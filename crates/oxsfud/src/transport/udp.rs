@@ -14,7 +14,7 @@ use super::conn::DemuxConn;
 use super::session::{ConnRole, TransportSession};
 use super::{demux, dtls, stun};
 use crate::handlers::{Sfu, now_ms};
-use crate::media::{codec, rtcp, rtp};
+use crate::media::{codec, rtcp, rtp, rtx};
 use crate::peer::Peer;
 use crate::media::subscribe::{SubscribeState, SubscriberStream};
 use crate::media::track::{PublishState, PublisherStream, PublisherTrack};
@@ -136,7 +136,8 @@ async fn on_rtcp(sfu: &Arc<Sfu>, socket: &Arc<UdpSocket>, peer: &Arc<Peer>, sess
                     sfu.request_keyframe(media, now, false).await;
                 }
             }
-            // NACK·TWCC·REMB 는 손실 복구·대역 축(정§11-1·§10)의 몫이다. 조용히 버리지 않는다.
+            Some(rtcp::PT_RTPFB) if rtcp::is_nack(part) => serve_nack(socket, peer, part, now).await,
+            // TWCC·REMB 는 대역 축(정§10)의 몫이다. 조용히 버리지 않는다.
             _ => debug!(user = %session.user_id, pt = ?rtcp::payload_type(part), fmt = ?rtcp::fmt(part), "rtcp not terminated here"),
         }
     }
@@ -178,7 +179,10 @@ async fn fan_out(sfu: &Arc<Sfu>, socket: &Arc<UdpSocket>, peer: &Arc<Peer>, pack
     track.rtp_in.fetch_add(1, Ordering::Relaxed);
     // 정§11-2 — 발행자에게 돌려줄 "우리 수신 품질". RTP 헤더만 보고 원자값으로 센다.
     if let (Some(seq), Some(ts)) = (rtp::sequence(packet), rtp::timestamp(packet)) {
-        track.reception.observe(seq, ts, now_ms(), stream.clock_rate());
+        let seen_at = now_ms();
+        track.reception.observe(seq, ts, seen_at, stream.clock_rate());
+        // 정§11-1 상향 — 판정만 한다. 무엇을 언제 보낼지는 타이머 하나가 정한다.
+        track.gaps.observe(seq, seen_at);
     }
     stream.set_state(PublishState::Active);
     // 정§6-3 — 선언 PT 와 첫 RTP PT 의 불일치는 표면화만 한다. 고치면 검은 화면이 침묵한다.
@@ -208,10 +212,43 @@ async fn fan_out(sfu: &Arc<Sfu>, socket: &Arc<UdpSocket>, peer: &Arc<Peer>, pack
         let Some(transport) = sub.transport.as_ref() else { continue };
         let Some(addr) = transport.addr.get() else { continue };
         assemble(egress, packet, &sub);
+        // 정§11-1 하향 — 재전송에 대비해 나간 것을 담는다. ★평문이다(암호는 그때 다시 건다).
+        if let Some(seq) = rtp::sequence(egress) {
+            sub.rtx.keep(seq, egress);
+        }
         let Ok(sealed) = transport.encrypt_rtp(egress) else { continue };
         if socket.send_to(&sealed, addr).await.is_ok() {
             sub.sent.fetch_add(1, Ordering::Relaxed);
         }
+    }
+}
+
+/// 정§11-1 하향 — 구독자가 요구한 재전송. 관문 넷을 지나고 사유는 계수로 남는다.
+async fn serve_nack(socket: &Arc<UdpSocket>, peer: &Arc<Peer>, pkt: &[u8], now: u64) {
+    let Some(media) = rtcp::media_ssrc(pkt) else { return };
+    let Some(sub) = peer.subscribe.all().into_iter().find(|s| s.vssrc == media) else { return };
+    // 오디오 NACK 은 미채택이다 — 협상하지 않았으므로 와도 답하지 않는다.
+    let (Some(rtx_pt), Some(rtx_ssrc)) = (sub.rtx_pt(), sub.rtx_vssrc) else { return };
+    let Some(transport) = sub.transport.as_ref() else { return };
+    let Some(addr) = transport.addr.get() else { return };
+
+    let (mut sent, mut gate, mut miss, mut budget) = (0u32, 0u32, 0u32, 0u32);
+    for seq in rtcp::read_nack(pkt) {
+        match sub.rtx.take(seq, now, now) {
+            Ok(original) => {
+                let Some(retx) = rtp::to_rtx(&original, rtx_pt, rtx_ssrc, sub.next_rtx_seq()) else { continue };
+                let Ok(sealed) = transport.encrypt_rtp(&retx) else { continue };
+                if socket.send_to(&sealed, addr).await.is_ok() {
+                    sent += 1;
+                }
+            }
+            Err(rtx::Refusal::Gate) => gate += 1,
+            Err(rtx::Refusal::Miss) => miss += 1,
+            Err(rtx::Refusal::Budget) => budget += 1,
+        }
+    }
+    if gate + miss + budget > 0 {
+        debug!(user = %peer.user_id, track = %sub.track_id, sent, gate, miss, budget, "rtx refused");
     }
 }
 

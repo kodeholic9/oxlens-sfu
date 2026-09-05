@@ -21,7 +21,7 @@ use tracing::{debug, info, warn};
 use crate::emit::EventBus;
 use crate::media::slot::new_vssrc;
 use crate::media::subscribe::{self, SubSpec, SubscribeState, entry_of, SubscriberStream};
-use crate::media::{rtcp, rtp};
+use crate::media::{nack, rtcp, rtp};
 use crate::media::track::{PublishState, PublisherStream, PublisherTrack, StreamSpec};
 use crate::media::floor::{Action, Request};
 use crate::media::{self, codec};
@@ -530,6 +530,25 @@ impl Sfu {
             // 보고자 SSRC 는 서버 자신이다 — 발행자의 것을 쓰면 자기 보고로 읽힌다.
             if self.send_rtcp(&peer.user_id, &rtcp::build_rr(SERVER_RTCP_SSRC, &blocks)).await {
                 sent += 1;
+            }
+        }
+        sent
+    }
+
+    /// 정§11-1 상향 — 결손 장부에서 지금 물을 것을 꺼내 발행자에게 보낸다.
+    /// ★소비자는 이 타이머 하나다 — 두 곳에서 꺼내면 같은 결손을 두 번 묻는다.
+    pub async fn emit_nacks(&self, now_ms: u64) -> usize {
+        let mut sent = 0;
+        for peer in self.peers.snapshot() {
+            for track in peer.publish.all().iter().flat_map(|st| st.tracks()) {
+                let due = track.gaps.due(now_ms);
+                if due.is_empty() {
+                    continue;
+                }
+                let pairs = nack::pack(&due);
+                if self.send_rtcp(&peer.user_id, &rtcp::build_nack(SERVER_RTCP_SSRC, track.ssrc, &pairs)).await {
+                    sent += 1;
+                }
             }
         }
         sent

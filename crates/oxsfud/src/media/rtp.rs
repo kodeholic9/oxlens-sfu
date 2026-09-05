@@ -137,8 +137,8 @@ pub fn extension_value(pkt: &[u8], want: u8) -> Option<&[u8]> {
     None
 }
 
-/// 헤더(+CSRC·확장) 뒤 — 코덱이 읽는 자리. 패딩은 걷지 않는다(키프레임 판정은 앞쪽만 본다).
-pub fn payload(pkt: &[u8]) -> Option<&[u8]> {
+/// 헤더(+CSRC·확장)의 끝 — payload 가 시작하는 자리.
+pub fn payload_offset(pkt: &[u8]) -> Option<usize> {
     if !is_rtp(pkt) {
         return None;
     }
@@ -146,7 +146,12 @@ pub fn payload(pkt: &[u8]) -> Option<&[u8]> {
         Some((_, span)) => span.end,
         None => FIXED_LEN + usize::from(pkt[0] & 0x0F) * 4,
     };
-    pkt.get(at..)
+    (at <= pkt.len()).then_some(at)
+}
+
+/// 헤더(+CSRC·확장) 뒤 — 코덱이 읽는 자리. 패딩은 걷지 않는다(키프레임 판정은 앞쪽만 본다).
+pub fn payload(pkt: &[u8]) -> Option<&[u8]> {
+    pkt.get(payload_offset(pkt)?..)
 }
 
 /// 정§7-2-1 — 원소마다 (발행자 번호 → 구독자 번호). `map` 이 `None` 을 주면 그 번호는 그대로 둔다.
@@ -183,6 +188,33 @@ pub fn rewrite_extension_ids(pkt: &mut [u8], map: impl Fn(u8) -> Option<u8>) -> 
         }
     }
     edits
+}
+
+#[cfg(test)]
+mod rtx_tests {
+    use super::*;
+
+    #[test]
+    fn a_retransmit_keeps_the_header_and_hides_the_original_seq_in_the_payload() {
+        let mut pkt = vec![0x80, 96, 0x12, 0x34, 0, 0, 0, 9, 0, 0, 0, 7];
+        pkt.extend_from_slice(&[0xAA, 0xBB]);
+        let rtx = to_rtx(&pkt, 97, 0xDEAD, 5).expect("rtp 여야 한다");
+
+        assert_eq!(payload_type(&rtx), Some(97));
+        assert_eq!(sequence(&rtx), Some(5), "재전송은 자기 seq 공간이다");
+        assert_eq!(ssrc(&rtx), Some(0xDEAD));
+        assert_eq!(timestamp(&rtx), timestamp(&pkt), "시각은 원본이다");
+        assert_eq!(
+            payload(&rtx).unwrap(),
+            &[0x12, 0x34, 0xAA, 0xBB],
+            "★앞 두 바이트가 원본 seq(OSN) 다 — 없으면 수신측이 어느 것의 재전송인지 모른다"
+        );
+    }
+
+    #[test]
+    fn what_is_not_rtp_is_not_retransmittable() {
+        assert!(to_rtx(&[0x00, 0x01], 97, 1, 1).is_none());
+    }
 }
 
 #[cfg(test)]
@@ -252,4 +284,19 @@ mod tests {
         assert_eq!(rewrite_extension_ids(&mut plain, |_| Some(1)), 0);
         assert!(!is_rtp(&plain[..8]));
     }
+}
+
+/// RFC 4588 §4 — 재전송 패킷. 원본 헤더를 그대로 두고 PT·SSRC·seq 만 갈고
+/// ★payload 앞에 원본 seq(OSN) 두 바이트를 끼운다. 확장·CSRC 는 원본을 따라간다.
+pub fn to_rtx(packet: &[u8], pt: u8, ssrc: u32, seq: u16) -> Option<Vec<u8>> {
+    let head = payload_offset(packet)?;
+    let original = sequence(packet)?;
+    let mut out = Vec::with_capacity(packet.len() + 2);
+    out.extend_from_slice(&packet[..head]);
+    out.extend_from_slice(&original.to_be_bytes());
+    out.extend_from_slice(&packet[head..]);
+    set_payload_type(&mut out, pt);
+    out[2..4].copy_from_slice(&seq.to_be_bytes());
+    out[8..12].copy_from_slice(&ssrc.to_be_bytes());
+    Some(out)
 }

@@ -8,6 +8,7 @@ use std::time::Duration;
 use common::bplane::SfuServiceServer;
 use common::config::PolicyConfig;
 use oxsfud::handlers::{MediaParams, RTCP_REPORT_INTERVAL_MS, Sfu, now_ms};
+use oxsfud::media::nack::RETRY_MS as NACK_TICK_MS;
 use oxsfud::service::Service;
 use oxsfud::peer::REAPER_TICK_MS;
 use oxsfud::transport::{ServerCert, udp};
@@ -69,6 +70,16 @@ async fn main() {
     };
     sfu.attach_socket(socket.clone());
     tokio::spawn(udp::run(sfu.clone(), socket));
+
+    // 정§11-1 상향 — 재전송 요구는 눈금이 다르다(200ms). RR 과 같은 타이머에 태우면 늦다.
+    let nacker = sfu.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_millis(NACK_TICK_MS));
+        loop {
+            tick.tick().await;
+            nacker.emit_nacks(now_ms()).await;
+        }
+    });
 
     // 정§11-2 — Ingress RR 은 서버가 자체 생성한다. 소비자는 ★이 타이머 하나다.
     let reporter = sfu.clone();

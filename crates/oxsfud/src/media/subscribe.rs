@@ -2,13 +2,15 @@
 //! 구독 배관 — 정§7-1·§7-2·§7-2-1. 구독 연결(Peer)마다 mid 풀 하나·PT 표 하나·확장표 하나.
 //! `SubscribeState` 에 `Intended` 가 없는 것이 설계다 — 구독은 등록 자체가 의도이고, `Active` 전이는 `READY{tracks}` 다.
 
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use oxsig::schema::{Duplex, Extmap, MediaKind, PcMode, TrackEntry};
 
+use super::rtx::RtxCache;
+use super::slot::new_vssrc;
 use super::mid::{MidPool, to_wire};
 use super::pt::PtTable;
 use super::rewriter::Rewriter;
@@ -44,6 +46,11 @@ pub struct SubscriberStream {
     /// 정§7-2 — 고갈이면 `None` 으로 산다(존재는 알되 조립 못 함). 풀리면 재발급한다.
     mid: Mutex<Option<u16>>,
     pub vssrc: u32,
+    /// 정§11-1 하향 — 재전송이 나갈 SSRC(RFC 4588). ★video 만이다(오디오 NACK 미채택).
+    pub rtx_vssrc: Option<u32>,
+    /// 정§11-1 하향 — 그 구독자에게 내보낸 것의 링버퍼와 예산.
+    pub rtx: RtxCache,
+    rtx_seq: AtomicU16,
     pt: AtomicU8,
     rtx_pt: AtomicU8,
     state: AtomicU8,
@@ -92,6 +99,11 @@ impl SubscriberStream {
 
     pub fn pt(&self) -> u8 {
         self.pt.load(Ordering::Acquire)
+    }
+
+    /// RFC 4588 — 재전송 스트림은 자기 seq 공간을 갖는다.
+    pub fn next_rtx_seq(&self) -> u16 {
+        self.rtx_seq.fetch_add(1, Ordering::Relaxed).wrapping_add(1)
     }
 
     pub fn rtx_pt(&self) -> Option<u8> {
@@ -262,6 +274,9 @@ impl SubscribeContext {
             kind: stream.kind,
             mid: Mutex::new(mid),
             vssrc: stream.vssrc,
+            rtx_vssrc: (stream.kind == MediaKind::Video).then(new_vssrc),
+            rtx: RtxCache::default(),
+            rtx_seq: AtomicU16::new(0),
             pt: AtomicU8::new(pt),
             rtx_pt: AtomicU8::new(0),
             state: AtomicU8::new(0),
@@ -340,7 +355,8 @@ pub fn entry_of(stream: &PublisherStream, sub: &SubscriberStream) -> TrackEntry 
         // 연§9-5 대로 `a=inactive` m-line 을 세워 발화해도 소리가 도착할 자리가 없다.
         active: (!slot).then_some(!half),
         source: stream.source.clone(),
-        rtx_ssrc: None,
+        // 정§11-1 — 재전송 SSRC 는 구독자마다다. 없으면 브라우저가 RTX 를 협상하지 않는다.
+        rtx_ssrc: sub.rtx_vssrc,
         pt: Some(sub.pt()),
         rtx_pt: sub.rtx_pt(),
         codec: (stream.kind == MediaKind::Video).then(|| stream.codec.to_owned()),
@@ -412,6 +428,9 @@ mod tests {
         assert_eq!((e.mid.as_deref(), e.pt, e.rtx_pt, e.codec.as_deref()), (Some("32"), Some(102), Some(103), Some("H264")));
         assert_eq!((e.fmtp.as_deref(), e.ssrc, e.user_id.as_deref(), e.duplex), (Some("x=1"), 0xABCD, Some("u1"), Some(Duplex::Full)));
         assert!(e.is_reachable() && !e.is_slot() && e.simulcast.is_none());
+        // 정§11-1 하향 — 구독자마다의 재전송 SSRC. 없으면 브라우저가 RTX 를 협상하지 않는다.
+        assert_eq!(e.rtx_ssrc, sub.rtx_vssrc);
+        assert!(e.rtx_ssrc.is_some(), "video 는 재전송 자리를 갖는다");
     }
 
     #[test]
@@ -442,6 +461,7 @@ mod tests {
         });
         let e = entry_of(&slot, &sub);
         assert!(e.is_slot(), "주인이 없으면 슬롯이다");
+        assert!(e.rtx_ssrc.is_none(), "★오디오 NACK 은 미채택이라 재전송 자리를 안 준다");
         assert!(
             e.active.is_none(),
             "★슬롯에 active 를 실으면 구독자가 a=inactive m-line 을 세워 발화해도 소리가 도착할 자리가 없다"

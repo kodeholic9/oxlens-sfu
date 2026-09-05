@@ -180,6 +180,44 @@ pub fn build_pli(sender: u32, media: u32) -> Vec<u8> {
     out
 }
 
+/// RFC 4585 §6.2.1 Generic NACK — 묶음(PID·BLP)마다 4바이트다.
+/// ★묶기는 `nack::pack` 이 한다 — 여기는 실어 나르기만 해서 두 곳이 같은 판단을 안 한다.
+pub fn build_nack(sender: u32, media: u32, pairs: &[(u16, u16)]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(12 + pairs.len() * 4);
+    out.push(0x80 | FMT_NACK);
+    out.push(PT_RTPFB);
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&sender.to_be_bytes());
+    out.extend_from_slice(&media.to_be_bytes());
+    for (pid, blp) in pairs {
+        out.extend_from_slice(&pid.to_be_bytes());
+        out.extend_from_slice(&blp.to_be_bytes());
+    }
+    set_length(&mut out);
+    out
+}
+
+/// 받은 Generic NACK 에서 요구된 seq 를 편다 — 하향(구독자 NACK) 응답의 입력이다.
+pub fn read_nack(pkt: &[u8]) -> Vec<u16> {
+    if !is_nack(pkt) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut at = 12;
+    while at + 4 <= pkt.len() {
+        let pid = u16::from_be_bytes([pkt[at], pkt[at + 1]]);
+        let blp = u16::from_be_bytes([pkt[at + 2], pkt[at + 3]]);
+        out.push(pid);
+        for bit in 0..16 {
+            if blp & (1 << bit) != 0 {
+                out.push(pid.wrapping_add(bit + 1));
+            }
+        }
+        at += 4;
+    }
+    out
+}
+
 fn set_length(out: &mut [u8]) {
     let words = (out.len() / 4 - 1) as u16;
     out[2..4].copy_from_slice(&words.to_be_bytes());
@@ -254,6 +292,10 @@ mod tests {
         assert_eq!((sender_ssrc(&pli), media_ssrc(&pli), pli.len()), (Some(0x9999), Some(0x1111), 12));
         let nack = [0x81, PT_RTPFB, 0, 3, 0, 0, 0, 9, 0, 0, 0, 1, 0, 10, 0, 0];
         assert!(is_nack(&nack) && !is_pli(&nack));
+        let built = build_nack(1, 42, &[(12, 0b11), (99, 0)]);
+        assert!(is_nack(&built) && media_ssrc(&built) == Some(42) && sender_ssrc(&built) == Some(1));
+        assert_eq!(read_nack(&built), vec![12, 13, 14, 99], "실은 것과 편 것이 같다");
+        assert_eq!(read_nack(&build_pli(1, 42)), Vec::<u16>::new(), "PLI 는 NACK 이 아니다");
         assert_eq!(media_ssrc(&nack), Some(1));
         assert_eq!(ntp_middle(0x1234_5678_9ABC_DEF0), 0x5678_9ABC);
         assert_eq!((delay_units(1_000), delay_units(0)), (65_536, 0));

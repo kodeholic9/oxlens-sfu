@@ -10,6 +10,7 @@ use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use oxsig::schema::{Duplex, MediaKind};
 
+use super::nack::GapTracker;
 use super::reception::Reception;
 use super::subscribe::SubscriberStream;
 
@@ -48,12 +49,23 @@ pub struct PublisherTrack {
     pub rtp_in: AtomicU64,
     /// 정§11-2 — Ingress RR 의 재료. ★RTX 는 여기 안 든다(손실률 오염).
     pub reception: Reception,
+    /// 정§11-1 상향 — 이 트랙의 결손 장부. 재전송 요구의 출처다.
+    pub gaps: GapTracker,
     last_pli_ms: AtomicU64,
 }
 
 impl PublisherTrack {
     fn new(ssrc: u32, rtx_ssrc: Option<u32>, rid: Option<String>) -> Self {
-        Self { ssrc, rtx_ssrc, rid, subscribers: ArcSwap::from_pointee(Vec::new()), rtp_in: AtomicU64::new(0), reception: Reception::default(), last_pli_ms: AtomicU64::new(0) }
+        Self {
+            ssrc,
+            rtx_ssrc,
+            rid,
+            subscribers: ArcSwap::from_pointee(Vec::new()),
+            rtp_in: AtomicU64::new(0),
+            reception: Reception::default(),
+            gaps: GapTracker::default(),
+            last_pli_ms: AtomicU64::new(0),
+        }
     }
 
     /// 정§7-1 ④ — 통째 교체(RCU). 죽은 Weak 는 이때 함께 걷는다.
