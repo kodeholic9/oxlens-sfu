@@ -1,0 +1,17 @@
+# 개발 실증용 시스템 파일 — hub 19745(1974 는 구 서버가 점유) + sfud 하나(gRPC 50061). 값의 뜻은 crates/common/src/config.rs.
+[hub]
+listen = "127.0.0.1:19745"
+base_path = "/media"
+
+[hub.auth]
+jwt_secret = "change-me-in-production"
+
+[[hub.auth.api_keys]]
+key = "ox_k_demo"
+secret = "ox_s_demo"
+name = "demo"
+
+[[unit]]
+role = "sfu"
+id = "sfu-1"
+addr = "127.0.0.1:50061"
