@@ -38,6 +38,8 @@ pub const MAX_ACTIVE_STREAMS: usize = 16;
 pub const GATE_TIMEOUT_MS: u64 = 5_000;
 /// 정§14-3 — READY 뒤 이만큼 송신 계수가 안 움직이면 정체다.
 pub const STALL_WINDOW_MS: u64 = 5_000;
+/// 정§11-2 — Ingress TWCC 주기. RR·REMB(1초)보다 촘촘해야 추정이 따라온다.
+pub const TWCC_INTERVAL_MS: u64 = 100;
 /// 정§14-3 `T-stall` — 같은 (user, 방) 재통보 쿨다운. 폭풍 방지다.
 pub const T_STALL_MS: u64 = 30_000;
 /// 정§11-2 — PLI 스로틀(h 300ms). 인프라 PLI 는 통과한다.
@@ -58,6 +60,22 @@ pub struct MediaParams {
     pub udp_port: u16,
     pub fingerprint: String,
     pub max_bitrate_bps: u64,
+    /// 정책서 §3 `bwe_mode` — 발행자 송신 추정을 어느 축으로 먹이나. 둘 다 켜지 않는다.
+    pub bwe_mode: BweMode,
+}
+
+/// 정§11-2 — 하나만 고른다. 둘을 같이 보내면 발행자가 어느 값을 따를지 갈린다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BweMode {
+    #[default]
+    Twcc,
+    Remb,
+}
+
+impl BweMode {
+    pub fn parse(s: &str) -> Self {
+        if s == "remb" { BweMode::Remb } else { BweMode::Twcc }
+    }
 }
 
 pub struct Sfu {
@@ -533,6 +551,56 @@ impl Sfu {
             }
         }
         sent
+    }
+
+    /// 정§11-2 — Ingress TWCC. 발행자가 `transport-cc` 를 협상했을 때만 나간다.
+    /// ★없으면 발행자 송신 추정이 갱신되지 않는다 — 화질이 안 올라가고 어느 계수에도 안 남는다.
+    pub async fn emit_transport_feedback(&self) -> usize {
+        if self.media.bwe_mode != BweMode::Twcc {
+            return 0;
+        }
+        let mut sent = 0;
+        for peer in self.peers.snapshot() {
+            let Some(session) = self.transport.by_ufrag(&peer.publish_ice.ufrag) else { continue };
+            let Some(first) = peer.publish.all().iter().flat_map(|st| st.tracks()).map(|t| t.ssrc).next() else {
+                continue;
+            };
+            let Some(pkt) = session.arrivals.drain(SERVER_RTCP_SSRC, first) else { continue };
+            if self.send_rtcp(&peer.user_id, &pkt).await {
+                sent += 1;
+            }
+        }
+        sent
+    }
+
+    /// 정§11-2 — Ingress REMB. 값은 `min(수신측 추정, max_bitrate_bps)` 인데
+    /// ★수신측 추정은 자동 레이어 축(정§10-3)이 세운다 — 그것이 서기 전에는 상한이 곧 값이다.
+    pub async fn emit_remb(&self) -> usize {
+        let mut sent = 0;
+        for (user, pkt) in self.remb_targets() {
+            if self.send_rtcp(&user, &pkt).await {
+                sent += 1;
+            }
+        }
+        sent
+    }
+
+    /// 판정만 — 누구에게 무엇을 보낼지. ★송신과 갈라야 소켓 없이도 축 선택을 잰다.
+    fn remb_targets(&self) -> Vec<(String, Vec<u8>)> {
+        if self.media.bwe_mode != BweMode::Remb {
+            return Vec::new();
+        }
+        self.peers
+            .snapshot()
+            .into_iter()
+            .filter_map(|peer| {
+                let ssrcs: Vec<u32> =
+                    peer.publish.all().iter().flat_map(|st| st.tracks()).map(|t| t.ssrc).collect();
+                (!ssrcs.is_empty()).then(|| {
+                    (peer.user_id.clone(), rtcp::build_remb(SERVER_RTCP_SSRC, &ssrcs, self.media.max_bitrate_bps))
+                })
+            })
+            .collect()
     }
 
     /// 정§11-1 상향 — 결손 장부에서 지금 물을 것을 꺼내 발행자에게 보낸다.
@@ -1425,8 +1493,11 @@ mod tests {
     use oxsig::frame::Kind;
 
     fn sfu() -> Arc<Sfu> {
+        sfu_with(BweMode::Twcc)
+    }
+    fn sfu_with(bwe_mode: BweMode) -> Arc<Sfu> {
         let cert = Arc::new(ServerCert::generate().unwrap());
-        Arc::new(Sfu::new("sfu-test".into(), MediaParams { public_ip: "10.0.0.1".into(), udp_port: 20000, fingerprint: cert.fingerprint.clone(), max_bitrate_bps: 800_000 }, cert))
+        Arc::new(Sfu::new("sfu-test".into(), MediaParams { public_ip: "10.0.0.1".into(), udp_port: 20000, bwe_mode, fingerprint: cert.fingerprint.clone(), max_bitrate_bps: 800_000 }, cert))
     }
     fn env(user: &str, op: u16, body: Value) -> Envelope {
         Envelope { session_id: format!("s-{user}"), user_id: user.into(), room_id: String::new(), target: String::new(), exclude: Vec::new(), wire: encode_json(&Header::msg(op, 7), &body), pc_mode: "2pc".into(), floor_priority: 0 }
@@ -1703,6 +1774,31 @@ mod tests {
         s.sweep_stalls(t0);
         s.peers.get("u2").unwrap().transition(PeerState::Suspect, t0);
         assert_eq!(s.sweep_stalls(t0 + STALL_WINDOW_MS * 3), 0, "★enum 으로 견딘다 — 정수 비교는 의미가 반전된다");
+    }
+
+    /// 정§11-2 — 발행자 송신 추정은 한 축으로만 먹인다. 둘을 같이 보내면 어느 값을 따를지 갈린다.
+    #[tokio::test]
+    async fn only_one_bandwidth_axis_speaks() {
+        assert_eq!(BweMode::parse("remb"), BweMode::Remb);
+        assert_eq!(BweMode::parse("twcc"), BweMode::Twcc);
+        assert_eq!(BweMode::parse("무엇이든"), BweMode::Twcc, "모르는 값은 기본 축이다");
+
+        let s = sfu();
+        create(&s, "r", 5);
+        call(&s, "u1", Op::RoomJoin.code(), json!({"room_id": "r"}));
+        let full = json!({"kind": "audio", "ssrc": 7, "mid": "0", "pt": 111});
+        assert_eq!(call(&s, "u1", Op::PublishTracks.code(), json!({"room_id": "r", "tracks": [full]})).0, Kind::Ok);
+
+        // ★판정을 직접 본다 — 소켓 없이 송신 계수를 보면 어느 축이든 0 이라 판정이 가려진다.
+        assert!(s.remb_targets().is_empty(), "★twcc 인데 REMB 를 같이 보내면 발행자가 갈린다");
+
+        let r = sfu_with(BweMode::Remb);
+        create(&r, "r", 5);
+        call(&r, "u1", Op::RoomJoin.code(), json!({"room_id": "r"}));
+        assert_eq!(call(&r, "u1", Op::PublishTracks.code(), json!({"room_id": "r", "tracks": [full]})).0, Kind::Ok);
+        let targets = r.remb_targets();
+        assert_eq!(targets.len(), 1, "remb 축이면 나간다");
+        assert_eq!(&targets[0].1[12..16], b"REMB");
     }
 
     #[test]

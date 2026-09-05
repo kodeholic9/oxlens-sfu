@@ -16,6 +16,7 @@ use tracing::debug;
 
 use super::IceCredentials;
 use super::srtp::SrtpContext;
+use crate::media::twcc::Arrivals;
 use crate::peer::Peer;
 
 /// 정§13 — DC 준비 전 버퍼. 넘치면 오래된 것부터 버리고 센다.
@@ -65,6 +66,8 @@ pub struct TransportSession {
     /// ★핫패스 — 주인을 직접 든다(매 패킷 등록부 조회를 없앤다). Peer 가 이 세션을 도로 들므로 `Weak` 다.
     owner: std::sync::Weak<Peer>,
     pub addr: AddrCell,
+    /// 정§11-2 — Ingress TWCC 의 도착 장부. ★SSRC 가 아니라 전송로 단위다(transport-wide).
+    pub arrivals: Arrivals,
     /// 정§17-2 ④ — 이것을 켜야 DTLS·SCTP 태스크가 끝난다. 종료 신호까지가 회수다.
     pub cancel: CancellationToken,
     handshake: AtomicBool,
@@ -82,6 +85,7 @@ impl TransportSession {
             creds,
             owner: Arc::downgrade(owner),
             addr: AddrCell::default(),
+            arrivals: Arrivals::default(),
             cancel: CancellationToken::new(),
             handshake: AtomicBool::new(false),
             dtls_tx: Mutex::new(None),

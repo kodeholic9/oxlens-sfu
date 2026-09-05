@@ -14,6 +14,10 @@ pub const PT_RTPFB: u8 = 205;
 pub const PT_PSFB: u8 = 206;
 
 pub const FMT_NACK: u8 = 1;
+/// draft-holmer-rmcat-transport-wide-cc-extensions-01 — 전송로 단위 피드백.
+pub const FMT_TWCC: u8 = 15;
+/// draft-alvestrand-rmcat-remb — PSFB 안의 자리다(같은 15 지만 PT 가 다르다).
+pub const FMT_REMB: u8 = 15;
 pub const FMT_PLI: u8 = 1;
 
 const HEADER_LEN: usize = 4;
@@ -218,6 +222,40 @@ pub fn read_nack(pkt: &[u8]) -> Vec<u16> {
     out
 }
 
+/// draft-alvestrand-rmcat-remb — 발행자에게 "이만큼까지 보내라" 를 알린다.
+/// ★값은 지수·가수로 실린다(6비트 지수 + 18비트 가수).
+pub fn build_remb(sender: u32, ssrcs: &[u32], bps: u64) -> Vec<u8> {
+    let (exp, mantissa) = split_bitrate(bps);
+    let mut out = Vec::with_capacity(20 + ssrcs.len() * 4);
+    out.push(0x80 | FMT_REMB);
+    out.push(PT_PSFB);
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&sender.to_be_bytes());
+    // media ssrc 는 0 이다 — 대상은 아래 목록이 정한다.
+    out.extend_from_slice(&0u32.to_be_bytes());
+    out.extend_from_slice(b"REMB");
+    out.push(ssrcs.len() as u8);
+    out.push((exp << 2) | ((mantissa >> 16) & 0x03) as u8);
+    out.push(((mantissa >> 8) & 0xFF) as u8);
+    out.push((mantissa & 0xFF) as u8);
+    for ssrc in ssrcs {
+        out.extend_from_slice(&ssrc.to_be_bytes());
+    }
+    set_length(&mut out);
+    out
+}
+
+/// 가수가 18비트에 들어갈 때까지 지수를 올린다.
+fn split_bitrate(bps: u64) -> (u8, u32) {
+    let mut exp = 0u8;
+    let mut mantissa = bps;
+    while mantissa > 0x0003_FFFF && exp < 63 {
+        mantissa >>= 1;
+        exp += 1;
+    }
+    (exp, mantissa as u32)
+}
+
 fn set_length(out: &mut [u8]) {
     let words = (out.len() / 4 - 1) as u16;
     out[2..4].copy_from_slice(&words.to_be_bytes());
@@ -296,6 +334,16 @@ mod tests {
         assert!(is_nack(&built) && media_ssrc(&built) == Some(42) && sender_ssrc(&built) == Some(1));
         assert_eq!(read_nack(&built), vec![12, 13, 14, 99], "실은 것과 편 것이 같다");
         assert_eq!(read_nack(&build_pli(1, 42)), Vec::<u16>::new(), "PLI 는 NACK 이 아니다");
+
+        let remb = build_remb(1, &[7, 9], 800_000);
+        assert_eq!((payload_type(&remb), fmt(&remb)), (Some(PT_PSFB), Some(FMT_REMB)));
+        assert_eq!(&remb[12..16], b"REMB");
+        assert_eq!(remb[16], 2, "대상 ssrc 개수");
+        let exp = u32::from(remb[17] >> 2);
+        let mantissa = (u32::from(remb[17] & 0x03) << 16) | (u32::from(remb[18]) << 8) | u32::from(remb[19]);
+        assert_eq!((mantissa as u64) << exp, 800_000, "지수·가수가 원래 값을 낸다");
+        assert_eq!(&remb[20..24], &7u32.to_be_bytes());
+        assert_eq!(remb.len() % 4, 0);
         assert_eq!(media_ssrc(&nack), Some(1));
         assert_eq!(ntp_middle(0x1234_5678_9ABC_DEF0), 0x5678_9ABC);
         assert_eq!((delay_units(1_000), delay_units(0)), (65_536, 0));

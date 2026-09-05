@@ -14,7 +14,7 @@ use super::conn::DemuxConn;
 use super::session::{ConnRole, TransportSession};
 use super::{demux, dtls, stun};
 use crate::handlers::{Sfu, now_ms};
-use crate::media::{codec, rtcp, rtp, rtx};
+use crate::media::{self, codec, rtcp, rtp, rtx};
 use crate::peer::Peer;
 use crate::media::subscribe::{SubscribeState, SubscriberStream};
 use crate::media::track::{PublishState, PublisherStream, PublisherTrack};
@@ -118,7 +118,7 @@ async fn on_srtp(sfu: &Arc<Sfu>, socket: &Arc<UdpSocket>, data: &[u8], remote: S
             return;
         }
     };
-    fan_out(sfu, socket, &peer, &plain, egress).await;
+    fan_out(sfu, socket, &peer, &session, &plain, egress).await;
 }
 
 /// 정§11-2 — 조각마다 축이 다르다: SR 은 발행 축(번역 릴레이) · RR/PLI/NACK 은 구독 축(서버가 소비).
@@ -173,9 +173,16 @@ async fn relay_sender_report(socket: &Arc<UdpSocket>, peer: &Arc<Peer>, sr: &[u8
 /// 매 패킷 방을 견줄 것이 없다. `pub_room` 은 방 공용 슬롯을 쓰는 반이중 축 전용이다(정§8-1).
 ///
 /// ★이 함수는 힙을 잡지 않는다 — 구독자 목록은 RCU 안내자를 그대로 훑고, 조립은 넘겨받은 버퍼를 재사용한다.
-async fn fan_out(sfu: &Arc<Sfu>, socket: &Arc<UdpSocket>, peer: &Arc<Peer>, packet: &[u8], egress: &mut Vec<u8>) {
+async fn fan_out(sfu: &Arc<Sfu>, socket: &Arc<UdpSocket>, peer: &Arc<Peer>, session: &Arc<TransportSession>, packet: &[u8], egress: &mut Vec<u8>) {
     let Some(ssrc) = rtp::ssrc(packet) else { return };
     let Some((stream, track)) = peer.publish.by_ssrc(ssrc).or_else(|| sfu.learn_simulcast(peer, packet, ssrc)) else { return };
+    // 정§11-2 — 발행자가 신고한 번호로 읽는다. 서버 선언값으로 읽으면 협상 결과와 어긋난다.
+    if let Some(id) = peer.publish.extmap().iter().find(|(_, uri)| *uri == media::URI_TWCC).map(|(id, _)| *id)
+        && let Some(value) = rtp::extension_value(packet, id)
+        && value.len() >= 2
+    {
+        session.arrivals.observe(u16::from_be_bytes([value[0], value[1]]), now_ms());
+    }
     track.rtp_in.fetch_add(1, Ordering::Relaxed);
     // 정§11-2 — 발행자에게 돌려줄 "우리 수신 품질". RTP 헤더만 보고 원자값으로 센다.
     if let (Some(seq), Some(ts)) = (rtp::sequence(packet), rtp::timestamp(packet)) {
