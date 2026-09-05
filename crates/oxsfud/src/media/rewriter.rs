@@ -1,6 +1,7 @@
 // author: kodeholic (powered by Claude)
-//! 슬롯 재기록 — 정§8-1. 반이중은 방 공용 m-line 하나를 화자들이 돌려쓰므로,
-//! 화자가 바뀌어도 egress 의 `seq`·`ts` 가 이어져야 한다(수신 NetEQ 는 구멍을 망 손실로 읽는다).
+//! 재기록 — 정§8-1·§10-2. ★**출처가 바뀌어도 egress 가 이어져야 하는 자리**가 둘이다:
+//! 반이중 방 슬롯(화자 교대)과 simulcast(레이어 전환). 둘 다 SSRC 하나에 여러 입력이 번갈아 든다.
+//! 수신 NetEQ·jitter buffer 는 구멍을 망 손실로 읽으므로 이어붙이는 것이 계약이다.
 //!
 //! ★규칙은 ★**단일 스칼라 offset** 하나다. 입력 `seq` 마다 구간을 기억하는 사상표를 두면
 //! 발행자가 바뀔 때 offset 이 충돌해 ★**egress seq 가 역행**하고, 그 결과가 무전 음성 드롭아웃이다.
@@ -19,7 +20,7 @@ const HANDOVER_TS_STEP: u32 = 960;
 
 #[derive(Debug, Default)]
 struct Scalar {
-    speaker: Option<String>,
+    source: Option<String>,
     seq_offset: u16,
     ts_offset: u32,
     last_out_seq: u16,
@@ -28,26 +29,26 @@ struct Scalar {
 }
 
 #[derive(Debug, Default)]
-pub struct SlotRewriter {
+pub struct Rewriter {
     inner: Mutex<Scalar>,
 }
 
-impl SlotRewriter {
-    /// 그 화자의 패킷 하나를 슬롯 값으로 고친다 — SSRC 는 슬롯 것, `seq`·`ts` 는 offset 하나로.
-    /// ★길이는 변하지 않는다. 반환: 고쳤나(형식이 아니면 `false`).
-    pub fn rewrite(&self, packet: &mut [u8], speaker: &str, slot_ssrc: u32) -> bool {
+impl Rewriter {
+    /// 그 출처의 패킷 하나를 하나의 egress 값으로 고친다 — SSRC 는 목적지 것, `seq`·`ts` 는 offset 하나로.
+    /// `source` 는 반이중이면 화자, simulcast 면 rid 다. ★길이는 변하지 않는다.
+    pub fn rewrite(&self, packet: &mut [u8], source: &str, out_ssrc: u32) -> bool {
         let (Some(in_seq), Some(in_ts)) = (rtp::sequence(packet), rtp::timestamp(packet)) else {
             return false;
         };
         let mut s = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if !s.started {
-            s.speaker = Some(speaker.to_owned());
+            s.source = Some(source.to_owned());
             s.seq_offset = 0;
             s.ts_offset = 0;
             s.started = true;
-        } else if s.speaker.as_deref() != Some(speaker) {
-            // 화자 교대 — 이어지는 자리에서 다시 시작하도록 offset 만 새로 잡는다.
-            s.speaker = Some(speaker.to_owned());
+        } else if s.source.as_deref() != Some(source) {
+            // 출처 교대(화자 교대·레이어 전환) — 이어지는 자리에서 다시 시작하도록 offset 만 새로 잡는다.
+            s.source = Some(source.to_owned());
             s.seq_offset = s.last_out_seq.wrapping_add(HANDOVER_SEQ_GAP).wrapping_sub(in_seq);
             s.ts_offset = s.last_out_ts.wrapping_add(HANDOVER_TS_STEP).wrapping_sub(in_ts);
         }
@@ -58,11 +59,11 @@ impl SlotRewriter {
         drop(s);
         rtp::set_sequence(packet, out_seq);
         rtp::set_timestamp(packet, out_ts);
-        rtp::set_ssrc(packet, slot_ssrc);
+        rtp::set_ssrc(packet, out_ssrc);
         true
     }
 
-    /// 슬롯이 비면 다음 화자가 0 부터 이어 붙는다 — 방 수명과 같이 간다.
+    /// 출처가 통째로 없어지면 다음 것이 0 부터 이어 붙는다.
     pub fn reset(&self) {
         *self.inner.lock().unwrap_or_else(|e| e.into_inner()) = Scalar::default();
     }
@@ -80,7 +81,7 @@ mod tests {
         rtp::set_ssrc(&mut p, ssrc);
         p
     }
-    fn out(r: &SlotRewriter, seq: u16, ts: u32, ssrc: u32, who: &str) -> (u16, u32, u32) {
+    fn out(r: &Rewriter, seq: u16, ts: u32, ssrc: u32, who: &str) -> (u16, u32, u32) {
         let mut p = pkt(seq, ts, ssrc);
         let before = p.len();
         assert!(r.rewrite(&mut p, who, 0xABCD));
@@ -90,7 +91,7 @@ mod tests {
 
     #[test]
     fn first_speaker_passes_through_and_takes_the_slot_ssrc() {
-        let r = SlotRewriter::default();
+        let r = Rewriter::default();
         assert_eq!(out(&r, 100, 5_000, 0x1111, "a"), (100, 5_000, 0xABCD));
         assert_eq!(out(&r, 101, 5_960, 0x1111, "a"), (101, 5_960, 0xABCD));
     }
@@ -98,7 +99,7 @@ mod tests {
     /// ★화자가 바뀌어도 egress 는 앞으로만 간다 — 이것이 무전 음성 드롭아웃을 막는 유일한 성질이다.
     #[test]
     fn handover_never_moves_egress_backwards() {
-        let r = SlotRewriter::default();
+        let r = Rewriter::default();
         let mut last = out(&r, 60_000, 900_000, 0x1111, "a").0;
         for i in 1..5 {
             last = out(&r, 60_000 + i, 900_000 + u32::from(i) * 960, 0x1111, "a").0;
@@ -117,7 +118,7 @@ mod tests {
 
     #[test]
     fn wrapping_is_the_normal_case_not_an_error() {
-        let r = SlotRewriter::default();
+        let r = Rewriter::default();
         assert_eq!(out(&r, 65_535, 0xFFFF_FF00, 0x1111, "a").0, 65_535);
         let wrapped = 0xFFFF_FF00u32.wrapping_add(960);
         let (seq, ts, _) = out(&r, 0, wrapped, 0x1111, "a");
@@ -128,7 +129,7 @@ mod tests {
 
     #[test]
     fn reset_starts_over_and_short_packets_are_refused() {
-        let r = SlotRewriter::default();
+        let r = Rewriter::default();
         out(&r, 100, 5_000, 0x1111, "a");
         r.reset();
         assert_eq!(out(&r, 9, 9, 0x1111, "b"), (9, 9, 0xABCD), "빈 슬롯은 그대로 통과");

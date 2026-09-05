@@ -14,10 +14,10 @@ use super::conn::DemuxConn;
 use super::session::{ConnRole, TransportSession};
 use super::{demux, dtls, stun};
 use crate::handlers::{Sfu, now_ms};
-use crate::media::{rtcp, rtp};
+use crate::media::{codec, rtcp, rtp};
 use crate::peer::Peer;
 use crate::media::subscribe::{SubscribeState, SubscriberStream};
-use crate::media::track::{PublishState, PublisherStream};
+use crate::media::track::{PublishState, PublisherStream, PublisherTrack};
 use oxsig::schema::{Duplex, MediaKind};
 
 const RECV_BUF: usize = 2_048;
@@ -118,7 +118,7 @@ async fn on_srtp(sfu: &Arc<Sfu>, socket: &Arc<UdpSocket>, data: &[u8], remote: S
             return;
         }
     };
-    fan_out(socket, &peer, &plain, egress).await;
+    fan_out(sfu, socket, &peer, &plain, egress).await;
 }
 
 /// 정§11-2 — 조각마다 축이 다르다: SR 은 발행 축(번역 릴레이) · RR/PLI/NACK 은 구독 축(서버가 소비).
@@ -172,9 +172,9 @@ async fn relay_sender_report(socket: &Arc<UdpSocket>, peer: &Arc<Peer>, sr: &[u8
 /// 매 패킷 방을 견줄 것이 없다. `pub_room` 은 방 공용 슬롯을 쓰는 반이중 축 전용이다(정§8-1).
 ///
 /// ★이 함수는 힙을 잡지 않는다 — 구독자 목록은 RCU 안내자를 그대로 훑고, 조립은 넘겨받은 버퍼를 재사용한다.
-async fn fan_out(socket: &Arc<UdpSocket>, peer: &Arc<Peer>, packet: &[u8], egress: &mut Vec<u8>) {
+async fn fan_out(sfu: &Arc<Sfu>, socket: &Arc<UdpSocket>, peer: &Arc<Peer>, packet: &[u8], egress: &mut Vec<u8>) {
     let Some(ssrc) = rtp::ssrc(packet) else { return };
-    let Some((stream, track)) = peer.publish.by_ssrc(ssrc) else { return };
+    let Some((stream, track)) = peer.publish.by_ssrc(ssrc).or_else(|| sfu.learn_simulcast(peer, packet, ssrc)) else { return };
     track.rtp_in.fetch_add(1, Ordering::Relaxed);
     // 정§11-2 — 발행자에게 돌려줄 "우리 수신 품질". RTP 헤더만 보고 원자값으로 센다.
     if let (Some(seq), Some(ts)) = (rtp::sequence(packet), rtp::timestamp(packet)) {
@@ -191,12 +191,12 @@ async fn fan_out(socket: &Arc<UdpSocket>, peer: &Arc<Peer>, packet: &[u8], egres
     if stream.muted() {
         return;
     }
-    // simulcast 는 레이어 선택(정§10)이 있어야 나간다.
-    if stream.simulcast {
-        return;
-    }
     if stream.duplex() == Duplex::Half {
         prefan(socket, peer, &stream, packet, egress).await;
+        return;
+    }
+    if stream.simulcast {
+        fan_out_simulcast(socket, &stream, &track, packet, egress).await;
         return;
     }
     for weak in track.subscribers().iter() {
@@ -255,6 +255,59 @@ fn start_handshake(sfu: Arc<Sfu>, socket: Arc<UdpSocket>, session: Arc<Transport
             ConnRole::Subscribe => hold(&conn, &session).await,
         }
     });
+}
+
+/// 정§10-1·§10-2 — simulcast 는 단이 여럿이라 ★구독자마다 하나를 고른다.
+/// 전환은 ★**target 레이어의 키프레임 도착에서만** 확정되고(중간에 바꾸면 디코더가 깨진다),
+/// egress 는 `vssrc` 하나로 합쳐지므로 재기록기가 `seq`·`ts` 를 이어 붙인다.
+async fn fan_out_simulcast(
+    socket: &Arc<UdpSocket>,
+    stream: &Arc<PublisherStream>,
+    track: &Arc<PublisherTrack>,
+    packet: &[u8],
+    egress: &mut Vec<u8>,
+) {
+    let Some(rid) = track.rid.clone() else { return };
+    let keyframe = rtp::payload(packet).is_some_and(|p| codec::is_keyframe(stream.codec, p));
+    let now = now_ms();
+    for weak in track.subscribers().iter() {
+        let Some(sub) = weak.upgrade() else { continue };
+        if sub.state() != SubscribeState::Active || sub.paused() {
+            continue;
+        }
+        let wanted = sub.wanted_rid();
+        let current = sub.current_rid();
+        if current.as_deref() != Some(rid.as_str()) {
+            // 아직 이 단이 아니다 — 목표면 키프레임을 기다리고, 아니면 흘리지 않는다.
+            if wanted != rid {
+                continue;
+            }
+            if !keyframe {
+                if sub.aim(&rid, now) {
+                    debug!(user = %sub.subscriber, track = %stream.track_id, rid = %rid, "layer target set, waiting for a keyframe");
+                }
+                continue;
+            }
+            sub.switch_to(&rid);
+        } else if wanted != rid {
+            // 상한이 내려갔다 — 다음 목표의 키프레임이 올 때까지 지금 단을 계속 흘린다.
+            sub.aim(wanted, now);
+        }
+        let Some(transport) = sub.transport.as_ref() else { continue };
+        let Some(addr) = transport.addr.get() else { continue };
+        egress.clear();
+        egress.extend_from_slice(packet);
+        if !sub.rewriter.rewrite(egress, &rid, sub.vssrc) {
+            continue;
+        }
+        rtp::set_payload_type(egress, sub.pt());
+        rtp::rewrite_extension_ids(egress, |id| sub.ext_of(id));
+        let Ok(sealed) = transport.encrypt_rtp(egress) else { continue };
+        if socket.send_to(&sealed, addr).await.is_ok() {
+            sub.sent.fetch_add(1, Ordering::Relaxed);
+            sub.sent_octets.fetch_add(egress.len() as u64, Ordering::Relaxed);
+        }
+    }
 }
 
 /// 정§7-3 — ★**발언권의 강제 권위는 여기다.** 통지(DC)가 늦거나 유실돼도 미디어는 새지 않는다.

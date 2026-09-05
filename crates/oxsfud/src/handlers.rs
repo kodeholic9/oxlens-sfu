@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use common::bplane::{Envelope, iop};
 use oxsig::body::affiliation::{AffiliationReq, AffiliationRes, Cause};
-use oxsig::body::media::{PublishAction, PublishTrack, PublishTracksReq, PublishTracksRes, PublishedTrack, ReadyReq, ReadyType};
+use oxsig::body::media::{PublishAction, PublishTrack, PublishTracksReq, PublishTracksRes, PublishedTrack, ReadyReq, ReadyType, SubscribeLayerReq, TrackSetReq};
 use oxsig::mbcp::{self, Msg, MsgType};
 use oxsig::body::notify::{ForcedCause, ParticipantEvent, ParticipantEventType, RoomEvent, RoomEventType, TrackAction, TrackEvent, TrackState, TrackStateType};
 use oxsig::body::room::{PARTICIPANT_RECORDER, RoomJoinReq, RoomJoinRes, RoomLeaveReq, RoomLeaveRes};
@@ -20,8 +20,8 @@ use tracing::{debug, info, warn};
 
 use crate::emit::EventBus;
 use crate::media::slot::new_vssrc;
-use crate::media::subscribe::{SubSpec, SubscribeState, entry_of};
-use crate::media::rtcp;
+use crate::media::subscribe::{self, SubSpec, SubscribeState, entry_of};
+use crate::media::{rtcp, rtp};
 use crate::media::track::{PublishState, PublisherStream, PublisherTrack, StreamSpec};
 use crate::media::floor::{Action, Request};
 use crate::media::{self, codec};
@@ -113,6 +113,8 @@ impl Sfu {
                 Some(Op::Affiliation) => self.affiliation(&env.user_id, &body),
                 Some(Op::PublishTracks) => self.publish_tracks(&env.user_id, &body),
                 Some(Op::Ready) => self.ready(&env.user_id, &body),
+                Some(Op::TrackSet) => self.track_set(&env.user_id, &body),
+                Some(Op::SubscribeLayer) => self.subscribe_layer(&env.user_id, &body),
                 Some(op) => Err(Failure::new(FailCode::InternalError).message(format!("{} not implemented in this build", op.name()))),
                 None => Err(Failure::new(FailCode::UnknownOp)),
             },
@@ -849,6 +851,44 @@ impl Sfu {
             .or_else(|| room.member_ids().iter().filter_map(|m| self.peers.get(m)).find_map(|p| p.publish.get(track_id)))
     }
 
+
+    /// 정§6-3 RID 학습 — simulcast 는 물리를 ★첫 RTP 까지 미룬다. 그 순간 배관·통지가 선다.
+    /// ★rid 확장을 못 읽으면 붙이지 않는다 — 어느 단인지 모르는 물리는 전환을 못 한다.
+    pub fn learn_simulcast(&self, peer: &Arc<Peer>, packet: &[u8], ssrc: u32) -> Option<(Arc<PublisherStream>, Arc<PublisherTrack>)> {
+        let rid_id = peer.publish.extmap().iter().find(|(_, uri)| *uri == media::URI_RID).map(|(id, _)| *id)?;
+        let rid = std::str::from_utf8(rtp::extension_value(packet, rid_id)?).ok()?.to_owned();
+        if !subscribe::RID_BY_SPATIAL.contains(&rid.as_str()) {
+            return None;
+        }
+        // 아직 물리가 없는 simulcast 논리 스트림 — 같은 kind 로 하나만 고른다.
+        let stream = peer.publish.all().into_iter().find(|s| s.simulcast && s.kind == MediaKind::Video && s.track_of_rid(&rid).is_none())?;
+        let track = peer.publish.learn(&stream, ssrc, Some(rid.clone()));
+        let first = stream.tracks().len() == 1;
+        info!(user = %peer.user_id, track = %stream.track_id, rid = %rid, ssrc, first, "simulcast layer learned");
+        if first {
+            stream.set_state(PublishState::Intended);
+            if let Some(room) = self.rooms.get(&stream.room_id) {
+                let _g = room.gate.lock().unwrap_or_else(|e| e.into_inner());
+                self.announce(&room, std::slice::from_ref(&stream));
+            }
+        } else {
+            // 둘째 단 — 이미 붙은 구독자들이 이 물리도 봐야 전환이 성립한다.
+            self.attach_existing(&stream, &track);
+        }
+        Some((stream, track))
+    }
+
+    /// 논리 스트림에 이미 붙은 구독자를 새 물리에도 건다(정§7-1 ④ 와 같은 방향 역전).
+    fn attach_existing(&self, stream: &Arc<PublisherStream>, track: &Arc<PublisherTrack>) {
+        let Some(room) = self.rooms.get(&stream.room_id) else { return };
+        for member in room.member_ids() {
+            let Some(peer) = self.peers.get(&member) else { continue };
+            if let Some(sub) = peer.subscribe.get(&room.id, &stream.track_id) {
+                track.attach(&sub);
+            }
+        }
+    }
+
     // ───────── 트랙 발행(정§6) ─────────
 
     fn publish_tracks(&self, user_id: &str, body: &Value) -> Result<Value, Failure> {
@@ -982,6 +1022,142 @@ impl Sfu {
         }
         let Some(slot) = room.slots.reset_video() else { return };
         self.withdraw(room, &[slot]);
+    }
+
+
+    // ───────── duplex·muted 전환(정§8-2) ─────────
+
+    /// 연§6-3 `TRACK_SET` — `muted` 와 `duplex` 는 배타(`1007`). 식별은 `track_id` 우선, `ssrc` 폴백.
+    fn track_set(self: &Arc<Self>, user_id: &str, body: &Value) -> Result<Value, Failure> {
+        let req: TrackSetReq = parse(body)?;
+        req.validate().map_err(Failure::new)?;
+        let room = self.rooms.get(&req.room_id).ok_or_else(|| Failure::new(FailCode::RoomNotFound))?;
+        let peer = self.peers.get(user_id).filter(|p| p.is_in(&room.id)).ok_or_else(|| Failure::new(FailCode::NotInRoom))?;
+        let stream = req
+            .track_id
+            .as_deref()
+            .and_then(|t| peer.publish.get(t))
+            .or_else(|| req.ssrc.and_then(|s| peer.publish.by_ssrc(s)).map(|(st, _)| st))
+            .ok_or_else(|| Failure::new(FailCode::TrackNotFound))?;
+        match (req.muted, req.duplex) {
+            (Some(muted), _) => Ok(self.set_muted(&room, &stream, muted)),
+            (_, Some(duplex)) => self.set_duplex(&peer, &room, &stream, duplex),
+            _ => Err(Failure::new(FailCode::FieldConflict)),
+        }
+    }
+
+    /// 정§8-2 — ★논리 Stream 단위다(그 안 모든 물리에 적용 — sim 단 비대칭 방지).
+    fn set_muted(&self, room: &Arc<Room>, stream: &Arc<PublisherStream>, muted: bool) -> Value {
+        if !stream.set_muted(muted) {
+            return json!({ "ssrc": stream.vssrc, "muted": muted, "noop": true });
+        }
+        self.emit_track_state(room, stream, TrackStateType::Muted, Some(muted), None, None);
+        info!(user = %stream.owner, room = %room.id, track = %stream.track_id, muted, "track muted");
+        json!({ "ssrc": stream.vssrc, "muted": muted })
+    }
+
+    /// 정§8-2 — ★duplex 원자 교체 하나로 fan-out 경로가 갈린다(새 분기를 만들지 않는다).
+    /// ★개인 구독 배관(mid)은 지우지 않는다 — 복귀 대비 보존이고, 잔존은 `active:false` 로 실린다.
+    fn set_duplex(self: &Arc<Self>, peer: &Arc<Peer>, room: &Arc<Room>, stream: &Arc<PublisherStream>, duplex: Duplex) -> Result<Value, Failure> {
+        // 정§8-1 — `half` 는 simulcast 강제 off. 두 재기록기가 같은 vssrc 를 다툰다.
+        if stream.simulcast {
+            return Err(Failure::new(FailCode::TrackOpUnsupported).message("simulcast track cannot change duplex"));
+        }
+        if stream.duplex() == duplex {
+            return Ok(json!({ "ssrc": stream.vssrc, "duplex": duplex, "noop": true }));
+        }
+        if duplex == Duplex::Half {
+            // 정§6-2 #5 와 같은 검사 — 첫 화자면 이 값이 방의 무전 코덱이 된다.
+            if stream.kind == MediaKind::Video {
+                if let Some((slot_codec, slot_fmtp)) = room.slots.video_codec()
+                    && (slot_codec, slot_fmtp.as_deref()) != (stream.codec, stream.fmtp.as_deref())
+                {
+                    return Err(Failure::new(FailCode::CodecMismatch).details(json!({ "codec": slot_codec, "fmtp": slot_fmtp })));
+                }
+                let (slot, created) = room.slots.ensure_video(&room.id, stream.codec, stream.fmtp.clone());
+                if created {
+                    let _g = room.gate.lock().unwrap_or_else(|e| e.into_inner());
+                    self.announce(room, &[slot]);
+                }
+            }
+            stream.set_duplex(Duplex::Half);
+        } else {
+            // 정§8-2 — ★그 트랙 발언권을 먼저 해제한다. 반이중이 아닌 트랙이 화자로 남으면 안 된다.
+            if let Some(pub_room) = peer.pub_room() {
+                self.floor_leave(&pub_room, &peer.user_id);
+            }
+            stream.set_duplex(Duplex::Full);
+            if stream.kind == MediaKind::Video {
+                let _g = room.gate.lock().unwrap_or_else(|e| e.into_inner());
+                self.retire_video_slot(room);
+            }
+            // 복귀한 영상은 키프레임이 있어야 보인다.
+            self.spawn_keyframe_burst(stream.tracks().iter().map(|t| t.ssrc).collect(), &CAMERA_PLI_GAPS);
+        }
+        let active = duplex == Duplex::Full;
+        self.emit_track_state(room, stream, TrackStateType::Duplex, None, Some(duplex), Some(active));
+        info!(user = %peer.user_id, room = %room.id, track = %stream.track_id, ?duplex, "track duplex");
+        Ok(json!({ "ssrc": stream.vssrc, "duplex": duplex }))
+    }
+
+    /// 연§6-7 `TRACK_STATE` — ★배관을 가진 구독자에게만 간다(없는 트랙의 속성을 알릴 이유가 없다).
+    /// `seq` 증가와 enqueue 는 한 임계 구역이다(정§14-1).
+    fn emit_track_state(&self, room: &Arc<Room>, stream: &Arc<PublisherStream>, state_type: TrackStateType, muted: Option<bool>, duplex: Option<Duplex>, active: Option<bool>) {
+        let targets: Vec<String> = room
+            .member_ids()
+            .into_iter()
+            .filter(|m| self.peers.get(m).is_some_and(|p| p.subscribe.get(&room.id, &stream.track_id).is_some()))
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        let _g = room.gate.lock().unwrap_or_else(|e| e.into_inner());
+        let version = room.seq.bump(&self.epoch);
+        for user in targets {
+            let ev = TrackState {
+                state_type,
+                user_id: stream.owner.clone(),
+                track_id: stream.track_id.clone(),
+                ssrc: stream.vssrc,
+                kind: stream.kind,
+                room_id: room.id.clone(),
+                version: version.clone(),
+                muted,
+                duplex,
+                active,
+                source: stream.source.clone(),
+            };
+            self.bus.user(&room.id, &user, Op::TrackState, &ev);
+        }
+    }
+
+
+    /// 연§6-3 `SUBSCRIBE_LAYER` — 요청은 "지정"이 아니라 ★**상한**이다. 생략한 필드는 안 바꾸고
+    /// 범위 초과는 그 축 최대로 자른다(거절하지 않는다). ★대상별 실패는 조용히 건너뛰고 응답은 성공이다.
+    fn subscribe_layer(self: &Arc<Self>, user_id: &str, body: &Value) -> Result<Value, Failure> {
+        let req: SubscribeLayerReq = parse(body)?;
+        let room = self.rooms.get(&req.room_id).ok_or_else(|| Failure::new(FailCode::RoomNotFound))?;
+        let peer = self.peers.get(user_id).filter(|p| p.is_in(&room.id)).ok_or_else(|| Failure::new(FailCode::NotInRoom))?;
+        let mut resumed = Vec::new();
+        for t in &req.targets {
+            let Some(sub) = peer.subscribe.get(&room.id, &t.track_id) else { continue };
+            if let Some(spatial) = t.spatial {
+                sub.set_spatial_cap(spatial);
+            }
+            if let Some(priority) = t.priority {
+                sub.set_priority(priority);
+            }
+            if let Some(paused) = t.paused
+                && sub.set_paused(paused)
+                && !paused
+            {
+                // 정§10-1 — 멈춰 있던 동안의 I-frame 이 없다. 풀 때 서버가 키프레임을 청한다.
+                resumed.push(sub.vssrc);
+            }
+        }
+        info!(user = user_id, room = %room.id, targets = req.targets.len(), "subscribe layer");
+        self.spawn_keyframe_burst(resumed, &[0]);
+        Ok(json!({}))
     }
 
     // ───────── READY(정§7-4) ─────────
@@ -1246,7 +1422,7 @@ mod tests {
         let (k, b) = call(&s, "u", Op::Affiliation.code(), json!({"pub_select": "a"}));
         assert_eq!((k, b["code"].as_u64(), b["details"]["codec"].as_str()), (Kind::Fail, Some(1006), Some("VP8")));
         assert_eq!(s.peers.get("u").unwrap().pub_room_id().as_deref(), Some("b"), "거절이면 아무것도 안 바뀐다");
-        let (k, b) = call(&s, "u", Op::TrackSet.code(), json!({}));
+        let (k, b) = call(&s, "u", Op::Message.code(), json!({}));
         assert_eq!((k, b["code"].as_u64()), (Kind::Fail, Some(5003)), "아직 안 옮긴 op 는 시험이 잡는다");
         let (k, b) = call(&s, "u", Op::PublishTracks.code(), json!({}));
         assert_eq!((k, b["code"].as_u64()), (Kind::Fail, Some(1003)));
@@ -1446,6 +1622,151 @@ mod tests {
         let live: Vec<_> = drain(&mut rx).into_iter().filter(|(op, ..)| *op == Op::TrackState.code()).collect();
         assert_eq!(live.len(), 1);
         assert_eq!((live[0].2["type"].as_str(), live[0].2["active"].as_bool()), (Some("live"), Some(true)));
+    }
+
+
+    #[tokio::test]
+    async fn duplex_and_mute_transitions_follow_the_atomic_axis() {
+        let s = sfu();
+        create(&s, "r", 5);
+        call(&s, "u1", Op::RoomJoin.code(), json!({"room_id": "r"}));
+        call(&s, "u2", Op::RoomJoin.code(), json!({"room_id": "r", "select": false}));
+        call(&s, "u1", Op::PublishTracks.code(), json!({"room_id": "r", "tracks": [video("1", 0xB1, "VP8")]}));
+        let room = s.rooms.get("r").unwrap();
+        let sub = s.peers.get("u2").unwrap().subscribe.in_room("r").into_iter().find(|x| x.kind == MediaKind::Video).unwrap();
+        let mid = sub.mid();
+        let mut rx = s.bus.subscribe();
+
+        // muted — 논리 Stream 단위. 같은 값이면 noop.
+        let (k, b) = call(&s, "u1", Op::TrackSet.code(), json!({"room_id": "r", "ssrc": 0xB1, "muted": true}));
+        assert_eq!((k, b["muted"].as_bool(), b["ssrc"].as_u64(), b.get("noop")), (Kind::Ok, Some(true), Some(0xB1), None));
+        let states = drain(&mut rx).into_iter().filter(|(op, ..)| *op == Op::TrackState.code()).collect::<Vec<_>>();
+        assert_eq!(states.len(), 1, "배관을 가진 구독자에게만");
+        assert_eq!((states[0].1.as_str(), states[0].2["type"].as_str(), states[0].2["muted"].as_bool()), ("u2", Some("muted"), Some(true)));
+        let (_, again) = call(&s, "u1", Op::TrackSet.code(), json!({"room_id": "r", "ssrc": 0xB1, "muted": true}));
+        assert_eq!(again["noop"].as_bool(), Some(true));
+
+        // full→half — 슬롯이 생기고, 개인 배관은 ★보존된다(복귀 대비).
+        let (k, b) = call(&s, "u1", Op::TrackSet.code(), json!({"room_id": "r", "track_id": s.peers.get("u1").unwrap().publish.all().iter().find(|t| t.kind == MediaKind::Video).unwrap().track_id.clone(), "duplex": "half"}));
+        assert_eq!((k, b["duplex"].as_str()), (Kind::Ok, Some("half")));
+        assert!(room.slots.video().is_some(), "첫 화자가 방의 무전 코덱을 정한다");
+        assert_eq!(s.peers.get("u2").unwrap().subscribe.get("r", &sub.track_id).map(|x| x.mid()), Some(mid), "개인 mid 를 지우지 않는다");
+        let half = drain(&mut rx).into_iter().filter(|(op, ..)| *op == Op::TrackState.code()).collect::<Vec<_>>();
+        let duplex_ev: Vec<_> = half.iter().filter(|(_, _, b)| b["type"] == "duplex").collect();
+        assert_eq!(duplex_ev.len(), 1);
+        assert_eq!((duplex_ev[0].1.as_str(), duplex_ev[0].2["active"].as_bool()), ("u2", Some(false)), "잔존은 active:false");
+
+        // half→full — 슬롯이 걷히고 active:true 가 간다.
+        let (k, b) = call(&s, "u1", Op::TrackSet.code(), json!({"room_id": "r", "ssrc": 0xB1, "duplex": "full"}));
+        assert_eq!((k, b["duplex"].as_str()), (Kind::Ok, Some("full")));
+        assert!(room.slots.video().is_none(), "마지막 반이중 video 보유자가 빠지면 슬롯을 리셋한다");
+        let back: Vec<_> = drain(&mut rx).into_iter().filter(|(op, _, b)| *op == Op::TrackState.code() && b["type"] == "duplex").collect();
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].2["active"].as_bool(), Some(true));
+
+        // 판정 셋 — 배타·미지 트랙·simulcast.
+        let (k, b) = call(&s, "u1", Op::TrackSet.code(), json!({"room_id": "r", "ssrc": 0xB1, "muted": true, "duplex": "half"}));
+        assert_eq!((k, b["code"].as_u64()), (Kind::Fail, Some(1007)));
+        let (k, b) = call(&s, "u1", Op::TrackSet.code(), json!({"room_id": "r", "ssrc": 999, "duplex": "half"}));
+        assert_eq!((k, b["code"].as_u64()), (Kind::Fail, Some(3005)));
+        call(&s, "u1", Op::PublishTracks.code(), json!({"room_id": "r", "tracks": [{"kind": "video", "ssrc": 0, "mid": "2", "pt": 96, "codec": "VP8", "simulcast": true}]}));
+        let sim = s.peers.get("u1").unwrap().publish.all().iter().find(|t| t.simulcast).unwrap().track_id.clone();
+        let (k, b) = call(&s, "u1", Op::TrackSet.code(), json!({"room_id": "r", "track_id": sim, "duplex": "half"}));
+        assert_eq!((k, b["code"].as_u64()), (Kind::Fail, Some(3006)), "★half 는 simulcast 강제 off");
+    }
+
+
+    /// rid 확장을 실은 RTP 하나 — 서버 선언 번호 10(연§4-2)을 쓴다.
+    fn rid_packet(ssrc: u32, rid: &str, keyframe: bool) -> Vec<u8> {
+        let mut p = vec![0x90, 0x60, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0];
+        rtp::set_ssrc(&mut p, ssrc);
+        let mut ext = vec![(10u8 << 4) | (rid.len() as u8 - 1)];
+        ext.extend_from_slice(rid.as_bytes());
+        while !ext.len().is_multiple_of(4) {
+            ext.push(0);
+        }
+        p.extend_from_slice(&[0xBE, 0xDE]);
+        p.extend_from_slice(&((ext.len() / 4) as u16).to_be_bytes());
+        p.extend_from_slice(&ext);
+        // VP8 descriptor(S=1·PID=0) + payload header 의 P 비트.
+        p.extend_from_slice(&[0x10, if keyframe { 0x00 } else { 0x01 }, 0, 0]);
+        p
+    }
+
+    #[test]
+    fn simulcast_layers_are_learned_from_the_first_rtp_and_announced_once() {
+        let s = sfu();
+        create(&s, "r", 5);
+        call(&s, "u1", Op::RoomJoin.code(), json!({"room_id": "r"}));
+        call(&s, "u2", Op::RoomJoin.code(), json!({"room_id": "r", "select": false}));
+        let (k, _) = call(&s, "u1", Op::PublishTracks.code(), json!({"room_id": "r", "tracks": [
+            {"kind": "video", "ssrc": 0, "mid": "1", "pt": 96, "codec": "VP8", "simulcast": true}]}));
+        assert_eq!(k, Kind::Ok);
+        let peer = s.peers.get("u1").unwrap();
+        let stream = peer.publish.all().into_iter().find(|t| t.simulcast).unwrap();
+        assert!(stream.tracks().is_empty(), "물리는 첫 RTP 까지 미룬다");
+        let mut rx = s.bus.subscribe();
+
+        // 첫 단 — 배관과 통지가 이때 선다.
+        assert!(s.learn_simulcast(&peer, &rid_packet(0xC1, "h", true), 0xC1).is_some());
+        let added = track_events(&mut rx, "add");
+        assert_eq!(added.len(), 1, "발행자 본인은 빼고 한 번만");
+        let entry = &added[0].1["tracks"][0];
+        assert_eq!((entry["simulcast"].as_bool(), entry["scalability"].as_str()), (Some(true), Some("L2T1")));
+        assert_eq!(entry["ssrc"].as_u64(), Some(u64::from(stream.vssrc)), "★egress 는 vssrc 하나로 합쳐진다");
+
+        // 둘째 단 — 통지는 다시 안 나가고, 이미 붙은 구독자가 새 물리에도 걸린다.
+        assert!(s.learn_simulcast(&peer, &rid_packet(0xC2, "l", true), 0xC2).is_some());
+        assert!(track_events(&mut rx, "add").is_empty(), "단이 늘어도 항목은 하나다");
+        assert_eq!(stream.tracks().len(), 2);
+        for t in stream.tracks() {
+            assert_eq!(t.subscriber_count(), 1, "rid={:?} 도 구독자를 봐야 전환이 성립한다", t.rid);
+        }
+        // 같은 단이 다시 와도 물리를 두 번 붙이지 않는다.
+        assert!(s.learn_simulcast(&peer, &rid_packet(0xC3, "h", true), 0xC3).is_none());
+        assert!(s.learn_simulcast(&peer, &rid_packet(0xC4, "m", true), 0xC4).is_none(), "모르는 rid 는 안 붙인다");
+        assert_eq!(stream.tracks().len(), 2);
+    }
+
+    // `paused:false` 는 키프레임을 청하므로(정§10-1) 런타임 안에서 돈다.
+    #[tokio::test]
+    async fn layer_request_is_a_cap_and_pause_is_a_separate_axis() {
+        let s = sfu();
+        create(&s, "r", 5);
+        call(&s, "u1", Op::RoomJoin.code(), json!({"room_id": "r"}));
+        call(&s, "u2", Op::RoomJoin.code(), json!({"room_id": "r", "select": false}));
+        call(&s, "u1", Op::PublishTracks.code(), json!({"room_id": "r", "tracks": [
+            {"kind": "video", "ssrc": 0, "mid": "1", "pt": 96, "codec": "VP8", "simulcast": true}]}));
+        let peer = s.peers.get("u1").unwrap();
+        s.learn_simulcast(&peer, &rid_packet(0xC1, "h", true), 0xC1);
+        let stream = peer.publish.all().into_iter().find(|t| t.simulcast).unwrap();
+        let sub = s.peers.get("u2").unwrap().subscribe.get("r", &stream.track_id).unwrap();
+        assert_eq!((sub.spatial_cap(), sub.wanted_rid(), sub.paused(), sub.priority()), (1, "h", false, 128));
+
+        let ask = |spatial: Value, paused: Value| {
+            json!({"room_id": "r", "targets": [{"track_id": stream.track_id, "spatial": spatial, "paused": paused, "priority": 200}]})
+        };
+        let (k, _) = call(&s, "u2", Op::SubscribeLayer.code(), ask(json!(0), Value::Null));
+        assert_eq!((k, sub.spatial_cap(), sub.wanted_rid()), (Kind::Ok, 0, "l"));
+        assert_eq!(sub.priority(), 200);
+        // ★상한이라 범위를 넘으면 자른다 — 거절하지 않는다.
+        call(&s, "u2", Op::SubscribeLayer.code(), ask(json!(9), Value::Null));
+        assert_eq!((sub.spatial_cap(), sub.wanted_rid()), (1, "h"));
+        // 생략한 필드는 안 바꾼다 · 대상별 실패는 조용히 건너뛰고 응답은 성공이다.
+        let (k, _) = call(&s, "u2", Op::SubscribeLayer.code(), json!({"room_id": "r", "targets": [{"track_id": "nope", "spatial": 0}]}));
+        assert_eq!((k, sub.spatial_cap()), (Kind::Ok, 1));
+
+        // `paused` 는 별개 축이다.
+        call(&s, "u2", Op::SubscribeLayer.code(), ask(json!(1), json!(true)));
+        assert!(sub.paused() && sub.spatial_cap() == 1);
+        call(&s, "u2", Op::SubscribeLayer.code(), ask(json!(1), json!(false)));
+        assert!(!sub.paused());
+
+        // 정§10-2 — 목표는 세워지되 전환은 키프레임에서만 확정된다.
+        assert!(sub.current_rid().is_none());
+        assert!(sub.aim("h", 1_000) && !sub.aim("h", 1_500), "pending 안에서는 다시 안 세운다");
+        sub.switch_to("h");
+        assert_eq!(sub.current_rid().as_deref(), Some("h"));
     }
 
     #[test]

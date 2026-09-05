@@ -157,6 +157,11 @@ impl PublisherStream {
         self.tracks.load().as_ref().clone()
     }
 
+    /// 그 단이 이미 붙었나 — RID 학습이 같은 단을 두 번 붙이지 않게.
+    pub fn track_of_rid(&self, rid: &str) -> Option<Arc<PublisherTrack>> {
+        self.tracks.load().iter().find(|t| t.rid.as_deref() == Some(rid)).cloned()
+    }
+
     pub fn track_of(&self, ssrc: u32) -> Option<Arc<PublisherTrack>> {
         self.tracks.load().iter().find(|t| t.ssrc == ssrc).cloned()
     }

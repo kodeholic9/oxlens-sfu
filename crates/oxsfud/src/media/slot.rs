@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use oxsig::schema::{Duplex, MediaKind};
 
 use super::codec::AUDIO_CODEC;
-use super::rewriter::SlotRewriter;
+use super::rewriter::Rewriter;
 use super::track::{PublisherStream, StreamSpec};
 
 /// 연§4-1 wire 값 — 슬롯 `track_id` 는 고정이다(클라는 파싱하지 않고 키로만 쓴다).
@@ -53,8 +53,8 @@ pub struct SlotSet {
     pub audio: Arc<PublisherStream>,
     video: Mutex<Option<Arc<PublisherStream>>>,
     /// 정§8-1 — 화자가 교대해도 슬롯의 `seq`·`ts` 는 이어져야 한다. kind 마다 하나.
-    audio_rewriter: SlotRewriter,
-    video_rewriter: SlotRewriter,
+    audio_rewriter: Rewriter,
+    video_rewriter: Rewriter,
 }
 
 impl SlotSet {
@@ -63,12 +63,12 @@ impl SlotSet {
         Self {
             audio: slot_stream(room_id, MediaKind::Audio, AUDIO_CODEC, None),
             video: Mutex::new(None),
-            audio_rewriter: SlotRewriter::default(),
-            video_rewriter: SlotRewriter::default(),
+            audio_rewriter: Rewriter::default(),
+            video_rewriter: Rewriter::default(),
         }
     }
 
-    pub fn rewriter(&self, kind: MediaKind) -> &SlotRewriter {
+    pub fn rewriter(&self, kind: MediaKind) -> &Rewriter {
         match kind {
             MediaKind::Audio => &self.audio_rewriter,
             MediaKind::Video => &self.video_rewriter,

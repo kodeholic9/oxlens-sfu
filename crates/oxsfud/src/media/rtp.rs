@@ -107,6 +107,48 @@ fn walk_extension(pkt: &[u8], mut visit: impl FnMut(u8, usize)) {
     }
 }
 
+/// 그 번호의 확장 값 — 첫 것만(같은 id 가 여럿이면 순서는 계약이 아니다).
+pub fn extension_value(pkt: &[u8], want: u8) -> Option<&[u8]> {
+    let (profile, span) = extension_span(pkt)?;
+    let two_byte = profile & TWO_BYTE_MASK == PROFILE_TWO_BYTE;
+    if !two_byte && profile != PROFILE_ONE_BYTE {
+        return None;
+    }
+    let mut at = span.start;
+    while at < span.end {
+        let b = pkt[at];
+        if b == 0 {
+            at += 1;
+            continue;
+        }
+        let (id, len, from) = if two_byte {
+            (b, usize::from(*pkt.get(at + 1)?), at + 2)
+        } else {
+            if b >> 4 == 15 {
+                return None;
+            }
+            (b >> 4, usize::from((b & 0x0F) + 1), at + 1)
+        };
+        if id == want {
+            return pkt.get(from..from + len);
+        }
+        at = from + len;
+    }
+    None
+}
+
+/// 헤더(+CSRC·확장) 뒤 — 코덱이 읽는 자리. 패딩은 걷지 않는다(키프레임 판정은 앞쪽만 본다).
+pub fn payload(pkt: &[u8]) -> Option<&[u8]> {
+    if !is_rtp(pkt) {
+        return None;
+    }
+    let at = match extension_span(pkt) {
+        Some((_, span)) => span.end,
+        None => FIXED_LEN + usize::from(pkt[0] & 0x0F) * 4,
+    };
+    pkt.get(at..)
+}
+
 /// 정§7-2-1 — 원소마다 (발행자 번호 → 구독자 번호). `map` 이 `None` 을 주면 그 번호는 그대로 둔다.
 /// ★id 자리만 바꾸므로 길이 불변이고, ★중간 자료 없이 제자리에서 한 번에 훑는다(매 패킷·구독자마다 도는 자리).
 pub fn rewrite_extension_ids(pkt: &mut [u8], map: impl Fn(u8) -> Option<u8>) -> usize {
@@ -182,6 +224,17 @@ mod tests {
         }), 2);
         assert_eq!(extension_ids(&p), vec![5, 6]);
         assert_eq!((p.len(), &p[16..20]), (before, &[0x50, 0x77, 0x60, 0x11][..]), "길이·값 그대로, id 자리만");
+    }
+
+    #[test]
+    fn extension_values_and_payload_start() {
+        let p = one_byte_packet();
+        assert_eq!(extension_value(&p, 2), Some(&[0x77u8][..]));
+        assert_eq!(extension_value(&p, 4), Some(&[0x11u8][..]));
+        assert_eq!(extension_value(&p, 9), None);
+        assert_eq!(payload(&p), Some(&[9u8, 9, 9][..]), "확장 뒤가 코덱의 자리다");
+        let plain = vec![0x80, 0x60, 0, 1, 0, 0, 0, 0, 1, 2, 3, 4, 0xAB];
+        assert_eq!((extension_value(&plain, 1), payload(&plain)), (None, Some(&[0xABu8][..])));
     }
 
     #[test]

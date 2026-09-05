@@ -11,6 +11,7 @@ use oxsig::schema::{Duplex, Extmap, MediaKind, PcMode, TrackEntry};
 
 use super::mid::{MidPool, to_wire};
 use super::pt::PtTable;
+use super::rewriter::Rewriter;
 use super::track::PublisherStream;
 use crate::transport::session::TransportSession;
 
@@ -55,7 +56,27 @@ pub struct SubscriberStream {
     pub sent_octets: AtomicU64,
     /// `T-gate` 안전망의 기준 시각(정§7-4).
     pub created_at_ms: AtomicU64,
+    /// 정§8-1·§10-2 — 출처가 바뀌어도 egress 가 이어지게 한다(슬롯은 방이 들고 개인 구독은 여기).
+    pub rewriter: Rewriter,
+    /// 정§10-1 — `SUBSCRIBE_LAYER` 의 `spatial` 은 ★상한이다(범위 초과는 자른다).
+    spatial_cap: AtomicU8,
+    paused: AtomicU8,
+    priority: AtomicU8,
+    /// 정§10-2 — 지금 릴레이 중인 단. 전환은 ★target 의 키프레임에서만 확정된다.
+    current: Mutex<Option<String>>,
+    target: Mutex<Option<String>>,
+    target_since_ms: AtomicU64,
 }
+
+/// 정§10-1 — 낮은 화질부터 `0`. 이 세대의 인코딩은 두 단 고정이다(연§6-3).
+pub const RID_BY_SPATIAL: [&str; 2] = ["l", "h"];
+pub const SPATIAL_MAX: u8 = 1;
+/// 연§4-1 — 구독자에게 알리는 값.
+pub const SCALABILITY: &str = "L2T1";
+/// 정§10-2 — 전환 pending 만료.
+pub const SWITCH_PENDING_MS: u64 = 10_000;
+/// 연§6-3 — 대역 부족 시 채움 순서의 기본값.
+pub const PRIORITY_DEFAULT: u8 = 128;
 
 impl SubscriberStream {
     pub fn mid(&self) -> Option<u16> {
@@ -89,6 +110,55 @@ impl SubscriberStream {
     /// `READY{tracks}` 가 그 (user, 방) 잠금을 푼다. 여러 번 보내도 안전하다.
     pub fn activate(&self) -> bool {
         self.state.swap(1, Ordering::AcqRel) == 0
+    }
+
+    // ───────── 레이어(정§10-1·§10-2) ─────────
+
+    /// ★상한이다 — 범위를 넘으면 그 축 최대로 자른다(거절하지 않는다).
+    pub fn set_spatial_cap(&self, spatial: u8) {
+        self.spatial_cap.store(spatial.min(SPATIAL_MAX), Ordering::Release);
+    }
+    pub fn spatial_cap(&self) -> u8 {
+        self.spatial_cap.load(Ordering::Acquire)
+    }
+    /// `paused` 는 ★별개 축이다 — 전달 자체를 멈춘다.
+    pub fn set_paused(&self, paused: bool) -> bool {
+        self.paused.swap(u8::from(paused), Ordering::AcqRel) != u8::from(paused)
+    }
+    pub fn paused(&self) -> bool {
+        self.paused.load(Ordering::Acquire) == 1
+    }
+    pub fn set_priority(&self, priority: u8) {
+        self.priority.store(priority, Ordering::Release);
+    }
+    pub fn priority(&self) -> u8 {
+        self.priority.load(Ordering::Acquire)
+    }
+
+    /// 상한 안에서 받고 싶은 단의 rid. 자동 판단(정§10-3)은 이 판에 없으므로 상한이 곧 목표다.
+    pub fn wanted_rid(&self) -> &'static str {
+        RID_BY_SPATIAL[usize::from(self.spatial_cap())]
+    }
+
+    pub fn current_rid(&self) -> Option<String> {
+        self.current.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// 정§10-2 — 목표를 세운다. 반환: 새로 세웠나(그때 target-rid PLI 를 청한다).
+    pub fn aim(&self, rid: &str, now_ms: u64) -> bool {
+        let mut t = self.target.lock().unwrap_or_else(|e| e.into_inner());
+        if t.as_deref() == Some(rid) && now_ms.saturating_sub(self.target_since_ms.load(Ordering::Acquire)) < SWITCH_PENDING_MS {
+            return false;
+        }
+        *t = Some(rid.to_owned());
+        self.target_since_ms.store(now_ms, Ordering::Release);
+        true
+    }
+
+    /// 정§10-2 — ★전환은 target 레이어의 키프레임 도착에서만 확정된다.
+    pub fn switch_to(&self, rid: &str) {
+        *self.current.lock().unwrap_or_else(|e| e.into_inner()) = Some(rid.to_owned());
+        *self.target.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     pub fn ext_of(&self, publisher_id: u8) -> Option<u8> {
@@ -173,6 +243,13 @@ impl SubscribeContext {
             sent: AtomicU64::new(0),
             sent_octets: AtomicU64::new(0),
             created_at_ms: AtomicU64::new(now_ms),
+            rewriter: Rewriter::default(),
+            spatial_cap: AtomicU8::new(SPATIAL_MAX),
+            paused: AtomicU8::new(0),
+            priority: AtomicU8::new(PRIORITY_DEFAULT),
+            current: Mutex::new(None),
+            target: Mutex::new(None),
+            target_since_ms: AtomicU64::new(0),
         });
         self.streams.insert((room_id, stream.track_id.clone()), sub.clone());
         sub
@@ -236,7 +313,7 @@ pub fn entry_of(stream: &PublisherStream, sub: &SubscriberStream) -> TrackEntry 
         codec: (stream.kind == MediaKind::Video).then(|| stream.codec.to_owned()),
         fmtp: stream.fmtp.clone(),
         simulcast: stream.simulcast.then_some(true),
-        scalability: stream.simulcast.then(|| "L2T1".to_owned()),
+        scalability: stream.simulcast.then(|| SCALABILITY.to_owned()),
     }
 }
 
