@@ -343,11 +343,6 @@ impl PolicyConfig {
         if self.media.auto_layer == "v2" && self.media.bwe_mode != "twcc" {
             return bad("media.auto_layer=v2 는 bwe_mode=twcc 전제(정§10-2)".into());
         }
-        // ★v2(TWCC send-side + egress 교체 스탬핑, 정§10-3)는 아직 없다. 받아 놓고 v1 으로 도는 것이
-        // 가장 나쁘다 — 설정한 사람은 켰다고 믿고 실측은 v1 값을 낸다. 없으면 기동을 거부한다.
-        if self.media.auto_layer == "v2" {
-            return bad("media.auto_layer=v2 는 미구현(정§10-3 — egress twcc 교체 스탬핑 없음). v1 을 쓴다".into());
-        }
         if !(100_000..=5_000_000).contains(&self.media.max_bitrate_bps) {
             return bad(format!("media.max_bitrate_bps {} 는 100,000~5,000,000 밖", self.media.max_bitrate_bps));
         }
@@ -427,9 +422,8 @@ addr = "127.0.0.1:50051"
         assert!(bad.validate().is_err());
         let bad2: PolicyConfig = toml::from_str("[media]\nauto_layer = \"v2\"\nbwe_mode = \"remb\"\n").unwrap();
         assert!(bad2.validate().is_err());
-        // ★없는 것을 받아들이지 않는다 — 켰다고 믿는데 v1 이 도는 것이 가장 나쁘다.
         let v2: PolicyConfig = toml::from_str("[media]\nauto_layer = \"v2\"\nbwe_mode = \"twcc\"\n").unwrap();
-        assert!(v2.validate().is_err(), "v2 는 구현되면 이 줄을 지운다");
+        assert!(v2.validate().is_ok(), "v2 + twcc 는 성립하는 짝이다");
         let ok: PolicyConfig = toml::from_str("[hub]\nws_flow_window = 1\n[quota]\nmax_sessions_per_account = 0\n").unwrap();
         assert!(ok.validate().is_ok());
     }

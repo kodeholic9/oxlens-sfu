@@ -57,6 +57,22 @@ pub struct SubscriberStream {
     state: AtomicU8,
     /// 발행자 번호 → 이 구독자 번호. 양쪽이 고정이라 붙일 때 한 번 굽는다(핫패스 무락).
     ext: ArcSwap<[Option<u8>; EXT_SLOTS]>,
+    /// 정§10-3 v2 — egress 에 TWCC 를 찍을 자리(구독자 표의 번호). ★0 = 안 찍는다.
+    /// v2 가 아니거나 구독자가 `transport-cc` 를 협상 안 했으면 비운다 — 협상 안 된 번호를 쓰지 않는다.
+    twcc_id: AtomicU8,
+    /// v2 — 그 전송로가 ★실제로 받아낸 속도(측정값)와 잰 시각.
+    send_side_bps: AtomicU64,
+    send_side_at_ms: AtomicU64,
+    /// v2 — RTX 패딩 프로브가 ★실증한 속도와 잰 시각. ★없으면 승격을 막는다(정§10-3 부정 경로).
+    bwe_probe_bps: AtomicU64,
+    bwe_probe_at_ms: AtomicU64,
+    /// v2 — TWCC 가 알려 준 손실률(천분율)과 잰 시각. RR 과 같은 자리를 다른 축이 채운다.
+    twcc_loss_permille: AtomicU16,
+    twcc_loss_at_ms: AtomicU64,
+    /// v2 — 프로브가 도는 동안의 끝 시각. ★겹쳐 쏘지 않는다(두 판이 서로의 측정을 오염시킨다).
+    probing_until_ms: AtomicU64,
+    /// v2 — 그 판이 겨눈 값. 실측이 이것을 넘겨야 ★실증이다.
+    probe_goal_bps: AtomicU64,
     /// egress 를 내보내는 자리 — 직접 소유한다(패킷마다 조회하지 않는다). 회수된 뒤엔 `None` 이다.
     pub transport: Option<Arc<TransportSession>>,
     pub sent: AtomicU64,
@@ -235,8 +251,78 @@ impl SubscriberStream {
         *self.ext.load().get(usize::from(publisher_id))?
     }
 
-    pub fn set_ext(&self, table: [Option<u8>; EXT_SLOTS]) {
+    /// 표와 ★TWCC 자리를 같이 놓는다 — 두 손이 갈리면 스탬핑 자리가 표와 어긋난다.
+    pub fn set_ext(&self, table: [Option<u8>; EXT_SLOTS], twcc_id: Option<u8>) {
         self.ext.store(Arc::new(table));
+        self.twcc_id.store(twcc_id.unwrap_or(0), Ordering::Release);
+    }
+
+    /// egress 에 TWCC 를 찍을 자리. `None` 이면 안 찍는다.
+    pub fn twcc_id(&self) -> Option<u8> {
+        match self.twcc_id.load(Ordering::Acquire) {
+            0 => None,
+            v => Some(v),
+        }
+    }
+
+    /// 정§10-3 v2 — 구독자 피드백이 알려 준 실수신 속도. ★못 잰 것은 `None` 이다.
+    pub fn send_side(&self) -> Option<(u64, u64)> {
+        let at = self.send_side_at_ms.load(Ordering::Relaxed);
+        (at != 0).then(|| (self.send_side_bps.load(Ordering::Relaxed), at))
+    }
+
+    pub fn note_send_side(&self, bps: u64, now_ms: u64) {
+        self.send_side_bps.store(bps, Ordering::Relaxed);
+        self.send_side_at_ms.store(now_ms, Ordering::Relaxed);
+    }
+
+    /// 프로브가 실증한 속도. ★`None` = 아직 안 쟀다 — 그 상태로 승격하면 게이트가 뚫린 것이다.
+    pub fn probe_result(&self) -> Option<(u64, u64)> {
+        let at = self.bwe_probe_at_ms.load(Ordering::Relaxed);
+        (at != 0).then(|| (self.bwe_probe_bps.load(Ordering::Relaxed), at))
+    }
+
+    /// 정§10-3 v2 — TWCC 가 알려 준 손실률(%).
+    pub fn twcc_loss(&self) -> Option<(f64, u64)> {
+        let at = self.twcc_loss_at_ms.load(Ordering::Relaxed);
+        (at != 0).then(|| (f64::from(self.twcc_loss_permille.load(Ordering::Relaxed)) / 10.0, at))
+    }
+
+    pub fn note_twcc_loss(&self, miss_pct: f64, now_ms: u64) {
+        self.twcc_loss_permille.store((miss_pct * 10.0) as u16, Ordering::Relaxed);
+        self.twcc_loss_at_ms.store(now_ms, Ordering::Relaxed);
+    }
+
+    /// 프로브가 도는 중인가. FB 처리가 이때의 실측만 실증치로 받는다.
+    pub fn probing(&self, now_ms: u64) -> bool {
+        now_ms < self.probing_until_ms.load(Ordering::Acquire)
+    }
+
+    /// 한 판만 연다 — 이미 돌고 있으면 `false`.
+    pub fn open_probe(&self, now_ms: u64, until_ms: u64, goal_bps: u64) -> bool {
+        let cur = self.probing_until_ms.load(Ordering::Acquire);
+        if now_ms < cur {
+            return false;
+        }
+        if self
+            .probing_until_ms
+            .compare_exchange(cur, until_ms, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            return false;
+        }
+        self.probe_goal_bps.store(goal_bps, Ordering::Release);
+        true
+    }
+
+    /// 그 판이 겨눈 값 — 실측이 이것 이상이어야 실증으로 친다.
+    pub fn probe_goal(&self) -> u64 {
+        self.probe_goal_bps.load(Ordering::Acquire)
+    }
+
+    pub fn note_probe(&self, bps: u64, now_ms: u64) {
+        self.bwe_probe_bps.store(bps, Ordering::Relaxed);
+        self.bwe_probe_at_ms.store(now_ms, Ordering::Relaxed);
     }
 }
 
@@ -255,7 +341,11 @@ impl SubscribeContext {
             streams: DashMap::new(),
             mids: Mutex::new(MidPool::new(pc_mode)),
             pts: Mutex::new(PtTable::default()),
-            extmap: ArcSwap::from_pointee(Vec::new()),
+            // 정§7-2-1 — 구독자 표의 씨앗은 ★서버 선언표(mid 제외)다. 2pc 는 이것이 끝이고,
+            // 1pc 도 `READY{transport}` 신고 전까지는 이것으로 본다.
+            // ★비워 두면 `ext_table` 의 `mine` 이 비어 확장이 전부 여분 번호로 나간다 —
+            // 구독자가 자기 표에 없는 번호를 못 읽어 ★대역 추정·음량 표시가 조용히 죽는다(§7-2-1 증상).
+            extmap: ArcSwap::from_pointee(super::subscriber_extmap()),
         }
     }
 
@@ -265,6 +355,11 @@ impl SubscribeContext {
 
     pub fn extmap(&self) -> Arc<Vec<Extmap>> {
         self.extmap.load_full()
+    }
+
+    /// 정§10-3 v2 — 이 구독자 표의 TWCC 자리. 표에 없으면 `None`(협상 안 된 번호를 쓰지 않는다, RFC 8285 §4.2).
+    pub fn twcc_id(&self) -> Option<u8> {
+        self.extmap().iter().find(|e| e.uri == crate::media::URI_TWCC).map(|e| e.id)
     }
 
     /// 정§7-2-1 — 발행자 번호 → URI → 구독자 번호. 표에 없는 URI 는 ★표 밖 번호(1~14 중 없는 최대값)로.
@@ -322,6 +417,15 @@ impl SubscribeContext {
             loss_at_ms: AtomicU64::new(0),
             probe_sent: AtomicU64::new(0),
             probe_at_ms: AtomicU64::new(0),
+            twcc_id: AtomicU8::new(0),
+            send_side_bps: AtomicU64::new(0),
+            send_side_at_ms: AtomicU64::new(0),
+            bwe_probe_bps: AtomicU64::new(0),
+            bwe_probe_at_ms: AtomicU64::new(0),
+            twcc_loss_permille: AtomicU16::new(0),
+            twcc_loss_at_ms: AtomicU64::new(0),
+            probing_until_ms: AtomicU64::new(0),
+            probe_goal_bps: AtomicU64::new(0),
             created_at_ms: AtomicU64::new(now_ms),
             rewriter: Rewriter::default(),
             spatial_cap: AtomicU8::new(SPATIAL_MAX),
@@ -502,6 +606,18 @@ mod tests {
             e.active.is_none(),
             "★슬롯에 active 를 실으면 구독자가 a=inactive m-line 을 세워 발화해도 소리가 도착할 자리가 없다"
         );
+    }
+
+    /// 정§7-2-1 — 구독자 표의 씨앗은 서버 선언표다. ★비워 두면 확장이 전부 여분 번호로 나가
+    /// 구독자가 못 읽는다(대역 추정·음량 표시가 조용히 죽는다). TWCC 자리도 그때 사라진다.
+    #[test]
+    fn a_fresh_context_already_speaks_the_server_table() {
+        let ctx = SubscribeContext::new(PcMode::TwoPc);
+        assert_eq!(ctx.twcc_id(), Some(6), "★TWCC 자리가 처음부터 있다 — v2 스탬핑이 여기 앉는다");
+        assert!(ctx.extmap().iter().all(|e| e.uri != crate::media::URI_MID), "구독자에게 mid 는 주지 않는다");
+        let table = ctx.ext_table(&[(6, crate::media::URI_TWCC), (4, crate::media::URI_AUDIO_LEVEL)]);
+        assert_eq!(table[6], Some(6), "같은 URI 는 구독자 번호로 간다");
+        assert_eq!(table[4], Some(4));
     }
 
     #[test]

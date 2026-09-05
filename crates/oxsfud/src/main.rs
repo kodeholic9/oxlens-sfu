@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use common::bplane::SfuServiceServer;
 use common::config::PolicyConfig;
-use oxsfud::handlers::{BweMode, MediaParams, RTCP_REPORT_INTERVAL_MS, TWCC_INTERVAL_MS, Sfu, now_ms};
+use oxsfud::handlers::{AutoLayer, BweMode, MediaParams, RTCP_REPORT_INTERVAL_MS, TWCC_INTERVAL_MS, Sfu, now_ms};
 use oxsfud::media::nack::RETRY_MS as NACK_TICK_MS;
 use oxsfud::service::Service;
 use oxsfud::peer::REAPER_TICK_MS;
@@ -59,7 +59,7 @@ async fn main() {
     info!(id = %args.id, epoch = %epoch, grpc = %args.grpc_listen, udp = %format!("{}:{}", args.public_ip, args.udp_port),
         fingerprint = %cert.fingerprint, max_bitrate = policy.media.max_bitrate_bps, "oxsfud up");
     let cert = Arc::new(cert);
-    let sfu = Arc::new(Sfu::new(epoch, MediaParams { public_ip: args.public_ip, udp_port: args.udp_port, fingerprint: cert.fingerprint.clone(), bwe_mode: BweMode::parse(&policy.media.bwe_mode), auto_layer: policy.media.auto_layer != "off", max_bitrate_bps: u64::from(policy.media.max_bitrate_bps) }, cert));
+    let sfu = Arc::new(Sfu::new(epoch, MediaParams { public_ip: args.public_ip, udp_port: args.udp_port, fingerprint: cert.fingerprint.clone(), bwe_mode: BweMode::parse(&policy.media.bwe_mode), auto_layer: AutoLayer::parse(&policy.media.auto_layer), max_bitrate_bps: u64::from(policy.media.max_bitrate_bps) }, cert));
 
     let socket = match udp::bind(args.udp_port).await {
         Ok(s) => s,

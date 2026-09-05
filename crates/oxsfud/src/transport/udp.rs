@@ -14,7 +14,7 @@ use super::conn::DemuxConn;
 use super::session::{ConnRole, TransportSession};
 use super::{demux, dtls, stun};
 use crate::handlers::{Sfu, now_ms};
-use crate::media::{self, codec, rtcp, rtp, rtx};
+use crate::media::{self, codec, rtcp, rtp, rtx, twcc};
 use crate::peer::Peer;
 use crate::media::rewriter::Rewrite;
 use crate::media::subscribe::{SubscribeState, SubscriberStream};
@@ -153,7 +153,28 @@ async fn on_rtcp(sfu: &Arc<Sfu>, socket: &Arc<UdpSocket>, peer: &Arc<Peer>, sess
                     }
                 }
             }
-            // TWCC 는 발행 축(정§11-2)의 몫이다. 조용히 버리지 않는다.
+            // 정§10-3 v2 — ★구독자가 돌려준 TWCC. 이 전송로가 **실제로 받아낸 속도**를 여기서 잰다.
+            //   담기만 하고 판정은 눈금이 한다. 대역 판단은 구독자(transport) 단위라 그 전송로의
+            //   구독 스트림 전부에 같은 값을 놓는다 — 방 총량을 보는 주체는 없다(정§10).
+            Some(rtcp::PT_RTPFB) if rtcp::fmt(part) == Some(rtcp::FMT_TWCC) => {
+                let Some(fb) = twcc::parse(part) else { continue };
+                session.departures.confirm(&fb.received);
+                let Some(miss) = session.departures.miss_pct(now) else { continue };
+                let bps = session.departures.rate_bps(now).unwrap_or(0);
+                for sub in peer.subscribe.all() {
+                    if sub.twcc_id().is_none() {
+                        continue;  // v2 가 아니면 이 축을 안 쓴다 — 안 쓰는 값을 채우지 않는다
+                    }
+                    sub.note_send_side(bps, now);
+                    sub.note_twcc_loss(miss, now);
+                    // ★프로브가 도는 동안, ★그 판의 목표를 넘긴 실측만 실증이다 —
+                    //   평상값이나 목표 미달로 승격 게이트를 열지 않는다.
+                    if sub.probing(now) && bps >= sub.probe_goal() {
+                        sub.note_probe(bps, now);
+                    }
+                }
+            }
+            // 그 밖의 TWCC 는 발행 축(정§11-2)의 몫이다. 조용히 버리지 않는다.
             _ => debug!(user = %session.user_id, pt = ?rtcp::payload_type(part), fmt = ?rtcp::fmt(part), "rtcp not terminated here"),
         }
     }
@@ -235,6 +256,7 @@ async fn fan_out(sfu: &Arc<Sfu>, socket: &Arc<UdpSocket>, peer: &Arc<Peer>, sess
         let Some(transport) = sub.transport.as_ref() else { continue };
         let Some(addr) = transport.addr.get() else { continue };
         assemble(egress, packet, &sub);
+        stamp_twcc(&sub, transport, egress, now_ms());
         // 정§11-1 하향 — 재전송에 대비해 나간 것을 담는다. ★평문이다(암호는 그때 다시 건다).
         if let Some(seq) = rtp::sequence(egress) {
             sub.rtx.keep(seq, egress);
@@ -259,7 +281,9 @@ async fn serve_nack(socket: &Arc<UdpSocket>, peer: &Arc<Peer>, pkt: &[u8], now: 
     for seq in rtcp::read_nack(pkt) {
         match sub.rtx.take(seq, now, now) {
             Ok(original) => {
-                let Some(retx) = rtp::to_rtx(&original, rtx_pt, rtx_ssrc, sub.next_rtx_seq()) else { continue };
+                let Some(mut retx) = rtp::to_rtx(&original, rtx_pt, rtx_ssrc, sub.next_rtx_seq()) else { continue };
+                // ★재전송·프로브 패딩도 그 전송로가 보낸 것이다 — 안 찍으면 프로브가 실증될 길이 없다.
+                stamp_twcc(&sub, transport, &mut retx, now);
                 let Ok(sealed) = transport.encrypt_rtp(&retx) else { continue };
                 if socket.send_to(&sealed, addr).await.is_ok() {
                     sent += 1;
@@ -365,6 +389,7 @@ async fn fan_out_simulcast(
         }
         rtp::set_payload_type(egress, sub.pt());
         rtp::rewrite_extension_ids(egress, |id| sub.ext_of(id));
+        stamp_twcc(&sub, transport, egress, now);
         // 정§11-1 하향 — 나간 것을 담아야 NACK 에 답할 수 있다. ★평문이다(암호는 그때 다시 건다).
         if let Some(seq) = rtp::sequence(egress) {
             sub.rtx.keep(seq, egress);
@@ -412,6 +437,7 @@ async fn prefan(socket: &Arc<UdpSocket>, peer: &Arc<Peer>, stream: &Arc<Publishe
         let Some(transport) = sub.transport.as_ref() else { continue };
         let Some(addr) = transport.addr.get() else { continue };
         assemble(egress, &base, &sub);
+        stamp_twcc(&sub, transport, egress, now_ms());
         // 정§11-1 하향 — 슬롯도 재전송에 답한다. 담지 않으면 NACK 이 전부 Miss 로 떨어진다.
         // ★전환 경계에서 캐시를 비우는 것은 발언권 쪽이다(`settle_floor`) — 첫 패킷을 기다리면
         //   그 사이에 온 stale NACK 이 옛 공간을 그대로 되받는다.
@@ -424,6 +450,14 @@ async fn prefan(socket: &Arc<UdpSocket>, peer: &Arc<Peer>, stream: &Arc<Publishe
             sub.sent_octets.fetch_add(egress.len() as u64, Ordering::Relaxed);
         }
     }
+}
+
+/// 정§10-3 v2 — egress 에 ★그 전송로의 TWCC 번호를 찍는다(정§7-2-1 TWCC 행 — 자리는 구독자 표의 번호).
+/// v2 가 아니거나 구독자가 `transport-cc` 를 협상 안 했으면 자리가 비어 있어 아무 일도 안 한다.
+fn stamp_twcc(sub: &SubscriberStream, transport: &TransportSession, egress: &mut Vec<u8>, now: u64) {
+    let Some(id) = sub.twcc_id() else { return };
+    let seq = transport.departures.stamp(now, egress.len());
+    rtp::upsert_twcc(egress, id, seq);
 }
 
 /// 구독자 하나 몫의 egress 조립 — PT 는 구독자 표 값으로, 확장 번호는 그 구독자 표로(정§7-2-1).
@@ -480,7 +514,7 @@ mod tests {
         // 이 구독자는 abs-send-time 을 3 번으로 협상했고 twcc 는 아예 없다.
         subs.set_extmap(vec![Extmap { id: 3, uri: crate::media::URI_ABS_SEND_TIME.into() }]);
         let sub = subs.insert(&stream, SubSpec { subscriber: "u2".into(), room_id: "r".into(), mid: Some(0), pt: 111, transport: None, now_ms: 0 });
-        sub.set_ext(subs.ext_table(&publish.extmap()));
+        sub.set_ext(subs.ext_table(&publish.extmap()), None);
 
         let src = packet();
         let mut egress = Vec::with_capacity(EGRESS_BUF);

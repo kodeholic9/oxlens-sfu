@@ -67,11 +67,17 @@ pub struct MediaParams {
     /// 정책서 §3 `bwe_mode` — 발행자 송신 추정을 어느 축으로 먹이나. 둘 다 켜지 않는다.
     pub bwe_mode: BweMode,
     /// 정책서 §3 `auto_layer` — 꺼 두면 수동(`SUBSCRIBE_LAYER`)만 산다. 두 손이 같은 값을 안 다툰다.
-    pub auto_layer: bool,
+    pub auto_layer: AutoLayer,
 }
 
+/// 정§10-3 운영 모드 셋 — 정의는 그 절의 모듈이 갖는다. 여기서는 이름만 빌린다.
+pub use crate::media::autolayer::Mode as AutoLayer;
+
+/// 프로브 패딩 한 장의 크기 — 이더넷 MTU 안에서 한 장이 최대로 나르는 몫.
+const PROBE_MTU: usize = 1_200;
+
 /// 정§11-2 — 하나만 고른다. 둘을 같이 보내면 발행자가 어느 값을 따를지 갈린다.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum BweMode {
     #[default]
     Twcc,
@@ -687,8 +693,8 @@ impl Sfu {
 
     /// 정§10-3 — 레이어 자동 판단 한 눈금. ★판정은 순수 함수가 하고 여기는 신호를 모아 집행만 한다.
     /// 정책이 `off` 면 수동(`SUBSCRIBE_LAYER`)만 산다 — 두 손이 같은 값을 다투지 않게.
-    pub fn auto_layer_tick(&self, now_ms: u64) -> usize {
-        if !self.media.auto_layer {
+    pub fn auto_layer_tick(self: &Arc<Self>, now_ms: u64) -> usize {
+        if !self.media.auto_layer.on() {
             return 0;
         }
         let mut moved = 0;
@@ -699,7 +705,13 @@ impl Sfu {
                 }
                 let signals = self.signals_for(&sub, now_ms);
                 let mut st = sub.auto.lock().unwrap_or_else(|e| e.into_inner());
-                match autolayer::policy_tick(&mut st, now_ms, &signals) {
+                // 정§16-2 — ★상태가 아니라 **판단의 입력**을 낸다. "왜 안 올라가나" 를 밖에서 보게.
+                let decision = autolayer::policy_tick(&mut st, now_ms, &signals, self.media.auto_layer);
+                debug!(user = %peer.user_id, track = %sub.track_id, layer = ?st.layer, ?decision,
+                    send_side = ?signals.send_side, send_loss = ?signals.send_loss, remb = ?signals.remb,
+                    loss = ?signals.loss, probe = ?signals.probe, nack = signals.nack_per_sec, drops = signals.drops,
+                    "auto layer tick");
+                match decision {
                     autolayer::Decision::Hold => continue,
                     autolayer::Decision::Demote(cause) => {
                         sub.set_spatial_cap(0);
@@ -709,11 +721,66 @@ impl Sfu {
                         sub.set_spatial_cap(1);
                         info!(user = %peer.user_id, track = %sub.track_id, "layer up");
                     }
+                    // ★올릴 조건은 다 섰는데 실측이 없다 — 지어내지 않고 쏴 본다.
+                    autolayer::Decision::Probe => {
+                        drop(st);
+                        self.spawn_probe(&sub, now_ms);
+                        continue;
+                    }
                 }
                 moved += 1;
             }
         }
         moved
+    }
+
+    /// 정§10-3 v2 — RTX 패딩으로 「이만큼은 지나가나」를 물어본다.
+    ///
+    /// ★패딩은 구독자가 버린다(모르는 원본의 RTX 다). 우리가 얻는 것은 ★**TWCC 로 되돌아오는
+    /// 도착 사실** 하나뿐이고, 그것이 승격의 유일한 근거다. 겹쳐 쏘면 두 판이 서로의 측정을
+    /// 오염시키므로 한 번에 한 판만 연다.
+    fn spawn_probe(self: &Arc<Self>, sub: &Arc<SubscriberStream>, at_ms: u64) {
+        // ★못 쏘는 사유는 남긴다 — 조용히 안 쏘면 "승격이 안 온다" 의 원인을 밖에서 못 본다(정§16-2).
+        let (Some(pt), Some(ssrc)) = (sub.rtx_pt(), sub.rtx_vssrc) else {
+            debug!(user = %sub.subscriber, track = %sub.track_id, "probe skipped: no rtx pt/ssrc");
+            return;
+        };
+        let Some(transport) = sub.transport.clone() else {
+            debug!(user = %sub.subscriber, track = %sub.track_id, "probe skipped: no transport");
+            return;
+        };
+        let Some(socket) = self.socket.load_full() else { return };
+        // 지금 받아내는 값의 배율만큼 겨눈다 — 아직 못 쟀으면 지금 층이 기준이다.
+        let base = sub.send_side().map_or_else(|| sub.auto.lock().unwrap_or_else(|e| e.into_inner()).layer.bps(), |(b, _)| b);
+        let target = autolayer::probe_target_bps(base);
+        let until = at_ms + autolayer::PROBE_HOLD_MS;
+        if !sub.open_probe(at_ms, until, target) {
+            return;
+        }
+        info!(user = %sub.subscriber, track = %sub.track_id, target, base, "probe up");
+        let chunk_bytes = (target / 8 * autolayer::PROBE_CHUNK_MS / 1_000).max(1) as usize;
+        let sub = sub.clone();
+        tokio::spawn(async move {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(autolayer::PROBE_HOLD_MS);
+            while std::time::Instant::now() < deadline {
+                let Some(addr) = transport.addr.get() else { break };
+                let mut left = chunk_bytes;
+                while left > 0 {
+                    let bytes = left.min(PROBE_MTU);
+                    left -= bytes;
+                    let mut pkt = rtp::probe_padding(pt, ssrc, sub.next_rtx_seq(), bytes);
+                    if let Some(id) = sub.twcc_id() {
+                        let seq = transport.departures.stamp(now_ms(), pkt.len());
+                        rtp::upsert_twcc(&mut pkt, id, seq);
+                    }
+                    let Ok(sealed) = transport.encrypt_rtp(&pkt) else { break };
+                    if socket.send_to(&sealed, addr).await.is_err() {
+                        return;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(autolayer::PROBE_CHUNK_MS)).await;
+            }
+        });
     }
 
     /// 판정에 쓰는 사실을 모은다. ★못 잰 것은 `None` 이다 — 0 으로 채우면 "쟀는데 0" 과 못 가른다.
@@ -726,6 +793,10 @@ impl Sfu {
         if let Some((pct, at)) = sub.reported_loss() {
             s.loss = Some((pct, at));
         }
+        // v2 — 실측 수신률과 프로브 실증치. ★못 잰 것은 `None` 으로 남긴다.
+        s.send_side = sub.send_side();
+        s.send_loss = sub.twcc_loss();
+        s.probe = sub.probe_result();
         let _ = now_ms;
         s
     }
@@ -1095,6 +1166,11 @@ impl Sfu {
     // ───────── 구독 배관(정§7-1·§7-2) ─────────
 
     /// 정§12 — 받기 egress 를 내보내는 연결. 1pc 는 그 하나가 겸한다.
+    /// 정§10-3 v2 — egress 에 TWCC 를 찍을 자리. ★v2 가 아니면 안 찍는다(스탬핑은 v2 의 축이다).
+    fn egress_twcc_id(&self, peer: &Peer) -> Option<u8> {
+        self.media.auto_layer.is_v2().then(|| peer.subscribe.twcc_id()).flatten()
+    }
+
     fn subscribe_transport(&self, peer: &Peer) -> Option<Arc<TransportSession>> {
         let role = match peer.pc_mode {
             PcMode::OnePc => ConnRole::Publish,
@@ -1126,7 +1202,7 @@ impl Sfu {
         let transport = self.subscribe_transport(peer);
         let sub = peer.subscribe.insert(stream, SubSpec { subscriber: peer.user_id.clone(), room_id: room_id.to_owned(), mid, pt, transport, now_ms: now_ms() });
         sub.set_pt(pt, rtx_pt);
-        sub.set_ext(peer.subscribe.ext_table(&self.publisher_extmap(stream)));
+        sub.set_ext(peer.subscribe.ext_table(&self.publisher_extmap(stream)), self.egress_twcc_id(peer));
         for t in stream.tracks() {
             t.attach(&sub);
         }
@@ -1588,7 +1664,7 @@ impl Sfu {
         let mut changed = Vec::new();
         for sub in peer.subscribe.all() {
             let Some(stream) = self.stream_of(&sub.room_id, &sub.track_id) else { continue };
-            sub.set_ext(peer.subscribe.ext_table(&self.publisher_extmap(&stream)));
+            sub.set_ext(peer.subscribe.ext_table(&self.publisher_extmap(&stream)), self.egress_twcc_id(peer));
             let want_rtx = stream.kind == MediaKind::Video;
             let Some((pt, rtx_pt)) = peer.subscribe.assign_pt(stream.codec, stream.fmtp.as_deref(), want_rtx) else { continue };
             if (pt, rtx_pt) != (sub.pt(), sub.rtx_pt()) {
@@ -1720,7 +1796,7 @@ mod tests {
     }
     fn sfu_with(bwe_mode: BweMode) -> Arc<Sfu> {
         let cert = Arc::new(ServerCert::generate().unwrap());
-        Arc::new(Sfu::new("sfu-test".into(), MediaParams { public_ip: "10.0.0.1".into(), udp_port: 20000, bwe_mode, auto_layer: true, fingerprint: cert.fingerprint.clone(), max_bitrate_bps: 800_000 }, cert))
+        Arc::new(Sfu::new("sfu-test".into(), MediaParams { public_ip: "10.0.0.1".into(), udp_port: 20000, bwe_mode, auto_layer: AutoLayer::V1, fingerprint: cert.fingerprint.clone(), max_bitrate_bps: 800_000 }, cert))
     }
     fn env(user: &str, op: u16, body: Value) -> Envelope {
         Envelope { session_id: format!("s-{user}"), user_id: user.into(), room_id: String::new(), target: String::new(), exclude: Vec::new(), wire: encode_json(&Header::msg(op, 7), &body), pc_mode: "2pc".into(), floor_priority: 0 }
@@ -2084,7 +2160,7 @@ mod tests {
     fn auto_layer_stays_out_of_the_way_when_the_policy_is_off() {
         let off = {
             let cert = Arc::new(ServerCert::generate().unwrap());
-            Arc::new(Sfu::new("sfu-test".into(), MediaParams { public_ip: "10.0.0.1".into(), udp_port: 20000, bwe_mode: BweMode::Twcc, auto_layer: false, fingerprint: cert.fingerprint.clone(), max_bitrate_bps: 800_000 }, cert))
+            Arc::new(Sfu::new("sfu-test".into(), MediaParams { public_ip: "10.0.0.1".into(), udp_port: 20000, bwe_mode: BweMode::Twcc, auto_layer: AutoLayer::Off, fingerprint: cert.fingerprint.clone(), max_bitrate_bps: 800_000 }, cert))
         };
         create(&off, "r", 5);
         call(&off, "u1", Op::RoomJoin.code(), json!({"room_id": "r"}));

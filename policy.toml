@@ -4,7 +4,10 @@ level = "info"
 
 [media]
 bwe_mode = "twcc"
-auto_layer = "off"
+# ★이 파일은 개발 실증용이다(dev/system.dev.toml 과 짝). 상용 기본은 `off`(명시 opt-in — 정책서 §3)이고
+# 그 값은 crates/common/src/config.rs 의 default 가 갖는다. 여기서 v2 를 켜는 이유는 2층 sim_bwe 축이
+# 그것을 전제하기 때문이다 — 끄면 그 세 시나리오가 「선언한 축의 자료 0」으로 정직하게 빨개진다.
+auto_layer = "v2"
 
 [floor]
 queue_max = 10
