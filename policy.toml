@@ -17,6 +17,8 @@ heartbeat_timeout_ms = 30000
 resume_window_ms = 60000
 ws_flow_window = 8
 room_default_capacity = 1000
+# 연§5-1 — 브라우저 클라의 origin 허용. 빈 목록이면 같은 origin 배포 전제.
+allowed_origins = ["*"]
 
 [quota]
 max_sessions_per_account = 0

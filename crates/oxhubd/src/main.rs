@@ -97,13 +97,20 @@ async fn main() {
     let listen = system.hub.listen.clone();
     let base = system.hub.base_path.clone();
     let rest_state = Arc::new(RestState { system, policy, registry, backend });
+    // 연§5-1 — 브라우저 클라가 부르는 자리와 앱 백엔드·운영의 자리를 가른다.
+    // CORS 는 앞쪽에만 붙는다: /auth/token 은 앱 백엔드 몫이고 /admin·/healthz 는 운영이다.
+    let mut client = Router::new()
+        .route("/rooms", get(rest::list_rooms).post(rest::create_room))
+        .route("/rooms/:room_id", get(rest::get_room));
+    if let Some(layer) = rest::cors(&rest_state.policy.hub.allowed_origins) {
+        client = client.layer(layer);
+    }
     let inner = Router::new()
         .route("/ws", get(ws::upgrade).with_state(hub))
         .route("/auth/token", post(rest::token))
-        .route("/rooms", get(rest::list_rooms).post(rest::create_room))
-        .route("/rooms/:room_id", get(rest::get_room))
         .route("/healthz", get(rest::healthz))
         .route("/admin/sfus", get(rest::admin_sfus))
+        .merge(client)
         .with_state(rest_state);
     let app = if base.is_empty() { inner } else { Router::new().nest(&base, inner) };
     let listener = tokio::net::TcpListener::bind(&listen).await.unwrap_or_else(|e| {

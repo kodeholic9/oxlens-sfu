@@ -207,6 +207,10 @@ pub struct HubPolicy {
     pub room_departure_ttl_secs: Option<u32>,
     #[serde(default = "default_capacity")]
     pub room_default_capacity: u32,
+    /// 연§5-1 — 브라우저 클라가 다른 origin 에서 붙을 때 허용할 origin.
+    /// `["*"]` 은 전부. 빈 목록이면 CORS 헤더를 아예 안 낸다(같은 origin 배포 전제).
+    #[serde(default = "default_origins")]
+    pub allowed_origins: Vec<String>,
 }
 impl Default for HubPolicy {
     fn default() -> Self {
@@ -219,6 +223,7 @@ impl Default for HubPolicy {
             room_unused_ttl_secs: None,
             room_departure_ttl_secs: None,
             room_default_capacity: default_capacity(),
+            allowed_origins: default_origins(),
         }
     }
 }
@@ -237,6 +242,12 @@ fn default_resume_window() -> u32 {
 fn default_flow_window() -> u8 {
     8
 }
+/// 연§5-1 — 웹 SDK 는 고객 앱에 들어가는 물건이라 다른 origin 이 기본이다.
+/// 좁히려면 목록을 적는다(적으면 그것만, 비우면 헤더를 안 낸다).
+fn default_origins() -> Vec<String> {
+    vec!["*".to_owned()]
+}
+
 fn default_capacity() -> u32 {
     1_000
 }

@@ -6,8 +6,11 @@ use std::sync::Arc;
 
 use std::net::SocketAddr;
 
+use std::time::Duration;
+
 use axum::extract::{ConnectInfo, Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use common::auth;
@@ -16,6 +19,7 @@ use common::config::{HubAuth, PolicyConfig, SystemConfig};
 use oxsig::frame::{self, Header, Kind};
 use oxsig::{FailCode, Failure};
 use serde::{Deserialize, Serialize};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use serde_json::{Value, json};
 
 use crate::backend::SfuBackend;
@@ -85,6 +89,41 @@ fn is_admin(auth_cfg: &HubAuth, headers: &HeaderMap) -> bool {
         .is_some_and(|c| c.role == "admin")
 }
 
+/// 연§5-1 — 브라우저 클라가 부르는 세 자리에만 붙인다.
+///
+/// ★`X-OxLens-Session` 이 안전목록 밖이라 매 요청 앞에 preflight 가 붙는다 — 헤더를 허용하고
+/// `max_age` 로 왕복을 줄인다. 쿠키를 안 쓰므로(Bearer·세션 헤더) 자격증명은 허용하지 않는다:
+/// 자격증명 없는 요청은 ambient 권한이 없어 `*` 로도 남의 페이지가 읽을 것이 없다.
+///
+/// 빈 목록이면 `None` — 헤더를 아예 안 낸다(같은 origin 배포 전제).
+pub fn cors(origins: &[String]) -> Option<CorsLayer> {
+    if origins.is_empty() {
+        return None;
+    }
+    let allow = if origins.iter().any(|o| o == "*") {
+        AllowOrigin::any()
+    } else {
+        let list: Vec<HeaderValue> = origins.iter().filter_map(|o| o.parse().ok()).collect();
+        if list.is_empty() {
+            return None;
+        }
+        AllowOrigin::list(list)
+    };
+    Some(
+        CorsLayer::new()
+            .allow_origin(allow)
+            .allow_methods([Method::GET, Method::POST])
+            .allow_headers([AUTHORIZATION, CONTENT_TYPE, HeaderName::from_static(SESSION_HEADER)])
+            .max_age(Duration::from_secs(CORS_MAX_AGE_SECS)),
+    )
+}
+
+/// preflight 를 얼마나 재사용하나 — 재동기가 갭마다 도는 자리라 왕복이 값지다.
+const CORS_MAX_AGE_SECS: u64 = 600;
+
+/// 연§5-1 세션 헤더. 이 이름이 안전목록 밖이라 preflight 를 부른다.
+const SESSION_HEADER: &str = "x-oxlens-session";
+
 /// 연§5-1 — `Authorization: Bearer` 또는 `X-OxLens-Session`. 둘 중 하나면 통과.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
@@ -93,7 +132,7 @@ pub struct Identity {
 }
 
 pub fn authenticate(secret: &str, registry: &SessionRegistry, headers: &HeaderMap) -> Result<Identity, HttpFail> {
-    if let Some(sid) = headers.get("x-oxlens-session").and_then(|v| v.to_str().ok()) {
+    if let Some(sid) = headers.get(SESSION_HEADER).and_then(|v| v.to_str().ok()) {
         return registry
             .get(sid)
             .map(|s| Identity { user_id: s.user_id, via_session: Some(s.id) })
@@ -317,6 +356,26 @@ mod tests {
         let ok = CreateRoomReq { room_id: Some("r1".into()), name: Some("n".into()), capacity: None, unused_ttl_secs: Some(0), departure_ttl_secs: None };
         let (id, body) = create_room_body(&ok, &p).unwrap();
         assert_eq!((id.as_str(), body["capacity"].as_u64(), body["departure_ttl_secs"].is_null()), ("r1", Some(1000), true));
+    }
+
+    #[test]
+    fn cors_is_off_when_no_origin_is_allowed() {
+        assert!(cors(&[]).is_none(), "빈 목록은 같은 origin 배포 전제 — 헤더를 안 낸다");
+        assert!(cors(&["not a header value\n".to_owned()]).is_none(), "못 읽는 값으로 열지 않는다");
+    }
+
+    #[test]
+    fn cors_is_on_for_any_and_for_a_list() {
+        assert!(cors(&["*".to_owned()]).is_some());
+        assert!(cors(&["https://app.example".to_owned()]).is_some());
+    }
+
+    #[test]
+    fn default_policy_lets_a_browser_on_another_origin_in() {
+        let p = PolicyConfig::default();
+        assert_eq!(p.hub.allowed_origins, vec!["*".to_owned()],
+            "웹 SDK 는 고객 앱에 들어가는 물건이라 다른 origin 이 기본이다");
+        assert!(cors(&p.hub.allowed_origins).is_some());
     }
 
     #[test]
