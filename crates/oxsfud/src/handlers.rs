@@ -2,11 +2,13 @@
 //! op 처리 — 정§4-2 입장 판정 ②~⑥ · §17-2 퇴장(②④⑦⑧) · §5-2 소속 · HTTP 대행(연§5-3~5-5) · §17-1 회수 주체 둘.
 //! 응답 경로는 전부 동기·메모리 안이고 요청 하나에 응답 하나다(정§19 ②). 전송 층은 이 상태를 읽고 쓴다.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use common::bplane::{Envelope, iop};
 use oxsig::body::affiliation::{AffiliationReq, AffiliationRes, Cause};
 use oxsig::body::data::{MessageRecv, MessageSend, MessageSendRes, Task, TaskPhase};
+use oxsig::body::session::{ResumeReq, ResumeRes, RoomSnapshot};
 use oxsig::body::media::{PublishAction, PublishTrack, PublishTracksReq, PublishTracksRes, PublishedTrack, ReadyReq, ReadyType, SubscribeLayerReq, TrackSetReq};
 use oxsig::mbcp::{self, Msg, MsgType};
 use oxsig::body::notify::{ForcedCause, ParticipantEvent, ParticipantEventType, RoomEvent, RoomEventType, TrackAction, TrackEvent, TrackState, TrackStateType};
@@ -142,6 +144,7 @@ impl Sfu {
                 Some(Op::Ready) => self.ready(&env.user_id, &body),
                 Some(Op::TrackSet) => self.track_set(&env.user_id, &body),
                 Some(Op::SubscribeLayer) => self.subscribe_layer(&env.user_id, &body),
+                Some(Op::Resume) => self.resume(&env.user_id, &body),
                 Some(Op::Message) => self.message(&env.user_id, &body),
                 Some(Op::Task) => self.task(&env.user_id, &body),
                 Some(op) => Err(Failure::new(FailCode::InternalError).message(format!("{} not implemented in this build", op.name()))),
@@ -284,6 +287,82 @@ impl Sfu {
             version,
         };
         Ok(serde_json::to_value(res).unwrap_or(Value::Null))
+    }
+
+    /// 연§6-1 · 정§3-3 — 시그널만 끊겼다 다시 붙었다. ★**방 단위로 판정한다**.
+    ///
+    /// 방 열 개 중 하나가 어긋났다고 열 개를 다시 만들지 않는다 — 다방 청취가 기본이라
+    /// 방 하나 때문에 나머지 아홉을 끊으면 무전이 통째로 멎는다.
+    /// ★발행 트랙은 방과 독립으로 판정한다 — 트랙은 세션 것이지 방에 못박히지 않는다(연§6-4).
+    fn resume(&self, user_id: &str, body: &Value) -> Result<Value, Failure> {
+        let req: ResumeReq = parse(body)?;
+        let peer = self.peers.get(user_id).ok_or_else(|| Failure::new(FailCode::SessionNotFound))?;
+        let mut res = ResumeRes::default();
+
+        for room_id in &req.rooms {
+            let Some(room) = self.rooms.get(room_id) else {
+                res.failed.push(room_id.clone());
+                res.reason.insert(room_id.clone(), FailCode::RoomNotFound.name().to_owned());
+                continue;
+            };
+            if !room.is_member(user_id) {
+                res.failed.push(room_id.clone());
+                res.reason.insert(room_id.clone(), FailCode::NotInRoom.name().to_owned());
+                continue;
+            }
+            // ★스냅샷이 끊겨 있는 동안 사라진 통지를 대신한다. 없으면 그 사이 트랙이 영영 안 붙는다.
+            res.snapshot.insert(room_id.clone(), RoomSnapshot {
+                participants: room.participants(),
+                tracks: self.tracks_for(&peer, &room),
+                version: room.version(&self.epoch),
+            });
+            res.resumed.push(room_id.clone());
+        }
+
+        // ★신고가 곧 발행 상태다 — 신고에서 빠진 트랙은 서버가 지운다(remove 와 같은 경로).
+        let reported: BTreeSet<&str> = req.publish.iter().map(|t| t.track_id.as_str()).collect();
+        let mine: Vec<String> = peer.publish.all().iter().map(|s| s.track_id.clone()).collect();
+        for track_id in &mine {
+            if !reported.contains(track_id.as_str()) {
+                self.retire_track(&peer, track_id);
+            }
+        }
+        for want in &req.publish {
+            if !mine.contains(&want.track_id) {
+                res.publish_failed.push(want.track_id.clone());
+            }
+        }
+        Ok(serde_json::to_value(res).unwrap_or(Value::Null))
+    }
+
+    /// 연§6-1 — 신고에서 빠진 발행 트랙을 지운다. `remove` 와 같은 경로를 지나야
+    /// 배관·슬롯 정리가 한 곳에서만 일어난다.
+    fn retire_track(&self, peer: &Arc<Peer>, track_id: &str) {
+        let Some(stream) = peer.publish.get(track_id) else { return };
+        let Some(room) = self.rooms.get(&stream.room_id) else { return };
+        let req = PublishTracksReq {
+            action: PublishAction::Remove,
+            room_id: room.id.clone(),
+            tracks: Vec::new(),
+            track_ids: vec![track_id.to_owned()],
+            twcc_extmap_id: None,
+            rid_extmap_id: None,
+            repair_rid_extmap_id: None,
+            mid_extmap_id: None,
+            audio_level_extmap_id: None,
+        };
+        if self.publish_remove(peer, &room, &req).is_err() {
+            warn!(user = %peer.user_id, track = %track_id, "resume retire failed");
+        }
+    }
+
+    /// 그 방에서 이 사람이 받는 트랙 전량 — 스냅샷의 재료다(연§4-1 보관본과 같은 형).
+    fn tracks_for(&self, peer: &Arc<Peer>, room: &Arc<Room>) -> Vec<TrackEntry> {
+        peer.subscribe
+            .in_room(&room.id)
+            .iter()
+            .filter_map(|sub| self.stream_of(&room.id, &sub.track_id).map(|s| entry_of(&s, sub)))
+            .collect()
     }
 
     /// 연§6-5 · 정§13 — 방 broadcast 중계. ★발신자는 뺀다(자기 것은 응답의 `pid` 로 안다).
@@ -1994,6 +2073,54 @@ mod tests {
         create(&off, "r", 5);
         call(&off, "u1", Op::RoomJoin.code(), json!({"room_id": "r"}));
         assert_eq!(off.auto_layer_tick(now_ms()), 0, "★꺼 두면 아무 값도 안 움직인다");
+    }
+
+    /// 연§6-1 · 정§3-3 — ★방 열 개 중 하나가 어긋났다고 열 개를 다시 만들지 않는다.
+    #[test]
+    fn resume_judges_room_by_room_not_all_or_nothing() {
+        let s = sfu();
+        create(&s, "a", 5);
+        create(&s, "b", 5);
+        call(&s, "u1", Op::RoomJoin.code(), json!({"room_id": "a"}));
+        call(&s, "u1", Op::RoomJoin.code(), json!({"room_id": "b", "select": false}));
+        call(&s, "u2", Op::RoomJoin.code(), json!({"room_id": "a"}));
+
+        let (k, b) = call(&s, "u1", Op::Resume.code(), json!({"rooms": ["a", "b", "없는방"], "publish": []}));
+        assert_eq!(k, Kind::Ok);
+        assert_eq!(b["resumed"], json!(["a", "b"]), "★하나가 어긋나도 나머지는 이어받는다");
+        assert_eq!(b["failed"], json!(["없는방"]));
+        assert!(b["reason"]["없는방"].as_str().is_some(), "사유는 로그용이지만 비어 있으면 안 된다");
+
+        // ★스냅샷이 끊겨 있는 동안 사라진 통지를 대신한다 — 없으면 그 사이 들어온 사람이 명단에 없다.
+        let snap = &b["snapshot"]["a"];
+        let members: Vec<&str> = snap["participants"].as_array().unwrap().iter().map(|m| m["user_id"].as_str().unwrap()).collect();
+        assert_eq!(members, vec!["u1", "u2"]);
+        assert!(snap["version"]["epoch"].as_str().is_some(), "스냅샷과 뒤 통지 사이에 틈이 없다는 근거다");
+        assert!(b["snapshot"]["없는방"].is_null(), "이어받지 못한 방엔 스냅샷이 없다");
+    }
+
+    /// 연§6-1 — 트랙은 세션 것이라 방에 못박히지 않는다. ★신고가 곧 발행 상태다.
+    #[test]
+    fn resume_reconciles_publish_independently_of_rooms() {
+        let s = sfu();
+        create(&s, "a", 5);
+        call(&s, "u1", Op::RoomJoin.code(), json!({"room_id": "a"}));
+        let track = json!({"kind": "audio", "ssrc": 5, "mid": "0", "pt": 111});
+        let (_, res) = call(&s, "u1", Op::PublishTracks.code(), json!({"room_id": "a", "tracks": [track]}));
+        let live = res["tracks"][0]["track_id"].as_str().unwrap().to_owned();
+
+        // 서버가 모르는 것을 신고했다 — publish_failed 다.
+        let (_, b) = call(&s, "u1", Op::Resume.code(), json!({
+            "rooms": ["a"],
+            "publish": [{"track_id": live, "kind": "audio"}, {"track_id": "유령", "kind": "audio"}]
+        }));
+        assert_eq!(b["publish_failed"], json!(["유령"]));
+        assert_eq!(s.peers.get("u1").unwrap().publish.active(), 1, "신고한 것은 그대로 산다");
+
+        // ★신고에서 빠뜨렸다 — 서버가 지운다. 신고가 곧 발행 상태다.
+        let (_, b) = call(&s, "u1", Op::Resume.code(), json!({"rooms": ["a"], "publish": []}));
+        assert_eq!(b["publish_failed"], json!([]));
+        assert_eq!(s.peers.get("u1").unwrap().publish.active(), 0, "★신고에서 빠진 트랙은 서버가 지운다");
     }
 
     #[test]
