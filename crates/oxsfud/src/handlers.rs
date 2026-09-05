@@ -21,7 +21,8 @@ use tracing::{debug, info, warn};
 use crate::emit::EventBus;
 use crate::media::slot::new_vssrc;
 use crate::media::subscribe::{SubSpec, SubscribeState, entry_of};
-use crate::media::track::{PublishState, PublisherStream, StreamSpec};
+use crate::media::rtcp;
+use crate::media::track::{PublishState, PublisherStream, PublisherTrack, StreamSpec};
 use crate::media::floor::{Action, Request};
 use crate::media::{self, codec};
 use crate::peer::{Peer, PeerMap, PeerState, judge};
@@ -35,6 +36,16 @@ pub const MAX_ROOMS_PER_USER: usize = 100;
 pub const MAX_ACTIVE_STREAMS: usize = 16;
 /// 정§7-4 `T-gate` — READY 미도착 시 스스로 푸는 안전망.
 pub const GATE_TIMEOUT_MS: u64 = 5_000;
+/// 정§11-2 — PLI 스로틀(h 300ms). 인프라 PLI 는 통과한다.
+pub const PLI_MIN_GAP_MS: u64 = 300;
+/// 서버가 내는 RTCP 의 보고자 SSRC — 발행자 것을 쓰면 자기 보고로 읽힌다.
+pub const SERVER_RTCP_SSRC: u32 = 1;
+/// 정§11-2 — Ingress RR 주기.
+pub const RTCP_REPORT_INTERVAL_MS: u64 = 1_000;
+/// 정§7-4 `READY{camera}` — 즉시·150ms 두 번.
+const CAMERA_PLI_GAPS: [u64; 2] = [0, 150];
+/// 정§9-7 — 허가 집행의 키프레임 burst.
+const GRANT_PLI_GAPS: [u64; 3] = [0, 500, 1_500];
 
 /// `server_config` 의 프로세스 고정 재료(정§4-2 emit 표).
 #[derive(Debug, Clone)]
@@ -53,6 +64,8 @@ pub struct Sfu {
     pub media: MediaParams,
     pub transport: TransportRegistry,
     pub cert: Arc<ServerCert>,
+    /// 정§11-2 — 서버가 먼저 내는 RTCP(RR·PLI)의 출구. 기동이 바인드한 뒤 채운다.
+    socket: arc_swap::ArcSwapOption<tokio::net::UdpSocket>,
 }
 
 pub fn now_ms() -> u64 {
@@ -76,11 +89,12 @@ fn parse<T: DeserializeOwned>(body: &Value) -> Result<T, Failure> {
 
 impl Sfu {
     pub fn new(epoch: String, media: MediaParams, cert: Arc<ServerCert>) -> Self {
-        Self { epoch, rooms: RoomRegistry::default(), peers: PeerMap::default(), bus: EventBus::default(), media, transport: TransportRegistry::default(), cert }
+        Self { epoch, rooms: RoomRegistry::default(), peers: PeerMap::default(), bus: EventBus::default(), media, transport: TransportRegistry::default(), cert, socket: arc_swap::ArcSwapOption::empty() }
     }
 
-    /// envelope 하나 → 응답 wire 하나.
-    pub fn handle(&self, env: &Envelope) -> Vec<u8> {
+    /// envelope 하나 → 응답 wire 하나. `Arc` 로 받는 것은 ★키프레임 요청처럼 응답을 안 붙잡는
+    /// 곁가지가 있어서다(정§7-4) — 그 자리만 태스크로 떨어져 나간다.
+    pub fn handle(self: &Arc<Self>, env: &Envelope) -> Vec<u8> {
         let (h, body) = match frame::decode(&env.wire) {
             Ok(x) => x,
             Err(e) => return fail(0, 0, &Failure::new(FailCode::InvalidPayload).message(e.to_string())),
@@ -177,7 +191,7 @@ impl Sfu {
 
     // ───────── 입장·퇴장 ─────────
 
-    fn room_join(&self, env: &Envelope, body: &Value) -> Result<Value, Failure> {
+    fn room_join(self: &Arc<Self>, env: &Envelope, body: &Value) -> Result<Value, Failure> {
         let req: RoomJoinReq = parse(body)?;
         let room = self.rooms.get(&req.room_id).ok_or_else(|| Failure::new(FailCode::RoomNotFound))?;
         let user_id = env.user_id.as_str();
@@ -241,7 +255,7 @@ impl Sfu {
         Ok(serde_json::to_value(res).unwrap_or(Value::Null))
     }
 
-    fn room_leave(&self, user_id: &str, body: &Value) -> Result<Value, Failure> {
+    fn room_leave(self: &Arc<Self>, user_id: &str, body: &Value) -> Result<Value, Failure> {
         let req: RoomLeaveReq = parse(body)?;
         let room = self.rooms.get(&req.room_id).ok_or_else(|| Failure::new(FailCode::RoomNotFound))?;
         let peer = self.peers.get(user_id).ok_or_else(|| Failure::new(FailCode::NotInRoom))?;
@@ -251,7 +265,7 @@ impl Sfu {
     }
 
     /// 정§17-2 — ② 명단 제거 · ④ peer.leave_room(마지막 방이면 Peer 제거) · ⑦ left broadcast. 없으면 `None`(거짓 성공 금지).
-    fn leave_one(&self, peer: &Arc<Peer>, room: &Arc<Room>) -> Option<Version> {
+    fn leave_one(self: &Arc<Self>, peer: &Arc<Peer>, room: &Arc<Room>) -> Option<Version> {
         // 정§17-2 ① — 발언권 정리가 먼저다(화자면 회수·승계, 큐에서도 제거).
         if !room.is_member(&peer.user_id) {
             return None;
@@ -302,7 +316,7 @@ impl Sfu {
     }
 
     /// 정§17-3 — 축출의 단위는 Peer: 모든 방에 ①~⑦(방마다 `left`), ⑧ 은 없다.
-    fn evict(&self, peer: &Arc<Peer>) {
+    fn evict(self: &Arc<Self>, peer: &Arc<Peer>) {
         for id in peer.rooms() {
             match self.rooms.get(&id) {
                 Some(room) => {
@@ -325,7 +339,7 @@ impl Sfu {
     }
 
     /// 정§13 — `svc` 별 입구. 발언권만 이 문서가 정하고(연§11-6), 나머지는 계수하고 버린다.
-    pub fn on_dc_frame(&self, session: &Arc<TransportSession>, svc: u8, payload: &[u8]) {
+    pub fn on_dc_frame(self: &Arc<Self>, session: &Arc<TransportSession>, svc: u8, payload: &[u8]) {
         self.observe_media(&session.user_id);
         if svc != oxsig::dc::SVC_MBCP {
             debug!(user = %session.user_id, svc, len = payload.len(), "dc frame dropped");
@@ -342,7 +356,7 @@ impl Sfu {
 
     /// 정§9-6 입구 관문 — ★`0x1D` 없음/미지 = 계수 후 무응답(돌려줄 방이 없다) ·
     /// 미입장 = `DENY(255, "not_in_room")`(원문에 자리가 없는 우리 쪽 오류). ★조용히 첫 방을 고르지 않는다.
-    fn floor_message(&self, user_id: &str, msg: &Msg) -> Vec<Action> {
+    fn floor_message(self: &Arc<Self>, user_id: &str, msg: &Msg) -> Vec<Action> {
         let Some(room_id) = msg.room_id() else {
             debug!(user = user_id, msg = msg.msg_type.name(), "mbcp without room");
             return Vec::new();
@@ -405,7 +419,13 @@ impl Sfu {
     }
 
     /// 상태기가 낸 액션을 집행하기 전에 Peer 축(§9-2 cross-room)을 맞춘다.
-    fn settle_floor(&self, room: &Arc<Room>, actions: Vec<Action>) -> Vec<Action> {
+    /// 정§9-7 — 허가가 섰으면 그 방 video 슬롯에 키프레임 burst 를 건다(결합은 흐름의 재료다).
+    fn settle_floor(self: &Arc<Self>, room: &Arc<Room>, actions: Vec<Action>) -> Vec<Action> {
+        if actions.iter().any(|a| a.msg().msg_type == MsgType::Granted)
+            && let Some(slot) = room.slots.video()
+        {
+            self.spawn_keyframe_burst(vec![slot.vssrc], &GRANT_PLI_GAPS);
+        }
         let holder = room.floor.state();
         for u in room.member_ids() {
             let Some(peer) = self.peers.get(&u) else { continue };
@@ -444,7 +464,7 @@ impl Sfu {
     }
 
     /// 정§17-1 — 발언권 타이머 주기(2,000ms). 회수 tick 에 편승한다.
-    fn floor_tick(&self, now_ms: u64) {
+    fn floor_tick(self: &Arc<Self>, now_ms: u64) {
         for room in self.rooms.all() {
             let blocked = self.blocked_in(&room);
             let actions = room.floor.tick(&blocked, now_ms);
@@ -458,7 +478,7 @@ impl Sfu {
     }
 
     /// 정§5-2·§17-2 ① — 그 방에서 화자·대기자였으면 반환·제거한다.
-    fn floor_leave(&self, room: &Arc<Room>, user_id: &str) {
+    fn floor_leave(self: &Arc<Self>, room: &Arc<Room>, user_id: &str) {
         let blocked = self.blocked_in(room);
         let actions = room.floor.on_leave(user_id, &blocked, now_ms());
         for action in self.settle_floor(room, actions) {
@@ -466,10 +486,110 @@ impl Sfu {
         }
     }
 
+
+    // ───────── RTCP(정§11-2) ─────────
+
+    pub fn attach_socket(&self, socket: Arc<tokio::net::UdpSocket>) {
+        self.socket.store(Some(socket));
+    }
+
+    /// 서버가 먼저 내는 RTCP 하나 — 그 사용자의 발행 연결로.
+    async fn send_rtcp(&self, user_id: &str, plain: &[u8]) -> bool {
+        let (Some(socket), Some(session)) = (self.socket.load_full(), self.transport.session_for(user_id, ConnRole::Publish)) else {
+            return false;
+        };
+        let (Some(addr), Ok(sealed)) = (session.addr.get(), session.encrypt_rtcp(plain)) else {
+            return false;
+        };
+        socket.send_to(&sealed, addr).await.is_ok()
+    }
+
+    /// 정§11-2 — Ingress RR 은 서버가 ★자체 생성한다(1,000ms). 발행자가 보는 "우리 수신 품질"이다.
+    /// ★조립 함수는 여기 하나다 — 두 곳에서 부르면 구간 델타가 갈려 값이 틀린다.
+    pub async fn emit_receiver_reports(&self, now_ms: u64) -> usize {
+        let mut sent = 0;
+        for peer in self.peers.snapshot() {
+            let blocks: Vec<rtcp::ReportBlock> = peer
+                .publish
+                .all()
+                .iter()
+                .flat_map(|st| st.tracks())
+                .filter_map(|t| t.reception.report(t.ssrc, now_ms))
+                .collect();
+            if blocks.is_empty() {
+                continue;
+            }
+            // 보고자 SSRC 는 서버 자신이다 — 발행자의 것을 쓰면 자기 보고로 읽힌다.
+            if self.send_rtcp(&peer.user_id, &rtcp::build_rr(SERVER_RTCP_SSRC, &blocks)).await {
+                sent += 1;
+            }
+        }
+        sent
+    }
+
+    /// 정§11-2 — 키프레임 요청. `egress_ssrc` 는 구독자가 본 값이라 발행 트랙으로 되짚는다.
+    /// `force` 는 인프라 PLI(게이트 해제·승계·`READY`)로 스로틀을 통과한다.
+    pub async fn request_keyframe(&self, egress_ssrc: u32, now_ms: u64, force: bool) -> bool {
+        let Some((owner, track)) = self.publisher_of_egress(egress_ssrc) else { return false };
+        if !track.claim_pli(now_ms, PLI_MIN_GAP_MS, force) {
+            return false;
+        }
+        self.send_rtcp(&owner, &rtcp::build_pli(SERVER_RTCP_SSRC, track.ssrc)).await
+    }
+
+    /// 구독자가 보는 SSRC → 발행 물리 트랙. 전이중 non-sim 은 원본이고 반이중은 방 슬롯 값이다(정§8-1).
+    fn publisher_of_egress(&self, egress_ssrc: u32) -> Option<(String, Arc<PublisherTrack>)> {
+        for peer in self.peers.snapshot() {
+            if let Some((_, track)) = peer.publish.by_ssrc(egress_ssrc) {
+                return Some((peer.user_id.clone(), track));
+            }
+        }
+        // 슬롯 값이면 지금 그 방에서 말하는 사람의 트랙을 가리킨다.
+        // ★찾다 만 방은 건너뛴다 — 여기서 함수를 빠져나가면 첫 방에 없다는 이유로 나머지를 안 본다.
+        for room in self.rooms.all() {
+            let Some(slot) = room.slots.all().into_iter().find(|s| s.vssrc == egress_ssrc) else { continue };
+            let Some(speaker) = room.floor.speaker() else { continue };
+            let Some(peer) = self.peers.get(&speaker) else { continue };
+            let track = peer
+                .publish
+                .in_room(&room.id)
+                .iter()
+                .find(|s| s.kind == slot.kind && s.duplex() == Duplex::Half)
+                .and_then(|s| s.tracks().first().cloned());
+            if let Some(track) = track {
+                return Some((speaker.to_string(), track));
+            }
+        }
+        None
+    }
+
+    /// 응답을 붙잡지 않고 낸다 — 키프레임은 요청이지 왕복이 아니다.
+    fn spawn_keyframe_burst(self: &Arc<Self>, ssrcs: Vec<u32>, gaps_ms: &'static [u64]) {
+        if ssrcs.is_empty() {
+            return;
+        }
+        let sfu = Arc::clone(self);
+        tokio::spawn(async move { sfu.keyframe_burst(ssrcs, gaps_ms).await });
+    }
+
+    /// 정§7-4 — `READY{tracks}` 는 그 방에 ★한 번, `{camera}` 는 그 트랙에 두 번(즉시·150ms).
+    /// 정§9-7 — 허가 집행의 burst 는 `[0, 500, 1500]` 이다.
+    async fn keyframe_burst(&self, ssrcs: Vec<u32>, gaps_ms: &[u64]) {
+        for (i, gap) in gaps_ms.iter().enumerate() {
+            if i > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(*gap)).await;
+            }
+            let now = now_ms();
+            for ssrc in &ssrcs {
+                self.request_keyframe(*ssrc, now, true).await;
+            }
+        }
+    }
+
     // ───────── 회수(정§17-1) ─────────
 
     /// 정§17-1 — 좀비 회수가 먼저, 빈 방 sweep 은 그 뒤에(급사 참가자가 남으면 유예 시작이 늦는다).
-    pub fn tick(&self) {
+    pub fn tick(self: &Arc<Self>) {
         let now = now_ms();
         self.reap(now);
         self.sweep_gates(now);
@@ -499,7 +619,7 @@ impl Sfu {
     }
 
     /// 정§2-2 PeerState — 전이 주체는 이 tick 단일. 반환: 회수한 Peer 수.
-    pub fn reap(&self, now_ms: u64) -> usize {
+    pub fn reap(self: &Arc<Self>, now_ms: u64) -> usize {
         let mut reaped = 0;
         // §2-3 계약 4 — 순회와 삭제를 겹치지 않는다.
         for peer in self.peers.snapshot() {
@@ -521,7 +641,7 @@ impl Sfu {
     }
 
     /// 정§17-2 — 좀비 경로. ①~⑦ 은 `leave_one` 이 맡고, ⑧ `media_lost` unicast 가 이 경로에만 붙는다.
-    fn reclaim(&self, peer: &Arc<Peer>, dwell_ms: u64) {
+    fn reclaim(self: &Arc<Self>, peer: &Arc<Peer>, dwell_ms: u64) {
         info!(user = %peer.user_id, suspect_dwell_ms = dwell_ms, rooms = peer.room_count(), "zombie reclaimed");
         for id in peer.rooms() {
             let Some(room) = self.rooms.get(&id) else {
@@ -545,7 +665,7 @@ impl Sfu {
 
     // ───────── 소속 ─────────
 
-    fn affiliation(&self, user_id: &str, body: &Value) -> Result<Value, Failure> {
+    fn affiliation(self: &Arc<Self>, user_id: &str, body: &Value) -> Result<Value, Failure> {
         let req: AffiliationReq = parse(body)?;
         if req.pub_select.is_none() && req.pub_deselect.is_none() {
             return Err(Failure::new(FailCode::MissingField).message("pub_select or pub_deselect"));
@@ -866,7 +986,7 @@ impl Sfu {
 
     // ───────── READY(정§7-4) ─────────
 
-    fn ready(&self, user_id: &str, body: &Value) -> Result<Value, Failure> {
+    fn ready(self: &Arc<Self>, user_id: &str, body: &Value) -> Result<Value, Failure> {
         let req: ReadyReq = parse(body)?;
         req.validate().map_err(Failure::new)?;
         let room = self.rooms.get(&req.room_id).ok_or_else(|| Failure::new(FailCode::RoomNotFound))?;
@@ -874,6 +994,9 @@ impl Sfu {
         match req.ready_type {
             ReadyType::Tracks => {
                 let opened = peer.subscribe.in_room(&room.id).iter().filter(|s| s.activate()).count();
+                // 정§7-4 — 키프레임은 ★그 방에 한 번이다(스트림마다 발동하면 과발동).
+                let video: Vec<u32> = peer.subscribe.in_room(&room.id).iter().filter(|s| s.kind == MediaKind::Video).map(|s| s.vssrc).collect();
+                self.spawn_keyframe_burst(video, &[0]);
                 // 정§9-6 처음 알리기 — 그 방에 화자가 있으면 그 사람에게만 `TAKEN` unicast.
                 for action in room.floor.announce_speaker(user_id) {
                     self.dispatch_floor(&action);
@@ -914,10 +1037,12 @@ impl Sfu {
     }
 
     /// 연§6-3 — `track_id` 의 그 트랙이 흐르는 방(`pub_room`)에 `TRACK_STATE{live}`. 발행 방이 없으면 통지 없음.
-    fn ready_camera(&self, peer: &Arc<Peer>, req: &ReadyReq) -> Result<(), Failure> {
+    fn ready_camera(self: &Arc<Self>, peer: &Arc<Peer>, req: &ReadyReq) -> Result<(), Failure> {
         let track_id = req.track_id.as_deref().unwrap_or_default();
         let stream = peer.publish.get(track_id).ok_or_else(|| Failure::new(FailCode::TrackNotFound).message(track_id.to_owned()))?;
         stream.set_state(PublishState::Active);
+        // 정§7-4 — 카메라가 프레임을 내기 시작했다. 그 트랙에 키프레임 두 번.
+        self.spawn_keyframe_burst(stream.tracks().iter().map(|t| t.ssrc).collect(), &CAMERA_PLI_GAPS);
         let Some(pub_room) = peer.pub_room() else {
             info!(user = %peer.user_id, track = track_id, "ready camera without a publishing room");
             return Ok(());
@@ -1024,20 +1149,20 @@ mod tests {
     use super::*;
     use oxsig::frame::Kind;
 
-    fn sfu() -> Sfu {
+    fn sfu() -> Arc<Sfu> {
         let cert = Arc::new(ServerCert::generate().unwrap());
-        Sfu::new("sfu-test".into(), MediaParams { public_ip: "10.0.0.1".into(), udp_port: 20000, fingerprint: cert.fingerprint.clone(), max_bitrate_bps: 800_000 }, cert)
+        Arc::new(Sfu::new("sfu-test".into(), MediaParams { public_ip: "10.0.0.1".into(), udp_port: 20000, fingerprint: cert.fingerprint.clone(), max_bitrate_bps: 800_000 }, cert))
     }
     fn env(user: &str, op: u16, body: Value) -> Envelope {
         Envelope { session_id: format!("s-{user}"), user_id: user.into(), room_id: String::new(), target: String::new(), exclude: Vec::new(), wire: encode_json(&Header::msg(op, 7), &body), pc_mode: "2pc".into(), floor_priority: 0 }
     }
-    fn call(s: &Sfu, user: &str, op: u16, body: Value) -> (Kind, Value) {
+    fn call(s: &Arc<Sfu>, user: &str, op: u16, body: Value) -> (Kind, Value) {
         let w = s.handle(&env(user, op, body));
         let (h, b) = frame::decode(&w).unwrap();
         assert_eq!(h.pid, 7);
         (h.kind, frame::body_json(b).unwrap())
     }
-    fn create(s: &Sfu, id: &str, cap: u64) {
+    fn create(s: &Arc<Sfu>, id: &str, cap: u64) {
         let (k, _) = call(s, "", iop::ROOM_CREATE, json!({"room_id": id, "name": "n", "capacity": cap}));
         assert_eq!(k, Kind::Ok);
     }
@@ -1277,8 +1402,9 @@ mod tests {
         assert_eq!(track_events(&mut rx, "remove").len(), 2, "슬롯 항목이 구독자 둘에게서 지워진다");
     }
 
-    #[test]
-    fn ready_opens_the_gate_and_transport_report_is_one_pc_only() {
+    // 키프레임 요청은 응답을 안 붙잡고 태스크로 떨어지므로(정§7-4) 런타임 안에서 돈다.
+    #[tokio::test]
+    async fn ready_opens_the_gate_and_transport_report_is_one_pc_only() {
         let s = sfu();
         create(&s, "r", 5);
         call(&s, "u1", Op::RoomJoin.code(), json!({"room_id": "r"}));
@@ -1345,7 +1471,7 @@ mod tests {
         oxsig::dc::encode(oxsig::dc::SVC_MBCP, &msg.encode().unwrap()).unwrap()
     }
     /// DC 는 실제 세션이 있어야 나가므로, 시험은 상태기가 낸 액션을 직접 본다.
-    fn floor_in(s: &Sfu, user: &str, msg: Msg) -> Vec<(MsgType, Option<String>, Option<u8>)> {
+    fn floor_in(s: &Arc<Sfu>, user: &str, msg: Msg) -> Vec<(MsgType, Option<String>, Option<u8>)> {
         s.floor_message(user, &msg)
             .iter()
             .map(|a| {

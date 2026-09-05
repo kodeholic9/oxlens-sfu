@@ -10,6 +10,7 @@ use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use oxsig::schema::{Duplex, MediaKind};
 
+use super::reception::Reception;
 use super::subscribe::SubscriberStream;
 
 /// 정§2-2 — 등록(의도)과 첫 RTP(실현)가 갈린다.
@@ -45,11 +46,14 @@ pub struct PublisherTrack {
     pub rid: Option<String>,
     subscribers: ArcSwap<Vec<Weak<SubscriberStream>>>,
     pub rtp_in: AtomicU64,
+    /// 정§11-2 — Ingress RR 의 재료. ★RTX 는 여기 안 든다(손실률 오염).
+    pub reception: Reception,
+    last_pli_ms: AtomicU64,
 }
 
 impl PublisherTrack {
     fn new(ssrc: u32, rtx_ssrc: Option<u32>, rid: Option<String>) -> Self {
-        Self { ssrc, rtx_ssrc, rid, subscribers: ArcSwap::from_pointee(Vec::new()), rtp_in: AtomicU64::new(0) }
+        Self { ssrc, rtx_ssrc, rid, subscribers: ArcSwap::from_pointee(Vec::new()), rtp_in: AtomicU64::new(0), reception: Reception::default(), last_pli_ms: AtomicU64::new(0) }
     }
 
     /// 정§7-1 ④ — 통째 교체(RCU). 죽은 Weak 는 이때 함께 걷는다.
@@ -73,6 +77,16 @@ impl PublisherTrack {
     /// ★핫패스 — RCU 안내자를 그대로 돌려준다. 부르는 쪽이 슬라이스를 순회하므로 ★할당이 없다.
     pub fn subscribers(&self) -> arc_swap::Guard<Arc<Vec<Weak<SubscriberStream>>>> {
         self.subscribers.load()
+    }
+
+    /// 정§11-2 — PLI 스로틀. ★인프라 PLI(게이트 해제·승계·키프레임 대기)는 `force` 로 통과한다.
+    pub fn claim_pli(&self, now_ms: u64, min_gap_ms: u64, force: bool) -> bool {
+        let last = self.last_pli_ms.load(Ordering::Acquire);
+        if !force && last != 0 && now_ms.saturating_sub(last) < min_gap_ms {
+            return false;
+        }
+        self.last_pli_ms.store(now_ms, Ordering::Release);
+        true
     }
 
     pub fn subscriber_count(&self) -> usize {
@@ -164,6 +178,14 @@ impl PublisherStream {
 
     pub fn rtp_in(&self) -> u64 {
         self.tracks.load().iter().map(|t| t.rtp_in.load(Ordering::Relaxed)).sum()
+    }
+
+    /// 연§4-2 — 클럭은 코덱이 정한다. opus 48k · video 90k.
+    pub fn clock_rate(&self) -> u32 {
+        match self.kind {
+            MediaKind::Audio => 48_000,
+            MediaKind::Video => 90_000,
+        }
     }
 }
 

@@ -51,6 +51,8 @@ pub struct SubscriberStream {
     /// egress 를 내보내는 자리 — 직접 소유한다(패킷마다 조회하지 않는다). 회수된 뒤엔 `None` 이다.
     pub transport: Option<Arc<TransportSession>>,
     pub sent: AtomicU64,
+    /// 정§11-2 — 번역 SR 의 `octets`. 페이로드가 아니라 보낸 RTP 전체 길이다(RFC 3550 §6.4.1).
+    pub sent_octets: AtomicU64,
     /// `T-gate` 안전망의 기준 시각(정§7-4).
     pub created_at_ms: AtomicU64,
 }
@@ -169,6 +171,7 @@ impl SubscribeContext {
             ext: ArcSwap::from_pointee([None; EXT_SLOTS]),
             transport,
             sent: AtomicU64::new(0),
+            sent_octets: AtomicU64::new(0),
             created_at_ms: AtomicU64::new(now_ms),
         });
         self.streams.insert((room_id, stream.track_id.clone()), sub.clone());

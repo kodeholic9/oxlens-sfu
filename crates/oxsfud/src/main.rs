@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use common::bplane::SfuServiceServer;
 use common::config::PolicyConfig;
-use oxsfud::handlers::{MediaParams, Sfu};
+use oxsfud::handlers::{MediaParams, RTCP_REPORT_INTERVAL_MS, Sfu, now_ms};
 use oxsfud::service::Service;
 use oxsfud::peer::REAPER_TICK_MS;
 use oxsfud::transport::{ServerCert, udp};
@@ -67,7 +67,18 @@ async fn main() {
             std::process::exit(2);
         }
     };
+    sfu.attach_socket(socket.clone());
     tokio::spawn(udp::run(sfu.clone(), socket));
+
+    // 정§11-2 — Ingress RR 은 서버가 자체 생성한다. 소비자는 ★이 타이머 하나다.
+    let reporter = sfu.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_millis(RTCP_REPORT_INTERVAL_MS));
+        loop {
+            tick.tick().await;
+            reporter.emit_receiver_reports(now_ms()).await;
+        }
+    });
 
     let reaper = sfu.clone();
     tokio::spawn(async move {

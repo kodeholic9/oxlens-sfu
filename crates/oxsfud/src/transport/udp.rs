@@ -14,7 +14,7 @@ use super::conn::DemuxConn;
 use super::session::{ConnRole, TransportSession};
 use super::{demux, dtls, stun};
 use crate::handlers::{Sfu, now_ms};
-use crate::media::rtp;
+use crate::media::{rtcp, rtp};
 use crate::peer::Peer;
 use crate::media::subscribe::{SubscribeState, SubscriberStream};
 use crate::media::track::{PublishState, PublisherStream};
@@ -99,7 +99,16 @@ async fn on_srtp(sfu: &Arc<Sfu>, socket: &Arc<UdpSocket>, data: &[u8], remote: S
     // 세션이 주인을 직접 들고 있어 등록부를 다시 뒤지지 않는다.
     let Some(peer) = session.peer() else { return };
     peer.touch(now_ms());
-    if rtp::is_rtcp(data) || session.role != ConnRole::Publish {
+    if rtp::is_rtcp(data) {
+        // 정§11-2 — RTCP 는 릴레이가 아니라 종단이다. 1pc 는 한 5-tuple 로 섞여 오므로
+        // ★복호 후 평문에서 패킷 단위로 분해한다(미해소는 계수하고 버린다).
+        match session.decrypt_rtcp(data) {
+            Ok(plain) => on_rtcp(sfu, socket, &peer, &session, &plain, egress).await,
+            Err(e) => debug!(user = %session.user_id, error = %e, "srtcp decrypt"),
+        }
+        return;
+    }
+    if session.role != ConnRole::Publish {
         return;
     }
     let plain = match session.decrypt_rtp(data) {
@@ -112,6 +121,51 @@ async fn on_srtp(sfu: &Arc<Sfu>, socket: &Arc<UdpSocket>, data: &[u8], remote: S
     fan_out(socket, &peer, &plain, egress).await;
 }
 
+/// 정§11-2 — 조각마다 축이 다르다: SR 은 발행 축(번역 릴레이) · RR/PLI/NACK 은 구독 축(서버가 소비).
+/// ★구독자 RR 을 발행자에게 릴레이하지 않는다 — 발행자가 남의 수신 품질로 비트레이트를 깎는다.
+async fn on_rtcp(sfu: &Arc<Sfu>, socket: &Arc<UdpSocket>, peer: &Arc<Peer>, session: &Arc<TransportSession>, compound: &[u8], egress: &mut Vec<u8>) {
+    let now = now_ms();
+    for part in rtcp::packets(compound) {
+        match rtcp::payload_type(part) {
+            Some(rtcp::PT_SR) => relay_sender_report(socket, peer, part, egress).await,
+            // 구독자 RR 은 여기서 끝난다(소비). 자동 레이어가 설 때 이 값을 읽는다(정§10).
+            Some(rtcp::PT_RR) => debug!(user = %session.user_id, blocks = rtcp::read_report_blocks(part).len(), "subscriber rr"),
+            Some(rtcp::PT_SDES | rtcp::PT_BYE | rtcp::PT_APP) => {}
+            Some(rtcp::PT_PSFB) if rtcp::is_pli(part) => {
+                if let Some(media) = rtcp::media_ssrc(part) {
+                    sfu.request_keyframe(media, now, false).await;
+                }
+            }
+            // NACK·TWCC·REMB 는 손실 복구·대역 축(정§11-1·§10)의 몫이다. 조용히 버리지 않는다.
+            _ => debug!(user = %session.user_id, pt = ?rtcp::payload_type(part), fmt = ?rtcp::fmt(part), "rtcp not terminated here"),
+        }
+    }
+}
+
+/// 정§11-2 — SR 은 ★자체 생성 금지, 번역 릴레이다. 카운터만 egress 기준으로 갈고 NTP 는 원본을 지킨다.
+async fn relay_sender_report(socket: &Arc<UdpSocket>, peer: &Arc<Peer>, sr: &[u8], egress: &mut Vec<u8>) {
+    let Some(info) = rtcp::sender_info(sr) else { return };
+    let Some((stream, track)) = peer.publish.by_ssrc(info.ssrc) else { return };
+    track.reception.on_sender_report(info.ntp, now_ms());
+    if stream.duplex() == Duplex::Half || stream.simulcast {
+        return;
+    }
+    for weak in track.subscribers().iter() {
+        let Some(sub) = weak.upgrade() else { continue };
+        let Some(transport) = sub.transport.as_ref() else { continue };
+        let Some(addr) = transport.addr.get() else { continue };
+        egress.clear();
+        egress.extend_from_slice(sr);
+        let sent = u32::try_from(sub.sent.load(Ordering::Relaxed)).unwrap_or(u32::MAX);
+        let octets = u32::try_from(sub.sent_octets.load(Ordering::Relaxed)).unwrap_or(u32::MAX);
+        if !rtcp::translate_sr(egress, sub.vssrc, info.rtp_ts, sent, octets) {
+            continue;
+        }
+        let Ok(sealed) = transport.encrypt_rtcp(egress) else { continue };
+        let _ = socket.send_to(&sealed, addr).await;
+    }
+}
+
 /// 정§7-3 — 순서가 계약이다. egress PT 는 ★구독자 표의 값이고 확장 번호는 원소마다 다시 쓴다(정§7-2-1).
 ///
 /// ★**전이중의 발화 방은 등록 방이다**(갈래 ②) — 배관이 그 방에서만 만들어지므로 목록 자체가 방이고,
@@ -122,6 +176,10 @@ async fn fan_out(socket: &Arc<UdpSocket>, peer: &Arc<Peer>, packet: &[u8], egres
     let Some(ssrc) = rtp::ssrc(packet) else { return };
     let Some((stream, track)) = peer.publish.by_ssrc(ssrc) else { return };
     track.rtp_in.fetch_add(1, Ordering::Relaxed);
+    // 정§11-2 — 발행자에게 돌려줄 "우리 수신 품질". RTP 헤더만 보고 원자값으로 센다.
+    if let (Some(seq), Some(ts)) = (rtp::sequence(packet), rtp::timestamp(packet)) {
+        track.reception.observe(seq, ts, now_ms(), stream.clock_rate());
+    }
     stream.set_state(PublishState::Active);
     // 정§6-3 — 선언 PT 와 첫 RTP PT 의 불일치는 표면화만 한다. 고치면 검은 화면이 침묵한다.
     if let Some(pt) = rtp::payload_type(packet)
@@ -240,6 +298,7 @@ async fn prefan(socket: &Arc<UdpSocket>, peer: &Arc<Peer>, stream: &Arc<Publishe
         let Ok(sealed) = transport.encrypt_rtp(egress) else { continue };
         if socket.send_to(&sealed, addr).await.is_ok() {
             sub.sent.fetch_add(1, Ordering::Relaxed);
+            sub.sent_octets.fetch_add(egress.len() as u64, Ordering::Relaxed);
         }
     }
 }
