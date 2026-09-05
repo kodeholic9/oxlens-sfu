@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use common::bplane::{Envelope, iop};
 use oxsig::body::affiliation::{AffiliationReq, AffiliationRes, Cause};
+use oxsig::body::data::{MessageRecv, MessageSend, MessageSendRes, Task, TaskPhase};
 use oxsig::body::media::{PublishAction, PublishTrack, PublishTracksReq, PublishTracksRes, PublishedTrack, ReadyReq, ReadyType, SubscribeLayerReq, TrackSetReq};
 use oxsig::mbcp::{self, Msg, MsgType};
 use oxsig::body::notify::{ForcedCause, ParticipantEvent, ParticipantEventType, RoomEvent, RoomEventType, TrackAction, TrackEvent, TrackState, TrackStateType};
@@ -139,6 +140,8 @@ impl Sfu {
                 Some(Op::Ready) => self.ready(&env.user_id, &body),
                 Some(Op::TrackSet) => self.track_set(&env.user_id, &body),
                 Some(Op::SubscribeLayer) => self.subscribe_layer(&env.user_id, &body),
+                Some(Op::Message) => self.message(&env.user_id, &body),
+                Some(Op::Task) => self.task(&env.user_id, &body),
                 Some(op) => Err(Failure::new(FailCode::InternalError).message(format!("{} not implemented in this build", op.name()))),
                 None => Err(Failure::new(FailCode::UnknownOp)),
             },
@@ -279,6 +282,35 @@ impl Sfu {
             version,
         };
         Ok(serde_json::to_value(res).unwrap_or(Value::Null))
+    }
+
+    /// 연§6-5 · 정§13 — 방 broadcast 중계. ★발신자는 뺀다(자기 것은 응답의 `pid` 로 안다).
+    /// ★`user_id` 는 세션에서 넣는다 — body 의 것을 믿으면 아무나 남을 사칭한다.
+    fn message(&self, user_id: &str, body: &Value) -> Result<Value, Failure> {
+        let req: MessageSend = parse(body)?;
+        let room = self.rooms.get(&req.room_id).ok_or_else(|| Failure::new(FailCode::NotInRoom))?;
+        if !room.is_member(user_id) {
+            return Err(Failure::new(FailCode::NotInRoom));
+        }
+        let recv = MessageRecv { room_id: room.id.clone(), user_id: user_id.to_owned(), content: req.content };
+        self.bus.room(&room.id, Op::Message, &recv, std::slice::from_ref(&user_id.to_owned()));
+        let res = MessageSendRes { msg_id: uuid::Uuid::new_v4().simple().to_string() };
+        Ok(serde_json::to_value(res).unwrap_or(Value::Null))
+    }
+
+    /// 연§6-6 — 서버가 발제하고 클라가 `report` 를 새 프레임으로 보낸다.
+    /// ★모르는 `type` 은 조용히 버리지 않는다 — 버리면 발제자가 타임아웃까지 기다린다.
+    fn task(&self, user_id: &str, body: &Value) -> Result<Value, Failure> {
+        let task: Task = parse(body)?;
+        if !task.is_known_type() {
+            return Err(Failure::new(FailCode::InvalidPayload).message("unknown task type"));
+        }
+        // 이 자리에 오는 것은 클라의 보고뿐이다 — 발제는 서버가 낸다.
+        if task.phase != TaskPhase::Report {
+            return Err(Failure::new(FailCode::InvalidPayload).message("phase"));
+        }
+        info!(user = %user_id, req_id = task.req_id, task = %task.task_type, "task report");
+        Ok(Value::Null)
     }
 
     fn room_leave(self: &Arc<Self>, user_id: &str, body: &Value) -> Result<Value, Failure> {
@@ -1641,8 +1673,8 @@ mod tests {
         let (k, b) = call(&s, "u", Op::Affiliation.code(), json!({"pub_select": "a"}));
         assert_eq!((k, b["code"].as_u64(), b["details"]["codec"].as_str()), (Kind::Fail, Some(1006), Some("VP8")));
         assert_eq!(s.peers.get("u").unwrap().pub_room_id().as_deref(), Some("b"), "거절이면 아무것도 안 바뀐다");
-        let (k, b) = call(&s, "u", Op::Message.code(), json!({}));
-        assert_eq!((k, b["code"].as_u64()), (Kind::Fail, Some(5003)), "아직 안 옮긴 op 는 시험이 잡는다");
+        let (k, b) = call(&s, "u", 0x0601, json!({}));
+        assert_eq!((k, b["code"].as_u64()), (Kind::Fail, Some(1003)), "필수 필드가 없으면 1003 이다");
         let (k, b) = call(&s, "u", Op::PublishTracks.code(), json!({}));
         assert_eq!((k, b["code"].as_u64()), (Kind::Fail, Some(1003)));
         let (k, b) = call(&s, "u", 0x0FFF, json!({}));
@@ -1655,6 +1687,13 @@ mod tests {
     }
     fn video(mid: &str, ssrc: u32, codec: &str) -> Value {
         json!({"kind": "video", "ssrc": ssrc, "mid": mid, "pt": 96, "codec": codec, "simulcast": false})
+    }
+    fn drain_raw(rx: &mut tokio::sync::broadcast::Receiver<Envelope>) -> Vec<Envelope> {
+        let mut out = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            out.push(e);
+        }
+        out
     }
     fn drain(rx: &mut tokio::sync::broadcast::Receiver<Envelope>) -> Vec<(u16, String, Value)> {
         let mut out = Vec::new();
@@ -1848,6 +1887,54 @@ mod tests {
         let targets = r.remb_targets();
         assert_eq!(targets.len(), 1, "remb 축이면 나간다");
         assert_eq!(&targets[0].1[12..16], b"REMB");
+    }
+
+    /// 연§6-5 · 정§13 — 문자는 방 broadcast 이고 신원은 세션이 준다.
+    #[test]
+    fn a_message_carries_the_session_identity_not_the_body() {
+        let s = sfu();
+        create(&s, "r", 5);
+        call(&s, "u1", Op::RoomJoin.code(), json!({"room_id": "r"}));
+        call(&s, "u2", Op::RoomJoin.code(), json!({"room_id": "r"}));
+        let mut rx = s.bus.subscribe();
+
+        // body 에 남의 이름을 실어 보낸다 — 서버는 그것을 믿지 않는다.
+        let (k, res) = call(&s, "u1", Op::Message.code(), json!({"room_id": "r", "content": "여기 u1", "user_id": "u2"}));
+        assert_eq!(k, Kind::Ok);
+        assert!(res["msg_id"].as_str().is_some_and(|m| !m.is_empty()), "응답이 msg_id 를 준다");
+
+        let sent: Vec<Envelope> = drain_raw(&mut rx).into_iter().filter(|e| {
+            frame::decode(&e.wire).map(|(h, _)| h.op) == Ok(Op::Message.code())
+        }).collect();
+        assert_eq!(sent.len(), 1, "방 하나에 한 장이다");
+        assert_eq!(sent[0].exclude, vec!["u1".to_owned()],
+            "★보낸 사람에게는 에코하지 않는다 — 자기 것은 응답으로 안다");
+        let body = frame::body_json(frame::decode(&sent[0].wire).unwrap().1).unwrap();
+        assert_eq!(body["user_id"], "u1", "★신원은 세션이 준다 — body 의 것을 믿으면 아무나 사칭한다");
+        assert_eq!(body["content"], "여기 u1");
+    }
+
+    #[test]
+    fn a_message_to_a_room_i_am_not_in_is_refused() {
+        let s = sfu();
+        create(&s, "r", 5);
+        call(&s, "u1", Op::RoomJoin.code(), json!({"room_id": "r"}));
+        assert_eq!(call(&s, "zz", Op::Message.code(), json!({"room_id": "r", "content": "x"})).1["code"], 3002);
+        assert_eq!(call(&s, "u1", Op::Message.code(), json!({"room_id": "none", "content": "x"})).1["code"], 3002);
+    }
+
+    /// 연§6-6 — 모르는 type 을 버리면 발제자가 타임아웃까지 기다린다.
+    #[test]
+    fn an_unknown_task_is_answered_not_dropped() {
+        let s = sfu();
+        create(&s, "r", 5);
+        call(&s, "u1", Op::RoomJoin.code(), json!({"room_id": "r"}));
+        let (k, b) = call(&s, "u1", Op::Task.code(), json!({"phase": "report", "req_id": 1, "type": "무엇이든", "result": {}}));
+        assert_eq!((k, b["code"].as_u64()), (Kind::Fail, Some(1002)));
+
+        // 발제는 서버가 낸다 — 클라가 request 를 올리는 자리가 아니다.
+        assert_eq!(call(&s, "u1", Op::Task.code(), json!({"phase": "request", "req_id": 2, "type": "probe"})).0, Kind::Fail);
+        assert_eq!(call(&s, "u1", Op::Task.code(), json!({"phase": "report", "req_id": 2, "type": "probe", "result": {}})).0, Kind::Ok);
     }
 
     #[test]
