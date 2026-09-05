@@ -1558,7 +1558,11 @@ mod tests {
         let added = track_events(&mut rx, "add");
         assert_eq!(added.len(), 2, "슬롯은 화자 본인도 받는다(N:1)");
         let slot_entry = &added.iter().find(|(t, _)| t == "u2").unwrap().1["tracks"][0];
-        assert_eq!((slot_entry["track_id"].as_str(), slot_entry["user_id"].is_null(), slot_entry["active"].as_bool()), (Some("ptt-r-video"), true, Some(false)));
+        assert_eq!(
+            (slot_entry["track_id"].as_str(), slot_entry["user_id"].is_null(), slot_entry["active"].is_null()),
+            (Some("ptt-r-video"), true, true),
+            "슬롯은 잔존이 아니라 배관이라 active 를 안 싣는다(연§4-1)"
+        );
 
         let (k, b) = call(&s, "u2", Op::PublishTracks.code(), json!({"room_id": "r", "tracks": [half("0", 2, "VP8", Value::Null)]}));
         assert_eq!((k, b["code"].as_u64()), (Kind::Fail, Some(1006)));

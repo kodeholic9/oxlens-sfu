@@ -296,16 +296,20 @@ impl SubscribeContext {
 /// 연§4-1 — 구독자에게 나가는 보관본 한 항목. 잔존(`active:false`)에도 pt·codec·fmtp 를 반드시 싣는다(정§7-1 ⑤).
 pub fn entry_of(stream: &PublisherStream, sub: &SubscriberStream) -> TrackEntry {
     let half = stream.duplex() == Duplex::Half;
+    // 연§4-1 — 주인이 없으면 방 슬롯이다. 화자는 발언권 통지로 안다.
+    let slot = stream.owner.is_empty();
     TrackEntry {
         room_id: sub.room_id.clone(),
-        user_id: (!stream.owner.is_empty()).then(|| stream.owner.clone()),
+        user_id: (!slot).then(|| stream.owner.clone()),
         kind: stream.kind,
         ssrc: sub.vssrc,
         track_id: stream.track_id.clone(),
         mid: sub.mid().map(to_wire),
         duplex: Some(stream.duplex()),
-        // 정§8-2 — half 로 전환된 개인 트랙은 `active:false` 로 잔존한다(자리 지킴 m-line 의 근거).
-        active: Some(!half),
+        // 정§8-2 — half 로 전환된 ★개인 트랙은 `active:false` 로 잔존한다(자리 지킴 m-line 의 근거).
+        // ★방 슬롯은 잔존이 아니라 배관이라 이 필드를 싣지 않는다(연§4-1 표) — 실으면 구독자가
+        // 연§9-5 대로 `a=inactive` m-line 을 세워 발화해도 소리가 도착할 자리가 없다.
+        active: (!slot).then_some(!half),
         source: stream.source.clone(),
         rtx_ssrc: None,
         pt: Some(sub.pt()),
@@ -379,6 +383,40 @@ mod tests {
         assert_eq!((e.mid.as_deref(), e.pt, e.rtx_pt, e.codec.as_deref()), (Some("32"), Some(102), Some(103), Some("H264")));
         assert_eq!((e.fmtp.as_deref(), e.ssrc, e.user_id.as_deref(), e.duplex), (Some("x=1"), 0xABCD, Some("u1"), Some(Duplex::Full)));
         assert!(e.is_reachable() && !e.is_slot() && e.simulcast.is_none());
+    }
+
+    #[test]
+    fn the_room_slot_is_plumbing_not_a_leftover() {
+        let ctx = PublishContext::default();
+        // 연§4-1 — 슬롯은 여러 사람이 돌려쓴다. 주인이 없고, 화자는 발언권 통지로 안다.
+        let slot = ctx.insert(StreamSpec {
+            track_id: "ptt-r1-audio".into(),
+            vssrc: 0x1234,
+            owner: String::new(),
+            room_id: "r1".into(),
+            kind: MediaKind::Audio,
+            mid: "0".into(),
+            pt: 111,
+            rtx_pt: None,
+            codec: "opus",
+            fmtp: None,
+            source: None,
+            duplex: Duplex::Half,
+            simulcast: false,
+            ssrc: 0x1234,
+            rtx_ssrc: None,
+        });
+        let subs = SubscribeContext::new(PcMode::TwoPc);
+        let sub = subs.insert(&slot, SubSpec {
+            subscriber: "u2".into(), room_id: "r1".into(),
+            mid: subs.alloc_mid(MediaKind::Audio), pt: 111, transport: None, now_ms: 0,
+        });
+        let e = entry_of(&slot, &sub);
+        assert!(e.is_slot(), "주인이 없으면 슬롯이다");
+        assert!(
+            e.active.is_none(),
+            "★슬롯에 active 를 실으면 구독자가 a=inactive m-line 을 세워 발화해도 소리가 도착할 자리가 없다"
+        );
     }
 
     #[test]
