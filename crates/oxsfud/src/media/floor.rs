@@ -176,6 +176,11 @@ impl FloorController {
 
     /// ★핫패스 — prefan 게이트를 통과한 순간. 원자값만 만진다.
     /// `T2` 의 시작은 허가가 아니라 첫 RTP 이고(연§8-4), `T1` 은 받을 때마다 다시 걸린다.
+    /// 정§9-7 — 이 허가에서 화자의 RTP 를 이미 받았나. 데우기를 멈출 자리다.
+    pub fn heard_media(&self) -> bool {
+        self.first_rtp_at.load(Ordering::Acquire) != 0
+    }
+
     pub fn on_media(&self, now_ms: u64) {
         let _ = self.first_rtp_at.compare_exchange(0, now_ms, Ordering::AcqRel, Ordering::Relaxed);
         self.last_rtp_at.store(now_ms, Ordering::Release);

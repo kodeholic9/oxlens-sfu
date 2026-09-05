@@ -2,6 +2,7 @@
 //! 무전 슬롯 — 정§8-1. 반이중은 방 공용 m-line 하나를 화자들이 돌려쓴다(N:1 — 화자 교대에 재협상이 없다).
 //! 슬롯도 배관은 개인 트랙과 같은 자료를 쓴다(`owner` 가 빈 값이라 `TrackEntry.user_id` 가 없다 — 연§4-1).
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use oxsig::schema::{Duplex, MediaKind};
@@ -55,6 +56,9 @@ pub struct SlotSet {
     /// 정§8-1 — 화자가 교대해도 슬롯의 `seq`·`ts` 는 이어져야 한다. kind 마다 하나.
     audio_rewriter: Rewriter,
     video_rewriter: Rewriter,
+    /// 정§9-7 — 데우기의 입력 번호. ★판마다 0 으로 되돌리면 rewriter 가 출처 교대를 못 보고
+    /// egress seq 가 역행한다(그 자리가 곧 무전 음성 드롭아웃이다). 방과 수명이 같다.
+    priming_seq: AtomicU32,
 }
 
 impl SlotSet {
@@ -65,7 +69,14 @@ impl SlotSet {
             video: Mutex::new(None),
             audio_rewriter: Rewriter::default(),
             video_rewriter: Rewriter::default(),
+            priming_seq: AtomicU32::new(0),
         }
+    }
+
+    /// 데우기 한 장이 쓸 입력 (seq, ts). ★이어지는 번호라 rewriter 의 offset 이 그대로 산다.
+    pub fn next_priming(&self) -> (u16, u32) {
+        let n = self.priming_seq.fetch_add(1, Ordering::Relaxed);
+        (n as u16, n.wrapping_mul(crate::media::priming::FRAME_TS_STEP))
     }
 
     pub fn rewriter(&self, kind: MediaKind) -> &Rewriter {

@@ -21,7 +21,7 @@ use tracing::{debug, info, warn};
 use crate::emit::EventBus;
 use crate::media::slot::new_vssrc;
 use crate::media::subscribe::{self, SubSpec, SubscribeState, entry_of, SubscriberStream};
-use crate::media::{nack, rtcp, rtp};
+use crate::media::{nack, priming, rtcp, rtp};
 use crate::media::track::{PublishState, PublisherStream, PublisherTrack, StreamSpec};
 use crate::media::floor::{Action, Request};
 use crate::media::{self, codec};
@@ -447,10 +447,13 @@ impl Sfu {
     /// 상태기가 낸 액션을 집행하기 전에 Peer 축(§9-2 cross-room)을 맞춘다.
     /// 정§9-7 — 허가가 섰으면 그 방 video 슬롯에 키프레임 burst 를 건다(결합은 흐름의 재료다).
     fn settle_floor(self: &Arc<Self>, room: &Arc<Room>, actions: Vec<Action>) -> Vec<Action> {
-        if actions.iter().any(|a| a.msg().msg_type == MsgType::Granted)
-            && let Some(slot) = room.slots.video()
-        {
+        let granted = actions.iter().any(|a| a.msg().msg_type == MsgType::Granted);
+        if granted && let Some(slot) = room.slots.video() {
             self.spawn_keyframe_burst(vec![slot.vssrc], &GRANT_PLI_GAPS);
+        }
+        // 정§9-7 — 허가 직후 슬롯을 데운다. 조용하던 슬롯에 바로 말하면 첫 음절이 잘린다.
+        if granted && let Some(speaker) = room.floor.speaker() {
+            self.spawn_priming(room, speaker.to_string(), priming::MAX_FRAMES);
         }
         let holder = room.floor.state();
         for u in room.member_ids() {
@@ -551,6 +554,52 @@ impl Sfu {
             }
         }
         sent
+    }
+
+    /// 정§9-7 — 허가 직후 슬롯 오디오를 무음으로 데운다. ★화자 자신은 뺀다(self-echo).
+    /// 화자의 진짜 RTP 가 오면 그 자리에서 멈춘다 — 데우기와 실제 음성이 겹칠 이유가 없다.
+    ///
+    /// ★해제 뒤에는 흘리지 않는다. 정§9-7 의 "해제가 돌려준 silence 프레임" 은 놓으면서 나오는
+    /// 것을 내보내라는 뜻이고, 새로 지어 넣으라는 뜻이 아니다 — 화자 없는 구간에 슬롯이 흐르면
+    /// 그것이 곧 게이트 누수다(정§7-3 이 강제 권위인 자리).
+    fn spawn_priming(self: &Arc<Self>, room: &Arc<Room>, speaker: String, frames: u32) {
+        let sfu = self.clone();
+        let room = room.clone();
+        tokio::spawn(async move {
+            let slot = room.slots.audio.clone();
+            for _ in 0..frames {
+                // 화자가 말을 시작했다 — 데울 이유가 사라졌다.
+                if !speaker.is_empty() && room.floor.heard_media() {
+                    return;
+                }
+                let (seq, ts) = room.slots.next_priming();
+                let mut pkt = priming::silence(slot.pt, seq, ts, slot.vssrc);
+                if !room.slots.rewriter(MediaKind::Audio).rewrite(&mut pkt, priming::SOURCE, slot.vssrc) {
+                    return;
+                }
+                sfu.broadcast_slot(&slot, &speaker, &pkt).await;
+                tokio::time::sleep(std::time::Duration::from_millis(priming::FRAME_INTERVAL_MS)).await;
+            }
+        });
+    }
+
+    /// 슬롯 구독자 전원에게 한 장 — 이름이 비면 아무도 안 뺀다(해제 무음이 그 경우다).
+    async fn broadcast_slot(&self, slot: &Arc<PublisherStream>, exclude: &str, packet: &[u8]) {
+        let Some(socket) = self.socket.load_full() else { return };
+        let Some(track) = slot.tracks().first().cloned() else { return };
+        for weak in track.subscribers().iter() {
+            let Some(sub) = weak.upgrade() else { continue };
+            if sub.subscriber == exclude {
+                continue;
+            }
+            let Some(transport) = sub.transport.as_ref() else { continue };
+            let Some(addr) = transport.addr.get() else { continue };
+            let mut egress = packet.to_vec();
+            rtp::set_payload_type(&mut egress, sub.pt());
+            if let Ok(sealed) = transport.encrypt_rtp(&egress) {
+                let _ = socket.send_to(&sealed, addr).await;
+            }
+        }
     }
 
     /// 정§11-2 — Ingress TWCC. 발행자가 `transport-cc` 를 협상했을 때만 나간다.
@@ -2119,8 +2168,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn floor_grant_gate_and_succession_run_through_the_wire() {
+    // 정§9-7 — 허가가 데우기 태스크를 띄우므로 런타임 안에서 돈다.
+    #[tokio::test]
+    async fn floor_grant_gate_and_succession_run_through_the_wire() {
         let s = sfu();
         create(&s, "r", 5);
         call(&s, "u1", Op::RoomJoin.code(), json!({"room_id": "r"}));

@@ -6,6 +6,7 @@ pub mod codec;
 pub mod floor;
 pub mod mid;
 pub mod nack;
+pub mod priming;
 pub mod pt;
 pub mod rewriter;
 pub mod reception;
