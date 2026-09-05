@@ -108,27 +108,39 @@ fn walk_extension(pkt: &[u8], mut visit: impl FnMut(u8, usize)) {
 }
 
 /// 정§7-2-1 — 원소마다 (발행자 번호 → 구독자 번호). `map` 이 `None` 을 주면 그 번호는 그대로 둔다.
-/// ★id 자리만 바꾸므로 길이 불변. 반환: 바꾼 원소 수.
+/// ★id 자리만 바꾸므로 길이 불변이고, ★중간 자료 없이 제자리에서 한 번에 훑는다(매 패킷·구독자마다 도는 자리).
 pub fn rewrite_extension_ids(pkt: &mut [u8], map: impl Fn(u8) -> Option<u8>) -> usize {
-    let Some((profile, _)) = extension_span(pkt) else { return 0 };
+    let Some((profile, span)) = extension_span(pkt) else { return 0 };
     let two_byte = profile & TWO_BYTE_MASK == PROFILE_TWO_BYTE;
     if !two_byte && profile != PROFILE_ONE_BYTE {
         return 0;
     }
-    let mut edits = Vec::new();
-    walk_extension(pkt, |id, at| {
-        if let Some(next) = map(id) {
-            edits.push((at, next));
+    let (mut at, mut edits) = (span.start, 0);
+    while at < span.end {
+        let b = pkt[at];
+        if b == 0 {
+            at += 1;
+            continue;
         }
-    });
-    for (at, next) in &edits {
         if two_byte {
-            pkt[*at] = *next;
+            let Some(&len) = pkt.get(at + 1) else { return edits };
+            if let Some(next) = map(b) {
+                pkt[at] = next;
+                edits += 1;
+            }
+            at += 2 + usize::from(len);
         } else {
-            pkt[*at] = (next << 4) | (pkt[*at] & 0x0F);
+            if b >> 4 == 15 {
+                return edits;
+            }
+            if let Some(next) = map(b >> 4) {
+                pkt[at] = (next << 4) | (b & 0x0F);
+                edits += 1;
+            }
+            at += 1 + usize::from((b & 0x0F) + 1);
         }
     }
-    edits.len()
+    edits
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 // author: kodeholic (powered by Claude)
 //! SRTP 문맥 — 정§12 SRTP 행. 방향마다 하나(inbound 복호·outbound 암호), 키는 DTLS 완료 뒤 한 번 설치한다.
 
+use bytes::Bytes;
 use webrtc_srtp::context::Context;
 use webrtc_srtp::protection_profile::ProtectionProfile;
 
@@ -13,20 +14,20 @@ impl SrtpContext {
             .map_err(|e| format!("srtp context: {e}"))
     }
 
-    pub fn decrypt_rtp(&mut self, packet: &[u8]) -> Result<Vec<u8>, String> {
-        self.0.as_mut().ok_or_else(|| "no key".to_owned())?.decrypt_rtp(packet).map(|b| b.to_vec()).map_err(|e| e.to_string())
+    pub fn decrypt_rtp(&mut self, packet: &[u8]) -> Result<Bytes, String> {
+        self.0.as_mut().ok_or_else(|| "no key".to_owned())?.decrypt_rtp(packet).map_err(|e| e.to_string())
     }
 
-    pub fn decrypt_rtcp(&mut self, packet: &[u8]) -> Result<Vec<u8>, String> {
-        self.0.as_mut().ok_or_else(|| "no key".to_owned())?.decrypt_rtcp(packet).map(|b| b.to_vec()).map_err(|e| e.to_string())
+    pub fn decrypt_rtcp(&mut self, packet: &[u8]) -> Result<Bytes, String> {
+        self.0.as_mut().ok_or_else(|| "no key".to_owned())?.decrypt_rtcp(packet).map_err(|e| e.to_string())
     }
 
-    pub fn encrypt_rtp(&mut self, packet: &[u8]) -> Result<Vec<u8>, String> {
-        self.0.as_mut().ok_or_else(|| "no key".to_owned())?.encrypt_rtp(packet).map(|b| b.to_vec()).map_err(|e| e.to_string())
+    pub fn encrypt_rtp(&mut self, packet: &[u8]) -> Result<Bytes, String> {
+        self.0.as_mut().ok_or_else(|| "no key".to_owned())?.encrypt_rtp(packet).map_err(|e| e.to_string())
     }
 
-    pub fn encrypt_rtcp(&mut self, packet: &[u8]) -> Result<Vec<u8>, String> {
-        self.0.as_mut().ok_or_else(|| "no key".to_owned())?.encrypt_rtcp(packet).map(|b| b.to_vec()).map_err(|e| e.to_string())
+    pub fn encrypt_rtcp(&mut self, packet: &[u8]) -> Result<Bytes, String> {
+        self.0.as_mut().ok_or_else(|| "no key".to_owned())?.encrypt_rtcp(packet).map_err(|e| e.to_string())
     }
 }
 
@@ -41,8 +42,8 @@ mod tests {
         let mut out = SrtpContext::install(&key, &salt).unwrap();
         let mut inn = SrtpContext::install(&key, &salt).unwrap();
         let sealed = out.encrypt_rtp(&plain).unwrap();
-        assert_ne!(sealed, plain);
-        assert_eq!(inn.decrypt_rtp(&sealed).unwrap(), plain);
+        assert_ne!(sealed.as_ref(), plain.as_slice());
+        assert_eq!(inn.decrypt_rtp(&sealed).unwrap().as_ref(), plain.as_slice());
         assert!(SrtpContext(None).decrypt_rtp(&plain).is_err());
     }
 }

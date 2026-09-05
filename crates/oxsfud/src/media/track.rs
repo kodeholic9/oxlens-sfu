@@ -70,9 +70,9 @@ impl PublisherTrack {
         self.subscribers.store(Arc::new(next));
     }
 
-    /// 핫패스 — 락 없이 현재 목록을 집는다.
-    pub fn subscribers(&self) -> Vec<Arc<SubscriberStream>> {
-        self.subscribers.load().iter().filter_map(Weak::upgrade).collect()
+    /// ★핫패스 — RCU 안내자를 그대로 돌려준다. 부르는 쪽이 슬라이스를 순회하므로 ★할당이 없다.
+    pub fn subscribers(&self) -> arc_swap::Guard<Arc<Vec<Weak<SubscriberStream>>>> {
+        self.subscribers.load()
     }
 
     pub fn subscriber_count(&self) -> usize {
@@ -126,7 +126,11 @@ impl PublisherStream {
         PublishState::from_code(self.state.load(Ordering::Acquire))
     }
 
+    /// 전이일 때만 부수효과를 낸다(§2-3 계약 3). ★이미 그 값이면 원자 RMW 조차 하지 않는다 — 매 패킷 부르는 자리다.
     pub fn set_state(&self, next: PublishState) -> bool {
+        if self.state.load(Ordering::Acquire) == next.code() {
+            return false;
+        }
         PublishState::from_code(self.state.swap(next.code(), Ordering::AcqRel)) != next
     }
 
@@ -350,13 +354,17 @@ mod tests {
             let b = subs.insert(&s, SubSpec { subscriber: "u3".into(), room_id: "r1".into(), mid: Some(1), pt: 111, transport: None, now_ms: 0 });
             track.attach(&a);
             track.attach(&b);
-            assert_eq!(track.subscriber_count(), 2);
+            assert_eq!((track.subscriber_count(), track.subscribers().len()), (2, 2));
             subs.remove("u3", "r1", "t1");
         }
         assert_eq!(track.subscriber_count(), 1, "Arc 가 사라지면 목록에서 없는 것과 같다");
-        assert_eq!(track.subscribers().first().map(|s| s.subscriber.clone()), Some("u2".to_owned()));
+        let alive: Vec<String> = track.subscribers().iter().filter_map(Weak::upgrade).map(|s| s.subscriber.clone()).collect();
+        assert_eq!(alive, vec!["u2".to_owned()]);
         s.detach_all("u2", "r1");
         assert_eq!(track.subscriber_count(), 0);
+        // ★핫패스 계약 — 순회는 RCU 안내자를 그대로 쓴다(목록을 복사하지 않는다).
+        let (g1, g2) = (track.subscribers(), track.subscribers());
+        assert_eq!(g1.as_ptr(), g2.as_ptr());
     }
 
     #[test]

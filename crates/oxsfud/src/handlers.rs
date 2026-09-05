@@ -53,7 +53,7 @@ pub struct Sfu {
     pub cert: Arc<ServerCert>,
 }
 
-fn now_ms() -> u64 {
+pub fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
@@ -206,7 +206,7 @@ impl Sfu {
             None => {
                 let p = Arc::new(Peer::new(user_id, req.participant_type, pc_mode, now_ms()));
                 self.peers.insert(p.clone());
-                self.transport.register(user_id, pc_mode, &p.publish_ice, &p.subscribe_ice);
+                self.transport.register(&p);
                 p
             }
         };

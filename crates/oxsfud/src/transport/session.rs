@@ -16,6 +16,7 @@ use tracing::debug;
 
 use super::IceCredentials;
 use super::srtp::SrtpContext;
+use crate::peer::Peer;
 
 /// 정§13 — DC 준비 전 버퍼. 넘치면 오래된 것부터 버리고 센다.
 pub const DC_PENDING_CAP: usize = 64;
@@ -61,6 +62,8 @@ pub struct TransportSession {
     pub user_id: String,
     pub role: ConnRole,
     pub creds: IceCredentials,
+    /// ★핫패스 — 주인을 직접 든다(매 패킷 등록부 조회를 없앤다). Peer 가 이 세션을 도로 들므로 `Weak` 다.
+    owner: std::sync::Weak<Peer>,
     pub addr: AddrCell,
     /// 정§17-2 ④ — 이것을 켜야 DTLS·SCTP 태스크가 끝난다. 종료 신호까지가 회수다.
     pub cancel: CancellationToken,
@@ -72,11 +75,12 @@ pub struct TransportSession {
 }
 
 impl TransportSession {
-    fn new(user_id: &str, role: ConnRole, creds: IceCredentials) -> Self {
+    fn new(owner: &Arc<Peer>, role: ConnRole, creds: IceCredentials) -> Self {
         Self {
-            user_id: user_id.to_owned(),
+            user_id: owner.user_id.clone(),
             role,
             creds,
+            owner: Arc::downgrade(owner),
             addr: AddrCell::default(),
             cancel: CancellationToken::new(),
             handshake: AtomicBool::new(false),
@@ -85,6 +89,10 @@ impl TransportSession {
             srtp_out: Mutex::new(None),
             dc: DcState::default(),
         }
+    }
+
+    pub fn peer(&self) -> Option<Arc<Peer>> {
+        self.owner.upgrade()
     }
 
     /// 정§2-3 계약 5 — 핸드셰이크 착수는 원샷 latch. USE-CANDIDATE 재전송이 겹쳐도 한 번만 시작한다.
@@ -110,19 +118,19 @@ impl TransportSession {
         self.srtp_in.lock().unwrap_or_else(|e| e.into_inner()).is_some()
     }
 
-    pub fn decrypt_rtp(&self, packet: &[u8]) -> Result<Vec<u8>, String> {
+    pub fn decrypt_rtp(&self, packet: &[u8]) -> Result<bytes::Bytes, String> {
         self.srtp_in.lock().unwrap_or_else(|e| e.into_inner()).as_mut().ok_or_else(|| "no key".to_owned())?.decrypt_rtp(packet)
     }
 
-    pub fn decrypt_rtcp(&self, packet: &[u8]) -> Result<Vec<u8>, String> {
+    pub fn decrypt_rtcp(&self, packet: &[u8]) -> Result<bytes::Bytes, String> {
         self.srtp_in.lock().unwrap_or_else(|e| e.into_inner()).as_mut().ok_or_else(|| "no key".to_owned())?.decrypt_rtcp(packet)
     }
 
-    pub fn encrypt_rtp(&self, packet: &[u8]) -> Result<Vec<u8>, String> {
+    pub fn encrypt_rtp(&self, packet: &[u8]) -> Result<bytes::Bytes, String> {
         self.srtp_out.lock().unwrap_or_else(|e| e.into_inner()).as_mut().ok_or_else(|| "no key".to_owned())?.encrypt_rtp(packet)
     }
 
-    pub fn encrypt_rtcp(&self, packet: &[u8]) -> Result<Vec<u8>, String> {
+    pub fn encrypt_rtcp(&self, packet: &[u8]) -> Result<bytes::Bytes, String> {
         self.srtp_out.lock().unwrap_or_else(|e| e.into_inner()).as_mut().ok_or_else(|| "no key".to_owned())?.encrypt_rtcp(packet)
     }
 
@@ -179,15 +187,15 @@ pub struct TransportRegistry {
 
 impl TransportRegistry {
     /// Peer 생성 때 한 번. `1pc` 도 자격 넷을 다 싣지만(정§4-2) 쓰는 연결은 `Publish` 하나다.
-    pub fn register(&self, user_id: &str, pc_mode: PcMode, publish: &IceCredentials, subscribe: &IceCredentials) {
-        self.insert(user_id, ConnRole::Publish, publish);
-        if pc_mode == PcMode::TwoPc {
-            self.insert(user_id, ConnRole::Subscribe, subscribe);
+    pub fn register(&self, peer: &Arc<Peer>) {
+        self.insert(peer, ConnRole::Publish, &peer.publish_ice);
+        if peer.pc_mode == PcMode::TwoPc {
+            self.insert(peer, ConnRole::Subscribe, &peer.subscribe_ice);
         }
     }
 
-    fn insert(&self, user_id: &str, role: ConnRole, creds: &IceCredentials) {
-        self.by_ufrag.insert(creds.ufrag.clone(), Arc::new(TransportSession::new(user_id, role, creds.clone())));
+    fn insert(&self, peer: &Arc<Peer>, role: ConnRole, creds: &IceCredentials) {
+        self.by_ufrag.insert(creds.ufrag.clone(), Arc::new(TransportSession::new(peer, role, creds.clone())));
     }
 
     pub fn by_ufrag(&self, ufrag: &str) -> Option<Arc<TransportSession>> {
@@ -249,15 +257,23 @@ mod tests {
         IceCredentials { ufrag: u.to_owned(), pwd: format!("pwd-{u}") }
     }
 
+    /// 자격을 지정해 만든 Peer — 등록부 시험이 ufrag 를 이름으로 집을 수 있게.
+    fn peer(user: &str, pc_mode: PcMode, publish: &str, subscribe: &str) -> Arc<Peer> {
+        Arc::new(Peer::with_credentials(user, 0, pc_mode, 0, creds(publish), creds(subscribe)))
+    }
+
     #[test]
     fn register_by_mode_and_release() {
         let r = TransportRegistry::default();
-        r.register("u1", PcMode::TwoPc, &creds("pub1"), &creds("sub1"));
-        r.register("u2", PcMode::OnePc, &creds("pub2"), &creds("sub2"));
+        // Arc 는 `PeerMap` 이 든다 — 시험도 같은 수명을 만들어 준다(세션은 Weak 로 잡는다).
+        let (p1, p2) = (peer("u1", PcMode::TwoPc, "pub1", "sub1"), peer("u2", PcMode::OnePc, "pub2", "sub2"));
+        r.register(&p1);
+        r.register(&p2);
         assert_eq!(r.len(), 3, "2pc 는 둘, 1pc 는 publish 하나");
         assert!(r.by_ufrag("sub2").is_none());
         assert_eq!(r.session_for("u1", ConnRole::Subscribe).unwrap().creds.pwd, "pwd-sub1");
         let s = r.by_ufrag("pub1").unwrap();
+        assert_eq!(s.peer().map(|p| p.user_id.clone()), Some("u1".to_owned()), "세션은 주인을 직접 든다");
         assert_eq!(r.unregister("u1"), 2);
         assert!(s.cancel.is_cancelled(), "회수는 종료 신호까지");
         assert_eq!((r.len(), r.unregister("nobody")), (1, 0));
@@ -266,8 +282,9 @@ mod tests {
     #[test]
     fn latch_moves_address_index_and_port_reuse_keeps_identity() {
         let r = TransportRegistry::default();
-        r.register("u1", PcMode::OnePc, &creds("pubA"), &creds("subA"));
-        r.register("u2", PcMode::OnePc, &creds("pubB"), &creds("subB"));
+        let (a, b) = (peer("u1", PcMode::OnePc, "pubA", "subA"), peer("u2", PcMode::OnePc, "pubB", "subB"));
+        r.register(&a);
+        r.register(&b);
         let a: SocketAddr = "203.0.113.7:5000".parse().unwrap();
         let b: SocketAddr = "203.0.113.7:5001".parse().unwrap();
         let sa = r.by_ufrag("pubA").unwrap();
@@ -285,7 +302,8 @@ mod tests {
     #[test]
     fn dc_buffers_until_open_then_drains() {
         let r = TransportRegistry::default();
-        r.register("u", PcMode::OnePc, &creds("p"), &creds("s"));
+        let owner = peer("u", PcMode::OnePc, "p", "s");
+        r.register(&owner);
         let s = r.by_ufrag("p").unwrap();
         assert!(!s.dc_ready());
         for i in 0..(DC_PENDING_CAP + 3) {
@@ -308,7 +326,8 @@ mod tests {
 
     #[test]
     fn handshake_claim_is_one_shot() {
-        let s = TransportSession::new("u", ConnRole::Publish, creds("x"));
+        let owner = peer("u", PcMode::OnePc, "x", "y");
+        let s = TransportSession::new(&owner, ConnRole::Publish, creds("x"));
         assert!(s.claim_handshake());
         assert!(!s.claim_handshake(), "USE-CANDIDATE 재전송이 겹쳐도 한 번만");
         assert!(!s.srtp_ready() && s.dtls_tx().is_none());

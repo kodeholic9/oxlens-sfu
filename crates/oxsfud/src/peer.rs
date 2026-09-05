@@ -1,12 +1,14 @@
 // author: kodeholic (powered by Claude)
 //! Peer — 정§2-1 "사용자 하나 = 이 서버에 Peer 하나". 입장 방 집합(= 듣는 방)과 `pub_room` 둘뿐(정§5-1).
 //! 전송 생존(정§2-2 PeerState)은 ★UDP 관찰 기준이다 — WS 하트비트는 이 축을 갱신하지 않는다.
+//! ★소속 두 값은 RCU 다(§2-3 계약 1: 핫패스는 락을 잡지 않는다) — 읽기는 무락, 쓰기만 직렬화한다.
 //! 자격은 Peer 생성 때 한 번(연§9-3 세션 동안 불변). 트랙은 뒤 판.
 
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
+use arc_swap::{ArcSwap, ArcSwapOption};
 use dashmap::DashMap;
 use oxsig::schema::{Affiliation, PcMode};
 
@@ -81,30 +83,36 @@ pub struct Peer {
     state: AtomicU8,
     last_seen: AtomicU64,
     suspect_since: AtomicU64,
-    rooms: Mutex<Rooms>,
-}
-
-#[derive(Debug, Default)]
-struct Rooms {
-    sub: BTreeSet<String>,
-    pub_room: Option<String>,
+    /// 입장 방 집합 = 구독 집합(정§5-1 — 두 집합을 두지 않는다). RCU: 쓰기는 통째 교체.
+    sub_rooms: ArcSwap<BTreeSet<String>>,
+    /// 정§7-3 — fan-out 이 매 패킷 읽는 값이라 ★RCU 여야 한다.
+    pub_room: ArcSwapOption<String>,
+    /// 두 값을 함께 옮기는 쓰기만 직렬화한다. 읽는 쪽은 이 락을 모른다.
+    write: Mutex<()>,
 }
 
 impl Peer {
     pub fn new(user_id: &str, participant_type: u8, pc_mode: PcMode, now_ms: u64) -> Self {
+        Self::with_credentials(user_id, participant_type, pc_mode, now_ms, IceCredentials::generate(), IceCredentials::generate())
+    }
+
+    /// 연§9-3 — 자격은 Peer 생성 때 한 번이고 세션 동안 불변이다. 시험은 값을 지정해 만든다.
+    pub fn with_credentials(user_id: &str, participant_type: u8, pc_mode: PcMode, now_ms: u64, publish_ice: IceCredentials, subscribe_ice: IceCredentials) -> Self {
         Self {
             user_id: user_id.to_owned(),
             participant_type,
             pc_mode,
-            publish_ice: IceCredentials::generate(),
-            subscribe_ice: IceCredentials::generate(),
+            publish_ice,
+            subscribe_ice,
             created_at_ms: now_ms,
             publish: PublishContext::default(),
             subscribe: SubscribeContext::new(pc_mode),
             state: AtomicU8::new(PeerState::Alive.code()),
             last_seen: AtomicU64::new(0),
             suspect_since: AtomicU64::new(0),
-            rooms: Mutex::new(Rooms::default()),
+            sub_rooms: ArcSwap::from_pointee(BTreeSet::new()),
+            pub_room: ArcSwapOption::empty(),
+            write: Mutex::new(()),
         }
     }
 
@@ -145,66 +153,74 @@ impl Peer {
         (true, dwell)
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Rooms> {
-        self.rooms.lock().unwrap_or_else(|e| e.into_inner())
+    fn writer(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.write.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     pub fn affiliation(&self) -> Affiliation {
-        let g = self.lock();
-        Affiliation { sub_rooms: g.sub.iter().cloned().collect(), pub_room: g.pub_room.clone() }
+        let sub = self.sub_rooms.load();
+        Affiliation { sub_rooms: sub.iter().cloned().collect(), pub_room: self.pub_room.load().as_deref().cloned() }
     }
     pub fn room_count(&self) -> usize {
-        self.lock().sub.len()
+        self.sub_rooms.load().len()
     }
     pub fn rooms(&self) -> Vec<String> {
-        self.lock().sub.iter().cloned().collect()
+        self.sub_rooms.load().iter().cloned().collect()
     }
     pub fn is_in(&self, room_id: &str) -> bool {
-        self.lock().sub.contains(room_id)
+        self.sub_rooms.load().contains(room_id)
     }
-    pub fn pub_room(&self) -> Option<String> {
-        self.lock().pub_room.clone()
+    /// ★핫패스 읽기 — 락도 문자열 복사도 없다(정§2-3 계약 1).
+    pub fn pub_room(&self) -> Option<Arc<String>> {
+        self.pub_room.load_full()
     }
 
     pub fn join_room(&self, room_id: &str, select: bool) {
-        let mut g = self.lock();
-        g.sub.insert(room_id.to_owned());
+        let _w = self.writer();
+        let mut next = self.sub_rooms.load().as_ref().clone();
+        next.insert(room_id.to_owned());
+        self.sub_rooms.store(Arc::new(next));
         if select {
-            g.pub_room = Some(room_id.to_owned());
+            self.pub_room.store(Some(Arc::new(room_id.to_owned())));
         }
     }
 
     /// 정§17-2 ④ + §5-2 cascade — 발행 방이면 `pub_room=null`. 반환: (있었나, 마지막 방이었나, 발행 방을 뺐나).
     pub fn leave_room(&self, room_id: &str) -> LeaveOutcome {
-        let mut g = self.lock();
-        let was_member = g.sub.remove(room_id);
-        let pub_cleared = g.pub_room.as_deref() == Some(room_id);
+        let _w = self.writer();
+        let mut next = self.sub_rooms.load().as_ref().clone();
+        let was_member = next.remove(room_id);
+        let last_room = next.is_empty();
+        self.sub_rooms.store(Arc::new(next));
+        let pub_cleared = self.pub_room.load().as_deref().map(String::as_str) == Some(room_id);
         if pub_cleared {
-            g.pub_room = None;
+            self.pub_room.store(None);
         }
-        LeaveOutcome { was_member, last_room: g.sub.is_empty(), pub_cleared }
+        LeaveOutcome { was_member, last_room, pub_cleared }
     }
 
     /// 정§5-2 — `pub_deselect` 는 현재 값과 일치할 때만(멱등), `pub_select` 는 입장 방일 때만(아니면 skip). 반환: 바뀐 방들.
     pub fn apply_affiliation(&self, pub_deselect: Option<&str>, pub_select: Option<&str>) -> Vec<String> {
-        let mut g = self.lock();
+        let _w = self.writer();
         let mut changed = Vec::new();
+        let current = |p: &ArcSwapOption<String>| p.load().as_deref().cloned();
         if let Some(d) = pub_deselect
-            && g.pub_room.as_deref() == Some(d)
+            && current(&self.pub_room).as_deref() == Some(d)
         {
-            g.pub_room = None;
+            self.pub_room.store(None);
             changed.push(d.to_owned());
         }
-        if let Some(s) = pub_select
-            && g.sub.contains(s)
-            && g.pub_room.as_deref() != Some(s)
+        if let Some(sel) = pub_select
+            && self.sub_rooms.load().contains(sel)
+            && current(&self.pub_room).as_deref() != Some(sel)
         {
-            if let Some(prev) = g.pub_room.replace(s.to_owned())
+            if let Some(prev) = current(&self.pub_room)
                 && !changed.contains(&prev)
             {
                 changed.push(prev);
             }
-            changed.push(s.to_owned());
+            self.pub_room.store(Some(Arc::new(sel.to_owned())));
+            changed.push(sel.to_owned());
         }
         changed
     }
@@ -298,6 +314,35 @@ mod tests {
         assert!(p.affiliation().is_consistent());
     }
 
+    /// ★핫패스 계약(§2-3 계약 1) — fan-out 이 매 패킷 읽는 값이라 읽기가 복사도 락도 하지 않아야 한다.
+    #[test]
+    fn publishing_room_reads_share_one_allocation() {
+        let p = Arc::new(peer());
+        p.join_room("a", true);
+        let (x, y) = (p.pub_room().unwrap(), p.pub_room().unwrap());
+        assert!(Arc::ptr_eq(&x, &y), "읽을 때마다 문자열을 복사하면 안 된다");
+
+        // 쓰기가 도는 동안에도 읽기는 늘 어떤 일관된 값을 본다(통째 교체라 찢어진 값이 없다).
+        let writer = {
+            let p = Arc::clone(&p);
+            std::thread::spawn(move || {
+                for i in 0..2_000 {
+                    p.apply_affiliation(None, Some(if i % 2 == 0 { "a" } else { "b" }));
+                }
+            })
+        };
+        p.join_room("b", false);
+        let mut seen = 0;
+        for _ in 0..2_000 {
+            if matches!(p.pub_room().as_deref().map(String::as_str), Some("a" | "b")) {
+                seen += 1;
+            }
+        }
+        writer.join().unwrap();
+        assert_eq!(seen, 2_000);
+        assert!(p.affiliation().is_consistent());
+    }
+
     #[test]
     fn affiliation_rules() {
         let p = peer();
@@ -305,11 +350,11 @@ mod tests {
         p.join_room("b", false);
         assert!(p.apply_affiliation(None, Some("zzz")).is_empty(), "not a member → skip");
         assert!(p.apply_affiliation(Some("b"), None).is_empty(), "mismatch deselect → ignored");
-        assert_eq!(p.pub_room().as_deref(), Some("a"));
+        assert_eq!(p.pub_room().as_deref().map(String::as_str), Some("a"));
         let mut ch = p.apply_affiliation(Some("a"), Some("b"));
         ch.sort();
         assert_eq!(ch, vec!["a".to_owned(), "b".to_owned()]);
-        assert_eq!(p.pub_room().as_deref(), Some("b"));
+        assert_eq!(p.pub_room().as_deref().map(String::as_str), Some("b"));
         let mut ch = p.apply_affiliation(None, Some("a"));
         ch.sort();
         assert_eq!(ch, vec!["a".to_owned(), "b".to_owned()], "switch without deselect bumps both");

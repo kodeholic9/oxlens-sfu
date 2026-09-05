@@ -13,13 +13,16 @@ use tracing::{debug, info, warn};
 use super::conn::DemuxConn;
 use super::session::{ConnRole, TransportSession};
 use super::{demux, dtls, stun};
-use crate::handlers::Sfu;
+use crate::handlers::{Sfu, now_ms};
 use crate::media::rtp;
-use crate::media::subscribe::SubscribeState;
+use crate::peer::Peer;
+use crate::media::subscribe::{SubscribeState, SubscriberStream};
 use crate::media::track::PublishState;
 use oxsig::schema::{Duplex, MediaKind};
 
 const RECV_BUF: usize = 2_048;
+/// egress 조립 자리 — 루프가 하나를 들고 재사용한다(구독자마다 새로 잡지 않는다).
+const EGRESS_BUF: usize = 2_048;
 const HANDSHAKE_TIMEOUT_MS: u64 = 10_000;
 
 pub async fn bind(port: u16) -> std::io::Result<Arc<UdpSocket>> {
@@ -29,6 +32,7 @@ pub async fn bind(port: u16) -> std::io::Result<Arc<UdpSocket>> {
 
 pub async fn run(sfu: Arc<Sfu>, socket: Arc<UdpSocket>) {
     let mut buf = vec![0u8; RECV_BUF];
+    let mut egress = Vec::with_capacity(EGRESS_BUF);
     loop {
         let (len, remote) = match socket.recv_from(&mut buf).await {
             Ok(r) => r,
@@ -41,7 +45,7 @@ pub async fn run(sfu: Arc<Sfu>, socket: Arc<UdpSocket>) {
         match demux::classify(data) {
             demux::Packet::Stun => on_stun(&sfu, &socket, data, remote).await,
             demux::Packet::Dtls => on_dtls(&sfu, &socket, Bytes::copy_from_slice(data), remote).await,
-            demux::Packet::Srtp => on_srtp(&sfu, &socket, data, remote).await,
+            demux::Packet::Srtp => on_srtp(&sfu, &socket, data, remote, &mut egress).await,
             demux::Packet::Unknown => debug!(%remote, "udp packet of unknown kind"),
         }
     }
@@ -90,9 +94,11 @@ async fn on_dtls(sfu: &Arc<Sfu>, socket: &Arc<UdpSocket>, data: Bytes, remote: S
 }
 
 /// 정§2-2 전송 생존 관찰 + 정§7-3 전달. RTCP 종단은 §11 의 몫이라 여기선 생존만 센다.
-async fn on_srtp(sfu: &Arc<Sfu>, socket: &Arc<UdpSocket>, data: &[u8], remote: SocketAddr) {
+async fn on_srtp(sfu: &Arc<Sfu>, socket: &Arc<UdpSocket>, data: &[u8], remote: SocketAddr, egress: &mut Vec<u8>) {
     let Some(session) = sfu.transport.by_addr(&remote) else { return };
-    sfu.observe_media(&session.user_id);
+    // 세션이 주인을 직접 들고 있어 등록부를 다시 뒤지지 않는다.
+    let Some(peer) = session.peer() else { return };
+    peer.touch(now_ms());
     if rtp::is_rtcp(data) || session.role != ConnRole::Publish {
         return;
     }
@@ -103,13 +109,16 @@ async fn on_srtp(sfu: &Arc<Sfu>, socket: &Arc<UdpSocket>, data: &[u8], remote: S
             return;
         }
     };
-    fan_out(sfu, socket, &session.user_id, &plain).await;
+    fan_out(socket, &peer, &plain, egress).await;
 }
 
-/// 정§7-3 — 순서가 계약이다. 방 결정은 ★매 패킷 그 발행자의 `pub_room`(RCU 읽기)이고,
-/// egress PT 는 ★구독자 표의 값이며 확장 번호는 원소마다 다시 쓴다(정§7-2-1).
-async fn fan_out(sfu: &Arc<Sfu>, socket: &Arc<UdpSocket>, publisher: &str, packet: &[u8]) {
-    let Some(peer) = sfu.peers.get(publisher) else { return };
+/// 정§7-3 — 순서가 계약이다. egress PT 는 ★구독자 표의 값이고 확장 번호는 원소마다 다시 쓴다(정§7-2-1).
+///
+/// ★**전이중의 발화 방은 등록 방이다**(갈래 ②) — 배관이 그 방에서만 만들어지므로 목록 자체가 방이고,
+/// 매 패킷 방을 견줄 것이 없다. `pub_room` 은 방 공용 슬롯을 쓰는 반이중 축 전용이다(정§8-1).
+///
+/// ★이 함수는 힙을 잡지 않는다 — 구독자 목록은 RCU 안내자를 그대로 훑고, 조립은 넘겨받은 버퍼를 재사용한다.
+async fn fan_out(socket: &Arc<UdpSocket>, peer: &Arc<Peer>, packet: &[u8], egress: &mut Vec<u8>) {
     let Some(ssrc) = rtp::ssrc(packet) else { return };
     let Some((stream, track)) = peer.publish.by_ssrc(ssrc) else { return };
     track.rtp_in.fetch_add(1, Ordering::Relaxed);
@@ -119,31 +128,22 @@ async fn fan_out(sfu: &Arc<Sfu>, socket: &Arc<UdpSocket>, publisher: &str, packe
         && pt != stream.pt
         && stream.claim_pt_report()
     {
-        warn!(user = publisher, track = %stream.track_id, declared = stream.pt, arrived = pt, "pt mismatch");
-    }
-    let Some(room_id) = peer.pub_room() else { return };
-    if stream.muted() {
-        return;
+        warn!(user = %peer.user_id, track = %stream.track_id, declared = stream.pt, arrived = pt, "pt mismatch");
     }
     // 반이중은 prefan(정§9)이 권위이고 simulcast 는 레이어 선택(정§10)이 있어야 나간다.
-    if stream.duplex() == Duplex::Half || stream.simulcast {
+    if stream.muted() || stream.duplex() == Duplex::Half || stream.simulcast {
         return;
     }
-    for sub in track.subscribers() {
-        if sub.room_id != room_id {
-            continue;
-        }
+    for weak in track.subscribers().iter() {
+        let Some(sub) = weak.upgrade() else { continue };
         // 게이트는 ★전이중 video 에만 — audio 는 어떤 경우에도 gate 로 죽지 않는다.
         if sub.kind == MediaKind::Video && sub.state() != SubscribeState::Active {
             continue;
         }
-        let (Some(transport), Some(addr)) = (sub.transport.as_ref(), sub.transport.as_ref().and_then(|t| t.addr.get())) else {
-            continue;
-        };
-        let mut out = packet.to_vec();
-        rtp::set_payload_type(&mut out, sub.pt());
-        rtp::rewrite_extension_ids(&mut out, |id| sub.ext_of(id));
-        let Ok(sealed) = transport.encrypt_rtp(&out) else { continue };
+        let Some(transport) = sub.transport.as_ref() else { continue };
+        let Some(addr) = transport.addr.get() else { continue };
+        assemble(egress, packet, &sub);
+        let Ok(sealed) = transport.encrypt_rtp(egress) else { continue };
         if socket.send_to(&sealed, addr).await.is_ok() {
             sub.sent.fetch_add(1, Ordering::Relaxed);
         }
@@ -192,6 +192,15 @@ fn start_handshake(sfu: Arc<Sfu>, socket: Arc<UdpSocket>, session: Arc<Transport
     });
 }
 
+/// 구독자 하나 몫의 egress 조립 — PT 는 구독자 표 값으로, 확장 번호는 그 구독자 표로(정§7-2-1).
+/// ★버퍼를 넘겨받아 재사용한다 — 구독자마다 새로 잡으면 방 하나에 사람이 늘수록 할당이 곱으로 는다.
+fn assemble(egress: &mut Vec<u8>, packet: &[u8], sub: &SubscriberStream) {
+    egress.clear();
+    egress.extend_from_slice(packet);
+    rtp::set_payload_type(egress, sub.pt());
+    rtp::rewrite_extension_ids(egress, |id| sub.ext_of(id));
+}
+
 /// 받기 연결에는 DC 가 없다(연§9-6) — 회수 신호가 올 때까지 DTLS 만 살려 둔다.
 /// UDP 는 상대가 사라져도 recv 가 영영 pending 이라 취소 팔이 없으면 태스크가 남는다(정§17-2 ④).
 async fn hold(conn: &dtls::DtlsConn, session: &Arc<TransportSession>) {
@@ -206,4 +215,51 @@ async fn hold(conn: &dtls::DtlsConn, session: &Arc<TransportSession>) {
         }
     }
     debug!(user = %session.user_id, "subscribe transport closed");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::media::subscribe::{SubSpec, SubscribeContext};
+    use crate::media::track::{PublishContext, StreamSpec};
+    use oxsig::schema::{Extmap, PcMode};
+
+    fn packet() -> Vec<u8> {
+        // marker=1 · PT=96 — 조립이 PT 만 바꾸고 marker 를 남기는지 함께 본다.
+        let mut p = vec![0x90, 0xE0, 0x00, 0x0A, 0, 0, 0x30, 0x39, 0x12, 0x34, 0x56, 0x78];
+        // 서버 선언 번호 그대로 온 확장 둘 — 5=abs-send-time · 6=twcc.
+        p.extend_from_slice(&[0xBE, 0xDE, 0x00, 0x01, 0x50, 0x77, 0x60, 0x11]);
+        p.extend_from_slice(&[9; 40]);
+        p
+    }
+
+    /// ★핫패스 계약 — 구독자마다 버퍼를 새로 잡지 않고, 길이는 변하지 않는다(SRTP 태그 계산의 전제).
+    #[test]
+    fn egress_assembly_reuses_one_buffer_and_keeps_the_length() {
+        let publish = PublishContext::default();
+        let stream = publish.insert(StreamSpec {
+            track_id: "t".into(), vssrc: 0x1234_5678, owner: "u1".into(), room_id: "r".into(),
+            kind: MediaKind::Audio, mid: "0".into(), pt: 111, rtx_pt: None, codec: "opus", fmtp: None,
+            source: None, duplex: Duplex::Full, simulcast: false, ssrc: 0x1234_5678, rtx_ssrc: None,
+        });
+        let subs = SubscribeContext::new(PcMode::TwoPc);
+        // 이 구독자는 abs-send-time 을 3 번으로 협상했고 twcc 는 아예 없다.
+        subs.set_extmap(vec![Extmap { id: 3, uri: crate::media::URI_ABS_SEND_TIME.into() }]);
+        let sub = subs.insert(&stream, SubSpec { subscriber: "u2".into(), room_id: "r".into(), mid: Some(0), pt: 111, transport: None, now_ms: 0 });
+        sub.set_ext(subs.ext_table(&publish.extmap()));
+
+        let src = packet();
+        let mut egress = Vec::with_capacity(EGRESS_BUF);
+        let cap = egress.capacity();
+        for _ in 0..1_000 {
+            assemble(&mut egress, &src, &sub);
+        }
+        assert_eq!(egress.capacity(), cap, "구독자·패킷이 늘어도 힙을 다시 잡지 않는다");
+        assert_eq!(egress.len(), src.len(), "길이 불변 — 바꾸면 SRTP 재암호가 어긋난다");
+        assert_eq!((rtp::payload_type(&egress), rtp::payload_type(&src)), (Some(111), Some(96)));
+        assert_eq!(egress[1] & 0x80, 0x80, "marker 보존");
+        assert_eq!(rtp::extension_ids(&src), vec![5, 6]);
+        assert_eq!(rtp::extension_ids(&egress), vec![3, 14], "abs-send-time 은 구독자 번호로, 표에 없는 twcc 는 표 밖 번호로");
+        assert_eq!(&egress[20..], &src[20..], "본문 무접촉");
+    }
 }
