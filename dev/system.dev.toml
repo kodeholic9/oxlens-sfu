@@ -1,4 +1,6 @@
-# 개발 실증용 시스템 파일 — hub 19745(1974 는 구 서버가 점유) + sfud 하나(gRPC 50061). 값의 뜻은 crates/common/src/config.rs.
+# 개발 실증용 시스템 파일 — hub 19745(1974 는 구 서버가 점유) + sfud 둘(gRPC 50061·50062).
+# ★노드가 둘이어야 배치(HRW)가 관측 가능하다 — 하나면 "다른 노드" 형상이 성립 불가라 2층이 거짓말을 한다.
+# 값의 뜻은 crates/common/src/config.rs.
 [hub]
 listen = "127.0.0.1:19745"
 base_path = "/media"
@@ -15,3 +17,8 @@ name = "demo"
 role = "sfu"
 id = "sfu-1"
 addr = "127.0.0.1:50061"
+
+[[unit]]
+role = "sfu"
+id = "sfu-2"
+addr = "127.0.0.1:50062"

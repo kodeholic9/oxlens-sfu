@@ -4,7 +4,9 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
+use std::net::SocketAddr;
+
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
@@ -62,6 +64,25 @@ pub struct RestState {
     pub policy: PolicyConfig,
     pub registry: Arc<SessionRegistry>,
     pub backend: Arc<SfuBackend>,
+}
+
+/// 정§16-1 `/admin/*` — 유닛 평면. 이 hub 가 ★지금 보고 있는 노드 목록이다(설정 파일이 아니라).
+/// ★loopback 은 통과시킨다(XFF 를 믿지 않는다 — 리버스 프록시 뒤 배치 금지가 전제).
+pub async fn admin_sfus(State(st): State<Arc<RestState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap) -> axum::response::Response {
+    if !peer.ip().is_loopback() && !is_admin(&st.system.hub.auth, &headers) {
+        return respond(Err((StatusCode::UNAUTHORIZED, Failure::new(FailCode::NotAuthorized).message("admin only"))));
+    }
+    let sfus: Vec<Value> = st.backend.nodes.all().iter().map(|n| json!({ "sfu_id": n.id, "addr": n.addr })).collect();
+    respond(Ok((StatusCode::OK, json!({ "sfus": sfus }))))
+}
+
+fn is_admin(auth_cfg: &HubAuth, headers: &HeaderMap) -> bool {
+    headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .and_then(|t| auth::verify(&auth_cfg.jwt_secret, t).ok())
+        .is_some_and(|c| c.role == "admin")
 }
 
 /// 연§5-1 — `Authorization: Bearer` 또는 `X-OxLens-Session`. 둘 중 하나면 통과.

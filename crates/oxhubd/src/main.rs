@@ -103,11 +103,12 @@ async fn main() {
         .route("/rooms", get(rest::list_rooms).post(rest::create_room))
         .route("/rooms/:room_id", get(rest::get_room))
         .route("/healthz", get(rest::healthz))
+        .route("/admin/sfus", get(rest::admin_sfus))
         .with_state(rest_state);
     let app = if base.is_empty() { inner } else { Router::new().nest(&base, inner) };
     let listener = tokio::net::TcpListener::bind(&listen).await.unwrap_or_else(|e| {
         eprintln!("bind {listen}: {e}");
         std::process::exit(2);
     });
-    axum::serve(listener, app).await.unwrap_or_else(|e| eprintln!("serve: {e}"));
+    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap_or_else(|e| eprintln!("serve: {e}"));
 }

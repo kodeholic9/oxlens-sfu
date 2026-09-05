@@ -552,6 +552,10 @@ impl Sfu {
         }
         let peer = self.peers.get(user_id).ok_or_else(|| Failure::new(FailCode::NotInRoom))?;
         let select = req.pub_select.as_deref().and_then(|id| self.rooms.get(id));
+        // 정§5-2 — ★새 방의 무전 코덱 재검사. 등록 때만 보면 H264 방 트랙을 VP8 방으로 끌고 가는 구멍이 생긴다.
+        if let Some(room) = select.as_ref() {
+            self.check_slot_codec(&peer, room)?;
+        }
         let changed = peer.apply_affiliation(req.pub_deselect.as_deref(), select.as_ref());
         // 정§5-2 — 발행 방에서 손을 떼면 그 방 발언권도 반환한다(`RELEASE` 와 같은 경로).
         for id in &changed {
@@ -833,6 +837,21 @@ impl Sfu {
         Ok(serde_json::to_value(res).unwrap_or(Value::Null))
     }
 
+    /// 정§5-2·§6-2 #5 — 그 사람의 반이중 video 가 새 방의 무전 코덱과 어긋나면 `1006` 으로 요청을 거절한다.
+    /// ★조용한 건너뛰기가 아니다 — 클라가 코덱을 맞춰 재등록해야 풀리는 실패라 원인을 알려야 한다.
+    fn check_slot_codec(&self, peer: &Peer, room: &Room) -> Result<(), Failure> {
+        let Some((slot_codec, slot_fmtp)) = room.slots.video_codec() else { return Ok(()) };
+        let mine = peer.publish.all();
+        let mismatch = mine
+            .iter()
+            .filter(|s| s.duplex() == Duplex::Half && s.kind == MediaKind::Video)
+            .any(|s| (s.codec, s.fmtp.as_deref()) != (slot_codec, slot_fmtp.as_deref()));
+        if mismatch {
+            return Err(Failure::new(FailCode::CodecMismatch).details(json!({ "codec": slot_codec, "fmtp": slot_fmtp })));
+        }
+        Ok(())
+    }
+
     /// 그 방에 반이중 video 보유자가 남아 있으면 슬롯을 그대로 둔다(어기면 잔존 구독자 영상이 영구 미표시).
     fn retire_video_slot(&self, room: &Room) {
         let still = room.member_ids().iter().filter_map(|m| self.peers.get(m)).any(|p| {
@@ -1092,6 +1111,16 @@ mod tests {
         assert_eq!((k, b["code"].as_u64()), (Kind::Fail, Some(1003)));
         let (k, b) = call(&s, "ghost", Op::Affiliation.code(), json!({"pub_select": "a"}));
         assert_eq!((k, b["code"].as_u64()), (Kind::Fail, Some(3002)));
+
+        // 정§5-2 — 새 방의 무전 코덱과 어긋나는 반이중 video 를 끌고 갈 수 없다.
+        let half_h264 = json!({"kind": "video", "ssrc": 7, "mid": "0", "pt": 96, "codec": "H264", "duplex": "half"});
+        let half_vp8 = json!({"kind": "video", "ssrc": 8, "mid": "0", "pt": 96, "codec": "VP8", "duplex": "half"});
+        call(&s, "u", Op::PublishTracks.code(), json!({"room_id": "b", "tracks": [half_h264]}));
+        call(&s, "other", Op::RoomJoin.code(), json!({"room_id": "a"}));
+        call(&s, "other", Op::PublishTracks.code(), json!({"room_id": "a", "tracks": [half_vp8]}));
+        let (k, b) = call(&s, "u", Op::Affiliation.code(), json!({"pub_select": "a"}));
+        assert_eq!((k, b["code"].as_u64(), b["details"]["codec"].as_str()), (Kind::Fail, Some(1006), Some("VP8")));
+        assert_eq!(s.peers.get("u").unwrap().pub_room_id().as_deref(), Some("b"), "거절이면 아무것도 안 바뀐다");
         let (k, b) = call(&s, "u", Op::TrackSet.code(), json!({}));
         assert_eq!((k, b["code"].as_u64()), (Kind::Fail, Some(5003)), "아직 안 옮긴 op 는 시험이 잡는다");
         let (k, b) = call(&s, "u", Op::PublishTracks.code(), json!({}));
