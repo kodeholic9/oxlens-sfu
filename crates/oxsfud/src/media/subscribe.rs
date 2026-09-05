@@ -66,6 +66,9 @@ pub struct SubscriberStream {
     current: Mutex<Option<String>>,
     target: Mutex<Option<String>>,
     target_since_ms: AtomicU64,
+    /// 정§14-3 — 전달 정체 판정의 직전 관측값. 판정은 절대값이 아니라 주기 차분이다.
+    probe_sent: AtomicU64,
+    probe_at_ms: AtomicU64,
 }
 
 /// 정§10-1 — 낮은 화질부터 `0`. 이 세대의 인코딩은 두 단 고정이다(연§6-3).
@@ -125,6 +128,30 @@ impl SubscriberStream {
     pub fn set_paused(&self, paused: bool) -> bool {
         self.paused.swap(u8::from(paused), Ordering::AcqRel) != u8::from(paused)
     }
+    /// 정§14-3 — 지난 관측 이후 `window` 만큼 지났는데 송신 계수가 그대로면 정체다.
+    /// ★첫 관측은 기준을 놓기만 한다 — 한 점으로는 흐르는지 멎었는지 알 수 없다.
+    pub fn stalled(&self, now_ms: u64, window_ms: u64) -> bool {
+        let sent = self.sent.load(Ordering::Relaxed);
+        let at = self.probe_at_ms.load(Ordering::Relaxed);
+        if at == 0 || now_ms.saturating_sub(at) < window_ms {
+            if at == 0 {
+                self.probe_sent.store(sent, Ordering::Relaxed);
+                self.probe_at_ms.store(now_ms, Ordering::Relaxed);
+            }
+            return false;
+        }
+        let moved = sent != self.probe_sent.load(Ordering::Relaxed);
+        self.probe_sent.store(sent, Ordering::Relaxed);
+        self.probe_at_ms.store(now_ms, Ordering::Relaxed);
+        !moved
+    }
+
+    /// 정체 판정의 기준을 지금으로 옮긴다 — 안 흐르는 게 정상인 창을 지날 때 쓴다.
+    pub fn rebase_probe(&self, now_ms: u64) {
+        self.probe_sent.store(self.sent.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.probe_at_ms.store(now_ms, Ordering::Relaxed);
+    }
+
     pub fn paused(&self) -> bool {
         self.paused.load(Ordering::Acquire) == 1
     }
@@ -242,6 +269,8 @@ impl SubscribeContext {
             transport,
             sent: AtomicU64::new(0),
             sent_octets: AtomicU64::new(0),
+            probe_sent: AtomicU64::new(0),
+            probe_at_ms: AtomicU64::new(0),
             created_at_ms: AtomicU64::new(now_ms),
             rewriter: Rewriter::default(),
             spatial_cap: AtomicU8::new(SPATIAL_MAX),

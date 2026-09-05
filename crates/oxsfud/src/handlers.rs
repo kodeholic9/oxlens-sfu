@@ -20,7 +20,7 @@ use tracing::{debug, info, warn};
 
 use crate::emit::EventBus;
 use crate::media::slot::new_vssrc;
-use crate::media::subscribe::{self, SubSpec, SubscribeState, entry_of};
+use crate::media::subscribe::{self, SubSpec, SubscribeState, entry_of, SubscriberStream};
 use crate::media::{rtcp, rtp};
 use crate::media::track::{PublishState, PublisherStream, PublisherTrack, StreamSpec};
 use crate::media::floor::{Action, Request};
@@ -36,6 +36,10 @@ pub const MAX_ROOMS_PER_USER: usize = 100;
 pub const MAX_ACTIVE_STREAMS: usize = 16;
 /// 정§7-4 `T-gate` — READY 미도착 시 스스로 푸는 안전망.
 pub const GATE_TIMEOUT_MS: u64 = 5_000;
+/// 정§14-3 — READY 뒤 이만큼 송신 계수가 안 움직이면 정체다.
+pub const STALL_WINDOW_MS: u64 = 5_000;
+/// 정§14-3 `T-stall` — 같은 (user, 방) 재통보 쿨다운. 폭풍 방지다.
+pub const T_STALL_MS: u64 = 30_000;
 /// 정§11-2 — PLI 스로틀(h 300ms). 인프라 PLI 는 통과한다.
 pub const PLI_MIN_GAP_MS: u64 = 300;
 /// 서버가 내는 RTCP 의 보고자 SSRC — 발행자 것을 쓰면 자기 보고로 읽힌다.
@@ -66,6 +70,8 @@ pub struct Sfu {
     pub cert: Arc<ServerCert>,
     /// 정§11-2 — 서버가 먼저 내는 RTCP(RR·PLI)의 출구. 기동이 바인드한 뒤 채운다.
     socket: arc_swap::ArcSwapOption<tokio::net::UdpSocket>,
+    /// 정§14-3 — `(user, 방)` 마다 마지막 정체 통보 시각. 쿨다운의 자리다.
+    stall_told: dashmap::DashMap<String, u64>,
 }
 
 pub fn now_ms() -> u64 {
@@ -89,7 +95,7 @@ fn parse<T: DeserializeOwned>(body: &Value) -> Result<T, Failure> {
 
 impl Sfu {
     pub fn new(epoch: String, media: MediaParams, cert: Arc<ServerCert>) -> Self {
-        Self { epoch, rooms: RoomRegistry::default(), peers: PeerMap::default(), bus: EventBus::default(), media, transport: TransportRegistry::default(), cert, socket: arc_swap::ArcSwapOption::empty() }
+        Self { epoch, rooms: RoomRegistry::default(), peers: PeerMap::default(), bus: EventBus::default(), media, transport: TransportRegistry::default(), cert, socket: arc_swap::ArcSwapOption::empty(), stall_told: dashmap::DashMap::new() }
     }
 
     /// envelope 하나 → 응답 wire 하나. `Arc` 로 받는 것은 ★키프레임 요청처럼 응답을 안 붙잡는
@@ -596,9 +602,83 @@ impl Sfu {
         self.reap(now);
         self.sweep_gates(now);
         self.floor_tick(now);
+        self.sweep_stalls(now);
         for id in self.rooms.sweep(now) {
             self.destroy_room(&id);
         }
+    }
+
+    /// 정§14-3 — 전달 정체 감지. 구독자가 받아야 하는데 서버 송신이 멎은 자리를 당사자에게 알린다.
+    ///
+    /// ★"안 흐르는 게 정상" 인 창을 전부 건너뛴다. 그 목록이 전량이고, 빠뜨리면 오탐이 난다.
+    /// ★못 보는 것 — 클라 하향이 죽은 경우는 서버 송신 계수가 계속 오르므로 여기 안 걸린다.
+    ///   그 축은 UDP 관찰 → zombie → `media_lost` 다(연§2-6).
+    pub fn sweep_stalls(&self, now_ms: u64) -> usize {
+        let mut told = 0;
+        for peer in self.peers.snapshot() {
+            // ★enum 으로 견준다 — 정수 비교는 의미가 반전된다.
+            if peer.state() != PeerState::Alive {
+                continue;
+            }
+            for sub in peer.subscribe.all() {
+                if !self.stalled_now(&sub, now_ms) {
+                    continue;
+                }
+                if self.notify_stall(&peer.user_id, &sub.room_id, now_ms) {
+                    warn!(user = %peer.user_id, room = %sub.room_id, track = %sub.track_id, "forwarding stalled");
+                    told += 1;
+                }
+            }
+        }
+        told
+    }
+
+    /// 판정 하나 — 흐를 자리인데 안 흐르는가. 안 흐르는 게 정상이면 기준만 옮기고 거짓을 돌려준다.
+    fn stalled_now(&self, sub: &Arc<SubscriberStream>, now_ms: u64) -> bool {
+        // 게이트가 안 열렸으면 아직 흐를 자리가 아니다(정§7-4).
+        if sub.state() != SubscribeState::Active || sub.paused() {
+            sub.rebase_probe(now_ms);
+            return false;
+        }
+        let Some(stream) = self.stream_of(&sub.room_id, &sub.track_id) else {
+            // 발행 자체가 없다 — 슬롯 자리만 남은 것이다.
+            sub.rebase_probe(now_ms);
+            return false;
+        };
+        if stream.muted() {
+            sub.rebase_probe(now_ms);
+            return false;
+        }
+        // 반이중은 화자가 있을 때만 흐른다 — 조용한 무전은 정상이다.
+        if stream.duplex() == Duplex::Half && !self.someone_holds(&sub.room_id) {
+            sub.rebase_probe(now_ms);
+            return false;
+        }
+        sub.stalled(now_ms, STALL_WINDOW_MS)
+    }
+
+    fn someone_holds(&self, room_id: &str) -> bool {
+        self.rooms.get(room_id).is_some_and(|r| r.floor.speaker().is_some())
+    }
+
+    /// 정§14-3 — 같은 (user, 방) 재통보는 `T-stall` 쿨다운을 둔다. 폭풍 방지다.
+    fn notify_stall(&self, user_id: &str, room_id: &str, now_ms: u64) -> bool {
+        let key = format!("{user_id}\u{0}{room_id}");
+        if self.stall_told.get(&key).is_some_and(|last| now_ms.saturating_sub(*last) < T_STALL_MS) {
+            return false;
+        }
+        let Some(room) = self.rooms.get(room_id) else { return false };
+        self.stall_told.insert(key, now_ms);
+        let ev = RoomEvent {
+            event_type: RoomEventType::SyncRequired,
+            room_id: room.id.clone(),
+            version: room.version(&self.epoch),
+            affiliation: None,
+            cause: None,
+            reason: Some("no_media_flow".to_owned()),
+        };
+        self.bus.user(&room.id, user_id, Op::RoomEvent, &ev);
+        true
     }
 
     /// 정§7-4 `T-gate` — READY 가 안 와도 스스로 푸는 안전망.
@@ -1537,6 +1617,92 @@ mod tests {
         assert_eq!((k, b["code"].as_u64(), peer.publish.active()), (Kind::Fail, Some(3005), 16), "남의 것 하나면 전체 거절");
         let (k, b) = call(&s, "ghost", Op::PublishTracks.code(), json!({"room_id": "r", "tracks": [audio("0", 1)]}));
         assert_eq!((k, b["code"].as_u64()), (Kind::Fail, Some(3002)));
+    }
+
+    /// 정§14-3 — "안 흐르는 게 정상" 인 창을 전부 건너뛴다. 이 목록이 전량이고 빠뜨리면 오탐이 난다.
+    #[test]
+    fn a_stall_is_only_reported_where_media_was_supposed_to_flow() {
+        let s = sfu();
+        create(&s, "r", 5);
+        call(&s, "u1", Op::RoomJoin.code(), json!({"room_id": "r"}));
+        call(&s, "u2", Op::RoomJoin.code(), json!({"room_id": "r"}));
+        let full = json!({"kind": "audio", "ssrc": 7, "mid": "0", "pt": 111});
+        assert_eq!(call(&s, "u1", Op::PublishTracks.code(), json!({"room_id": "r", "tracks": [full]})).0, Kind::Ok);
+        call(&s, "u2", Op::Ready.code(), json!({"room_id": "r", "type": "tracks"}));
+
+        let t0 = now_ms();
+        // 첫 판은 기준만 놓는다 — 한 점으로는 흐르는지 멎었는지 알 수 없다.
+        assert_eq!(s.sweep_stalls(t0), 0, "첫 관측은 판정이 아니다");
+        assert_eq!(s.sweep_stalls(t0 + STALL_WINDOW_MS - 1), 0, "창이 안 찼다");
+
+        let mut rx = s.bus.subscribe();
+        assert_eq!(s.sweep_stalls(t0 + STALL_WINDOW_MS), 1, "흐를 자리인데 안 흐른다");
+        let ev = drain(&mut rx).into_iter().find(|(op, _, _)| *op == Op::RoomEvent.code()).expect("당사자에게 간다");
+        assert_eq!((ev.1.as_str(), ev.2["type"].as_str(), ev.2["reason"].as_str()), ("u2", Some("sync_required"), Some("no_media_flow")));
+
+        // 쿨다운 — 같은 (user, 방) 재통보는 T-stall 안에서 막힌다.
+        assert_eq!(s.sweep_stalls(t0 + STALL_WINDOW_MS * 2), 0, "폭풍 방지");
+        assert_eq!(s.sweep_stalls(t0 + T_STALL_MS + STALL_WINDOW_MS), 1, "쿨다운이 지나면 다시 알린다");
+    }
+
+    /// 나머지 오탐 창 셋 — 게이트 전 · muted · Peer 비Alive. 하나만 빠져도 헛 재동기가 돈다.
+    #[test]
+    fn the_other_quiet_windows_are_not_stalls() {
+        let full = |ssrc: u32| json!({"kind": "audio", "ssrc": ssrc, "mid": "0", "pt": 111});
+
+        // ① 게이트가 안 열렸다 — READY 전이라 아직 흐를 자리가 아니다(정§7-4).
+        let s = sfu();
+        create(&s, "r", 5);
+        call(&s, "u1", Op::RoomJoin.code(), json!({"room_id": "r"}));
+        call(&s, "u2", Op::RoomJoin.code(), json!({"room_id": "r"}));
+        assert_eq!(call(&s, "u1", Op::PublishTracks.code(), json!({"room_id": "r", "tracks": [full(7)]})).0, Kind::Ok);
+        let t0 = now_ms();
+        s.sweep_stalls(t0);
+        assert_eq!(s.sweep_stalls(t0 + STALL_WINDOW_MS * 3), 0, "READY 전은 정체가 아니다");
+
+        // ② muted — 안 보내는 것이 정상이다.
+        let s = sfu();
+        create(&s, "r", 5);
+        call(&s, "u1", Op::RoomJoin.code(), json!({"room_id": "r"}));
+        call(&s, "u2", Op::RoomJoin.code(), json!({"room_id": "r"}));
+        let (_, body) = call(&s, "u1", Op::PublishTracks.code(), json!({"room_id": "r", "tracks": [full(8)]}));
+        let track_id = body["tracks"][0]["track_id"].as_str().unwrap().to_owned();
+        call(&s, "u2", Op::Ready.code(), json!({"room_id": "r", "type": "tracks"}));
+        assert_eq!(call(&s, "u1", Op::TrackSet.code(), json!({"room_id": "r", "track_id": track_id, "muted": true})).0, Kind::Ok);
+        let t0 = now_ms();
+        s.sweep_stalls(t0);
+        assert_eq!(s.sweep_stalls(t0 + STALL_WINDOW_MS * 3), 0, "muted 는 정체가 아니다");
+
+        // ③ Peer 가 Alive 가 아니다 — 회수 축이 따로 맡는다(연§2-6).
+        let s = sfu();
+        create(&s, "r", 5);
+        call(&s, "u1", Op::RoomJoin.code(), json!({"room_id": "r"}));
+        call(&s, "u2", Op::RoomJoin.code(), json!({"room_id": "r"}));
+        assert_eq!(call(&s, "u1", Op::PublishTracks.code(), json!({"room_id": "r", "tracks": [full(9)]})).0, Kind::Ok);
+        call(&s, "u2", Op::Ready.code(), json!({"room_id": "r", "type": "tracks"}));
+        let t0 = now_ms();
+        s.sweep_stalls(t0);
+        s.peers.get("u2").unwrap().transition(PeerState::Suspect, t0);
+        assert_eq!(s.sweep_stalls(t0 + STALL_WINDOW_MS * 3), 0, "★enum 으로 견딘다 — 정수 비교는 의미가 반전된다");
+    }
+
+    #[test]
+    fn a_quiet_walkie_talkie_is_not_a_stall() {
+        let s = sfu();
+        create(&s, "r", 5);
+        call(&s, "u1", Op::RoomJoin.code(), json!({"room_id": "r"}));
+        call(&s, "u2", Op::RoomJoin.code(), json!({"room_id": "r"}));
+        let half = json!({"kind": "audio", "ssrc": 9, "mid": "0", "pt": 111, "duplex": "half"});
+        assert_eq!(call(&s, "u1", Op::PublishTracks.code(), json!({"room_id": "r", "tracks": [half]})).0, Kind::Ok);
+        call(&s, "u2", Op::Ready.code(), json!({"room_id": "r", "type": "tracks"}));
+
+        let t0 = now_ms();
+        s.sweep_stalls(t0);
+        assert_eq!(
+            s.sweep_stalls(t0 + STALL_WINDOW_MS * 3),
+            0,
+            "★아무도 말하지 않는 무전은 조용한 것이 정상이다 — 여기서 알리면 온 방이 재동기를 돈다"
+        );
     }
 
     #[test]
