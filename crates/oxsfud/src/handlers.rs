@@ -512,6 +512,13 @@ impl Sfu {
             return Vec::new();
         };
         let Some(peer) = self.peers.get(user_id) else { return Vec::new() };
+        // ★`ACK` 은 도달 관측이라 어떤 경우에도 답하지 않는다(정§9-4). 미입장 검사보다 앞이다 —
+        //   ACK 은 대상 것의 방을 **에코**하므로(연§11-3 `0x1D`), 뒤에 두면 미입장 DENY 에 대한 ACK 이
+        //   또 미입장으로 판정돼 ★DENY↔ACK 무한 증폭이 된다(실측 33,971통, 요청 한 번에).
+        if msg.msg_type == MsgType::Ack {
+            debug!(user = user_id, room = room_id, acked = msg.get_u8(mbcp::field::ACK_TYPE), "floor ack");
+            return Vec::new();
+        }
         if !peer.is_in(&room.id) {
             let deny = Msg::new(MsgType::Deny)
                 .ack(true)
@@ -536,11 +543,6 @@ impl Sfu {
             }
             MsgType::Release => room.floor.release(user_id, &blocked, now),
             MsgType::QueuePosRequest => room.floor.queue_position(user_id),
-            // 정§9-4 — `FLOOR_ACK` 는 도달 관측이지 재전송 사유가 아니다.
-            MsgType::Ack => {
-                debug!(user = user_id, room = %room.id, acked = msg.get_u8(mbcp::field::ACK_TYPE), "floor ack");
-                Vec::new()
-            }
             other => {
                 debug!(user = user_id, msg = other.name(), "mbcp message is server to client only");
                 Vec::new()
@@ -2507,6 +2509,27 @@ mod tests {
     }
     fn request(room: &str) -> Msg {
         Msg::new(MsgType::Request).u8(mbcp::field::PRIORITY, 200).room(room)
+    }
+
+    /// ★`ACK` 에는 어떤 경우에도 답하지 않는다(정§9-4 — 도달 관측이지 재전송 사유가 아니다).
+    ///
+    /// ACK 은 대상 것의 방을 **에코**하므로(연§11-3 `0x1D`), 미입장 검사 뒤에 두면
+    /// 미입장 DENY 에 대한 ACK 이 또 미입장으로 판정돼 ★DENY↔ACK 무한 증폭이 된다
+    /// (실측: 요청 한 번에 33,971통).
+    #[test]
+    fn an_ack_never_draws_an_answer_even_from_a_room_one_is_not_in() {
+        let s = sfu();
+        create(&s, "mine", 5);
+        create(&s, "theirs", 5);
+        call(&s, "u1", Op::RoomJoin.code(), json!({"room_id": "mine"}));
+        // u1 은 `theirs` 에 안 들어가 있다 — 그 방을 지목한 요청은 한 번 거부된다.
+        assert_eq!(floor_in(&s, "u1", request("theirs")).len(), 1, "미입장 요청은 한 번 거부한다");
+        // ★그 거부에 대한 ACK 은 같은 방을 에코한다(연§11-3 `0x1D`). 여기에 또 답하면 루프다.
+        let ack_of_deny = Msg::new(MsgType::Ack).u8(mbcp::field::ACK_TYPE, 3).room("theirs");
+        assert!(floor_in(&s, "u1", ack_of_deny).is_empty(), "★ACK 에는 답이 없다 — 있으면 무한 증폭이다");
+        // 들어가 있는 방의 ACK 도 마찬가지다.
+        let ack_of_granted = Msg::new(MsgType::Ack).u8(mbcp::field::ACK_TYPE, 2).room("mine");
+        assert!(floor_in(&s, "u1", ack_of_granted).is_empty());
     }
 
     #[test]
