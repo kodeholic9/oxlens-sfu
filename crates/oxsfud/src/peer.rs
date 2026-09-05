@@ -10,6 +10,8 @@ use std::sync::{Arc, Mutex};
 use dashmap::DashMap;
 use oxsig::schema::{Affiliation, PcMode};
 
+use crate::media::subscribe::SubscribeContext;
+use crate::media::track::PublishContext;
 use crate::transport::IceCredentials;
 
 /// 정§2-2 — 전송 생존 3벌 중 Peer 의 것. ★정수 비교 금지, enum 동등성만.
@@ -67,7 +69,6 @@ pub fn judge(state: PeerState, last_seen: u64, now: u64) -> Option<PeerState> {
     (next != state).then_some(next)
 }
 
-#[derive(Debug)]
 pub struct Peer {
     pub user_id: String,
     pub participant_type: u8,
@@ -75,6 +76,8 @@ pub struct Peer {
     pub publish_ice: IceCredentials,
     pub subscribe_ice: IceCredentials,
     pub created_at_ms: u64,
+    pub publish: PublishContext,
+    pub subscribe: SubscribeContext,
     state: AtomicU8,
     last_seen: AtomicU64,
     suspect_since: AtomicU64,
@@ -96,6 +99,8 @@ impl Peer {
             publish_ice: IceCredentials::generate(),
             subscribe_ice: IceCredentials::generate(),
             created_at_ms: now_ms,
+            publish: PublishContext::default(),
+            subscribe: SubscribeContext::new(pc_mode),
             state: AtomicU8::new(PeerState::Alive.code()),
             last_seen: AtomicU64::new(0),
             suspect_since: AtomicU64::new(0),

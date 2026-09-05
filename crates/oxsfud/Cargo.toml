@@ -15,6 +15,7 @@ tokio.workspace = true
 tokio-stream.workspace = true
 tonic.workspace = true
 dashmap.workspace = true
+arc-swap.workspace = true
 uuid.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

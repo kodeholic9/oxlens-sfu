@@ -4,6 +4,7 @@
 
 pub mod emit;
 pub mod handlers;
+pub mod media;
 pub mod peer;
 pub mod room;
 pub mod service;

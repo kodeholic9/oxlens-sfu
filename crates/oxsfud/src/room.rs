@@ -10,6 +10,7 @@ use oxsig::body::room::PARTICIPANT_RECORDER;
 use oxsig::schema::{MemberInfo, Version};
 use serde::Serialize;
 
+use crate::media::slot::SlotSet;
 use crate::version::Seq;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,7 +28,6 @@ impl Member {
 }
 
 /// 정§4-1 — 정체 + 수명 + 명단 + `seq`. 발언권·슬롯은 뒤 판.
-#[derive(Debug)]
 pub struct Room {
     pub id: String,
     pub name: String,
@@ -42,6 +42,8 @@ pub struct Room {
     /// 0 = 사람 있음. 생성 직후는 `created_at`(unused 기준 시각).
     empty_since_ms: AtomicU64,
     ever_joined: AtomicBool,
+    /// 정§8-1 — 반이중은 방 공용 m-line 을 돌려쓴다. audio 는 방과 수명이 같고 video 는 첫 화자가 만든다.
+    pub slots: SlotSet,
 }
 
 /// 연§5-3 목록 항목.
@@ -66,7 +68,9 @@ pub struct RoomSpec {
 
 impl Room {
     pub fn new(spec: RoomSpec, now_ms: u64) -> Self {
+        let slots = SlotSet::new(&spec.room_id);
         Self {
+            slots,
             id: spec.room_id,
             name: spec.name,
             capacity: spec.capacity,
@@ -105,6 +109,7 @@ impl Room {
     pub fn participants(&self) -> Vec<MemberInfo> {
         self.lock().iter().filter(|(_, m)| !m.is_recorder()).map(|(u, m)| MemberInfo { user_id: u.clone(), role: m.role, select: m.select }).collect()
     }
+    /// 명단 스냅샷 — 배관 산출이 쓴다(§2-3 계약 4: 순회와 삭제를 겹치지 않는다).
     pub fn member_ids(&self) -> Vec<String> {
         self.lock().keys().cloned().collect()
     }
