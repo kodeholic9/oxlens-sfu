@@ -16,6 +16,7 @@ use super::{demux, dtls, stun};
 use crate::handlers::{Sfu, now_ms};
 use crate::media::{self, codec, rtcp, rtp, rtx};
 use crate::peer::Peer;
+use crate::media::rewriter::Rewrite;
 use crate::media::subscribe::{SubscribeState, SubscriberStream};
 use crate::media::track::{PublishState, PublisherStream, PublisherTrack};
 use oxsig::schema::{Duplex, MediaKind};
@@ -356,11 +357,18 @@ async fn fan_out_simulcast(
         let Some(addr) = transport.addr.get() else { continue };
         egress.clear();
         egress.extend_from_slice(packet);
-        if !sub.rewriter.rewrite(egress, &rid, sub.vssrc) {
-            continue;
+        match sub.rewriter.rewrite(egress, &rid, sub.vssrc) {
+            Rewrite::Skip => continue,
+            // 정§11-1 ① — 단이 갈리면 egress seq 공간도 갈린다. 앞의 요구는 전부 stale 이다.
+            Rewrite::Switched => sub.rtx.reset(now),
+            Rewrite::Kept => {}
         }
         rtp::set_payload_type(egress, sub.pt());
         rtp::rewrite_extension_ids(egress, |id| sub.ext_of(id));
+        // 정§11-1 하향 — 나간 것을 담아야 NACK 에 답할 수 있다. ★평문이다(암호는 그때 다시 건다).
+        if let Some(seq) = rtp::sequence(egress) {
+            sub.rtx.keep(seq, egress);
+        }
         let Ok(sealed) = transport.encrypt_rtp(egress) else { continue };
         if socket.send_to(&sealed, addr).await.is_ok() {
             sub.sent.fetch_add(1, Ordering::Relaxed);
@@ -391,7 +399,7 @@ async fn prefan(socket: &Arc<UdpSocket>, peer: &Arc<Peer>, stream: &Arc<Publishe
     egress.clear();
     egress.extend_from_slice(packet);
     let rewriter = room.slots.rewriter(stream.kind);
-    if !rewriter.rewrite(egress, &peer.user_id, slot.vssrc) {
+    if rewriter.rewrite(egress, &peer.user_id, slot.vssrc) == Rewrite::Skip {
         return;
     }
     let base = std::mem::take(egress);
@@ -403,10 +411,13 @@ async fn prefan(socket: &Arc<UdpSocket>, peer: &Arc<Peer>, stream: &Arc<Publishe
         }
         let Some(transport) = sub.transport.as_ref() else { continue };
         let Some(addr) = transport.addr.get() else { continue };
-        egress.clear();
-        egress.extend_from_slice(&base);
-        rtp::set_payload_type(egress, sub.pt());
-        rtp::rewrite_extension_ids(egress, |id| sub.ext_of(id));
+        assemble(egress, &base, &sub);
+        // 정§11-1 하향 — 슬롯도 재전송에 답한다. 담지 않으면 NACK 이 전부 Miss 로 떨어진다.
+        // ★전환 경계에서 캐시를 비우는 것은 발언권 쪽이다(`settle_floor`) — 첫 패킷을 기다리면
+        //   그 사이에 온 stale NACK 이 옛 공간을 그대로 되받는다(20260905 실측 3패킷).
+        if let Some(seq) = rtp::sequence(egress) {
+            sub.rtx.keep(seq, egress);
+        }
         let Ok(sealed) = transport.encrypt_rtp(egress) else { continue };
         if socket.send_to(&sealed, addr).await.is_ok() {
             sub.sent.fetch_add(1, Ordering::Relaxed);

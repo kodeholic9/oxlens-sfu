@@ -50,7 +50,7 @@ mod tests {
         let r = Rewriter::default();
         let out = |r: &Rewriter, seq: u16, ts: u32| {
             let mut p = silence(111, seq, ts, 1);
-            assert!(r.rewrite(&mut p, SOURCE, 0x5150));
+            assert_ne!(r.rewrite(&mut p, SOURCE, 0x5150), crate::media::rewriter::Rewrite::Skip);
             rtp::sequence(&p).unwrap()
         };
         // 1차 데우기 — 이어지는 입력 번호.
@@ -71,12 +71,12 @@ mod tests {
         let mut out_seqs = Vec::new();
         for i in 0..3u16 {
             let mut pkt = silence(111, i, u32::from(i) * FRAME_TS_STEP, 1);
-            assert!(r.rewrite(&mut pkt, SOURCE, 0x5150));
+            assert_ne!(r.rewrite(&mut pkt, SOURCE, 0x5150), crate::media::rewriter::Rewrite::Skip);
             out_seqs.push(rtp::sequence(&pkt).unwrap());
         }
         // 화자의 진짜 RTP — 입력 seq 공간이 전혀 다르다.
         let mut real = silence(111, 40_000, 7_000_000, 2);
-        assert!(r.rewrite(&mut real, "u1", 0x5150));
+        assert_ne!(r.rewrite(&mut real, "u1", 0x5150), crate::media::rewriter::Rewrite::Skip);
         let first_real = rtp::sequence(&real).unwrap();
 
         assert_eq!(out_seqs, vec![0, 1, 2], "데우기는 이어진 번호를 쓴다");

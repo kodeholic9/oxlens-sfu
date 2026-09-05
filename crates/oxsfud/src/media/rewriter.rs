@@ -33,20 +33,34 @@ pub struct Rewriter {
     inner: Mutex<Scalar>,
 }
 
+/// 고쳤나, 그리고 ★**출처가 갈렸나.** 갈린 자리는 egress seq 공간의 경계라 그 앞의
+/// 재전송 요구는 전부 stale 이다(정§11-1 ①) — 부르는 쪽이 그 사실을 알아야 캐시를 버린다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rewrite {
+    /// RTP 로 읽히지 않았다 — 흘리지 않는다.
+    Skip,
+    /// 같은 출처가 이어진다.
+    Kept,
+    /// ★출처 교대(화자 교대·레이어 전환) — 여기서 seq 공간이 갈렸다.
+    Switched,
+}
+
 impl Rewriter {
     /// 그 출처의 패킷 하나를 하나의 egress 값으로 고친다 — SSRC 는 목적지 것, `seq`·`ts` 는 offset 하나로.
     /// `source` 는 반이중이면 화자, simulcast 면 rid 다. ★길이는 변하지 않는다.
-    pub fn rewrite(&self, packet: &mut [u8], source: &str, out_ssrc: u32) -> bool {
+    pub fn rewrite(&self, packet: &mut [u8], source: &str, out_ssrc: u32) -> Rewrite {
         let (Some(in_seq), Some(in_ts)) = (rtp::sequence(packet), rtp::timestamp(packet)) else {
-            return false;
+            return Rewrite::Skip;
         };
         let mut s = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut switched = false;
         if !s.started {
             s.source = Some(source.to_owned());
             s.seq_offset = 0;
             s.ts_offset = 0;
             s.started = true;
         } else if s.source.as_deref() != Some(source) {
+            switched = true;
             // 출처 교대(화자 교대·레이어 전환) — 이어지는 자리에서 다시 시작하도록 offset 만 새로 잡는다.
             s.source = Some(source.to_owned());
             s.seq_offset = s.last_out_seq.wrapping_add(HANDOVER_SEQ_GAP).wrapping_sub(in_seq);
@@ -60,7 +74,7 @@ impl Rewriter {
         rtp::set_sequence(packet, out_seq);
         rtp::set_timestamp(packet, out_ts);
         rtp::set_ssrc(packet, out_ssrc);
-        true
+        if switched { Rewrite::Switched } else { Rewrite::Kept }
     }
 
     /// 출처가 통째로 없어지면 다음 것이 0 부터 이어 붙는다.
@@ -84,7 +98,7 @@ mod tests {
     fn out(r: &Rewriter, seq: u16, ts: u32, ssrc: u32, who: &str) -> (u16, u32, u32) {
         let mut p = pkt(seq, ts, ssrc);
         let before = p.len();
-        assert!(r.rewrite(&mut p, who, 0xABCD));
+        assert_ne!(r.rewrite(&mut p, who, 0xABCD), Rewrite::Skip);
         assert_eq!(p.len(), before, "길이 불변");
         (rtp::sequence(&p).unwrap(), rtp::timestamp(&p).unwrap(), rtp::ssrc(&p).unwrap())
     }
@@ -127,6 +141,20 @@ mod tests {
         assert_eq!(seq2, 1, "교대도 감긴 자리에서 이어진다");
     }
 
+    /// ★출처 교대를 부르는 쪽에 알린다 — 그 경계 앞의 재전송 요구는 stale 이다(정§11-1 ①).
+    #[test]
+    fn a_source_change_is_reported_so_the_caller_can_drop_its_cache() {
+        let r = Rewriter::default();
+        let mut p = pkt(100, 5_000, 0x1111);
+        assert_eq!(r.rewrite(&mut p, "a", 0xABCD), Rewrite::Kept, "첫 출처는 교대가 아니다");
+        let mut p = pkt(101, 5_960, 0x1111);
+        assert_eq!(r.rewrite(&mut p, "a", 0xABCD), Rewrite::Kept);
+        let mut p = pkt(7, 700, 0x2222);
+        assert_eq!(r.rewrite(&mut p, "b", 0xABCD), Rewrite::Switched);
+        let mut p = pkt(8, 1_660, 0x2222);
+        assert_eq!(r.rewrite(&mut p, "b", 0xABCD), Rewrite::Kept, "교대는 한 번만 알린다");
+    }
+
     #[test]
     fn reset_starts_over_and_short_packets_are_refused() {
         let r = Rewriter::default();
@@ -134,6 +162,6 @@ mod tests {
         r.reset();
         assert_eq!(out(&r, 9, 9, 0x1111, "b"), (9, 9, 0xABCD), "빈 슬롯은 그대로 통과");
         let mut short = vec![0x80, 0x6F, 0, 1];
-        assert!(!r.rewrite(&mut short, "a", 1));
+        assert_eq!(r.rewrite(&mut short, "a", 1), Rewrite::Skip);
     }
 }

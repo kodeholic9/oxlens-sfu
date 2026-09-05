@@ -9,6 +9,7 @@ use common::bplane::{Envelope, iop};
 use oxsig::body::affiliation::{AffiliationReq, AffiliationRes, Cause};
 use oxsig::body::data::{MessageRecv, MessageSend, MessageSendRes, Task, TaskPhase};
 use oxsig::body::session::{ResumeReq, ResumeRes, RoomSnapshot};
+use crate::media::rewriter::Rewrite;
 use oxsig::body::media::{PublishAction, PublishTrack, PublishTracksReq, PublishTracksRes, PublishedTrack, ReadyReq, ReadyType, SubscribeLayerReq, TrackSetReq};
 use oxsig::mbcp::{self, Msg, MsgType};
 use oxsig::body::notify::{ForcedCause, ParticipantEvent, ParticipantEventType, RoomEvent, RoomEventType, TrackAction, TrackEvent, TrackState, TrackStateType};
@@ -564,6 +565,21 @@ impl Sfu {
         if granted && let Some(slot) = room.slots.video() {
             self.spawn_keyframe_burst(vec![slot.vssrc], &GRANT_PLI_GAPS);
         }
+        // 정§11-1 ① — 허가가 서는 ★그 순간 egress seq 공간이 갈린다. 앞의 재전송 요구는 전부
+        // stale 이므로 슬롯 구독자의 캐시를 여기서 비운다. ★새 화자의 첫 패킷을 기다리면 안 된다 —
+        // 옛 화자의 마지막 패킷과 새 화자의 첫 패킷 사이에 온 NACK 이 옛 공간을 그대로 되받는다.
+        if granted {
+            let now = now_ms();
+            for slot in room.slots.all() {
+                for t in slot.tracks().iter() {
+                    for weak in t.subscribers().iter() {
+                        if let Some(sub) = weak.upgrade() {
+                            sub.rtx.reset(now);
+                        }
+                    }
+                }
+            }
+        }
         // 정§9-7 — 허가 직후 슬롯을 데운다. 조용하던 슬롯에 바로 말하면 첫 음절이 잘린다.
         if granted && let Some(speaker) = room.floor.speaker() {
             self.spawn_priming(room, speaker.to_string(), priming::MAX_FRAMES);
@@ -732,7 +748,7 @@ impl Sfu {
                 }
                 let (seq, ts) = room.slots.next_priming();
                 let mut pkt = priming::silence(slot.pt, seq, ts, slot.vssrc);
-                if !room.slots.rewriter(MediaKind::Audio).rewrite(&mut pkt, priming::SOURCE, slot.vssrc) {
+                if room.slots.rewriter(MediaKind::Audio).rewrite(&mut pkt, priming::SOURCE, slot.vssrc) == Rewrite::Skip {
                     return;
                 }
                 sfu.broadcast_slot(&slot, &speaker, &pkt).await;
