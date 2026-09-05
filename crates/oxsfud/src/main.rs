@@ -59,7 +59,7 @@ async fn main() {
     info!(id = %args.id, epoch = %epoch, grpc = %args.grpc_listen, udp = %format!("{}:{}", args.public_ip, args.udp_port),
         fingerprint = %cert.fingerprint, max_bitrate = policy.media.max_bitrate_bps, "oxsfud up");
     let cert = Arc::new(cert);
-    let sfu = Arc::new(Sfu::new(epoch, MediaParams { public_ip: args.public_ip, udp_port: args.udp_port, fingerprint: cert.fingerprint.clone(), bwe_mode: BweMode::parse(&policy.media.bwe_mode), max_bitrate_bps: u64::from(policy.media.max_bitrate_bps) }, cert));
+    let sfu = Arc::new(Sfu::new(epoch, MediaParams { public_ip: args.public_ip, udp_port: args.udp_port, fingerprint: cert.fingerprint.clone(), bwe_mode: BweMode::parse(&policy.media.bwe_mode), auto_layer: policy.media.auto_layer != "off", max_bitrate_bps: u64::from(policy.media.max_bitrate_bps) }, cert));
 
     let socket = match udp::bind(args.udp_port).await {
         Ok(s) => s,
@@ -100,6 +100,8 @@ async fn main() {
             reporter.emit_receiver_reports(now_ms()).await;
             // 정§11-2 — REMB 는 RR 과 같은 눈금이다(1초).
             reporter.emit_remb().await;
+            // 정§10-3 — 레이어 판단도 1초 눈금이다(판정 해상도 ≈2s).
+            reporter.auto_layer_tick(now_ms());
         }
     });
 

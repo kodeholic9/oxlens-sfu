@@ -22,7 +22,7 @@ use tracing::{debug, info, warn};
 use crate::emit::EventBus;
 use crate::media::slot::new_vssrc;
 use crate::media::subscribe::{self, SubSpec, SubscribeState, entry_of, SubscriberStream};
-use crate::media::{nack, priming, rtcp, rtp};
+use crate::media::{autolayer, nack, priming, rtcp, rtp};
 use crate::media::track::{PublishState, PublisherStream, PublisherTrack, StreamSpec};
 use crate::media::floor::{Action, Request};
 use crate::media::{self, codec};
@@ -63,6 +63,8 @@ pub struct MediaParams {
     pub max_bitrate_bps: u64,
     /// 정책서 §3 `bwe_mode` — 발행자 송신 추정을 어느 축으로 먹이나. 둘 다 켜지 않는다.
     pub bwe_mode: BweMode,
+    /// 정책서 §3 `auto_layer` — 꺼 두면 수동(`SUBSCRIBE_LAYER`)만 산다. 두 손이 같은 값을 안 다툰다.
+    pub auto_layer: bool,
 }
 
 /// 정§11-2 — 하나만 고른다. 둘을 같이 보내면 발행자가 어느 값을 따를지 갈린다.
@@ -586,6 +588,51 @@ impl Sfu {
             }
         }
         sent
+    }
+
+    /// 정§10-3 — 레이어 자동 판단 한 눈금. ★판정은 순수 함수가 하고 여기는 신호를 모아 집행만 한다.
+    /// 정책이 `off` 면 수동(`SUBSCRIBE_LAYER`)만 산다 — 두 손이 같은 값을 다투지 않게.
+    pub fn auto_layer_tick(&self, now_ms: u64) -> usize {
+        if !self.media.auto_layer {
+            return 0;
+        }
+        let mut moved = 0;
+        for peer in self.peers.snapshot() {
+            for sub in peer.subscribe.all() {
+                if sub.kind != MediaKind::Video {
+                    continue;
+                }
+                let signals = self.signals_for(&sub, now_ms);
+                let mut st = sub.auto.lock().unwrap_or_else(|e| e.into_inner());
+                match autolayer::policy_tick(&mut st, now_ms, &signals) {
+                    autolayer::Decision::Hold => continue,
+                    autolayer::Decision::Demote(cause) => {
+                        sub.set_spatial_cap(0);
+                        info!(user = %peer.user_id, track = %sub.track_id, ?cause, "layer down");
+                    }
+                    autolayer::Decision::Promote => {
+                        sub.set_spatial_cap(1);
+                        info!(user = %peer.user_id, track = %sub.track_id, "layer up");
+                    }
+                }
+                moved += 1;
+            }
+        }
+        moved
+    }
+
+    /// 판정에 쓰는 사실을 모은다. ★못 잰 것은 `None` 이다 — 0 으로 채우면 "쟀는데 0" 과 못 가른다.
+    fn signals_for(&self, sub: &Arc<SubscriberStream>, now_ms: u64) -> autolayer::Signals {
+        let mut s = autolayer::Signals::default();
+        // v1 — REMB 는 서버가 발행자에게 내는 값이 아니라 구독자가 준 추정이다.
+        if let Some((bps, at)) = sub.remb_estimate() {
+            s.remb = Some((bps, at));
+        }
+        if let Some((pct, at)) = sub.reported_loss() {
+            s.loss = Some((pct, at));
+        }
+        let _ = now_ms;
+        s
     }
 
     /// 정§9-7 — 허가 직후 슬롯 오디오를 무음으로 데운다. ★화자 자신은 뺀다(self-echo).
@@ -1578,7 +1625,7 @@ mod tests {
     }
     fn sfu_with(bwe_mode: BweMode) -> Arc<Sfu> {
         let cert = Arc::new(ServerCert::generate().unwrap());
-        Arc::new(Sfu::new("sfu-test".into(), MediaParams { public_ip: "10.0.0.1".into(), udp_port: 20000, bwe_mode, fingerprint: cert.fingerprint.clone(), max_bitrate_bps: 800_000 }, cert))
+        Arc::new(Sfu::new("sfu-test".into(), MediaParams { public_ip: "10.0.0.1".into(), udp_port: 20000, bwe_mode, auto_layer: true, fingerprint: cert.fingerprint.clone(), max_bitrate_bps: 800_000 }, cert))
     }
     fn env(user: &str, op: u16, body: Value) -> Envelope {
         Envelope { session_id: format!("s-{user}"), user_id: user.into(), room_id: String::new(), target: String::new(), exclude: Vec::new(), wire: encode_json(&Header::msg(op, 7), &body), pc_mode: "2pc".into(), floor_priority: 0 }
@@ -1935,6 +1982,18 @@ mod tests {
         // 발제는 서버가 낸다 — 클라가 request 를 올리는 자리가 아니다.
         assert_eq!(call(&s, "u1", Op::Task.code(), json!({"phase": "request", "req_id": 2, "type": "probe"})).0, Kind::Fail);
         assert_eq!(call(&s, "u1", Op::Task.code(), json!({"phase": "report", "req_id": 2, "type": "probe", "result": {}})).0, Kind::Ok);
+    }
+
+    /// 정§10-3 — 정책이 꺼져 있으면 수동만 산다. 두 손이 같은 값을 다투면 앱이 정한 상한이 흔들린다.
+    #[test]
+    fn auto_layer_stays_out_of_the_way_when_the_policy_is_off() {
+        let off = {
+            let cert = Arc::new(ServerCert::generate().unwrap());
+            Arc::new(Sfu::new("sfu-test".into(), MediaParams { public_ip: "10.0.0.1".into(), udp_port: 20000, bwe_mode: BweMode::Twcc, auto_layer: false, fingerprint: cert.fingerprint.clone(), max_bitrate_bps: 800_000 }, cert))
+        };
+        create(&off, "r", 5);
+        call(&off, "u1", Op::RoomJoin.code(), json!({"room_id": "r"}));
+        assert_eq!(off.auto_layer_tick(now_ms()), 0, "★꺼 두면 아무 값도 안 움직인다");
     }
 
     #[test]

@@ -246,6 +246,20 @@ pub fn build_remb(sender: u32, ssrcs: &[u32], bps: u64) -> Vec<u8> {
 }
 
 /// 가수가 18비트에 들어갈 때까지 지수를 올린다.
+/// 받은 REMB — 구독자가 말한 추정. 우리 것과 남의 것이 같은 형이라 인코더의 짝이다.
+pub fn is_remb(pkt: &[u8]) -> bool {
+    payload_type(pkt) == Some(PT_PSFB) && fmt(pkt) == Some(FMT_REMB) && pkt.len() >= 20 && &pkt[12..16] == b"REMB"
+}
+
+pub fn read_remb(pkt: &[u8]) -> Option<u64> {
+    if !is_remb(pkt) {
+        return None;
+    }
+    let exp = u32::from(pkt[17] >> 2);
+    let mantissa = (u32::from(pkt[17] & 0x03) << 16) | (u32::from(pkt[18]) << 8) | u32::from(pkt[19]);
+    Some(u64::from(mantissa) << exp)
+}
+
 fn split_bitrate(bps: u64) -> (u8, u32) {
     let mut exp = 0u8;
     let mut mantissa = bps;
@@ -343,6 +357,8 @@ mod tests {
         let mantissa = (u32::from(remb[17] & 0x03) << 16) | (u32::from(remb[18]) << 8) | u32::from(remb[19]);
         assert_eq!((mantissa as u64) << exp, 800_000, "지수·가수가 원래 값을 낸다");
         assert_eq!(&remb[20..24], &7u32.to_be_bytes());
+        assert_eq!(read_remb(&remb), Some(800_000), "실은 것과 읽은 것이 같다");
+        assert_eq!(read_remb(&build_pli(1, 42)), None, "PLI 는 REMB 가 아니다");
         assert_eq!(remb.len() % 4, 0);
         assert_eq!(media_ssrc(&nack), Some(1));
         assert_eq!(ntp_middle(0x1234_5678_9ABC_DEF0), 0x5678_9ABC);

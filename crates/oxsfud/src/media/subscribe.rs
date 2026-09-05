@@ -9,6 +9,7 @@ use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use oxsig::schema::{Duplex, Extmap, MediaKind, PcMode, TrackEntry};
 
+use super::autolayer::State as AutoState;
 use super::rtx::RtxCache;
 use super::slot::new_vssrc;
 use super::mid::{MidPool, to_wire};
@@ -73,6 +74,12 @@ pub struct SubscriberStream {
     current: Mutex<Option<String>>,
     target: Mutex<Option<String>>,
     target_since_ms: AtomicU64,
+    /// 정§10-3 — 레이어 자동 판단의 상태. 판정은 순수 함수가 하고 여기는 들고만 있다.
+    pub auto: Mutex<AutoState>,
+    remb_bps: AtomicU64,
+    remb_at_ms: AtomicU64,
+    loss_permille: AtomicU16,
+    loss_at_ms: AtomicU64,
     /// 정§14-3 — 전달 정체 판정의 직전 관측값. 판정은 절대값이 아니라 주기 차분이다.
     probe_sent: AtomicU64,
     probe_at_ms: AtomicU64,
@@ -140,6 +147,30 @@ impl SubscriberStream {
     pub fn set_paused(&self, paused: bool) -> bool {
         self.paused.swap(u8::from(paused), Ordering::AcqRel) != u8::from(paused)
     }
+    /// 정§10-3 v1 — 구독자가 준 대역 추정(REMB). ★안 왔으면 `None` 이다.
+    pub fn remb_estimate(&self) -> Option<(u64, u64)> {
+        let at = self.remb_at_ms.load(Ordering::Relaxed);
+        (at != 0).then(|| (self.remb_bps.load(Ordering::Relaxed), at))
+    }
+
+    /// 정§10-3 v1 — 구독자 RR 이 말한 손실률(%). 서버가 소비하는 값이다(발행자에게 안 넘긴다).
+    pub fn reported_loss(&self) -> Option<(f64, u64)> {
+        let at = self.loss_at_ms.load(Ordering::Relaxed);
+        (at != 0).then(|| (f64::from(self.loss_permille.load(Ordering::Relaxed)) / 10.0, at))
+    }
+
+    /// 구독 축에서 소비한 사실을 담는다 — 판정은 눈금이 한다.
+    pub fn note_remb(&self, bps: u64, now_ms: u64) {
+        self.remb_bps.store(bps, Ordering::Relaxed);
+        self.remb_at_ms.store(now_ms, Ordering::Relaxed);
+    }
+
+    pub fn note_loss(&self, fraction_lost: u8, now_ms: u64) {
+        // RFC 3550 — fraction 은 256분율이다. 천분율로 옮겨 담는다.
+        self.loss_permille.store(u16::from(fraction_lost) * 1000 / 256, Ordering::Relaxed);
+        self.loss_at_ms.store(now_ms, Ordering::Relaxed);
+    }
+
     /// 정§14-3 — 지난 관측 이후 `window` 만큼 지났는데 송신 계수가 그대로면 정체다.
     /// ★첫 관측은 기준을 놓기만 한다 — 한 점으로는 흐르는지 멎었는지 알 수 없다.
     pub fn stalled(&self, now_ms: u64, window_ms: u64) -> bool {
@@ -284,6 +315,11 @@ impl SubscribeContext {
             transport,
             sent: AtomicU64::new(0),
             sent_octets: AtomicU64::new(0),
+            auto: Mutex::new(AutoState::default()),
+            remb_bps: AtomicU64::new(0),
+            remb_at_ms: AtomicU64::new(0),
+            loss_permille: AtomicU16::new(0),
+            loss_at_ms: AtomicU64::new(0),
             probe_sent: AtomicU64::new(0),
             probe_at_ms: AtomicU64::new(0),
             created_at_ms: AtomicU64::new(now_ms),

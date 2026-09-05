@@ -2,6 +2,7 @@
 //! 미디어 — 정§6 발행 · §7 구독·전달 · §8 duplex. 논리/물리 두 계층(`track`), 구독 배관(`subscribe`),
 //! 구독 연결마다인 두 표(`mid`·`pt`), 방 공용 슬롯(`slot`), egress 도구(`rtp`).
 
+pub mod autolayer;
 pub mod codec;
 pub mod floor;
 pub mod mid;

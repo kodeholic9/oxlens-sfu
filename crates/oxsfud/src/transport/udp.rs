@@ -128,8 +128,15 @@ async fn on_rtcp(sfu: &Arc<Sfu>, socket: &Arc<UdpSocket>, peer: &Arc<Peer>, sess
     for part in rtcp::packets(compound) {
         match rtcp::payload_type(part) {
             Some(rtcp::PT_SR) => relay_sender_report(socket, peer, part, egress).await,
-            // 구독자 RR 은 여기서 끝난다(소비). 자동 레이어가 설 때 이 값을 읽는다(정§10).
-            Some(rtcp::PT_RR) => debug!(user = %session.user_id, blocks = rtcp::read_report_blocks(part).len(), "subscriber rr"),
+            // 정§11-2 — 구독자 RR 은 여기서 끝난다(소비). ★발행자에게 릴레이하지 않는다.
+            // 정§10-3 — 그 값이 자동 레이어의 손실 신호다. 담기만 하고 판정은 눈금이 한다.
+            Some(rtcp::PT_RR) => {
+                for block in rtcp::read_report_blocks(part) {
+                    if let Some(sub) = peer.subscribe.all().into_iter().find(|s| s.vssrc == block.ssrc) {
+                        sub.note_loss(block.fraction_lost, now);
+                    }
+                }
+            }
             Some(rtcp::PT_SDES | rtcp::PT_BYE | rtcp::PT_APP) => {}
             Some(rtcp::PT_PSFB) if rtcp::is_pli(part) => {
                 if let Some(media) = rtcp::media_ssrc(part) {
@@ -137,7 +144,15 @@ async fn on_rtcp(sfu: &Arc<Sfu>, socket: &Arc<UdpSocket>, peer: &Arc<Peer>, sess
                 }
             }
             Some(rtcp::PT_RTPFB) if rtcp::is_nack(part) => serve_nack(socket, peer, part, now).await,
-            // TWCC·REMB 는 대역 축(정§10)의 몫이다. 조용히 버리지 않는다.
+            // 정§10-3 v1 — 구독자가 준 대역 추정. 담기만 하고 판정은 눈금이 한다.
+            Some(rtcp::PT_PSFB) if rtcp::is_remb(part) => {
+                if let Some(bps) = rtcp::read_remb(part) {
+                    for sub in peer.subscribe.all() {
+                        sub.note_remb(bps, now);
+                    }
+                }
+            }
+            // TWCC 는 발행 축(정§11-2)의 몫이다. 조용히 버리지 않는다.
             _ => debug!(user = %session.user_id, pt = ?rtcp::payload_type(part), fmt = ?rtcp::fmt(part), "rtcp not terminated here"),
         }
     }
