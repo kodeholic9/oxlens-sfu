@@ -156,6 +156,15 @@ impl SessionRegistry {
         dead
     }
 
+    /// 살아 붙어 있는 연결 — 통지 배달용. 끊긴(창 안) 세션은 `None`(통지는 사라지고 `RESUME` 스냅샷이 대신한다).
+    pub fn conn_of_user(&self, user_id: &str) -> Option<u64> {
+        let sid = self.by_user.get(user_id)?.clone();
+        match self.by_id.get(&sid)?.attach {
+            Attach::Attached { conn_id } => Some(conn_id),
+            Attach::Detached { .. } => None,
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.by_id.len()
     }

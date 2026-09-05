@@ -1,0 +1,25 @@
+// author: kodeholic (powered by Claude)
+// B 평면 — hub↔sfud (정§15). 메시지 집합의 정식 규격은 예정이고, 이 파일은 envelope 하나와 구독 하나만 든다.
+// wire 는 클라 프레임(연§3-1) 그대로 통과한다. user_id 는 hub 세션에서 주입한다(body 를 믿지 않는다).
+syntax = "proto3";
+package oxlens.b.v1;
+
+service SfuService {
+  // 요청 하나 → 응답 wire 하나(성공/실패 프레임). hub 가 재해석하지 않고 클라에 통과시킨다.
+  rpc Handle(Envelope) returns (Envelope);
+  // sfud → hub 통지 스트림. target 이 있으면 그 사용자에게, 없으면 room_id 방 전원(exclude 제외).
+  rpc Subscribe(SubscribeRequest) returns (stream Envelope);
+}
+
+message Envelope {
+  string session_id = 1;
+  string user_id = 2;
+  string room_id = 3;
+  string target = 4;
+  repeated string exclude = 5;
+  bytes wire = 6;
+}
+
+message SubscribeRequest {
+  string hub_id = 1;
+}

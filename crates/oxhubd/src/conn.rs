@@ -97,7 +97,12 @@ impl Conn {
     /// 서버 통지 — 우선순위 큐 + 윈도우.
     pub fn on_notify(&mut self, op: Op, body: &Value, now: Instant) -> Vec<Action> {
         let bytes = if body.is_null() { Vec::new() } else { body.to_string().into_bytes() };
-        self.outbound.enqueue(op.code(), &bytes, now).into_iter().map(Action::Send).collect()
+        self.on_notify_raw(op.code(), &bytes, now)
+    }
+
+    /// sfud 가 만든 body 바이트 그대로(재해석 금지 — 정§19 ③).
+    pub fn on_notify_raw(&mut self, op: u16, body: &[u8], now: Instant) -> Vec<Action> {
+        self.outbound.enqueue(op, body, now).into_iter().map(Action::Send).collect()
     }
 
     /// 주기 판정 — `T-bind`(4003) · 무응답 30초(4003) · ACK 30초(4001) · 밀림 1,000(4002).
