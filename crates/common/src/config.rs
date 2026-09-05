@@ -427,7 +427,7 @@ addr = "127.0.0.1:50051"
         assert!(bad.validate().is_err());
         let bad2: PolicyConfig = toml::from_str("[media]\nauto_layer = \"v2\"\nbwe_mode = \"remb\"\n").unwrap();
         assert!(bad2.validate().is_err());
-        // ★미구현을 받아들이지 않는다 — 켰다고 믿는데 v1 이 도는 것이 가장 나쁘다.
+        // ★없는 것을 받아들이지 않는다 — 켰다고 믿는데 v1 이 도는 것이 가장 나쁘다.
         let v2: PolicyConfig = toml::from_str("[media]\nauto_layer = \"v2\"\nbwe_mode = \"twcc\"\n").unwrap();
         assert!(v2.validate().is_err(), "v2 는 구현되면 이 줄을 지운다");
         let ok: PolicyConfig = toml::from_str("[hub]\nws_flow_window = 1\n[quota]\nmax_sessions_per_account = 0\n").unwrap();

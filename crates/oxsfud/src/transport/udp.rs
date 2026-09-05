@@ -414,7 +414,7 @@ async fn prefan(socket: &Arc<UdpSocket>, peer: &Arc<Peer>, stream: &Arc<Publishe
         assemble(egress, &base, &sub);
         // 정§11-1 하향 — 슬롯도 재전송에 답한다. 담지 않으면 NACK 이 전부 Miss 로 떨어진다.
         // ★전환 경계에서 캐시를 비우는 것은 발언권 쪽이다(`settle_floor`) — 첫 패킷을 기다리면
-        //   그 사이에 온 stale NACK 이 옛 공간을 그대로 되받는다(20260905 실측 3패킷).
+        //   그 사이에 온 stale NACK 이 옛 공간을 그대로 되받는다.
         if let Some(seq) = rtp::sequence(egress) {
             sub.rtx.keep(seq, egress);
         }
