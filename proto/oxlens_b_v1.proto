@@ -20,6 +20,8 @@ message Envelope {
   bytes wire = 6;
   // 세션 확정값(연§6-1) — sfud 가 server_config.pc_mode 로 에코한다. 통지에는 비어 있다.
   string pc_mode = 7;
+  // 연§11-3 — 발언권 우선순위의 권위는 토큰 클레임이다. hub 가 세션값으로 주입한다.
+  uint32 floor_priority = 8;
 }
 
 message SubscribeRequest {

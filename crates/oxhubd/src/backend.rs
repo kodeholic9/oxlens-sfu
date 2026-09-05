@@ -23,6 +23,7 @@ pub struct Envelope {
     pub user_id: String,
     /// 세션 확정값(연§6-1) — `"1pc"`/`"2pc"`.
     pub pc_mode: String,
+    pub floor_priority: u32,
     pub op: Op,
     pub pid: u32,
     pub body: Value,
@@ -139,6 +140,7 @@ impl Backend for SfuBackend {
             exclude: Vec::new(),
             wire,
             pc_mode: env.pc_mode.clone(),
+            floor_priority: env.floor_priority,
         };
         match self.send_to_node(&node_id, out).await {
             Ok(resp) => {
@@ -158,7 +160,7 @@ mod tests {
     #[tokio::test]
     async fn unmapped_room_is_3001_and_unreachable_node_is_5001() {
         let be = SfuBackend { nodes: Arc::new(NodeTable::new([("sfu-1".to_owned(), "127.0.0.1:1".to_owned())])), rooms: Arc::new(RoomMap::default()), members: Arc::new(Members::default()) };
-        let env = |body: Value| Envelope { session_id: "s".into(), user_id: "u".into(), pc_mode: "2pc".into(), op: Op::RoomJoin, pid: 1, body };
+        let env = |body: Value| Envelope { session_id: "s".into(), user_id: "u".into(), pc_mode: "2pc".into(), floor_priority: 0, op: Op::RoomJoin, pid: 1, body };
         let w = be.handle(env(json!({"room_id":"r"}))).await;
         assert_eq!(frame::body_json(&w[frame::HEADER_LEN..]).unwrap()["code"], 3001);
         be.rooms.assign("r", "sfu-1");
@@ -171,7 +173,7 @@ mod tests {
     #[test]
     fn membership_learns_from_join_and_leave_including_3002() {
         let be = SfuBackend { nodes: Arc::new(NodeTable::new([])), rooms: Arc::new(RoomMap::default()), members: Arc::new(Members::default()) };
-        let env = |op| Envelope { session_id: "s".into(), user_id: "u".into(), pc_mode: "2pc".into(), op, pid: 1, body: Value::Null };
+        let env = |op| Envelope { session_id: "s".into(), user_id: "u".into(), pc_mode: "2pc".into(), floor_priority: 0, op, pid: 1, body: Value::Null };
         be.learn_membership(&env(Op::RoomJoin), "r", &ok_frame(Op::RoomJoin, 1, &Value::Null));
         assert_eq!(be.members.members("r"), vec!["u".to_owned()]);
         be.learn_membership(&env(Op::RoomLeave), "r", &fail_frame(Op::RoomLeave.code(), 1, &Failure::new(FailCode::NotInRoom)));

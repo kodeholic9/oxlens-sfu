@@ -31,19 +31,19 @@ impl EventBus {
     /// 방 broadcast — hub 가 명단 사본으로 배달한다.
     pub fn room<T: Serialize>(&self, room_id: &str, op: Op, body: &T, exclude: &[String]) {
         let wire = encode_json(&Header::msg(op.code(), 0), &serde_json::to_value(body).unwrap_or_default());
-        self.send(Envelope { session_id: String::new(), user_id: String::new(), room_id: room_id.to_owned(), target: String::new(), exclude: exclude.to_vec(), wire, pc_mode: String::new() });
+        self.send(Envelope { session_id: String::new(), user_id: String::new(), room_id: room_id.to_owned(), target: String::new(), exclude: exclude.to_vec(), wire, pc_mode: String::new(), floor_priority: 0 });
     }
 
     /// 당사자 unicast — `ROOM_EVENT{affiliation}`·`sync_required`(정§5-3·§14-3).
     pub fn user<T: Serialize>(&self, room_id: &str, user_id: &str, op: Op, body: &T) {
         let wire = encode_json(&Header::msg(op.code(), 0), &serde_json::to_value(body).unwrap_or_default());
-        self.send(Envelope { session_id: String::new(), user_id: String::new(), room_id: room_id.to_owned(), target: user_id.to_owned(), exclude: Vec::new(), wire, pc_mode: String::new() });
+        self.send(Envelope { session_id: String::new(), user_id: String::new(), room_id: room_id.to_owned(), target: user_id.to_owned(), exclude: Vec::new(), wire, pc_mode: String::new(), floor_priority: 0 });
     }
 
     /// 정§4-1 생성 완료 통보 / 폭파 통보 — hub 가 배치를 배우고 푼다.
     pub fn lifecycle(&self, room_id: &str, created: bool) {
         let body = serde_json::json!({ "type": if created { "created" } else { "destroyed" }, "room_id": room_id });
         let wire = encode_json(&Header::msg(iop::ROOM_LIFECYCLE, 0), &body);
-        self.send(Envelope { session_id: String::new(), user_id: String::new(), room_id: room_id.to_owned(), target: String::new(), exclude: Vec::new(), wire, pc_mode: String::new() });
+        self.send(Envelope { session_id: String::new(), user_id: String::new(), room_id: room_id.to_owned(), target: String::new(), exclude: Vec::new(), wire, pc_mode: String::new(), floor_priority: 0 });
     }
 }

@@ -22,7 +22,7 @@ impl SfuService for Service {
     async fn handle(&self, req: Request<Envelope>) -> Result<Response<Envelope>, Status> {
         let env = req.into_inner();
         let wire = self.sfu.handle(&env);
-        Ok(Response::new(Envelope { session_id: env.session_id, user_id: env.user_id, room_id: env.room_id, target: String::new(), exclude: Vec::new(), wire, pc_mode: String::new() }))
+        Ok(Response::new(Envelope { session_id: env.session_id, user_id: env.user_id, room_id: env.room_id, target: String::new(), exclude: Vec::new(), wire, pc_mode: String::new(), floor_priority: 0 }))
     }
 
     type SubscribeStream = Pin<Box<dyn Stream<Item = Result<Envelope, Status>> + Send>>;

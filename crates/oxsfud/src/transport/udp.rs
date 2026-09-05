@@ -17,7 +17,7 @@ use crate::handlers::{Sfu, now_ms};
 use crate::media::rtp;
 use crate::peer::Peer;
 use crate::media::subscribe::{SubscribeState, SubscriberStream};
-use crate::media::track::PublishState;
+use crate::media::track::{PublishState, PublisherStream};
 use oxsig::schema::{Duplex, MediaKind};
 
 const RECV_BUF: usize = 2_048;
@@ -130,8 +130,15 @@ async fn fan_out(socket: &Arc<UdpSocket>, peer: &Arc<Peer>, packet: &[u8], egres
     {
         warn!(user = %peer.user_id, track = %stream.track_id, declared = stream.pt, arrived = pt, "pt mismatch");
     }
-    // 반이중은 prefan(정§9)이 권위이고 simulcast 는 레이어 선택(정§10)이 있어야 나간다.
-    if stream.muted() || stream.duplex() == Duplex::Half || stream.simulcast {
+    if stream.muted() {
+        return;
+    }
+    // simulcast 는 레이어 선택(정§10)이 있어야 나간다.
+    if stream.simulcast {
+        return;
+    }
+    if stream.duplex() == Duplex::Half {
+        prefan(socket, peer, &stream, packet, egress).await;
         return;
     }
     for weak in track.subscribers().iter() {
@@ -190,6 +197,51 @@ fn start_handshake(sfu: Arc<Sfu>, socket: Arc<UdpSocket>, session: Arc<Transport
             ConnRole::Subscribe => hold(&conn, &session).await,
         }
     });
+}
+
+/// 정§7-3 — ★**발언권의 강제 권위는 여기다.** 통지(DC)가 늦거나 유실돼도 미디어는 새지 않는다.
+/// 산출 조건은 둘: 방 = 그 순간의 `pub_room`(RCU) · 그 방 발언권 화자 == 발행자.
+/// 통과한 것만 `T1`·`T2` 의 "RTP 수신"으로 센다(정§9-2) — 막힌 RTP 는 발화가 아니다.
+async fn prefan(socket: &Arc<UdpSocket>, peer: &Arc<Peer>, stream: &Arc<PublisherStream>, packet: &[u8], egress: &mut Vec<u8>) {
+    let Some(room) = peer.pub_room() else { return };
+    if !room.floor.is_speaker(&peer.user_id) {
+        return;
+    }
+    let Some(slot) = (match stream.kind {
+        MediaKind::Audio => Some(room.slots.audio.clone()),
+        MediaKind::Video => room.slots.video(),
+    }) else {
+        return;
+    };
+    // 정§9-7 — video 는 화자 코덱 == 슬롯 코덱일 때만 결합한다(다르면 조용한 검은 화면이 된다).
+    if stream.kind == MediaKind::Video && (slot.codec, slot.fmtp.as_deref()) != (stream.codec, stream.fmtp.as_deref()) {
+        return;
+    }
+    room.floor.on_media(now_ms());
+    egress.clear();
+    egress.extend_from_slice(packet);
+    let rewriter = room.slots.rewriter(stream.kind);
+    if !rewriter.rewrite(egress, &peer.user_id, slot.vssrc) {
+        return;
+    }
+    let base = std::mem::take(egress);
+    for weak in slot.tracks().first().map(|t| t.subscribers()).as_deref().into_iter().flat_map(|g| g.iter()) {
+        let Some(sub) = weak.upgrade() else { continue };
+        // ★슬롯 fan-out 은 화자 본인을 뺀다 — N:1 슬롯을 화자도 구독하므로 안 빼면 제 목소리가 되돌아온다.
+        if sub.subscriber == peer.user_id {
+            continue;
+        }
+        let Some(transport) = sub.transport.as_ref() else { continue };
+        let Some(addr) = transport.addr.get() else { continue };
+        egress.clear();
+        egress.extend_from_slice(&base);
+        rtp::set_payload_type(egress, sub.pt());
+        rtp::rewrite_extension_ids(egress, |id| sub.ext_of(id));
+        let Ok(sealed) = transport.encrypt_rtp(egress) else { continue };
+        if socket.send_to(&sealed, addr).await.is_ok() {
+            sub.sent.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 /// 구독자 하나 몫의 egress 조립 — PT 는 구독자 표 값으로, 확장 번호는 그 구독자 표로(정§7-2-1).

@@ -14,6 +14,7 @@ use oxsig::schema::{Affiliation, PcMode};
 
 use crate::media::subscribe::SubscribeContext;
 use crate::media::track::PublishContext;
+use crate::room::Room;
 use crate::transport::IceCredentials;
 
 /// 정§2-2 — 전송 생존 3벌 중 Peer 의 것. ★정수 비교 금지, enum 동등성만.
@@ -75,6 +76,8 @@ pub struct Peer {
     pub user_id: String,
     pub participant_type: u8,
     pub pc_mode: PcMode,
+    /// 연§11-3 — 발언권 우선순위의 상한. 토큰 클레임이 권위이고 hub 가 세션값으로 준다.
+    pub floor_priority: u8,
     pub publish_ice: IceCredentials,
     pub subscribe_ice: IceCredentials,
     pub created_at_ms: u64,
@@ -85,8 +88,10 @@ pub struct Peer {
     suspect_since: AtomicU64,
     /// 입장 방 집합 = 구독 집합(정§5-1 — 두 집합을 두지 않는다). RCU: 쓰기는 통째 교체.
     sub_rooms: ArcSwap<BTreeSet<String>>,
-    /// 정§7-3 — fan-out 이 매 패킷 읽는 값이라 ★RCU 여야 한다.
-    pub_room: ArcSwapOption<String>,
+    /// 정§7-3 — 반이중 fan-out 이 매 패킷 읽는 값이라 ★RCU 이고, ★방을 직접 든다(조회 없음).
+    pub_room: ArcSwapOption<Room>,
+    /// 정§9-2 — cross-room 검사는 방 제어기 밖 ★Peer 축이다. `Taken` 인 방만 담는다.
+    floor_room: ArcSwapOption<String>,
     /// 두 값을 함께 옮기는 쓰기만 직렬화한다. 읽는 쪽은 이 락을 모른다.
     write: Mutex<()>,
 }
@@ -96,12 +101,18 @@ impl Peer {
         Self::with_credentials(user_id, participant_type, pc_mode, now_ms, IceCredentials::generate(), IceCredentials::generate())
     }
 
+    pub fn with_floor_priority(mut self, floor_priority: u8) -> Self {
+        self.floor_priority = floor_priority;
+        self
+    }
+
     /// 연§9-3 — 자격은 Peer 생성 때 한 번이고 세션 동안 불변이다. 시험은 값을 지정해 만든다.
     pub fn with_credentials(user_id: &str, participant_type: u8, pc_mode: PcMode, now_ms: u64, publish_ice: IceCredentials, subscribe_ice: IceCredentials) -> Self {
         Self {
             user_id: user_id.to_owned(),
             participant_type,
             pc_mode,
+            floor_priority: u8::MAX,
             publish_ice,
             subscribe_ice,
             created_at_ms: now_ms,
@@ -112,6 +123,7 @@ impl Peer {
             suspect_since: AtomicU64::new(0),
             sub_rooms: ArcSwap::from_pointee(BTreeSet::new()),
             pub_room: ArcSwapOption::empty(),
+            floor_room: ArcSwapOption::empty(),
             write: Mutex::new(()),
         }
     }
@@ -159,7 +171,7 @@ impl Peer {
 
     pub fn affiliation(&self) -> Affiliation {
         let sub = self.sub_rooms.load();
-        Affiliation { sub_rooms: sub.iter().cloned().collect(), pub_room: self.pub_room.load().as_deref().cloned() }
+        Affiliation { sub_rooms: sub.iter().cloned().collect(), pub_room: self.pub_room_id() }
     }
     pub fn room_count(&self) -> usize {
         self.sub_rooms.load().len()
@@ -170,18 +182,32 @@ impl Peer {
     pub fn is_in(&self, room_id: &str) -> bool {
         self.sub_rooms.load().contains(room_id)
     }
-    /// ★핫패스 읽기 — 락도 문자열 복사도 없다(정§2-3 계약 1).
-    pub fn pub_room(&self) -> Option<Arc<String>> {
+    /// ★핫패스 읽기 — 락도 조회도 없다(정§2-3 계약 1). 반이중 fan-out 이 방을 곧바로 집는다.
+    pub fn pub_room(&self) -> Option<Arc<Room>> {
         self.pub_room.load_full()
     }
+    pub fn pub_room_id(&self) -> Option<String> {
+        self.pub_room.load().as_ref().map(|r| r.id.clone())
+    }
 
-    pub fn join_room(&self, room_id: &str, select: bool) {
+    /// 정§9-2 — 다른 방에서 발언권을 쥐고 있나. `PendingRevoke` 는 담기지 않는다.
+    pub fn holds_floor_elsewhere(&self, room_id: &str) -> bool {
+        self.floor_room.load().as_deref().is_some_and(|held| held != room_id)
+    }
+    pub fn floor_room_is(&self, room_id: &str) -> bool {
+        self.floor_room.load().as_deref().is_some_and(|held| held == room_id)
+    }
+    pub fn set_floor_room(&self, room_id: Option<&str>) {
+        self.floor_room.store(room_id.map(|r| Arc::new(r.to_owned())));
+    }
+
+    pub fn join_room(&self, room: &Arc<Room>, select: bool) {
         let _w = self.writer();
         let mut next = self.sub_rooms.load().as_ref().clone();
-        next.insert(room_id.to_owned());
+        next.insert(room.id.clone());
         self.sub_rooms.store(Arc::new(next));
         if select {
-            self.pub_room.store(Some(Arc::new(room_id.to_owned())));
+            self.pub_room.store(Some(room.clone()));
         }
     }
 
@@ -192,7 +218,7 @@ impl Peer {
         let was_member = next.remove(room_id);
         let last_room = next.is_empty();
         self.sub_rooms.store(Arc::new(next));
-        let pub_cleared = self.pub_room.load().as_deref().map(String::as_str) == Some(room_id);
+        let pub_cleared = self.pub_room.load().as_deref().map(|r| r.id.as_str()) == Some(room_id);
         if pub_cleared {
             self.pub_room.store(None);
         }
@@ -200,27 +226,27 @@ impl Peer {
     }
 
     /// 정§5-2 — `pub_deselect` 는 현재 값과 일치할 때만(멱등), `pub_select` 는 입장 방일 때만(아니면 skip). 반환: 바뀐 방들.
-    pub fn apply_affiliation(&self, pub_deselect: Option<&str>, pub_select: Option<&str>) -> Vec<String> {
+    /// 정§5-2 — `pub_deselect` → `pub_select` 순. `pub_select` 는 입장 방일 때만(아니면 항목 skip).
+    pub fn apply_affiliation(&self, pub_deselect: Option<&str>, select: Option<&Arc<Room>>) -> Vec<String> {
         let _w = self.writer();
         let mut changed = Vec::new();
-        let current = |p: &ArcSwapOption<String>| p.load().as_deref().cloned();
         if let Some(d) = pub_deselect
-            && current(&self.pub_room).as_deref() == Some(d)
+            && self.pub_room_id().as_deref() == Some(d)
         {
             self.pub_room.store(None);
             changed.push(d.to_owned());
         }
-        if let Some(sel) = pub_select
-            && self.sub_rooms.load().contains(sel)
-            && current(&self.pub_room).as_deref() != Some(sel)
+        if let Some(room) = select
+            && self.sub_rooms.load().contains(&room.id)
+            && self.pub_room_id().as_deref() != Some(room.id.as_str())
         {
-            if let Some(prev) = current(&self.pub_room)
+            if let Some(prev) = self.pub_room_id()
                 && !changed.contains(&prev)
             {
                 changed.push(prev);
             }
-            self.pub_room.store(Some(Arc::new(sel.to_owned())));
-            changed.push(sel.to_owned());
+            self.pub_room.store(Some(room.clone()));
+            changed.push(room.id.clone());
         }
         changed
     }
@@ -269,6 +295,11 @@ mod tests {
         Peer::new("u", 0, PcMode::TwoPc, 0)
     }
 
+    fn room(id: &str) -> Arc<crate::room::Room> {
+        let spec = crate::room::RoomSpec { room_id: id.into(), name: id.into(), capacity: 10, unused_ttl_secs: None, departure_ttl_secs: None };
+        Arc::new(crate::room::Room::new(spec, 0))
+    }
+
     #[test]
     fn peer_state_is_judged_on_udp_observation_only() {
         assert_eq!(judge(PeerState::Alive, 0, 60_000), None, "미관찰은 판정 불가");
@@ -305,8 +336,8 @@ mod tests {
     #[test]
     fn join_leave_cascade() {
         let p = peer();
-        p.join_room("a", false);
-        p.join_room("b", true);
+        p.join_room(&room("a"), false);
+        p.join_room(&room("b"), true);
         assert_eq!(p.affiliation(), Affiliation { sub_rooms: vec!["a".into(), "b".into()], pub_room: Some("b".into()) });
         assert_eq!(p.leave_room("b"), LeaveOutcome { was_member: true, last_room: false, pub_cleared: true });
         assert_eq!(p.leave_room("b"), LeaveOutcome { was_member: false, last_room: false, pub_cleared: false });
@@ -318,23 +349,25 @@ mod tests {
     #[test]
     fn publishing_room_reads_share_one_allocation() {
         let p = Arc::new(peer());
-        p.join_room("a", true);
+        p.join_room(&room("a"), true);
         let (x, y) = (p.pub_room().unwrap(), p.pub_room().unwrap());
-        assert!(Arc::ptr_eq(&x, &y), "읽을 때마다 문자열을 복사하면 안 된다");
+        assert!(Arc::ptr_eq(&x, &y), "읽을 때마다 자료를 복사하면 안 된다 — 같은 방을 그대로 든다");
 
         // 쓰기가 도는 동안에도 읽기는 늘 어떤 일관된 값을 본다(통째 교체라 찢어진 값이 없다).
+        let (a, b) = (room("a"), room("b"));
+        let b2 = Arc::clone(&b);
         let writer = {
             let p = Arc::clone(&p);
             std::thread::spawn(move || {
                 for i in 0..2_000 {
-                    p.apply_affiliation(None, Some(if i % 2 == 0 { "a" } else { "b" }));
+                    p.apply_affiliation(None, Some(if i % 2 == 0 { &a } else { &b }));
                 }
             })
         };
-        p.join_room("b", false);
+        p.join_room(&b2, false);
         let mut seen = 0;
         for _ in 0..2_000 {
-            if matches!(p.pub_room().as_deref().map(String::as_str), Some("a" | "b")) {
+            if matches!(p.pub_room_id().as_deref(), Some("a" | "b")) {
                 seen += 1;
             }
         }
@@ -346,19 +379,19 @@ mod tests {
     #[test]
     fn affiliation_rules() {
         let p = peer();
-        p.join_room("a", true);
-        p.join_room("b", false);
-        assert!(p.apply_affiliation(None, Some("zzz")).is_empty(), "not a member → skip");
+        p.join_room(&room("a"), true);
+        p.join_room(&room("b"), false);
+        assert!(p.apply_affiliation(None, Some(&room("zzz"))).is_empty(), "not a member → skip");
         assert!(p.apply_affiliation(Some("b"), None).is_empty(), "mismatch deselect → ignored");
-        assert_eq!(p.pub_room().as_deref().map(String::as_str), Some("a"));
-        let mut ch = p.apply_affiliation(Some("a"), Some("b"));
+        assert_eq!(p.pub_room_id().as_deref(), Some("a"));
+        let mut ch = p.apply_affiliation(Some("a"), Some(&room("b")));
         ch.sort();
         assert_eq!(ch, vec!["a".to_owned(), "b".to_owned()]);
-        assert_eq!(p.pub_room().as_deref().map(String::as_str), Some("b"));
-        let mut ch = p.apply_affiliation(None, Some("a"));
+        assert_eq!(p.pub_room_id().as_deref(), Some("b"));
+        let mut ch = p.apply_affiliation(None, Some(&room("a")));
         ch.sort();
         assert_eq!(ch, vec!["a".to_owned(), "b".to_owned()], "switch without deselect bumps both");
-        assert!(p.apply_affiliation(None, Some("a")).is_empty(), "no-op select");
+        assert!(p.apply_affiliation(None, Some(&room("a"))).is_empty(), "no-op select");
         assert_ne!(p.publish_ice, p.subscribe_ice);
     }
 }

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use common::bplane::{Envelope, iop};
 use oxsig::body::affiliation::{AffiliationReq, AffiliationRes, Cause};
 use oxsig::body::media::{PublishAction, PublishTrack, PublishTracksReq, PublishTracksRes, PublishedTrack, ReadyReq, ReadyType};
+use oxsig::mbcp::{self, Msg, MsgType};
 use oxsig::body::notify::{ForcedCause, ParticipantEvent, ParticipantEventType, RoomEvent, RoomEventType, TrackAction, TrackEvent, TrackState, TrackStateType};
 use oxsig::body::room::{PARTICIPANT_RECORDER, RoomJoinReq, RoomJoinRes, RoomLeaveReq, RoomLeaveRes};
 use oxsig::frame::{self, Header, Kind, encode_json};
@@ -15,12 +16,13 @@ use oxsig::schema::{Affiliation, CodecSpec, DtlsConfig, Duplex, Extmap, IceConfi
 use oxsig::{FailCode, Failure};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::emit::EventBus;
 use crate::media::slot::new_vssrc;
 use crate::media::subscribe::{SubSpec, SubscribeState, entry_of};
 use crate::media::track::{PublishState, PublisherStream, StreamSpec};
+use crate::media::floor::{Action, Request};
 use crate::media::{self, codec};
 use crate::peer::{Peer, PeerMap, PeerState, judge};
 use crate::room::{Created, Member, Room, RoomRegistry, RoomSpec};
@@ -204,7 +206,8 @@ impl Sfu {
         let peer = match peer {
             Some(p) => p,
             None => {
-                let p = Arc::new(Peer::new(user_id, req.participant_type, pc_mode, now_ms()));
+                let priority = u8::try_from(env.floor_priority).unwrap_or(u8::MAX);
+                let p = Arc::new(Peer::new(user_id, req.participant_type, pc_mode, now_ms()).with_floor_priority(priority));
                 self.peers.insert(p.clone());
                 self.transport.register(&p);
                 p
@@ -218,7 +221,7 @@ impl Sfu {
             if !room.insert(user_id, Member { role: req.role, select: req.select, participant_type: req.participant_type, joined_at_ms: now_ms() }) {
                 return Err(Failure::new(FailCode::InternalError).message("member already present after eviction"));
             }
-            peer.join_room(&room.id, req.select);
+            peer.join_room(&room, req.select);
             let v = room.seq.bump(&self.epoch);
             if req.participant_type != PARTICIPANT_RECORDER {
                 let ev = ParticipantEvent { event_type: ParticipantEventType::Joined, room_id: room.id.clone(), user_id: user_id.to_owned(), role: Some(req.role), select: Some(req.select), version: v.clone() };
@@ -249,6 +252,11 @@ impl Sfu {
 
     /// 정§17-2 — ② 명단 제거 · ④ peer.leave_room(마지막 방이면 Peer 제거) · ⑦ left broadcast. 없으면 `None`(거짓 성공 금지).
     fn leave_one(&self, peer: &Arc<Peer>, room: &Arc<Room>) -> Option<Version> {
+        // 정§17-2 ① — 발언권 정리가 먼저다(화자면 회수·승계, 큐에서도 제거).
+        if !room.is_member(&peer.user_id) {
+            return None;
+        }
+        self.floor_leave(room, &peer.user_id);
         let version = {
             let _g = room.gate.lock().unwrap_or_else(|e| e.into_inner());
             let member = room.remove(&peer.user_id)?;
@@ -316,16 +324,146 @@ impl Sfu {
         }
     }
 
-    /// 정§13 — `svc` 별 입구. 발언권(0x01)의 상태기는 정§9 의 몫이라 이 판은 관찰만 한다.
+    /// 정§13 — `svc` 별 입구. 발언권만 이 문서가 정하고(연§11-6), 나머지는 계수하고 버린다.
     pub fn on_dc_frame(&self, session: &Arc<TransportSession>, svc: u8, payload: &[u8]) {
         self.observe_media(&session.user_id);
-        let name = match svc {
-            oxsig::dc::SVC_MBCP => "mbcp",
-            oxsig::dc::SVC_VOICE_ACTIVITY => "voice_activity",
-            oxsig::dc::SVC_APP_MIN.. => "app",
-            _ => "unknown",
+        if svc != oxsig::dc::SVC_MBCP {
+            debug!(user = %session.user_id, svc, len = payload.len(), "dc frame dropped");
+            return;
+        }
+        let Some(msg) = Msg::decode(payload) else {
+            debug!(user = %session.user_id, len = payload.len(), "mbcp decode");
+            return;
         };
-        info!(user = %session.user_id, svc = name, len = payload.len(), "dc frame in");
+        for action in self.floor_message(&session.user_id, &msg) {
+            self.dispatch_floor(&action);
+        }
+    }
+
+    /// 정§9-6 입구 관문 — ★`0x1D` 없음/미지 = 계수 후 무응답(돌려줄 방이 없다) ·
+    /// 미입장 = `DENY(255, "not_in_room")`(원문에 자리가 없는 우리 쪽 오류). ★조용히 첫 방을 고르지 않는다.
+    fn floor_message(&self, user_id: &str, msg: &Msg) -> Vec<Action> {
+        let Some(room_id) = msg.room_id() else {
+            debug!(user = user_id, msg = msg.msg_type.name(), "mbcp without room");
+            return Vec::new();
+        };
+        let Some(room) = self.rooms.get(room_id) else {
+            debug!(user = user_id, room = room_id, "mbcp for unknown room");
+            return Vec::new();
+        };
+        let Some(peer) = self.peers.get(user_id) else { return Vec::new() };
+        if !peer.is_in(&room.id) {
+            let deny = Msg::new(MsgType::Deny)
+                .ack(true)
+                .u8(mbcp::field::CAUSE, mbcp::reject::OTHER)
+                .str(mbcp::field::CAUSE_TEXT, "not_in_room")
+                .room(&room.id);
+            return vec![Action::Unicast { to: user_id.to_owned(), msg: deny }];
+        }
+        let now = now_ms();
+        let blocked = self.blocked_in(&room);
+        let actions = match msg.msg_type {
+            MsgType::Request => {
+                let req = Request {
+                    user: user_id.to_owned(),
+                    // 정§9-5 — 권위는 토큰 클레임이다. 클라 선언값으로 선점을 결정하지 않는다.
+                    eff_priority: msg.get_u8(mbcp::field::PRIORITY).unwrap_or(0).min(peer.floor_priority),
+                    duration_secs: msg.get_u16(mbcp::field::DURATION),
+                    has_half_track: self.has_half_track(&peer, &room),
+                    alone: room.user_count() <= 1,
+                };
+                room.floor.request(&req, &blocked, now)
+            }
+            MsgType::Release => room.floor.release(user_id, &blocked, now),
+            MsgType::QueuePosRequest => room.floor.queue_position(user_id),
+            // 정§9-4 — `FLOOR_ACK` 는 도달 관측이지 재전송 사유가 아니다.
+            MsgType::Ack => {
+                debug!(user = user_id, room = %room.id, acked = msg.get_u8(mbcp::field::ACK_TYPE), "floor ack");
+                Vec::new()
+            }
+            other => {
+                debug!(user = user_id, msg = other.name(), "mbcp message is server to client only");
+                Vec::new()
+            }
+        };
+        self.settle_floor(&room, actions)
+    }
+
+    /// 정§9-2 — cross-room 검사(Peer 축). 큐 후보와 요청자만 보므로 최대 열한 번 읽는다.
+    fn blocked_in(&self, room: &Arc<Room>) -> std::collections::BTreeSet<String> {
+        room.floor
+            .candidates()
+            .into_iter()
+            .chain(room.member_ids())
+            .filter(|u| self.peers.get(u).is_some_and(|p| p.holds_floor_elsewhere(&room.id)))
+            .collect()
+    }
+
+    /// 정§9-6 관문 ② — 그 user 에 이 방 반이중 발행 트랙이 있나.
+    fn has_half_track(&self, peer: &Peer, room: &Room) -> bool {
+        peer.publish.in_room(&room.id).iter().any(|s| s.duplex() == Duplex::Half)
+    }
+
+    /// 상태기가 낸 액션을 집행하기 전에 Peer 축(§9-2 cross-room)을 맞춘다.
+    fn settle_floor(&self, room: &Arc<Room>, actions: Vec<Action>) -> Vec<Action> {
+        let holder = room.floor.state();
+        for u in room.member_ids() {
+            let Some(peer) = self.peers.get(&u) else { continue };
+            let mine = holder.speaker() == Some(u.as_str()) && room.floor.holds(&u);
+            if mine {
+                peer.set_floor_room(Some(&room.id));
+            } else if peer.floor_room_is(&room.id) {
+                peer.set_floor_room(None);
+            }
+        }
+        actions
+    }
+
+    /// 정§9 — 락 밖 집행. DC 는 그 사람의 발행 연결 위에 있다(연§9-6).
+    fn dispatch_floor(&self, action: &Action) {
+        let Ok(payload) = action.msg().encode() else { return };
+        let Ok(frame) = oxsig::dc::encode(oxsig::dc::SVC_MBCP, &payload) else { return };
+        match action {
+            Action::Unicast { to, .. } => self.send_dc(to, &frame),
+            Action::Broadcast { msg, exclude } => {
+                let Some(room_id) = msg.room_id().and_then(|r| self.rooms.get(r)) else { return };
+                for u in room_id.member_ids() {
+                    if exclude.as_deref() == Some(u.as_str()) {
+                        continue;
+                    }
+                    self.send_dc(&u, &frame);
+                }
+            }
+        }
+    }
+
+    fn send_dc(&self, user_id: &str, frame: &[u8]) {
+        if let Some(session) = self.transport.session_for(user_id, ConnRole::Publish) {
+            session.dc_send(frame.to_vec());
+        }
+    }
+
+    /// 정§17-1 — 발언권 타이머 주기(2,000ms). 회수 tick 에 편승한다.
+    fn floor_tick(&self, now_ms: u64) {
+        for room in self.rooms.all() {
+            let blocked = self.blocked_in(&room);
+            let actions = room.floor.tick(&blocked, now_ms);
+            if actions.is_empty() {
+                continue;
+            }
+            for action in self.settle_floor(&room, actions) {
+                self.dispatch_floor(&action);
+            }
+        }
+    }
+
+    /// 정§5-2·§17-2 ① — 그 방에서 화자·대기자였으면 반환·제거한다.
+    fn floor_leave(&self, room: &Arc<Room>, user_id: &str) {
+        let blocked = self.blocked_in(room);
+        let actions = room.floor.on_leave(user_id, &blocked, now_ms());
+        for action in self.settle_floor(room, actions) {
+            self.dispatch_floor(&action);
+        }
     }
 
     // ───────── 회수(정§17-1) ─────────
@@ -335,6 +473,7 @@ impl Sfu {
         let now = now_ms();
         self.reap(now);
         self.sweep_gates(now);
+        self.floor_tick(now);
         for id in self.rooms.sweep(now) {
             self.destroy_room(&id);
         }
@@ -412,7 +551,17 @@ impl Sfu {
             return Err(Failure::new(FailCode::MissingField).message("pub_select or pub_deselect"));
         }
         let peer = self.peers.get(user_id).ok_or_else(|| Failure::new(FailCode::NotInRoom))?;
-        let changed = peer.apply_affiliation(req.pub_deselect.as_deref(), req.pub_select.as_deref());
+        let select = req.pub_select.as_deref().and_then(|id| self.rooms.get(id));
+        let changed = peer.apply_affiliation(req.pub_deselect.as_deref(), select.as_ref());
+        // 정§5-2 — 발행 방에서 손을 떼면 그 방 발언권도 반환한다(`RELEASE` 와 같은 경로).
+        for id in &changed {
+            if peer.pub_room_id().as_deref() == Some(id.as_str()) {
+                continue;
+            }
+            if let Some(room) = self.rooms.get(id) {
+                self.floor_leave(&room, user_id);
+            }
+        }
         let mut versions = std::collections::BTreeMap::new();
         for id in changed {
             if let Some(room) = self.rooms.get(&id) {
@@ -706,6 +855,10 @@ impl Sfu {
         match req.ready_type {
             ReadyType::Tracks => {
                 let opened = peer.subscribe.in_room(&room.id).iter().filter(|s| s.activate()).count();
+                // 정§9-6 처음 알리기 — 그 방에 화자가 있으면 그 사람에게만 `TAKEN` unicast.
+                for action in room.floor.announce_speaker(user_id) {
+                    self.dispatch_floor(&action);
+                }
                 info!(user = user_id, room = %room.id, opened, "ready tracks");
             }
             ReadyType::Transport => self.ready_transport(&peer, &room, &req)?,
@@ -746,7 +899,7 @@ impl Sfu {
         let track_id = req.track_id.as_deref().unwrap_or_default();
         let stream = peer.publish.get(track_id).ok_or_else(|| Failure::new(FailCode::TrackNotFound).message(track_id.to_owned()))?;
         stream.set_state(PublishState::Active);
-        let Some(pub_room) = peer.pub_room().and_then(|id| self.rooms.get(&id)) else {
+        let Some(pub_room) = peer.pub_room() else {
             info!(user = %peer.user_id, track = track_id, "ready camera without a publishing room");
             return Ok(());
         };
@@ -857,7 +1010,7 @@ mod tests {
         Sfu::new("sfu-test".into(), MediaParams { public_ip: "10.0.0.1".into(), udp_port: 20000, fingerprint: cert.fingerprint.clone(), max_bitrate_bps: 800_000 }, cert)
     }
     fn env(user: &str, op: u16, body: Value) -> Envelope {
-        Envelope { session_id: format!("s-{user}"), user_id: user.into(), room_id: String::new(), target: String::new(), exclude: Vec::new(), wire: encode_json(&Header::msg(op, 7), &body), pc_mode: "2pc".into() }
+        Envelope { session_id: format!("s-{user}"), user_id: user.into(), room_id: String::new(), target: String::new(), exclude: Vec::new(), wire: encode_json(&Header::msg(op, 7), &body), pc_mode: "2pc".into(), floor_priority: 0 }
     }
     fn call(s: &Sfu, user: &str, op: u16, body: Value) -> (Kind, Value) {
         let w = s.handle(&env(user, op, body));
@@ -1153,6 +1306,102 @@ mod tests {
         assert_eq!(s.sweep_gates(now_ms()), 0, "아직 창 안");
         assert_eq!(s.sweep_gates(now_ms() + GATE_TIMEOUT_MS + 1), 1, "video 하나만 — audio 는 gate 로 죽지 않는다");
         assert_eq!(s.sweep_gates(now_ms() + GATE_TIMEOUT_MS + 2), 0, "원샷");
+    }
+
+
+    fn half_audio(mid: &str, ssrc: u32) -> Value {
+        json!({"kind": "audio", "ssrc": ssrc, "mid": mid, "pt": 111, "duplex": "half"})
+    }
+    fn mbcp_frame(msg: &Msg) -> Vec<u8> {
+        oxsig::dc::encode(oxsig::dc::SVC_MBCP, &msg.encode().unwrap()).unwrap()
+    }
+    /// DC 는 실제 세션이 있어야 나가므로, 시험은 상태기가 낸 액션을 직접 본다.
+    fn floor_in(s: &Sfu, user: &str, msg: Msg) -> Vec<(MsgType, Option<String>, Option<u8>)> {
+        s.floor_message(user, &msg)
+            .iter()
+            .map(|a| {
+                let m = a.msg();
+                let key = match m.msg_type {
+                    MsgType::Deny | MsgType::Revoke => m.get_u8(mbcp::field::CAUSE),
+                    MsgType::QueueInfo => m.get(mbcp::field::QUEUE_INFO).and_then(|v| v.first().copied()),
+                    _ => None,
+                };
+                (m.msg_type, a.target().map(str::to_owned), key)
+            })
+            .collect()
+    }
+    fn request(room: &str) -> Msg {
+        Msg::new(MsgType::Request).u8(mbcp::field::PRIORITY, 200).room(room)
+    }
+
+    #[test]
+    fn floor_entry_gates_are_the_contract_not_silence() {
+        let s = sfu();
+        create(&s, "r", 5);
+        create(&s, "other", 5);
+        call(&s, "u1", Op::RoomJoin.code(), json!({"room_id": "r"}));
+        call(&s, "u2", Op::RoomJoin.code(), json!({"room_id": "r"}));
+
+        // 정§9-6 ① — 방이 없거나 모르는 방이면 계수 후 무응답(돌려줄 방이 없다).
+        assert!(floor_in(&s, "u1", Msg::new(MsgType::Request)).is_empty(), "0x1D 없음");
+        assert!(floor_in(&s, "u1", request("__nope__")).is_empty(), "모르는 방");
+        // 미입장은 우리 쪽 오류라 사유 255 + 설명으로 돌려준다.
+        let out = s.floor_message("u1", &request("other"));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].msg().get_u8(mbcp::field::CAUSE), Some(mbcp::reject::OTHER));
+        assert_eq!(out[0].msg().get_str(mbcp::field::CAUSE_TEXT), Some("not_in_room"));
+
+        // 정§9-6 ② — 반이중 발행 트랙이 없으면 무시가 아니라 사유 5 다.
+        assert_eq!(
+            floor_in(&s, "u1", request("r")),
+            vec![(MsgType::Deny, Some("u1".to_owned()), Some(mbcp::reject::RECEIVE_ONLY))]
+        );
+    }
+
+    #[test]
+    fn floor_grant_gate_and_succession_run_through_the_wire() {
+        let s = sfu();
+        create(&s, "r", 5);
+        call(&s, "u1", Op::RoomJoin.code(), json!({"room_id": "r"}));
+        call(&s, "u2", Op::RoomJoin.code(), json!({"room_id": "r"}));
+        for u in ["u1", "u2"] {
+            let (k, _) = call(&s, u, Op::PublishTracks.code(), json!({"room_id": "r", "tracks": [half_audio("0", if u == "u1" { 11 } else { 22 })]}));
+            assert_eq!(k, Kind::Ok);
+        }
+        let room = s.rooms.get("r").unwrap();
+
+        // 정§9-5 — 권위는 토큰 클레임이다. 요청 TLV 0 이 200 이어도 상한이 자른다.
+        s.peers.get("u1").unwrap().set_floor_room(None);
+        let granted = floor_in(&s, "u1", request("r"));
+        assert_eq!(granted, vec![(MsgType::Granted, Some("u1".to_owned()), None), (MsgType::Taken, None, None)]);
+        assert!(room.floor.is_speaker("u1"));
+        assert!(s.peers.get("u1").unwrap().holds_floor_elsewhere("zzz"), "cross-room 축이 Peer 에 선다");
+        assert!(!s.peers.get("u1").unwrap().holds_floor_elsewhere("r"));
+
+        // 두 번째 요청은 큐로. 우선순위가 같으면 선점이 아니다.
+        assert_eq!(
+            floor_in(&s, "u2", request("r")),
+            vec![(MsgType::QueueInfo, Some("u2".to_owned()), Some(1))]
+        );
+
+        // RELEASE → 큐가 있으므로 IDLE 없이 곧바로 승계.
+        let after = floor_in(&s, "u1", Msg::new(MsgType::Release).room("r"));
+        assert_eq!(after, vec![(MsgType::Granted, Some("u2".to_owned()), None), (MsgType::Taken, None, None)]);
+        assert!(room.floor.is_speaker("u2") && !s.peers.get("u1").unwrap().holds_floor_elsewhere("zzz"));
+
+        // 정§17-2 ① — 퇴장이 발언권을 먼저 정리한다.
+        call(&s, "u2", Op::RoomLeave.code(), json!({"room_id": "r"}));
+        assert_eq!(room.floor.state(), crate::media::floor::FloorState::Idle);
+        assert!(room.floor.speaker().is_none());
+    }
+
+    #[test]
+    fn frames_round_trip_through_the_datachannel_codec() {
+        let msg = Msg::new(MsgType::Granted).ack(true).u8(mbcp::field::PRIORITY, 7).room("r1");
+        let frame = mbcp_frame(&msg);
+        let (svc, payload) = oxsig::dc::decode(&frame).unwrap();
+        assert_eq!(svc, oxsig::dc::SVC_MBCP);
+        assert_eq!(Msg::decode(payload), Some(msg), "DC 4B 헤더 안에서 그대로 산다");
     }
 
     #[test]

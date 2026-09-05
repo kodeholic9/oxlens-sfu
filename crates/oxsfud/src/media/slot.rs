@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use oxsig::schema::{Duplex, MediaKind};
 
 use super::codec::AUDIO_CODEC;
+use super::rewriter::SlotRewriter;
 use super::track::{PublisherStream, StreamSpec};
 
 /// 연§4-1 wire 값 — 슬롯 `track_id` 는 고정이다(클라는 파싱하지 않고 키로만 쓴다).
@@ -51,12 +52,27 @@ fn slot_stream(room_id: &str, kind: MediaKind, codec: &'static str, fmtp: Option
 pub struct SlotSet {
     pub audio: Arc<PublisherStream>,
     video: Mutex<Option<Arc<PublisherStream>>>,
+    /// 정§8-1 — 화자가 교대해도 슬롯의 `seq`·`ts` 는 이어져야 한다. kind 마다 하나.
+    audio_rewriter: SlotRewriter,
+    video_rewriter: SlotRewriter,
 }
 
 impl SlotSet {
     pub fn new(room_id: &str) -> Self {
         debug_assert_eq!(AUDIO_CODEC, "opus");
-        Self { audio: slot_stream(room_id, MediaKind::Audio, AUDIO_CODEC, None), video: Mutex::new(None) }
+        Self {
+            audio: slot_stream(room_id, MediaKind::Audio, AUDIO_CODEC, None),
+            video: Mutex::new(None),
+            audio_rewriter: SlotRewriter::default(),
+            video_rewriter: SlotRewriter::default(),
+        }
+    }
+
+    pub fn rewriter(&self, kind: MediaKind) -> &SlotRewriter {
+        match kind {
+            MediaKind::Audio => &self.audio_rewriter,
+            MediaKind::Video => &self.video_rewriter,
+        }
     }
 
     pub fn video(&self) -> Option<Arc<PublisherStream>> {
@@ -84,6 +100,7 @@ impl SlotSet {
     /// 정§17-2 ⑥ — 반이중 video 보유자가 전원 빠지면 슬롯 코덱을 리셋하고 항목을 지운다.
     /// 다음 화자가 새로 정하며 그때 `add` 로 다시 생긴다. 반환: 지운 슬롯.
     pub fn reset_video(&self) -> Option<Arc<PublisherStream>> {
+        self.video_rewriter.reset();
         self.video.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 

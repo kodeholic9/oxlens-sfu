@@ -3,8 +3,10 @@
 //! 구독 연결마다인 두 표(`mid`·`pt`), 방 공용 슬롯(`slot`), egress 도구(`rtp`).
 
 pub mod codec;
+pub mod floor;
 pub mod mid;
 pub mod pt;
+pub mod rewriter;
 pub mod rtp;
 pub mod slot;
 pub mod subscribe;

@@ -10,6 +10,7 @@ use oxsig::body::room::PARTICIPANT_RECORDER;
 use oxsig::schema::{MemberInfo, Version};
 use serde::Serialize;
 
+use crate::media::floor::{FloorController, T2_DEFAULT_SECS};
 use crate::media::slot::SlotSet;
 use crate::version::Seq;
 
@@ -44,6 +45,8 @@ pub struct Room {
     ever_joined: AtomicBool,
     /// 정§8-1 — 반이중은 방 공용 m-line 을 돌려쓴다. audio 는 방과 수명이 같고 video 는 첫 화자가 만든다.
     pub slots: SlotSet,
+    /// 정§9 — 방마다 발언권 제어기 하나.
+    pub floor: FloorController,
 }
 
 /// 연§5-3 목록 항목.
@@ -69,8 +72,10 @@ pub struct RoomSpec {
 impl Room {
     pub fn new(spec: RoomSpec, now_ms: u64) -> Self {
         let slots = SlotSet::new(&spec.room_id);
+        let floor = FloorController::new(&spec.room_id, T2_DEFAULT_SECS);
         Self {
             slots,
+            floor,
             id: spec.room_id,
             name: spec.name,
             capacity: spec.capacity,
@@ -186,6 +191,11 @@ impl RoomRegistry {
         v
     }
     /// 정§4-1 만료·명시 삭제 ① — 사람 있으면 `None`(`3004` 는 호출자 몫).
+    /// 스냅샷 — 타이머 tick 이 방마다 돈다(§2-3 계약 4).
+    pub fn all(&self) -> Vec<std::sync::Arc<Room>> {
+        self.rooms.iter().map(|e| e.clone()).collect()
+    }
+
     pub fn remove_if_unoccupied(&self, room_id: &str) -> Option<std::sync::Arc<Room>> {
         self.rooms.remove_if(room_id, |_, r| !r.is_occupied()).map(|(_, r)| r)
     }
