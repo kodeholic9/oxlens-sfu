@@ -1,0 +1,23 @@
+# oxlens-sfu 정책 파일 — 정책서 oxlens_policy.md §3 키 전량. 모르는 키는 기동 실패.
+[logging]
+level = "info"
+
+[media]
+bwe_mode = "twcc"
+auto_layer = "off"
+
+[floor]
+queue_max = 10
+t2_stop_talking_secs = 30
+
+[hub]
+token_ttl_secs = 3600
+heartbeat_interval_ms = 10000
+heartbeat_timeout_ms = 30000
+resume_window_ms = 60000
+ws_flow_window = 8
+room_default_capacity = 1000
+
+[quota]
+max_sessions_per_account = 0
+max_rooms_per_account = 0

@@ -1,0 +1,12 @@
+# oxlens-sfu 시스템 파일 — 정§18-1 (hub 전용). 값의 뜻은 crates/common/src/config.rs.
+[hub]
+listen = "0.0.0.0:1974"
+base_path = "/media"
+
+[hub.auth]
+jwt_secret = "change-me-in-production"
+
+[[hub.auth.api_keys]]
+key = "ox_k_demo"
+secret = "ox_s_demo"
+name = "demo"

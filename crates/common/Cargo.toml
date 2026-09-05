@@ -1,0 +1,18 @@
+[package]
+name = "common"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "OxLens 서버 공통 — 설정(strict)·토큰·WS 흐름 제어"
+
+[dependencies]
+oxsig.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+jsonwebtoken.workspace = true
+chrono.workspace = true
+
+[lints]
+workspace = true
