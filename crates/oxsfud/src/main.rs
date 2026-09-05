@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-//! 기동 — 정책 파일 1회 로드(정§18-1) · 프로세스 인증서·epoch 발급(정§14-1) · gRPC `SfuService` · room sweep(정§17-1).
+//! 기동 — 정책 파일 1회 로드(정§18-1) · 프로세스 인증서·epoch 발급(정§14-1) · UDP 전송 포트(정§12) · gRPC `SfuService` · 회수 tick(정§17-1).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -9,7 +9,8 @@ use common::bplane::SfuServiceServer;
 use common::config::PolicyConfig;
 use oxsfud::handlers::{MediaParams, Sfu};
 use oxsfud::service::Service;
-use oxsfud::transport::ServerCert;
+use oxsfud::peer::REAPER_TICK_MS;
+use oxsfud::transport::{ServerCert, udp};
 use oxsfud::version::new_epoch;
 use tracing::info;
 
@@ -56,14 +57,24 @@ async fn main() {
     let epoch = new_epoch();
     info!(id = %args.id, epoch = %epoch, grpc = %args.grpc_listen, udp = %format!("{}:{}", args.public_ip, args.udp_port),
         fingerprint = %cert.fingerprint, max_bitrate = policy.media.max_bitrate_bps, "oxsfud up");
-    let sfu = Arc::new(Sfu::new(epoch, MediaParams { public_ip: args.public_ip, udp_port: args.udp_port, fingerprint: cert.fingerprint.clone(), max_bitrate_bps: u64::from(policy.media.max_bitrate_bps) }));
+    let cert = Arc::new(cert);
+    let sfu = Arc::new(Sfu::new(epoch, MediaParams { public_ip: args.public_ip, udp_port: args.udp_port, fingerprint: cert.fingerprint.clone(), max_bitrate_bps: u64::from(policy.media.max_bitrate_bps) }, cert));
 
-    let sweeper = sfu.clone();
+    let socket = match udp::bind(args.udp_port).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("udp bind {}: {e}", args.udp_port);
+            std::process::exit(2);
+        }
+    };
+    tokio::spawn(udp::run(sfu.clone(), socket));
+
+    let reaper = sfu.clone();
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_millis(5_000));
+        let mut tick = tokio::time::interval(Duration::from_millis(REAPER_TICK_MS));
         loop {
             tick.tick().await;
-            sweeper.sweep();
+            reaper.tick();
         }
     });
 

@@ -30,6 +30,14 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 getrandom = { version = "0.3", features = ["std"] }
 sha2 = "0.10"
 dtls = "0.17.1"
+webrtc-srtp = "0.17.1"
+webrtc-util = "0.17.1"
+sctp-proto = "0.9"
+tokio-util = { version = "0.7", features = ["rt"] }
+bytes = "1"
+hmac = "0.12"
+sha1 = "0.10"
+crc32fast = "1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -1,24 +1,26 @@
 // author: kodeholic (powered by Claude)
-//! op 처리 — 정§4-2 입장 판정 ②~⑥ · §17-2 퇴장(이 판은 ②④⑦) · §5-2 소속 · HTTP 대행(연§5-3~5-5).
-//! 전부 동기·메모리 안이다. 응답은 요청 하나에 정확히 하나(정§19 ②).
+//! op 처리 — 정§4-2 입장 판정 ②~⑥ · §17-2 퇴장(②④⑦⑧) · §5-2 소속 · HTTP 대행(연§5-3~5-5) · §17-1 회수 주체 둘.
+//! 응답 경로는 전부 동기·메모리 안이고 요청 하나에 응답 하나다(정§19 ②). 전송 층은 이 상태를 읽고 쓴다.
 
 use std::sync::Arc;
 
 use common::bplane::{Envelope, iop};
 use oxsig::body::affiliation::{AffiliationReq, AffiliationRes, Cause};
-use oxsig::body::notify::{ParticipantEvent, ParticipantEventType};
+use oxsig::body::notify::{ForcedCause, ParticipantEvent, ParticipantEventType, RoomEvent, RoomEventType};
 use oxsig::body::room::{PARTICIPANT_RECORDER, RoomJoinReq, RoomJoinRes, RoomLeaveReq, RoomLeaveRes};
 use oxsig::frame::{self, Header, Kind, encode_json};
 use oxsig::op::Op;
-use oxsig::schema::{CodecSpec, DtlsConfig, Extmap, IceConfig, MediaKind, PcMode, ServerConfig, Version};
+use oxsig::schema::{Affiliation, CodecSpec, DtlsConfig, Extmap, IceConfig, MediaKind, PcMode, ServerConfig, Version};
 use oxsig::{FailCode, Failure};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tracing::{info, warn};
 
 use crate::emit::EventBus;
-use crate::peer::{Peer, PeerMap};
+use crate::peer::{Peer, PeerMap, PeerState, judge};
 use crate::room::{Created, Member, Room, RoomRegistry, RoomSpec};
+use crate::transport::ServerCert;
+use crate::transport::session::{TransportRegistry, TransportSession};
 
 /// 정§4-2 ④ — 서버마다 따로 센다.
 pub const MAX_ROOMS_PER_USER: usize = 100;
@@ -38,6 +40,8 @@ pub struct Sfu {
     pub peers: PeerMap,
     pub bus: EventBus,
     pub media: MediaParams,
+    pub transport: TransportRegistry,
+    pub cert: Arc<ServerCert>,
 }
 
 fn now_ms() -> u64 {
@@ -60,8 +64,8 @@ fn parse<T: DeserializeOwned>(body: &Value) -> Result<T, Failure> {
 }
 
 impl Sfu {
-    pub fn new(epoch: String, media: MediaParams) -> Self {
-        Self { epoch, rooms: RoomRegistry::default(), peers: PeerMap::default(), bus: EventBus::default(), media }
+    pub fn new(epoch: String, media: MediaParams, cert: Arc<ServerCert>) -> Self {
+        Self { epoch, rooms: RoomRegistry::default(), peers: PeerMap::default(), bus: EventBus::default(), media, transport: TransportRegistry::default(), cert }
     }
 
     /// envelope 하나 → 응답 wire 하나.
@@ -146,12 +150,6 @@ impl Sfu {
         true
     }
 
-    pub fn sweep(&self) {
-        for id in self.rooms.sweep(now_ms()) {
-            self.destroy_room(&id);
-        }
-    }
-
     // ───────── 입장·퇴장 ─────────
 
     fn room_join(&self, env: &Envelope, body: &Value) -> Result<Value, Failure> {
@@ -177,12 +175,18 @@ impl Sfu {
         if current >= MAX_ROOMS_PER_USER {
             return Err(Failure::new(FailCode::ListenLimit).details(json!({ "limit": MAX_ROOMS_PER_USER, "current": current })));
         }
-        let pc_mode: PcMode = serde_json::from_value(Value::String(env.pc_mode.clone())).unwrap_or(PcMode::TwoPc);
-        let peer = peer.unwrap_or_else(|| {
-            let p = Arc::new(Peer::new(user_id, req.participant_type, pc_mode, now_ms()));
-            self.peers.insert(p.clone());
-            p
-        });
+        // 정§12 — `pc_mode` 는 세션 확정값이다. 모르는 값을 조용히 갈음하지 않는다.
+        let pc_mode: PcMode = serde_json::from_value(Value::String(env.pc_mode.clone()))
+            .map_err(|_| Failure::new(FailCode::InvalidPayload).message(format!("pc_mode {}", env.pc_mode)))?;
+        let peer = match peer {
+            Some(p) => p,
+            None => {
+                let p = Arc::new(Peer::new(user_id, req.participant_type, pc_mode, now_ms()));
+                self.peers.insert(p.clone());
+                self.transport.register(user_id, pc_mode, &p.publish_ice, &p.subscribe_ice);
+                p
+            }
+        };
         // ⑥ 명단 등록 · select 에코 · pub_room · seq++ · emit — 한 임계 구역.
         let version = {
             let _g = room.gate.lock().unwrap_or_else(|e| e.into_inner());
@@ -229,6 +233,7 @@ impl Sfu {
             }
             if out.last_room {
                 self.peers.remove(&peer.user_id);
+                self.transport.unregister(&peer.user_id);
             }
             let v = room.seq.bump(&self.epoch);
             if !member.is_recorder() {
@@ -252,6 +257,84 @@ impl Sfu {
             }
         }
         self.peers.remove(&peer.user_id);
+        self.transport.unregister(&peer.user_id);
+    }
+
+    // ───────── 전송 층이 부르는 자리 ─────────
+
+    /// 정§2-2 — `last_seen` 의 갱신원은 UDP 관찰 둘뿐이다. WS 하트비트는 여기 오지 않는다.
+    pub fn observe_media(&self, user_id: &str) {
+        if let Some(peer) = self.peers.get(user_id) {
+            peer.touch(now_ms());
+        }
+    }
+
+    /// 정§13 — `svc` 별 입구. 발언권(0x01)의 상태기는 정§9 의 몫이라 이 판은 관찰만 한다.
+    pub fn on_dc_frame(&self, session: &Arc<TransportSession>, svc: u8, payload: &[u8]) {
+        self.observe_media(&session.user_id);
+        let name = match svc {
+            oxsig::dc::SVC_MBCP => "mbcp",
+            oxsig::dc::SVC_VOICE_ACTIVITY => "voice_activity",
+            oxsig::dc::SVC_APP_MIN.. => "app",
+            _ => "unknown",
+        };
+        info!(user = %session.user_id, svc = name, len = payload.len(), "dc frame in");
+    }
+
+    // ───────── 회수(정§17-1) ─────────
+
+    /// 정§17-1 — 좀비 회수가 먼저, 빈 방 sweep 은 그 뒤에(급사 참가자가 남으면 유예 시작이 늦는다).
+    pub fn tick(&self) {
+        let now = now_ms();
+        self.reap(now);
+        for id in self.rooms.sweep(now) {
+            self.destroy_room(&id);
+        }
+    }
+
+    /// 정§2-2 PeerState — 전이 주체는 이 tick 단일. 반환: 회수한 Peer 수.
+    pub fn reap(&self, now_ms: u64) -> usize {
+        let mut reaped = 0;
+        // §2-3 계약 4 — 순회와 삭제를 겹치지 않는다.
+        for peer in self.peers.snapshot() {
+            let Some(next) = judge(peer.state(), peer.last_seen(), now_ms) else { continue };
+            let (changed, dwell) = peer.transition(next, now_ms);
+            if !changed {
+                continue;
+            }
+            match next {
+                PeerState::Suspect => warn!(user = %peer.user_id, "peer suspect"),
+                PeerState::Alive => info!(user = %peer.user_id, "peer media resumed"),
+                PeerState::Zombie => {
+                    self.reclaim(&peer, dwell);
+                    reaped += 1;
+                }
+            }
+        }
+        reaped
+    }
+
+    /// 정§17-2 — 좀비 경로. ①~⑦ 은 `leave_one` 이 맡고, ⑧ `media_lost` unicast 가 이 경로에만 붙는다.
+    fn reclaim(&self, peer: &Arc<Peer>, dwell_ms: u64) {
+        info!(user = %peer.user_id, suspect_dwell_ms = dwell_ms, rooms = peer.room_count(), "zombie reclaimed");
+        for id in peer.rooms() {
+            let Some(room) = self.rooms.get(&id) else {
+                warn!(user = %peer.user_id, room = %id, "index mismatch: peer room without room");
+                continue;
+            };
+            let Some(version) = self.leave_one(peer, &room) else { continue };
+            let ev = RoomEvent {
+                event_type: RoomEventType::Affiliation,
+                room_id: id.clone(),
+                version,
+                affiliation: Some(Affiliation { sub_rooms: Vec::new(), pub_room: None }),
+                cause: Some(ForcedCause::MediaLost),
+                reason: None,
+            };
+            self.bus.user(&id, &peer.user_id, Op::RoomEvent, &ev);
+        }
+        self.peers.remove(&peer.user_id);
+        self.transport.unregister(&peer.user_id);
     }
 
     // ───────── 소속 ─────────
@@ -324,7 +407,8 @@ mod tests {
     use oxsig::frame::Kind;
 
     fn sfu() -> Sfu {
-        Sfu::new("sfu-test".into(), MediaParams { public_ip: "10.0.0.1".into(), udp_port: 20000, fingerprint: "sha-256 AA".into(), max_bitrate_bps: 800_000 })
+        let cert = Arc::new(ServerCert::generate().unwrap());
+        Sfu::new("sfu-test".into(), MediaParams { public_ip: "10.0.0.1".into(), udp_port: 20000, fingerprint: cert.fingerprint.clone(), max_bitrate_bps: 800_000 }, cert)
     }
     fn env(user: &str, op: u16, body: Value) -> Envelope {
         Envelope { session_id: format!("s-{user}"), user_id: user.into(), room_id: String::new(), target: String::new(), exclude: Vec::new(), wire: encode_json(&Header::msg(op, 7), &body), pc_mode: "2pc".into() }
@@ -413,6 +497,65 @@ mod tests {
         assert_eq!((k, b["code"].as_u64()), (Kind::Fail, Some(5003)));
         let (k, b) = call(&s, "u", 0x0FFF, json!({}));
         assert_eq!((k, b["code"].as_u64()), (Kind::Fail, Some(1001)));
+    }
+
+    #[test]
+    fn transport_registered_per_mode_and_released_with_peer() {
+        let s = sfu();
+        create(&s, "r", 5);
+        call(&s, "u2pc", Op::RoomJoin.code(), json!({"room_id": "r"}));
+        assert_eq!(s.transport.len(), 2, "2pc 는 자격 두 벌이 다 산다");
+        let w = s.handle(&Envelope { pc_mode: "1pc".into(), ..env("u1pc", Op::RoomJoin.code(), json!({"room_id": "r", "select": false})) });
+        assert_eq!(frame::decode(&w).unwrap().0.kind, Kind::Ok);
+        assert_eq!(s.transport.len(), 3, "1pc 는 publish 하나");
+        let pub_ufrag = s.peers.get("u1pc").unwrap().publish_ice.ufrag.clone();
+        assert_eq!(s.transport.by_ufrag(&pub_ufrag).unwrap().user_id, "u1pc");
+        let w = s.handle(&Envelope { pc_mode: "3pc".into(), ..env("ux", Op::RoomJoin.code(), json!({"room_id": "r"})) });
+        let (h, b) = frame::decode(&w).unwrap();
+        assert_eq!((h.kind, frame::body_json(b).unwrap()["code"].as_u64()), (Kind::Fail, Some(1002)), "미지 pc_mode 는 갈음하지 않는다");
+        call(&s, "u1pc", Op::RoomLeave.code(), json!({"room_id": "r"}));
+        assert_eq!(s.transport.len(), 2, "마지막 방을 나가면 전송도 회수");
+        assert!(s.transport.by_ufrag(&pub_ufrag).is_none());
+    }
+
+    #[test]
+    fn zombie_reclaim_is_the_full_teardown_plus_media_lost() {
+        let s = sfu();
+        create(&s, "r1", 5);
+        create(&s, "r2", 5);
+        call(&s, "u1", Op::RoomJoin.code(), json!({"room_id": "r1"}));
+        call(&s, "u1", Op::RoomJoin.code(), json!({"room_id": "r2", "select": false}));
+        call(&s, "u2", Op::RoomJoin.code(), json!({"room_id": "r1", "select": false}));
+        assert_eq!((s.transport.len(), s.peers.len()), (4, 2));
+        assert_eq!(s.reap(10_000_000), 0, "UDP 미관찰이면 판정 자체를 건너뛴다");
+
+        let peer = s.peers.get("u1").unwrap();
+        s.observe_media("u1");
+        peer.touch(1_000);
+        assert_eq!(s.reap(1_000 + crate::peer::SUSPECT_AFTER_MS + 1), 0);
+        assert_eq!(peer.state(), PeerState::Suspect);
+        let mut rx = s.bus.subscribe();
+        assert_eq!(s.reap(1_000 + crate::peer::ZOMBIE_AFTER_MS + 1), 1);
+
+        let mut seen = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            let (h, body) = frame::decode(&e.wire).unwrap();
+            seen.push((h.op, e.room_id.clone(), e.target.clone(), frame::body_json(body).unwrap()));
+        }
+        let lefts: Vec<_> = seen.iter().filter(|(op, ..)| *op == Op::ParticipantEvent.code()).collect();
+        let losts: Vec<_> = seen.iter().filter(|(op, ..)| *op == Op::RoomEvent.code()).collect();
+        assert_eq!((lefts.len(), losts.len()), (2, 2), "방마다 ⑦ left broadcast + ⑧ media_lost unicast");
+        for (_, room_id, target, body) in &losts {
+            assert_eq!(target, "u1", "⑧ 은 당사자에게만");
+            let ev: RoomEvent = serde_json::from_value(body.clone()).unwrap();
+            assert_eq!((ev.event_type, ev.cause, ev.room_id.as_str()), (RoomEventType::Affiliation, Some(ForcedCause::MediaLost), room_id.as_str()));
+            assert_eq!(ev.affiliation, Some(Affiliation { sub_rooms: Vec::new(), pub_room: None }));
+            assert!(!ev.still_member());
+        }
+        assert!(s.peers.get("u1").is_none() && s.transport.len() == 2, "Peer 와 그 전송만 회수");
+        assert!(!s.rooms.get("r1").unwrap().is_member("u1") && s.rooms.get("r2").unwrap().user_count() == 0);
+        assert!(s.rooms.get("r1").unwrap().is_member("u2"), "남의 방 자리는 건드리지 않는다");
+        assert_eq!(s.reap(1_000 + crate::peer::ZOMBIE_AFTER_MS + 2), 0, "회수는 한 번뿐");
     }
 
     #[test]

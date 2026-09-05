@@ -1,7 +1,18 @@
 // author: kodeholic (powered by Claude)
-//! 전송 수립 재료 — 정§12. 이 판은 자격과 지문만(ICE-lite host 후보 하나 · DTLS passive 지문). 소켓·SRTP·SCTP 는 뒤 판.
+//! 전송 수립 — 정§12. 포트 하나(`udp`) · ICE-lite 자격(`stun`) · DTLS passive(`dtls`) · SRTP(`srtp`) · SCTP/DC(`dc`).
+//! 세션 등록부(`session`)가 이 층의 상태 주인이고, 자격과 프로세스 인증서는 여기서 만든다.
 
-use dtls::crypto::Certificate;
+pub mod conn;
+pub mod dc;
+pub mod dcep;
+pub mod demux;
+pub mod dtls;
+pub mod session;
+pub mod srtp;
+pub mod stun;
+pub mod udp;
+
+use ::dtls::crypto::Certificate;
 use sha2::{Digest, Sha256};
 
 /// 정§12 — ufrag 8자·pwd 22자, 연결마다 발급, 세션 동안 불변(연§9-3).
@@ -30,7 +41,7 @@ pub struct ServerCert {
 }
 
 impl ServerCert {
-    pub fn generate() -> Result<Self, dtls::Error> {
+    pub fn generate() -> Result<Self, ::dtls::Error> {
         let cert = Certificate::generate_self_signed(vec!["ox-sfu".to_owned()])?;
         let der = cert.certificate.first().map(|c| c.as_ref()).unwrap_or(&[]);
         Ok(Self { fingerprint: sha256_fingerprint(der), cert })
