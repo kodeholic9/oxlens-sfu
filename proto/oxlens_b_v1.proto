@@ -18,6 +18,8 @@ message Envelope {
   string target = 4;
   repeated string exclude = 5;
   bytes wire = 6;
+  // 세션 확정값(연§6-1) — sfud 가 server_config.pc_mode 로 에코한다. 통지에는 비어 있다.
+  string pc_mode = 7;
 }
 
 message SubscribeRequest {

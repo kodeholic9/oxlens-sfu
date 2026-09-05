@@ -50,8 +50,11 @@ impl Node {
     pub async fn client(&self) -> Option<Client> {
         let mut slot = self.client.lock().await;
         if slot.is_none() {
-            let endpoint = format!("http://{}", self.addr);
-            *slot = Client::connect(endpoint).await.ok();
+            let endpoint = if self.addr.contains("://") { self.addr.clone() } else { format!("http://{}", self.addr) };
+            match Client::connect(endpoint).await {
+                Ok(c) => *slot = Some(c),
+                Err(e) => tracing::warn!(node = %self.id, addr = %self.addr, error = %e, "sfud dial failed"),
+            }
         }
         slot.clone()
     }

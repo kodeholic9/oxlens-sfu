@@ -124,7 +124,8 @@ async fn run(mut socket: WebSocket, hub: Arc<Hub>) {
                     let Some(sid) = conn.session_id().map(str::to_owned) else { continue };
                     let wire = match hub.registry.get(&sid) {
                         Some(s) if op != Op::Resume || hub.registry.take_resume(&sid).is_ok() => {
-                            hub.backend.handle(Envelope { session_id: sid, user_id: s.user_id, op, pid, body }).await
+                            let pc_mode = serde_json::to_value(s.pc_mode).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
+                            hub.backend.handle(Envelope { session_id: sid, user_id: s.user_id, pc_mode, op, pid, body }).await
                         }
                         Some(_) => fail_frame(op.code(), pid, &Failure::new(FailCode::SessionNotFound)),
                         None => fail_frame(op.code(), pid, &Failure::new(FailCode::SessionNotFound)),

@@ -181,7 +181,7 @@ pub async fn list_rooms(State(st): State<Arc<RestState>>, headers: HeaderMap) ->
         authenticate(&st.system.hub.auth.jwt_secret, &st.registry, &headers)?;
         let mut rooms: Vec<Value> = Vec::new();
         for node in st.backend.nodes.all() {
-            let env = bplane::Envelope { session_id: String::new(), user_id: String::new(), room_id: String::new(), target: String::new(), exclude: Vec::new(), wire: internal_wire(iop::ROOM_LIST, &Value::Null) };
+            let env = bplane::Envelope { session_id: String::new(), user_id: String::new(), room_id: String::new(), target: String::new(), exclude: Vec::new(), wire: internal_wire(iop::ROOM_LIST, &Value::Null), pc_mode: String::new() };
             match st.backend.send_to_node(&node.id, env).await.map_err(fail_of).and_then(|w| unwrap_wire(&w)) {
                 Ok(v) => rooms.extend(v["rooms"].as_array().cloned().unwrap_or_default()),
                 Err((_, f)) => tracing::warn!(node = %node.id, code = f.code, "ROOM_LIST fan-out: partial merge"),
@@ -206,7 +206,7 @@ pub async fn create_room(State(st): State<Arc<RestState>>, headers: HeaderMap, J
                 st.backend.rooms.assign(&room_id, chosen)
             }
         };
-        let env = bplane::Envelope { session_id: String::new(), user_id: String::new(), room_id: room_id.clone(), target: String::new(), exclude: Vec::new(), wire: internal_wire(iop::ROOM_CREATE, &body) };
+        let env = bplane::Envelope { session_id: String::new(), user_id: String::new(), room_id: room_id.clone(), target: String::new(), exclude: Vec::new(), wire: internal_wire(iop::ROOM_CREATE, &body), pc_mode: String::new() };
         let out = st.backend.send_to_node(&node_id, env).await.map_err(fail_of).and_then(|w| unwrap_wire(&w));
         if out.is_err() {
             st.backend.rooms.unbind(&room_id);
@@ -234,6 +234,7 @@ pub async fn get_room(State(st): State<Arc<RestState>>, headers: HeaderMap, Path
             target: String::new(),
             exclude: Vec::new(),
             wire: internal_wire(iop::ROOM_GET, &json!({ "room_id": room_id, "tracks": q.tracks == 1 })),
+            pc_mode: String::new(),
         };
         st.backend.send_to_node(&node_id, env).await.map_err(fail_of).and_then(|w| unwrap_wire(&w)).map(|v| (StatusCode::OK, v))
     }

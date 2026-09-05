@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/oxsig", "crates/common", "crates/oxhubd"]
+members = ["crates/oxsig", "crates/common", "crates/oxhubd", "crates/oxsfud"]
 resolver = "3"
 
 [workspace.package]
@@ -26,7 +26,10 @@ async-trait = "0.1"
 tonic = "0.12"
 prost = "0.13"
 tonic-build = "0.12"
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["sync"] }
+getrandom = { version = "0.3", features = ["std"] }
+sha2 = "0.10"
+dtls = "0.17.1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
