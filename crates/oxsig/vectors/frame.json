@@ -1,0 +1,72 @@
+{
+ "spec": "oxlens_client_protocol §3-1 WS frame",
+ "cases": [
+  {
+   "name": "heartbeat empty body",
+   "spec": "§3-1·§6-1",
+   "hex": "0100010300000001",
+   "expect": {
+    "kind": "msg",
+    "op": 259,
+    "pid": 1,
+    "body": {}
+   }
+  },
+  {
+   "name": "ack = empty ok",
+   "spec": "§3-1",
+   "hex": "010107010000002a",
+   "expect": {
+    "kind": "ok",
+    "op": 1793,
+    "pid": 42,
+    "body": {}
+   }
+  },
+  {
+   "name": "fail with Failure body",
+   "spec": "§4-5",
+   "hex": "01020201000000077b22636f6465223a333030312c226e616d65223a22524f4f4d5f4e4f545f464f554e44222c227065726d616e656e74223a66616c73657d",
+   "expect": {
+    "kind": "fail",
+    "op": 513,
+    "pid": 7,
+    "body": {
+     "code": 3001,
+     "name": "ROOM_NOT_FOUND",
+     "permanent": false
+    }
+   }
+  },
+  {
+   "name": "reserved flag bits preserved",
+   "spec": "§3-1",
+   "hex": "01a40101ffffffff7b22746f6b656e223a2274227d",
+   "expect": {
+    "kind": "msg",
+    "op": 257,
+    "pid": 4294967295,
+    "reserved": 164,
+    "body": {
+     "token": "t"
+    }
+   }
+  },
+  {
+   "name": "reserved kind 11 disconnects",
+   "spec": "§3-1",
+   "hex": "0103010100000001",
+   "expect": {
+    "error": true
+   }
+  },
+  {
+   "name": "bad version disconnects",
+   "spec": "§3-1",
+   "hex": "0200010100000001",
+   "expect": {
+    "error": true
+   }
+  }
+ ]
+}
