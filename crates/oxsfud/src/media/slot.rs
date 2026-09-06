@@ -49,6 +49,31 @@ fn slot_stream(room_id: &str, kind: MediaKind, codec: &'static str, fmtp: Option
     })
 }
 
+/// 정§7-3·§9-7 — 이 발행 스트림이 지금 그 방 슬롯에 **결합되는가**. 결합되면 그 슬롯을 준다.
+///
+/// ★핫패스(`prefan`)와 정체 판정(정§14-3)이 **이 함수 하나**를 쓴다. 조건을 두 곳에 적으면
+/// 반드시 어긋난다 — 정§8-1 이 *"같은 정보를 두 곳에서 판정하면 시점 race 가 난다"* 고 정한 그것이다.
+/// 실제로 어긋나 있었다: 정체 쪽이 *"그 방에 화자가 아무나 있나"* 만 보고 결합을 안 봐서,
+/// 코덱 불일치로 미결합된 video 슬롯에 재동기 지시를 보냈다.
+///
+/// ★화자 여부는 부르는 쪽이 정한다(`floor.is_speaker`) — 발언권 권위는 하나다.
+pub fn bound_slot(slots: &SlotSet, stream: &PublisherStream) -> Option<Arc<PublisherStream>> {
+    if stream.duplex() != Duplex::Half {
+        return None;
+    }
+    let slot = match stream.kind {
+        MediaKind::Audio => slots.audio.clone(),
+        MediaKind::Video => slots.video()?,
+    };
+    // 정§9-7 — video 는 화자 코덱 == 슬롯 코덱일 때만 결합한다(다르면 조용한 검은 화면이 된다).
+    if stream.kind == MediaKind::Video
+        && (slot.codec, slot.fmtp.as_deref()) != (stream.codec, stream.fmtp.as_deref())
+    {
+        return None;
+    }
+    Some(slot)
+}
+
 /// 방마다 둘. audio 는 방과 수명이 같고(opus 고정 — 맞출 것이 없다), video 는 첫 화자가 코덱을 정한다.
 pub struct SlotSet {
     pub audio: Arc<PublisherStream>,
@@ -144,6 +169,37 @@ mod tests {
         assert!(s.reset_video().is_some() && s.video().is_none(), "전원 빠지면 다음 화자가 새로 정한다");
         let (v2, fresh) = s.ensure_video("r1", "VP8", None);
         assert!(fresh && v2.codec == "VP8" && v2.vssrc != v.vssrc);
+    }
+
+    fn half(kind: MediaKind, codec: &'static str, fmtp: Option<&str>) -> Arc<PublisherStream> {
+        PublisherStream::create(StreamSpec {
+            track_id: "t".into(), vssrc: 1, owner: "u1".into(), room_id: "r1".into(), kind,
+            mid: "0".into(), pt: 96, rtx_pt: None, codec, fmtp: fmtp.map(str::to_owned),
+            source: None, duplex: Duplex::Half, simulcast: false, ssrc: 1, rtx_ssrc: None,
+        })
+    }
+
+    /// 정§9-7 — video 는 화자 코덱 == 슬롯 코덱일 때만 결합한다. 미결합이면 흘릴 소스가 없다.
+    ///
+    /// ★이 판정을 정체 감지(정§14-3)가 안 봐서, 코덱 불일치로 거절된 화자가 발언하는 동안
+    /// 청취자에게 "재동기하라" 가 갔다. 이제 두 곳이 이 함수 하나를 쓴다.
+    #[test]
+    fn an_unbound_slot_has_nothing_to_flow() {
+        let s = SlotSet::new("r1");
+        assert!(bound_slot(&s, &half(MediaKind::Audio, "opus", None)).is_some(), "audio 는 방과 수명이 같다");
+        assert!(bound_slot(&s, &half(MediaKind::Video, "VP8", None)).is_none(), "video 슬롯이 아직 없다");
+
+        s.ensure_video("r1", "H264", Some("profile-level-id=42e01f".into()));
+        assert!(bound_slot(&s, &half(MediaKind::Video, "H264", Some("profile-level-id=42e01f"))).is_some());
+        assert!(bound_slot(&s, &half(MediaKind::Video, "VP8", None)).is_none(), "★코덱이 다르면 미결합");
+        assert!(bound_slot(&s, &half(MediaKind::Video, "H264", None)).is_none(), "★fmtp 까지가 계약이다");
+
+        let full = PublisherStream::create(StreamSpec {
+            track_id: "t2".into(), vssrc: 2, owner: "u1".into(), room_id: "r1".into(),
+            kind: MediaKind::Audio, mid: "1".into(), pt: 111, rtx_pt: None, codec: "opus",
+            fmtp: None, source: None, duplex: Duplex::Full, simulcast: false, ssrc: 2, rtx_ssrc: None,
+        });
+        assert!(bound_slot(&s, &full).is_none(), "전이중은 슬롯을 안 탄다");
     }
 
     #[test]

@@ -1016,32 +1016,62 @@ impl Sfu {
         told
     }
 
-    /// 판정 하나 — 흐를 자리인데 안 흐르는가. 안 흐르는 게 정상이면 기준만 옮기고 거짓을 돌려준다.
+    /// 판정 하나 — ★**흘릴 자격이 있는데 안 흘렀나.** 자격이 없으면 기준만 옮긴다.
+    ///
+    /// ★종전엔 "안 흐른다" 를 관측하고 **안 흐르는 게 정상인 경우를 목록으로 뺐다.** 목록은
+    /// 조건이 늘 때마다 뒤처지고, 실제로 둘을 빠뜨렸다(화자 본인·슬롯 미결합). 방향을 뒤집어
+    /// ★**자격을 먼저 묻는다** — 자격 판정은 흘리는 쪽(정§7-3)이 이미 갖고 있다.
     fn stalled_now(&self, sub: &Arc<SubscriberStream>, now_ms: u64) -> bool {
-        // 게이트가 안 열렸으면 아직 흐를 자리가 아니다(정§7-4).
-        if sub.state() != SubscribeState::Active || sub.paused() {
-            sub.rebase_probe(now_ms);
-            return false;
-        }
-        let Some(stream) = self.stream_of(&sub.room_id, &sub.track_id) else {
-            // 발행 자체가 없다 — 슬롯 자리만 남은 것이다.
-            sub.rebase_probe(now_ms);
-            return false;
-        };
-        if stream.muted() {
-            sub.rebase_probe(now_ms);
-            return false;
-        }
-        // 반이중은 화자가 있을 때만 흐른다 — 조용한 무전은 정상이다.
-        if stream.duplex() == Duplex::Half && !self.someone_holds(&sub.room_id) {
+        if !self.should_flow(sub) {
             sub.rebase_probe(now_ms);
             return false;
         }
         sub.stalled(now_ms, STALL_WINDOW_MS)
     }
 
-    fn someone_holds(&self, room_id: &str) -> bool {
-        self.rooms.get(room_id).is_some_and(|r| r.floor.speaker().is_some())
+    /// 정§7-3 — 지금 이 구독으로 흘릴 자격이 있는가. ★정체 판정(정§14-3)의 유일한 관문이다.
+    ///
+    /// ★자격이 없는 창은 정체가 아니다. 규격이 그 창을 열거하지만(정§14-3 오탐 목록) ★열거는
+    /// 사본이라 반드시 어긋난다 — 여기서는 **흘리는 쪽과 같은 판정**을 물어 사본을 없앤다.
+    fn should_flow(&self, sub: &Arc<SubscriberStream>) -> bool {
+        // 게이트가 안 열렸거나 수동 pause 면 아직 흐를 자리가 아니다(정§7-4·§10-1).
+        if sub.state() != SubscribeState::Active || sub.paused() {
+            return false;
+        }
+        let Some(stream) = self.stream_of(&sub.room_id, &sub.track_id) else {
+            return false; // 발행 자체가 없다 — 슬롯 껍데기만 남은 것이다.
+        };
+        if stream.muted() {
+            return false;
+        }
+        if stream.duplex() != Duplex::Half {
+            return true; // 전이중은 보내면 간다(정§8-1) — 게이트가 없다.
+        }
+        // ── 반이중(무전 슬롯) ────────────────────────────────────────────────
+        let Some(room) = self.rooms.get(&sub.room_id) else {
+            return false;
+        };
+        let Some(speaker) = room.floor.speaker() else {
+            return false; // 아무도 말하지 않는다 — 조용한 무전은 정상이다.
+        };
+        // 정§7-3 ① — 슬롯 fan-out 은 ★화자 본인을 뺀다. 화자 자신의 슬롯 구독은 0 이 계약이다.
+        if speaker.as_str() == sub.subscriber {
+            return false;
+        }
+        // ★그 화자가 이 슬롯에 **결합돼 있나** — 흘리는 쪽과 같은 함수로 묻는다(정§9-7).
+        //   코덱 불일치로 등록이 거절됐거나 그 kind 를 아예 안 올렸으면 흘릴 소스가 없다.
+        let Some(peer) = self.peers.get(speaker.as_str()) else {
+            return false;
+        };
+        if peer.pub_room_id().as_deref() != Some(sub.room_id.as_str()) {
+            return false; // 발언 방이 여기가 아니다(정§7-3 반이중 행 — 매 패킷 `pub_room`).
+        }
+        peer.publish
+            .all()
+            .into_iter()
+            .filter(|s| s.kind == stream.kind)
+            .filter_map(|s| media::slot::bound_slot(&room.slots, &s))
+            .any(|slot| slot.track_id == sub.track_id)
     }
 
     /// 정§14-3 — 같은 (user, 방) 재통보는 `T-stall` 쿨다운을 둔다. 폭풍 방지다.
@@ -2041,6 +2071,44 @@ mod tests {
         // 쿨다운 — 같은 (user, 방) 재통보는 T-stall 안에서 막힌다.
         assert_eq!(s.sweep_stalls(t0 + STALL_WINDOW_MS * 2), 0, "폭풍 방지");
         assert_eq!(s.sweep_stalls(t0 + T_STALL_MS + STALL_WINDOW_MS), 1, "쿨다운이 지나면 다시 알린다");
+    }
+
+    /// 정§7-3 ① — ★화자 본인의 슬롯 구독은 0 이 계약이다. 그것을 정체로 세면 안 된다.
+    ///
+    /// 서버가 슬롯 fan-out 에서 화자를 일부러 빼놓고, 5초 뒤 그 화자에게 "너한테 안 나간다"
+    /// 고 알리던 자리다. 자격을 먼저 묻는 판정으로 바꿔 닫았다.
+    #[test]
+    fn the_speaker_is_not_stalled_by_the_slot_it_cannot_receive() {
+        let s = sfu();
+        create(&s, "r", 5);
+        call(&s, "u1", Op::RoomJoin.code(), json!({"room_id": "r"}));
+        call(&s, "u2", Op::RoomJoin.code(), json!({"room_id": "r"}));
+        let half = json!({"kind": "audio", "ssrc": 7, "mid": "0", "pt": 111, "duplex": "half"});
+        assert_eq!(call(&s, "u1", Op::PublishTracks.code(), json!({"room_id": "r", "tracks": [half]})).0, Kind::Ok);
+        call(&s, "u1", Op::Ready.code(), json!({"room_id": "r", "type": "tracks"}));
+        call(&s, "u2", Op::Ready.code(), json!({"room_id": "r", "type": "tracks"}));
+        let room = s.rooms.get("r").unwrap();
+        room.floor.request(
+            &crate::media::floor::Request {
+                user: "u1".into(),
+                eff_priority: 1,
+                duration_secs: None,
+                has_half_track: true,
+                alone: false,
+            },
+            &Default::default(),
+            now_ms(),
+        );
+        assert!(room.floor.is_speaker("u1"), "u1 이 화자여야 이 시험이 성립한다");
+
+        let t0 = now_ms();
+        s.sweep_stalls(t0);
+        let mut rx = s.bus.subscribe();
+        assert_eq!(s.sweep_stalls(t0 + STALL_WINDOW_MS), 1, "청취자 u2 에게는 흘러야 한다");
+        let who: Vec<String> = drain(&mut rx).into_iter()
+            .filter(|(op, _, b)| *op == Op::RoomEvent.code() && b["type"] == "sync_required")
+            .map(|(_, u, _)| u).collect();
+        assert_eq!(who, vec!["u2".to_string()], "★화자 u1 에게는 가지 않는다");
     }
 
     /// 나머지 오탐 창 셋 — 게이트 전 · muted · Peer 비Alive. 하나만 빠져도 헛 재동기가 돈다.

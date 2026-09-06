@@ -410,16 +410,11 @@ async fn prefan(socket: &Arc<UdpSocket>, peer: &Arc<Peer>, stream: &Arc<Publishe
     if !room.floor.is_speaker(&peer.user_id) {
         return;
     }
-    let Some(slot) = (match stream.kind {
-        MediaKind::Audio => Some(room.slots.audio.clone()),
-        MediaKind::Video => room.slots.video(),
-    }) else {
+    // 정§7-3·§9-7 — 결합 판정은 ★정체 판정(정§14-3)과 같은 함수를 쓴다. 조건을 두 곳에 적으면
+    //   어긋난다(정§8-1). 어긋났던 자국은 `media::slot::bound_slot` 본문에 있다.
+    let Some(slot) = media::slot::bound_slot(&room.slots, stream) else {
         return;
     };
-    // 정§9-7 — video 는 화자 코덱 == 슬롯 코덱일 때만 결합한다(다르면 조용한 검은 화면이 된다).
-    if stream.kind == MediaKind::Video && (slot.codec, slot.fmtp.as_deref()) != (stream.codec, stream.fmtp.as_deref()) {
-        return;
-    }
     room.floor.on_media(now_ms());
     egress.clear();
     egress.extend_from_slice(packet);
