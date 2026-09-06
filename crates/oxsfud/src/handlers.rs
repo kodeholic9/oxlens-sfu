@@ -215,7 +215,7 @@ impl Sfu {
             }
             peers.push(json!({ "user_id": peer.user_id, "publish": pubs, "subscribe": subs }));
         }
-        let mut out = json!({ "epoch": self.epoch, "peers": peers });
+        let mut out = json!({ "epoch": self.epoch, "build": common::build::stamp(), "peers": peers });
         put_drops(&mut out, self.drops.snapshot());
         out
     }

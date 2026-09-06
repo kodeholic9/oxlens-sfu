@@ -159,6 +159,7 @@ pub async fn admin_snapshot(State(st): State<Arc<RestState>>, ConnectInfo(peer):
     let ready = sfus.iter().all(|r| r["live"] == Value::Bool(true));
     respond(Ok((StatusCode::OK, json!({
         "ready": ready,
+        "build": common::build::stamp(),
         "supervising": supervising,
         "sfus": sfus,
         "rooms": st.backend.rooms.placements().len(),
@@ -422,7 +423,8 @@ pub async fn healthz_ready(State(st): State<Arc<RestState>>) -> axum::response::
     }
     let code = if down.is_empty() { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
     // ★어느 노드가 빠졌는지까지 낸다 — 503 만 주면 운영자가 다시 물어봐야 한다.
-    respond(Ok((code, json!({ "ready": down.is_empty(), "down": down }))))
+    // ★어느 빌드가 돌고 있는지 같이 낸다 — 회귀가 옛 바이너리를 상대로 도는 것을 봉쇄한다.
+    respond(Ok((code, json!({ "ready": down.is_empty(), "down": down, "build": common::build::stamp() }))))
 }
 
 #[cfg(test)]

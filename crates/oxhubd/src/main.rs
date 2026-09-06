@@ -33,8 +33,13 @@ fn parse_args() -> Args {
             "--system" => a.system = it.next().unwrap_or_default().into(),
             "--policy" => a.policy = it.next().unwrap_or_default().into(),
             "--id" => a.id = it.next().unwrap_or_default(),
+            // ★바이너리에게 직접 묻는 자리 — 파일 시각으로 추측하지 않는다(정§16-2 관측).
+            "--build" => {
+                println!("{}", common::build::stamp());
+                std::process::exit(0);
+            }
             _ => {
-                eprintln!("usage: oxhubd [--system system.toml] [--policy policy.toml] [--id hub-1]");
+                eprintln!("usage: oxhubd [--system system.toml] [--policy policy.toml] [--id hub-1] [--build]");
                 std::process::exit(2);
             }
         }

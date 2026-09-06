@@ -27,6 +27,11 @@ fn parse_args() -> Args {
     let mut a = Args { policy: "policy.toml".into(), id: "sfu-1".into(), grpc_listen: "127.0.0.1:50061".into(), udp_port: 20000, public_ip: "127.0.0.1".into() };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
+        // ★값을 안 받는 인자는 먼저 걸러야 한다 — 아래가 무조건 하나를 삼킨다.
+        if k == "--build" {
+            println!("{}", common::build::stamp());
+            std::process::exit(0);
+        }
         let v = it.next().unwrap_or_default();
         match k.as_str() {
             "--policy" => a.policy = v.into(),
@@ -35,7 +40,7 @@ fn parse_args() -> Args {
             "--udp-port" => a.udp_port = v.parse().unwrap_or(20000),
             "--public-ip" => a.public_ip = v,
             _ => {
-                eprintln!("usage: oxsfud [--policy policy.toml] [--id sfu-1] [--grpc-listen 127.0.0.1:50061] [--udp-port 20000] [--public-ip 127.0.0.1]");
+                eprintln!("usage: oxsfud [--policy policy.toml] [--id sfu-1] [--grpc-listen 127.0.0.1:50061] [--udp-port 20000] [--public-ip 127.0.0.1] [--build]");
                 std::process::exit(2);
             }
         }

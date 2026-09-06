@@ -1,0 +1,11 @@
+# 개발 실증 기동 인자 — ★2층 하네스(`oxe2epy`)가 이것을 읽어 서버를 띄운다.
+#
+# ★hub listen·유닛 id·gRPC 주소는 여기 안 적는다 — `system.dev.toml` 이 정본이다.
+#   두 곳에 적으면 하나만 고쳤을 때 갈린다. 여기는 **그 파일에 없는 것만** 든다.
+policy = "policy.toml"
+system = "dev/system.dev.toml"
+hub_id = "hub-1"
+# ICE 후보로 낼 주소. `auto` = 기본 인터페이스 주소(브라우저 3층이 다른 기기에서 붙는다).
+public_ip = "auto"
+# 유닛 순서대로 +1 씩. sfu-1=20000, sfu-2=20001.
+udp_base = 20000
