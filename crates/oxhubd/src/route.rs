@@ -96,13 +96,34 @@ pub fn room_of(op: Op, body: &Value) -> Result<String, FailCode> {
         let req: AffiliationReq = serde_json::from_value(body.clone()).map_err(|_| FailCode::InvalidPayload)?;
         return req.pub_select.or(req.pub_deselect).ok_or(FailCode::MissingField);
     }
-    body.get("room_id").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned).ok_or(FailCode::MissingField)
+    // 연§10-1 — `1002`(본문 파싱 실패)와 `1003`(필수 필드 누락)은 **다른 말**이다.
+    // ★있는데 형이 아닌 것을 「누락」으로 접으면 클라는 "필드를 안 보냈다" 는 잘못된 진단을 받는다
+    //   (20260906 악조건 탐침이 잡았다 — `{"room_id": 12345}` 가 `1003` 으로 왔다).
+    match body.get("room_id") {
+        Some(Value::String(s)) if !s.is_empty() => Ok(s.clone()),
+        // 빈 문자열은 안 준 것과 같이 본다 — 라우팅할 키가 없다.
+        None | Some(Value::String(_)) => Err(FailCode::MissingField),
+        Some(_) => Err(FailCode::InvalidPayload),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// 연§10-1 — ★「없다」와 「형이 아니다」는 다른 말이다. 접으면 클라가 잘못된 진단을 받는다.
+    #[test]
+    fn a_wrongly_typed_room_id_is_a_payload_error_not_a_missing_field() {
+        assert_eq!(room_of(Op::RoomJoin, &json!({"room_id": "r"})).unwrap(), "r");
+        assert_eq!(room_of(Op::RoomJoin, &json!({})).unwrap_err(), FailCode::MissingField);
+        assert_eq!(room_of(Op::RoomJoin, &json!({"room_id": ""})).unwrap_err(), FailCode::MissingField,
+            "빈 문자열은 안 준 것과 같다 — 라우팅할 키가 없다");
+        for bad in [json!(12345), json!(true), json!(["r"]), json!({"v": "r"}), json!(null)] {
+            assert_eq!(room_of(Op::RoomJoin, &json!({"room_id": bad})).unwrap_err(),
+                FailCode::InvalidPayload, "있는데 형이 아니다: {bad}");
+        }
+    }
 
     #[test]
     fn hrw_is_deterministic_and_moves_about_one_over_n() {

@@ -2143,6 +2143,33 @@ mod tests {
         assert_eq!(s.sweep_stalls(t0 + T_STALL_MS + STALL_WINDOW_MS), 1, "쿨다운이 지나면 다시 알린다");
     }
 
+    /// ★창(`STALL_WINDOW_MS`)과 sweep 주기(`REAPER_TICK_MS`)가 **둘 다 5초**라, 한 회차가
+    /// 1ms 만 모자라도 그 회차는 판정도 앵커 갱신도 안 하고 통째로 미뤄진다.
+    ///
+    /// 왜 실제로 모자라나 — `now_ms()` 는 **벽시계**고 tick 은 **단조시계**다. 둘이 어긋나는
+    /// 방향이 음수면 `now - probe_at` 이 4,999 가 된다. 드문 일이 아니라 ★**구조상 예정된 일**이다.
+    ///
+    /// 그래서 감지 지연이 2주기(10초)가 아니라 **3주기(15초)** 까지 늘어난다. 이 시험이 그 상한을
+    /// 못박는다 — 2층 시나리오의 실행 길이는 이 값에서 나와야 한다(짧으면 통지 전에 판이 끝난다).
+    #[test]
+    fn a_window_that_falls_one_millisecond_short_costs_a_whole_cycle() {
+        let s = sfu();
+        create(&s, "r", 5);
+        call(&s, "u1", Op::RoomJoin.code(), json!({"room_id": "r"}));
+        call(&s, "u2", Op::RoomJoin.code(), json!({"room_id": "r"}));
+        let full = json!({"kind": "audio", "ssrc": 7, "mid": "0", "pt": 111});
+        assert_eq!(call(&s, "u1", Op::PublishTracks.code(), json!({"room_id": "r", "tracks": [full]})).0, Kind::Ok);
+        call(&s, "u2", Op::Ready.code(), json!({"room_id": "r", "type": "tracks"}));
+
+        let t0 = now_ms();
+        assert_eq!(s.sweep_stalls(t0), 0, "첫 관측은 기준만 놓는다");
+        // 회차가 1ms 모자랐다 — 판정도 안 하고 ★앵커도 안 옮긴다.
+        assert_eq!(s.sweep_stalls(t0 + STALL_WINDOW_MS - 1), 0);
+        // 다음 회차는 앵커가 그대로라 창이 두 배로 찼다 — 여기서야 판정한다.
+        assert_eq!(s.sweep_stalls(t0 + STALL_WINDOW_MS * 2 - 1), 1,
+            "★한 번 모자라면 감지가 한 주기 통째로 밀린다 — 「가끔 안 뜬다」의 정체다");
+    }
+
     /// 정§7-3 ① — ★화자 본인의 슬롯 구독은 0 이 계약이다. 그것을 정체로 세면 안 된다.
     ///
     /// 서버가 슬롯 fan-out 에서 화자를 일부러 빼놓고, 5초 뒤 그 화자에게 "너한테 안 나간다"
