@@ -14,7 +14,7 @@ use super::conn::DemuxConn;
 use super::session::{ConnRole, TransportSession};
 use super::{demux, dtls, stun};
 use crate::handlers::{Sfu, now_ms};
-use crate::media::{self, codec, rtcp, rtp, rtx, twcc};
+use crate::media::{self, drops, codec, rtcp, rtp, rtx, twcc};
 use crate::peer::Peer;
 use crate::media::rewriter::Rewrite;
 use crate::media::subscribe::{SubscribeState, SubscriberStream};
@@ -96,25 +96,36 @@ async fn on_dtls(sfu: &Arc<Sfu>, socket: &Arc<UdpSocket>, data: Bytes, remote: S
 
 /// 정§2-2 전송 생존 관찰 + 정§7-3 전달. RTCP 종단은 §11 의 몫이라 여기선 생존만 센다.
 async fn on_srtp(sfu: &Arc<Sfu>, socket: &Arc<UdpSocket>, data: &[u8], remote: SocketAddr, egress: &mut Vec<u8>) {
-    let Some(session) = sfu.transport.by_addr(&remote) else { return };
+    let Some(session) = sfu.transport.by_addr(&remote) else {
+        drops::note(&sfu.drops.no_session);
+        return;
+    };
     // 세션이 주인을 직접 들고 있어 등록부를 다시 뒤지지 않는다.
-    let Some(peer) = session.peer() else { return };
+    let Some(peer) = session.peer() else {
+        drops::note(&sfu.drops.no_session);
+        return;
+    };
     peer.touch(now_ms());
     if rtp::is_rtcp(data) {
         // 정§11-2 — RTCP 는 릴레이가 아니라 종단이다. 1pc 는 한 5-tuple 로 섞여 오므로
         // ★복호 후 평문에서 패킷 단위로 분해한다(미해소는 계수하고 버린다).
         match session.decrypt_rtcp(data) {
             Ok(plain) => on_rtcp(sfu, socket, &peer, &session, &plain, egress).await,
-            Err(e) => debug!(user = %session.user_id, error = %e, "srtcp decrypt"),
+            Err(e) => {
+                drops::note(&sfu.drops.srtcp_decrypt);
+                debug!(user = %session.user_id, error = %e, "srtcp decrypt");
+            }
         }
         return;
     }
     if session.role != ConnRole::Publish {
+        drops::note(&sfu.drops.not_publisher);
         return;
     }
     let plain = match session.decrypt_rtp(data) {
         Ok(p) => p,
         Err(e) => {
+            drops::note(&sfu.drops.srtp_decrypt);
             debug!(user = %session.user_id, error = %e, "srtp decrypt");
             return;
         }
@@ -211,8 +222,15 @@ async fn relay_sender_report(socket: &Arc<UdpSocket>, peer: &Arc<Peer>, sr: &[u8
 ///
 /// ★이 함수는 힙을 잡지 않는다 — 구독자 목록은 RCU 안내자를 그대로 훑고, 조립은 넘겨받은 버퍼를 재사용한다.
 async fn fan_out(sfu: &Arc<Sfu>, socket: &Arc<UdpSocket>, peer: &Arc<Peer>, session: &Arc<TransportSession>, packet: &[u8], egress: &mut Vec<u8>) {
-    let Some(ssrc) = rtp::ssrc(packet) else { return };
-    let Some((stream, track)) = peer.publish.by_ssrc(ssrc).or_else(|| sfu.learn_simulcast(peer, packet, ssrc)) else { return };
+    let Some(ssrc) = rtp::ssrc(packet) else {
+        drops::note(&sfu.drops.malformed);
+        return;
+    };
+    let Some((stream, track)) = peer.publish.by_ssrc(ssrc).or_else(|| sfu.learn_simulcast(peer, packet, ssrc)) else {
+        // ★약속(연§4-1) 밖의 ssrc — 오설정이거나 남의 것이다. 조용히 버리면 영영 안 보인다.
+        drops::note(&sfu.drops.unknown_ssrc);
+        return;
+    };
     // 정§11-2 — 발행자가 신고한 번호로 읽는다. 서버 선언값으로 읽으면 협상 결과와 어긋난다.
     if let Some(id) = peer.publish.extmap().iter().find(|(_, uri)| *uri == media::URI_TWCC).map(|(id, _)| *id)
         && let Some(value) = rtp::extension_value(packet, id)
@@ -237,6 +255,7 @@ async fn fan_out(sfu: &Arc<Sfu>, socket: &Arc<UdpSocket>, peer: &Arc<Peer>, sess
         warn!(user = %peer.user_id, track = %stream.track_id, declared = stream.pt, arrived = pt, "pt mismatch");
     }
     if stream.muted() {
+        drops::note(&stream.drops.muted);
         return;
     }
     if stream.duplex() == Duplex::Half {
@@ -251,19 +270,32 @@ async fn fan_out(sfu: &Arc<Sfu>, socket: &Arc<UdpSocket>, peer: &Arc<Peer>, sess
         let Some(sub) = weak.upgrade() else { continue };
         // 게이트는 ★전이중 video 에만 — audio 는 어떤 경우에도 gate 로 죽지 않는다.
         if sub.kind == MediaKind::Video && sub.state() != SubscribeState::Active {
+            // 정§7-4 — 여기서 버리면 출력 seq 에 구멍이 남는다. ★서버가 만든 구멍이다.
+            drops::note(&sub.drops.gate);
             continue;
         }
-        let Some(transport) = sub.transport.as_ref() else { continue };
-        let Some(addr) = transport.addr.get() else { continue };
+        let Some(transport) = sub.transport.as_ref() else {
+            drops::note(&sub.drops.no_transport);
+            continue;
+        };
+        let Some(addr) = transport.addr.get() else {
+            drops::note(&sub.drops.no_transport);
+            continue;
+        };
         assemble(egress, packet, &sub);
         stamp_twcc(&sub, transport, egress, now_ms());
         // 정§11-1 하향 — 재전송에 대비해 나간 것을 담는다. ★평문이다(암호는 그때 다시 건다).
         if let Some(seq) = rtp::sequence(egress) {
             sub.rtx.keep(seq, egress);
         }
-        let Ok(sealed) = transport.encrypt_rtp(egress) else { continue };
+        let Ok(sealed) = transport.encrypt_rtp(egress) else {
+            drops::note(&sub.drops.encrypt);
+            continue;
+        };
         if socket.send_to(&sealed, addr).await.is_ok() {
             sub.sent.fetch_add(1, Ordering::Relaxed);
+        } else {
+            drops::note(&sub.drops.send_err);
         }
     }
 }
@@ -289,9 +321,19 @@ async fn serve_nack(socket: &Arc<UdpSocket>, peer: &Arc<Peer>, pkt: &[u8], now: 
                     sent += 1;
                 }
             }
-            Err(rtx::Refusal::Gate) => gate += 1,
-            Err(rtx::Refusal::Miss) => miss += 1,
-            Err(rtx::Refusal::Budget) => budget += 1,
+            // ★로그로만 흘리면 사유가 그 순간에 사라진다 — 계수로도 남긴다(정§16-2).
+            Err(rtx::Refusal::Gate) => {
+                gate += 1;
+                drops::note(&sub.drops.rtx_gate);
+            }
+            Err(rtx::Refusal::Miss) => {
+                miss += 1;
+                drops::note(&sub.drops.rtx_miss);
+            }
+            Err(rtx::Refusal::Budget) => {
+                budget += 1;
+                drops::note(&sub.drops.rtx_budget);
+            }
         }
     }
     if gate + miss + budget > 0 {
@@ -351,12 +393,20 @@ async fn fan_out_simulcast(
     packet: &[u8],
     egress: &mut Vec<u8>,
 ) {
-    let Some(rid) = track.rid.clone() else { return };
+    let Some(rid) = track.rid.clone() else {
+        drops::note(&stream.drops.slot_unbound);
+        return;
+    };
     let keyframe = rtp::payload(packet).is_some_and(|p| codec::is_keyframe(stream.codec, p));
     let now = now_ms();
     for weak in track.subscribers().iter() {
         let Some(sub) = weak.upgrade() else { continue };
-        if sub.state() != SubscribeState::Active || sub.paused() {
+        if sub.state() != SubscribeState::Active {
+            drops::note(&sub.drops.gate);
+            continue;
+        }
+        if sub.paused() {
+            drops::note(&sub.drops.paused);
             continue;
         }
         let wanted = sub.wanted_rid();
@@ -370,6 +420,10 @@ async fn fan_out_simulcast(
                 if sub.aim(&rid, now) {
                     debug!(user = %sub.subscriber, track = %stream.track_id, rid = %rid, "layer target set, waiting for a keyframe");
                 }
+                // ★목표 단인데 아직 못 올린다 — *"왜 안 올라가나"* 의 입력이다(정§16-2).
+                //   ★비선택 단(`wanted != rid`)은 위에서 이미 빠졌다 — 그쪽은 버린 게 아니라
+                //   애초에 이 구독자 몫이 아니라서 안 센다(핫패스 카운팅 억제).
+                drops::note(&sub.drops.awaiting_keyframe);
                 continue;
             }
             sub.switch_to(&rid);
@@ -377,12 +431,21 @@ async fn fan_out_simulcast(
             // 상한이 내려갔다 — 다음 목표의 키프레임이 올 때까지 지금 단을 계속 흘린다.
             sub.aim(wanted, now);
         }
-        let Some(transport) = sub.transport.as_ref() else { continue };
-        let Some(addr) = transport.addr.get() else { continue };
+        let Some(transport) = sub.transport.as_ref() else {
+            drops::note(&sub.drops.no_transport);
+            continue;
+        };
+        let Some(addr) = transport.addr.get() else {
+            drops::note(&sub.drops.no_transport);
+            continue;
+        };
         egress.clear();
         egress.extend_from_slice(packet);
         match sub.rewriter.rewrite(egress, &rid, sub.vssrc) {
-            Rewrite::Skip => continue,
+            Rewrite::Skip => {
+                drops::note(&sub.drops.rewrite_skip);
+                continue;
+            }
             // 정§11-1 ① — 단이 갈리면 egress seq 공간도 갈린다. 앞의 요구는 전부 stale 이다.
             Rewrite::Switched => sub.rtx.reset(now),
             Rewrite::Kept => {}
@@ -394,10 +457,15 @@ async fn fan_out_simulcast(
         if let Some(seq) = rtp::sequence(egress) {
             sub.rtx.keep(seq, egress);
         }
-        let Ok(sealed) = transport.encrypt_rtp(egress) else { continue };
+        let Ok(sealed) = transport.encrypt_rtp(egress) else {
+            drops::note(&sub.drops.encrypt);
+            continue;
+        };
         if socket.send_to(&sealed, addr).await.is_ok() {
             sub.sent.fetch_add(1, Ordering::Relaxed);
             sub.sent_octets.fetch_add(egress.len() as u64, Ordering::Relaxed);
+        } else {
+            drops::note(&sub.drops.send_err);
         }
     }
 }
@@ -406,13 +474,20 @@ async fn fan_out_simulcast(
 /// 산출 조건은 둘: 방 = 그 순간의 `pub_room`(RCU) · 그 방 발언권 화자 == 발행자.
 /// 통과한 것만 `T1`·`T2` 의 "RTP 수신"으로 센다(정§9-2) — 막힌 RTP 는 발화가 아니다.
 async fn prefan(socket: &Arc<UdpSocket>, peer: &Arc<Peer>, stream: &Arc<PublisherStream>, packet: &[u8], egress: &mut Vec<u8>) {
-    let Some(room) = peer.pub_room() else { return };
+    let Some(room) = peer.pub_room() else {
+        drops::note(&stream.drops.no_room);
+        return;
+    };
     if !room.floor.is_speaker(&peer.user_id) {
+        // ★0 이 아니면 클라 게이트가 새고 있다는 뜻이다 — 서버가 막았으니 소리는 안 나지만
+        //   그 사실 자체가 관측 대상이다(정§7-3 강제 권위).
+        drops::note(&stream.drops.no_floor);
         return;
     }
     // 정§7-3·§9-7 — 결합 판정은 ★정체 판정(정§14-3)과 같은 함수를 쓴다. 조건을 두 곳에 적으면
     //   어긋난다(정§8-1). 어긋났던 자국은 `media::slot::bound_slot` 본문에 있다.
     let Some(slot) = media::slot::bound_slot(&room.slots, stream) else {
+        drops::note(&stream.drops.slot_unbound);
         return;
     };
     room.floor.on_media(now_ms());
@@ -420,6 +495,7 @@ async fn prefan(socket: &Arc<UdpSocket>, peer: &Arc<Peer>, stream: &Arc<Publishe
     egress.extend_from_slice(packet);
     let rewriter = room.slots.rewriter(stream.kind);
     if rewriter.rewrite(egress, &peer.user_id, slot.vssrc) == Rewrite::Skip {
+        drops::note(&stream.drops.rewrite_skip);
         return;
     }
     let base = std::mem::take(egress);
@@ -429,8 +505,14 @@ async fn prefan(socket: &Arc<UdpSocket>, peer: &Arc<Peer>, stream: &Arc<Publishe
         if sub.subscriber == peer.user_id {
             continue;
         }
-        let Some(transport) = sub.transport.as_ref() else { continue };
-        let Some(addr) = transport.addr.get() else { continue };
+        let Some(transport) = sub.transport.as_ref() else {
+            drops::note(&sub.drops.no_transport);
+            continue;
+        };
+        let Some(addr) = transport.addr.get() else {
+            drops::note(&sub.drops.no_transport);
+            continue;
+        };
         assemble(egress, &base, &sub);
         stamp_twcc(&sub, transport, egress, now_ms());
         // 정§11-1 하향 — 슬롯도 재전송에 답한다. 담지 않으면 NACK 이 전부 Miss 로 떨어진다.
@@ -439,10 +521,15 @@ async fn prefan(socket: &Arc<UdpSocket>, peer: &Arc<Peer>, stream: &Arc<Publishe
         if let Some(seq) = rtp::sequence(egress) {
             sub.rtx.keep(seq, egress);
         }
-        let Ok(sealed) = transport.encrypt_rtp(egress) else { continue };
+        let Ok(sealed) = transport.encrypt_rtp(egress) else {
+            drops::note(&sub.drops.encrypt);
+            continue;
+        };
         if socket.send_to(&sealed, addr).await.is_ok() {
             sub.sent.fetch_add(1, Ordering::Relaxed);
             sub.sent_octets.fetch_add(egress.len() as u64, Ordering::Relaxed);
+        } else {
+            drops::note(&sub.drops.send_err);
         }
     }
 }

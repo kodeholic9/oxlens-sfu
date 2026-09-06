@@ -102,10 +102,26 @@ pub struct Sfu {
     socket: arc_swap::ArcSwapOption<tokio::net::UdpSocket>,
     /// 정§14-3 — `(user, 방)` 마다 마지막 정체 통보 시각. 쿨다운의 자리다.
     stall_told: dashmap::DashMap<String, u64>,
+    /// 정§16-2 — 스트림을 짓기 전에 버린 것. 누구 것인지 모르는 자리라 여기 모인다.
+    pub drops: media::drops::SfuDrops,
 }
 
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+/// 사유가 하나도 없으면 칸을 안 만든다 — 「없다」와 「0 이다」는 다른 말이다(연§6-6).
+fn put_drops(row: &mut Value, rows: Vec<(&'static str, u64)>) {
+    put_named(row, "drops", rows);
+}
+
+fn put_named(row: &mut Value, key: &str, rows: Vec<(&'static str, u64)>) {
+    if rows.is_empty() {
+        return;
+    }
+    if let Some(map) = row.as_object_mut() {
+        map.insert(key.to_owned(), rows.into_iter().map(|(n, v)| (n.to_owned(), Value::from(v))).collect::<serde_json::Map<_, _>>().into());
+    }
 }
 
 fn ok(op: u16, pid: u32, body: &Value) -> Vec<u8> {
@@ -125,7 +141,7 @@ fn parse<T: DeserializeOwned>(body: &Value) -> Result<T, Failure> {
 
 impl Sfu {
     pub fn new(epoch: String, media: MediaParams, cert: Arc<ServerCert>) -> Self {
-        Self { epoch, rooms: RoomRegistry::default(), peers: PeerMap::default(), bus: EventBus::default(), media, transport: TransportRegistry::default(), cert, socket: arc_swap::ArcSwapOption::empty(), stall_told: dashmap::DashMap::new() }
+        Self { epoch, rooms: RoomRegistry::default(), peers: PeerMap::default(), bus: EventBus::default(), media, transport: TransportRegistry::default(), cert, socket: arc_swap::ArcSwapOption::empty(), stall_told: dashmap::DashMap::new(), drops: media::drops::SfuDrops::default() }
     }
 
     /// envelope 하나 → 응답 wire 하나. `Arc` 로 받는 것은 ★키프레임 요청처럼 응답을 안 붙잡는
@@ -143,6 +159,7 @@ impl Sfu {
             iop::ROOM_LIST => Ok(self.room_list()),
             iop::ROOM_CREATE => self.room_create(&body),
             iop::ROOM_GET => self.room_get(&env.user_id, &body),
+            iop::SFU_STATS => Ok(self.sfu_stats()),
             code => match Op::from_code(code) {
                 Some(Op::RoomJoin) => self.room_join(env, &body),
                 Some(Op::RoomLeave) => self.room_leave(&env.user_id, &body),
@@ -168,6 +185,39 @@ impl Sfu {
 
     fn room_list(&self) -> Value {
         json!({ "rooms": self.rooms.list() })
+    }
+
+    /// 정§16-2 관측 — ★**상태가 아니라 판단의 입력을 낸다.** 흐른 것과 버린 것을 나란히 놓는다.
+    ///
+    /// ★0 인 사유는 안 싣는다(`snapshot` 이 이미 거른다) — 조용한 판은 `drops` 칸 자체가 없다.
+    /// ★핫패스에 계수를 늘리지 않는다(정§16-2) — 여기 보이는 흐름 계수는 **이미 있던 것**이고,
+    ///   새로 는 것은 버린 자리뿐이다. packets/bytes 의 정본은 여전히 클라 `getStats` 다.
+    fn sfu_stats(&self) -> Value {
+        let mut peers = Vec::new();
+        for peer in self.peers.snapshot() {
+            let mut pubs = Vec::new();
+            for stream in peer.publish.all() {
+                let mut row = json!({
+                    "track_id": stream.track_id, "kind": stream.kind, "rtp_in": stream.rtp_in(),
+                });
+                put_drops(&mut row, stream.drops.snapshot());
+                pubs.push(row);
+            }
+            let mut subs = Vec::new();
+            for sub in peer.subscribe.all() {
+                let mut row = json!({
+                    "track_id": sub.track_id, "kind": sub.kind,
+                    "sent": sub.sent.load(std::sync::atomic::Ordering::Relaxed),
+                });
+                put_drops(&mut row, sub.drops.snapshot());
+                put_named(&mut row, "stall_skips", sub.stall_skips.snapshot());
+                subs.push(row);
+            }
+            peers.push(json!({ "user_id": peer.user_id, "publish": pubs, "subscribe": subs }));
+        }
+        let mut out = json!({ "epoch": self.epoch, "peers": peers });
+        put_drops(&mut out, self.drops.snapshot());
+        out
     }
 
     fn room_create(&self, body: &Value) -> Result<Value, Failure> {
@@ -1033,15 +1083,25 @@ impl Sfu {
     ///
     /// ★자격이 없는 창은 정체가 아니다. 규격이 그 창을 열거하지만(정§14-3 오탐 목록) ★열거는
     /// 사본이라 반드시 어긋난다 — 여기서는 **흘리는 쪽과 같은 판정**을 물어 사본을 없앤다.
+    /// ★건너뛴 사유를 계수로 남긴다(정§16-2) — 안 남기면 통지가 없을 때
+    /// **감지가 죽은 것인지 정상 유예인지 밖에서 가를 수 없다.**
     fn should_flow(&self, sub: &Arc<SubscriberStream>) -> bool {
+        let skips = &sub.stall_skips;
         // 게이트가 안 열렸거나 수동 pause 면 아직 흐를 자리가 아니다(정§7-4·§10-1).
-        if sub.state() != SubscribeState::Active || sub.paused() {
+        if sub.state() != SubscribeState::Active {
+            media::drops::note(&skips.gate);
+            return false;
+        }
+        if sub.paused() {
+            media::drops::note(&skips.paused);
             return false;
         }
         let Some(stream) = self.stream_of(&sub.room_id, &sub.track_id) else {
+            media::drops::note(&skips.no_stream);
             return false; // 발행 자체가 없다 — 슬롯 껍데기만 남은 것이다.
         };
         if stream.muted() {
+            media::drops::note(&skips.muted);
             return false;
         }
         if stream.duplex() != Duplex::Half {
@@ -1049,29 +1109,39 @@ impl Sfu {
         }
         // ── 반이중(무전 슬롯) ────────────────────────────────────────────────
         let Some(room) = self.rooms.get(&sub.room_id) else {
+            media::drops::note(&skips.no_room);
             return false;
         };
         let Some(speaker) = room.floor.speaker() else {
+            media::drops::note(&skips.no_speaker);
             return false; // 아무도 말하지 않는다 — 조용한 무전은 정상이다.
         };
         // 정§7-3 ① — 슬롯 fan-out 은 ★화자 본인을 뺀다. 화자 자신의 슬롯 구독은 0 이 계약이다.
         if speaker.as_str() == sub.subscriber {
+            media::drops::note(&skips.self_speaker);
             return false;
         }
         // ★그 화자가 이 슬롯에 **결합돼 있나** — 흘리는 쪽과 같은 함수로 묻는다(정§9-7).
         //   코덱 불일치로 등록이 거절됐거나 그 kind 를 아예 안 올렸으면 흘릴 소스가 없다.
         let Some(peer) = self.peers.get(speaker.as_str()) else {
+            media::drops::note(&skips.no_speaker);
             return false;
         };
         if peer.pub_room_id().as_deref() != Some(sub.room_id.as_str()) {
+            media::drops::note(&skips.wrong_room);
             return false; // 발언 방이 여기가 아니다(정§7-3 반이중 행 — 매 패킷 `pub_room`).
         }
-        peer.publish
+        let bound = peer
+            .publish
             .all()
             .into_iter()
             .filter(|s| s.kind == stream.kind)
             .filter_map(|s| media::slot::bound_slot(&room.slots, &s))
-            .any(|slot| slot.track_id == sub.track_id)
+            .any(|slot| slot.track_id == sub.track_id);
+        if !bound {
+            media::drops::note(&skips.unbound);
+        }
+        bound
     }
 
     /// 정§14-3 — 같은 (user, 방) 재통보는 `T-stall` 쿨다운을 둔다. 폭풍 방지다.
@@ -2109,6 +2179,28 @@ mod tests {
             .filter(|(op, _, b)| *op == Op::RoomEvent.code() && b["type"] == "sync_required")
             .map(|(_, u, _)| u).collect();
         assert_eq!(who, vec!["u2".to_string()], "★화자 u1 에게는 가지 않는다");
+    }
+
+    /// ★조용한 유예와 죽은 감지를 가르는 자리(정§16-2). 통지가 0 인 것만으로는 둘을 못 가른다 —
+    /// 어느 창에서 건너뛰었는지가 계수로 남아야 밖에서 답할 수 있다.
+    #[test]
+    fn a_skipped_judgement_says_which_window_it_skipped() {
+        let full = |ssrc: u32| json!({"kind": "audio", "ssrc": ssrc, "mid": "0", "pt": 111});
+        let s = sfu();
+        create(&s, "r", 5);
+        call(&s, "u1", Op::RoomJoin.code(), json!({"room_id": "r"}));
+        call(&s, "u2", Op::RoomJoin.code(), json!({"room_id": "r"}));
+        assert_eq!(call(&s, "u1", Op::PublishTracks.code(), json!({"room_id": "r", "tracks": [full(7)]})).0, Kind::Ok);
+        let t0 = now_ms();
+        s.sweep_stalls(t0);
+        assert_eq!(s.sweep_stalls(t0 + STALL_WINDOW_MS * 3), 0, "READY 전은 정체가 아니다");
+
+        let subs: Vec<_> = s.peers.get("u2").unwrap().subscribe.all();
+        let seen: Vec<_> = subs.iter().flat_map(|x| x.stall_skips.snapshot()).collect();
+        assert!(seen.iter().any(|(n, v)| *n == "gate" && *v > 0),
+            "★어느 창에서 건너뛰었는지를 안 남기면 감지가 죽어도 같은 그림이다: {seen:?}");
+        assert!(seen.iter().all(|(n, _)| *n == "gate"),
+            "★건너뛴 사유는 하나여야 한다 — 여럿이면 판정이 어디서 멈췄는지 못 읽는다: {seen:?}");
     }
 
     /// 나머지 오탐 창 셋 — 게이트 전 · muted · Peer 비Alive. 하나만 빠져도 헛 재동기가 돈다.

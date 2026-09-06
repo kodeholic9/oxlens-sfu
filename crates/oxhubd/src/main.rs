@@ -147,6 +147,8 @@ async fn main() {
         .route("/admin/rooms", get(rest::admin_rooms))
         .route("/admin/users", get(rest::admin_users))
         .route("/admin/snapshot", get(rest::admin_snapshot))
+        // 정§16-2 — 버린 것을 사유별로 읽는 자리. 계수만 두고 읽을 길이 없으면 조용한 drop 과 같다.
+        .route("/admin/drops", get(rest::admin_drops))
         .merge(client)
         .with_state(rest_state);
     let app = if base.is_empty() { inner } else { Router::new().nest(&base, inner) };

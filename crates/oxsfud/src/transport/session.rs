@@ -5,7 +5,7 @@
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use dashmap::DashMap;
@@ -56,7 +56,8 @@ struct DcState {
     tx: Mutex<Option<mpsc::Sender<Vec<u8>>>>,
     ready: AtomicBool,
     pending: Mutex<VecDeque<Vec<u8>>>,
-    dropped: AtomicU64,
+    /// 정§16-2 — 사유별. `dc_dropped()` 는 그 합이다.
+    pub drops: crate::media::drops::DcDrops,
 }
 
 pub struct TransportSession {
@@ -163,7 +164,7 @@ impl TransportSession {
     }
 
     pub fn dc_dropped(&self) -> u64 {
-        self.dc.dropped.load(Ordering::Relaxed)
+        self.dc.drops.total()
     }
 
     /// 정§13 — `try_send` 실패는 계수이지 연결 종료 사유가 아니다. 미개통이면 64 버퍼에 쌓는다.
@@ -172,14 +173,14 @@ impl TransportSession {
             && let Some(tx) = self.dc.tx.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
         {
             if tx.try_send(frame).is_err() {
-                self.dc.dropped.fetch_add(1, Ordering::Relaxed);
+                crate::media::drops::note(&self.dc.drops.full);
             }
             return;
         }
         let mut pending = self.dc.pending.lock().unwrap_or_else(|e| e.into_inner());
         if pending.len() >= DC_PENDING_CAP {
             pending.pop_front();
-            self.dc.dropped.fetch_add(1, Ordering::Relaxed);
+            crate::media::drops::note(&self.dc.drops.pending_overflow);
         }
         pending.push_back(frame);
     }

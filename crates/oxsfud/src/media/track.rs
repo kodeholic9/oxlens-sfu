@@ -122,6 +122,8 @@ pub struct PublisherStream {
     pub fmtp: Option<String>,
     pub source: Option<String>,
     pub simulcast: bool,
+    /// 정§16-2 — 이 스트림을 내보내지 않기로 한 사유별 계수.
+    pub drops: crate::media::drops::PubDrops,
     duplex: AtomicU8,
     muted: AtomicBool,
     state: AtomicU8,
@@ -252,6 +254,7 @@ impl PublisherStream {
             fmtp: spec.fmtp,
             source: spec.source,
             simulcast: spec.simulcast,
+            drops: crate::media::drops::PubDrops::default(),
             duplex: AtomicU8::new(u8::from(spec.duplex == Duplex::Half)),
             muted: AtomicBool::new(false),
             state: AtomicU8::new(PublishState::Created.code()),

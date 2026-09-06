@@ -76,6 +76,10 @@ pub struct SubscriberStream {
     /// egress 를 내보내는 자리 — 직접 소유한다(패킷마다 조회하지 않는다). 회수된 뒤엔 `None` 이다.
     pub transport: Option<Arc<TransportSession>>,
     pub sent: AtomicU64,
+    /// 정§16-2 — ★받을 사람이 정해졌는데 그에게 못/안 간 사유별 계수.
+    pub drops: crate::media::drops::SubDrops,
+    /// 정§16-2 — 정체 판정을 건너뛴 사유. ★통지가 없을 때 죽은 것과 정상 유예를 가른다.
+    pub stall_skips: crate::media::drops::StallSkips,
     /// 정§11-2 — 번역 SR 의 `octets`. 페이로드가 아니라 보낸 RTP 전체 길이다(RFC 3550 §6.4.1).
     pub sent_octets: AtomicU64,
     /// `T-gate` 안전망의 기준 시각(정§7-4).
@@ -410,6 +414,8 @@ impl SubscribeContext {
             transport,
             sent: AtomicU64::new(0),
             sent_octets: AtomicU64::new(0),
+            drops: crate::media::drops::SubDrops::default(),
+            stall_skips: crate::media::drops::StallSkips::default(),
             auto: Mutex::new(AutoState::default()),
             remb_bps: AtomicU64::new(0),
             remb_at_ms: AtomicU64::new(0),

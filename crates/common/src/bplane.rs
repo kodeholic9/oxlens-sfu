@@ -17,6 +17,8 @@ pub mod iop {
     pub const ROOM_CREATE: u16 = 0x0F02;
     /// hub→sfud `{ room_id, tracks: bool }` (envelope `user_id` 가 있으면 그 사람이 입장한 방일 때만 `mid`) → 연§5-5 형.
     pub const ROOM_GET: u16 = 0x0F03;
+    /// hub→sfud `{}` → 정§16-2 관측 스냅샷. ★계수를 읽는 자리 — 없으면 계수가 곧 조용한 drop 이다.
+    pub const SFU_STATS: u16 = 0x0F04;
     /// sfud→hub `{ type: "created" | "destroyed", room_id }` — 배치 학습·해제.
     pub const ROOM_LIFECYCLE: u16 = 0x0F10;
 

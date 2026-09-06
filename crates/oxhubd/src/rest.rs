@@ -116,6 +116,29 @@ pub async fn admin_rooms(State(st): State<Arc<RestState>>, ConnectInfo(peer): Co
     respond(Ok((StatusCode::OK, json!({ "rooms": rooms, "total": rooms.len() }))))
 }
 
+/// 정§16-2 관측 평면 — 사유별 drop 계수. ★유닛마다 따로 낸다(합치면 어느 유닛인지 잃는다).
+/// 실패 노드는 그 자리에 `error` 를 적는다 — 빠뜨리면 "0 건"으로 읽힌다.
+pub async fn admin_drops(State(st): State<Arc<RestState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap) -> axum::response::Response {
+    if let Some(deny) = guard(&st, &peer, &headers) {
+        return deny;
+    }
+    let mut units: Vec<Value> = Vec::new();
+    for node in st.backend.nodes.all() {
+        let env = bplane::Envelope { session_id: String::new(), user_id: String::new(), room_id: String::new(), target: String::new(), exclude: Vec::new(), wire: internal_wire(iop::SFU_STATS, &Value::Null), pc_mode: String::new(), floor_priority: 0 };
+        let row = match st.backend.send_to_node(&node.id, env).await.map_err(fail_of).and_then(|w| unwrap_wire(&w)) {
+            Ok(mut v) => {
+                if let Some(map) = v.as_object_mut() {
+                    map.insert("sfu_id".into(), Value::String(node.id.clone()));
+                }
+                v
+            }
+            Err((_, f)) => json!({ "sfu_id": node.id, "error": f.code }),
+        };
+        units.push(row);
+    }
+    respond(Ok((StatusCode::OK, json!({ "units": units }))))
+}
+
 /// 정§16-1 사용자 평면 — 붙어 있는 세션. ★토큰·시크릿은 안 낸다.
 pub async fn admin_users(State(st): State<Arc<RestState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap) -> axum::response::Response {
     if let Some(deny) = guard(&st, &peer, &headers) {

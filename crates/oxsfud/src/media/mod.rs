@@ -4,6 +4,7 @@
 
 pub mod autolayer;
 pub mod codec;
+pub mod drops;
 pub mod floor;
 pub mod mid;
 pub mod nack;
