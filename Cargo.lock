@@ -1315,6 +1315,7 @@ dependencies = [
  "common",
  "dashmap",
  "futures-util",
+ "nix",
  "oxsig",
  "serde",
  "serde_json",

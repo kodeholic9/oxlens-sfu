@@ -38,6 +38,11 @@ pub struct RoomMap {
 }
 
 impl RoomMap {
+    /// 정§16-1 방 평면 — `(room_id, node_id)` 전량. ★hub 가 아는 방이 곧 배치 맵이다(§15-2).
+    pub fn placements(&self) -> Vec<(String, String)> {
+        self.rooms.iter().map(|e| (e.key().clone(), e.value().clone())).collect()
+    }
+
     pub fn node_of(&self, room_id: &str) -> Option<String> {
         self.rooms.get(room_id).map(|n| n.clone())
     }

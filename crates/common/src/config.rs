@@ -76,11 +76,47 @@ fn default_roles() -> Vec<String> {
     vec![crate::auth::ROLE_USER.to_owned(), crate::auth::ROLE_ADMIN.to_owned()]
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Supervisor {
     #[serde(default)]
     pub enabled: bool,
+    /// 첫 재기동까지 기다리는 시간 — 이후 지수로 늘린다.
+    #[serde(default = "default_backoff_start")]
+    pub backoff_start_ms: u64,
+    #[serde(default = "default_backoff_max")]
+    pub backoff_max_ms: u64,
+    /// 정§16-1 backoff 폭주 판정 — 이 창 안에서 이만큼 기동하면 `Blocked` 다.
+    #[serde(default = "default_burst")]
+    pub start_limit_burst: u32,
+    #[serde(default = "default_burst_window")]
+    pub start_limit_interval_sec: u64,
+}
+
+fn default_backoff_start() -> u64 {
+    500
+}
+fn default_backoff_max() -> u64 {
+    30_000
+}
+fn default_burst() -> u32 {
+    5
+}
+fn default_burst_window() -> u64 {
+    60
+}
+
+// ★`derive(Default)` 를 안 쓴다 — 그러면 같은 기본값이 두 곳(0 과 serde fn)에 생겨 갈린다.
+impl Default for Supervisor {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            backoff_start_ms: default_backoff_start(),
+            backoff_max_ms: default_backoff_max(),
+            start_limit_burst: default_burst(),
+            start_limit_interval_sec: default_burst_window(),
+        }
+    }
 }
 
 /// 정§18-1 유닛 목록 — 노드 등재 자리는 이것 하나. `cmd` 없음 = 원격(dial 만).

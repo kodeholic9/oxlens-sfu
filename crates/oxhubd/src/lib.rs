@@ -9,4 +9,5 @@ pub mod nodes;
 pub mod rest;
 pub mod route;
 pub mod session;
+pub mod supervisor;
 pub mod ws;

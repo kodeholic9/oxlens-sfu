@@ -50,6 +50,12 @@ impl Hub {
         self.registry.conn_of_user(user_id).is_some_and(|c| self.notify_raw(c, op, body))
     }
 
+    /// 정§16-1 종료 순서 ① — 붙어 있는 전원에게 같은 사유로 Close. 몇에게 갔는지 돌려준다.
+    /// ★`4006` 은 연§10-3 에서 재접속 가능이라 클라가 백오프로 다시 온다 — 조용히 끊으면 전원이 즉시 몰린다.
+    pub fn close_all(&self, code: CloseCode) -> usize {
+        self.conns.iter().filter(|h| h.close.try_send(code).is_ok()).count()
+    }
+
     pub fn notify_user_json(&self, user_id: &str, op: Op, body: &Value) -> bool {
         self.notify_user(user_id, op.code(), body.to_string().into_bytes())
     }
@@ -144,4 +150,42 @@ async fn run(mut socket: WebSocket, hub: Arc<Hub>) {
         hub.registry.detach(sid, conn_id, Instant::now());
     }
     info!(conn_id, "ws closed");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::NoBackend;
+
+    fn hub() -> Hub {
+        let reg = Arc::new(SessionRegistry::new("s", Duration::from_secs(60), 10_000));
+        Hub::new(reg, Arc::new(NoBackend), 8, Duration::from_secs(30))
+    }
+
+    #[tokio::test]
+    async fn shutdown_reaches_every_connection_with_the_same_reason() {
+        let h = hub();
+        let mut rx = Vec::new();
+        for id in 1..=3u64 {
+            let (notify, _n) = mpsc::channel(1);
+            let (close, r) = mpsc::channel(1);
+            h.conns.insert(id, ConnHandle { notify, close });
+            rx.push(r);
+        }
+        assert_eq!(h.close_all(CloseCode::ServerShutdown), 3);
+        for r in &mut rx {
+            // ★사유가 4006 이라야 클라가 백오프로 다시 온다(연§10-3) — 조용히 끊으면 전원이 즉시 몰린다.
+            assert_eq!(r.recv().await, Some(CloseCode::ServerShutdown));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_connection_that_cannot_take_it_is_not_counted() {
+        let h = hub();
+        let (notify, _n) = mpsc::channel(1);
+        let (close, r) = mpsc::channel(1);
+        drop(r); // 이미 끊어진 연결
+        h.conns.insert(1, ConnHandle { notify, close });
+        assert_eq!(h.close_all(CloseCode::ServerShutdown), 0, "못 간 것을 갔다고 세지 않는다");
+    }
 }

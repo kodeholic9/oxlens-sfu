@@ -15,8 +15,9 @@ use oxhubd::nodes::NodeTable;
 use oxhubd::rest::{self, RestState};
 use oxhubd::route::RoomMap;
 use oxhubd::session::SessionRegistry;
+use oxhubd::supervisor::Supervisor;
 use oxhubd::ws::{self, Hub};
-use tracing::info;
+use tracing::{error, info};
 
 struct Args {
     system: PathBuf,
@@ -94,9 +95,38 @@ async fn main() {
         }
     });
 
+    // 정§16-1 supervisor — 꺼져 있으면 유닛을 하나도 안 쥔다(설정 그대로).
+    let sup = Supervisor::new(&system.supervisor, &system.units);
+    let supervising = !sup.is_empty();
+    let (blocked_tx, mut blocked_rx) = tokio::sync::mpsc::channel::<String>(1);
+    let sup_slot: Arc<tokio::sync::Mutex<Supervisor>> = Arc::new(tokio::sync::Mutex::new(sup));
+    if supervising {
+        let held = sup_slot.clone();
+        let table = nodes.clone();
+        tokio::spawn(async move {
+            held.lock().await.start_all(Instant::now());
+            let mut t = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                t.tick().await;
+                // ★붙느냐를 먼저 훑어서 넣어 준다 — 상태기가 gRPC 를 모르게.
+                let mut live: Vec<String> = Vec::new();
+                for node in table.all() {
+                    if node.client().await.is_some() {
+                        live.push(node.id.clone());
+                    }
+                }
+                let blocked = held.lock().await.tick(Instant::now(), &|id| live.iter().any(|l| l == id));
+                if let Some(id) = blocked {
+                    let _ = blocked_tx.send(id).await;
+                    return;
+                }
+            }
+        });
+    }
+
     let listen = system.hub.listen.clone();
     let base = system.hub.base_path.clone();
-    let rest_state = Arc::new(RestState { system, policy, registry, backend });
+    let rest_state = Arc::new(RestState { system, policy, registry, backend, supervisor: sup_slot.clone() });
     // 연§5-1 — 브라우저 클라가 부르는 자리와 앱 백엔드·운영의 자리를 가른다.
     // CORS 는 앞쪽에만 붙는다: /auth/token 은 앱 백엔드 몫이고 /admin·/healthz 는 운영이다.
     let mut client = Router::new()
@@ -105,11 +135,18 @@ async fn main() {
     if let Some(layer) = rest::cors(&rest_state.policy.hub.allowed_origins) {
         client = client.layer(layer);
     }
+    let hub_for_close = hub.clone();
     let inner = Router::new()
         .route("/ws", get(ws::upgrade).with_state(hub))
         .route("/auth/token", post(rest::token))
-        .route("/healthz", get(rest::healthz))
+        // 정§16-1 — 생존과 준비는 다른 물음이다. 하나로 두면 재기동할 때와 기다릴 때가 안 갈린다.
+        .route("/healthz/live", get(rest::healthz_live))
+        .route("/healthz/ready", get(rest::healthz_ready))
+        // 정§16-1 — 방·유닛·사용자·스냅샷 네 평면.
         .route("/admin/sfus", get(rest::admin_sfus))
+        .route("/admin/rooms", get(rest::admin_rooms))
+        .route("/admin/users", get(rest::admin_users))
+        .route("/admin/snapshot", get(rest::admin_snapshot))
         .merge(client)
         .with_state(rest_state);
     let app = if base.is_empty() { inner } else { Router::new().nest(&base, inner) };
@@ -117,5 +154,33 @@ async fn main() {
         eprintln!("bind {listen}: {e}");
         std::process::exit(2);
     });
-    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap_or_else(|e| eprintln!("serve: {e}"));
+    let serve = axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>());
+
+    // 정§16-1 종료 — ①클라 전원 Close 4006 ②유닛 graceful ③hub. 순서가 뒤집히면
+    // 클라는 사유 없이 끊긴 것으로 보고 즉시 재접속으로 몰린다.
+    let reason = tokio::select! {
+        r = serve => { r.unwrap_or_else(|e| eprintln!("serve: {e}")); "listener closed" }
+        _ = shutdown_signal() => "signal",
+        Some(id) = blocked_rx.recv() => { error!(unit = %id, "unit blocked"); "unit blocked" }
+    };
+    info!(reason, "shutting down");
+    oxhubd::supervisor::announce_shutdown(&hub_for_close).await;
+    sup_slot.lock().await.stop_all().await;
+    info!("oxhubd down");
+}
+
+async fn shutdown_signal() {
+    let term = async {
+        #[cfg(unix)]
+        {
+            let mut s = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("SIGTERM");
+            s.recv().await;
+        }
+        #[cfg(not(unix))]
+        std::future::pending::<()>().await;
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        () = term => {}
+    }
 }

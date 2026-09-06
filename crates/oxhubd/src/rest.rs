@@ -19,11 +19,13 @@ use common::config::{HubAuth, PolicyConfig, SystemConfig};
 use oxsig::frame::{self, Header, Kind};
 use oxsig::{FailCode, Failure};
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use serde_json::{Value, json};
 
 use crate::backend::SfuBackend;
 use crate::session::SessionRegistry;
+use crate::supervisor::Supervisor;
 
 #[derive(Debug, Deserialize)]
 pub struct TokenRequest {
@@ -68,16 +70,90 @@ pub struct RestState {
     pub policy: PolicyConfig,
     pub registry: Arc<SessionRegistry>,
     pub backend: Arc<SfuBackend>,
+    /// 정§16-1 유닛 평면의 8상태 출처. supervisor 가 꺼져 있으면 비어 있다.
+    pub supervisor: Arc<Mutex<Supervisor>>,
 }
 
 /// 정§16-1 `/admin/*` — 유닛 평면. 이 hub 가 ★지금 보고 있는 노드 목록이다(설정 파일이 아니라).
 /// ★loopback 은 통과시킨다(XFF 를 믿지 않는다 — 리버스 프록시 뒤 배치 금지가 전제).
 pub async fn admin_sfus(State(st): State<Arc<RestState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap) -> axum::response::Response {
-    if !peer.ip().is_loopback() && !is_admin(&st.system.hub.auth, &headers) {
-        return respond(Err((StatusCode::UNAUTHORIZED, Failure::new(FailCode::NotAuthorized).message("admin only"))));
+    if let Some(deny) = guard(&st, &peer, &headers) {
+        return deny;
     }
-    let sfus: Vec<Value> = st.backend.nodes.all().iter().map(|n| json!({ "sfu_id": n.id, "addr": n.addr })).collect();
-    respond(Ok((StatusCode::OK, json!({ "sfus": sfus }))))
+    let (sfus, supervising) = sfu_rows(&st).await;
+    respond(Ok((StatusCode::OK, json!({ "sfus": sfus, "supervising": supervising }))))
+}
+
+/// ★유닛 한 줄의 정본 — 유닛 평면과 스냅샷 평면이 같은 것을 봐야 한다(두 곳에 적으면 갈린다).
+/// 붙느냐(dial)와 supervisor 가 무엇으로 적었느냐는 다른 물음이라 둘 다 낸다.
+async fn sfu_rows(st: &Arc<RestState>) -> (Vec<Value>, bool) {
+    let states = st.supervisor.lock().await.states();
+    let mut sfus: Vec<Value> = Vec::new();
+    for node in st.backend.nodes.all() {
+        let mut row = json!({ "sfu_id": node.id, "addr": node.addr, "live": node.client().await.is_some() });
+        // supervisor 가 안 쥔 유닛은 상태 칸 자체가 없다 — 모르는 것을 지어내지 않는다(연§6-6).
+        if let Some((_, state)) = states.iter().find(|(id, _)| id == &node.id)
+            && let Some(map) = row.as_object_mut()
+        {
+            map.insert("unit_state".into(), Value::String(format!("{state:?}")));
+        }
+        sfus.push(row);
+    }
+    (sfus, !states.is_empty())
+}
+
+/// 정§16-1 방 평면 — 배치와 배달 명단. ★정본은 sfud 이고 이것은 hub 가 **보고 있는 것**이다.
+pub async fn admin_rooms(State(st): State<Arc<RestState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap) -> axum::response::Response {
+    if let Some(deny) = guard(&st, &peer, &headers) {
+        return deny;
+    }
+    let rooms: Vec<Value> = st.backend.rooms.placements().into_iter()
+        .map(|(room_id, node_id)| {
+            let members = st.backend.members.members(&room_id);
+            json!({ "room_id": room_id, "sfu_id": node_id, "members": members.len(), "member_ids": members })
+        })
+        .collect();
+    respond(Ok((StatusCode::OK, json!({ "rooms": rooms, "total": rooms.len() }))))
+}
+
+/// 정§16-1 사용자 평면 — 붙어 있는 세션. ★토큰·시크릿은 안 낸다.
+pub async fn admin_users(State(st): State<Arc<RestState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap) -> axum::response::Response {
+    if let Some(deny) = guard(&st, &peer, &headers) {
+        return deny;
+    }
+    let users: Vec<Value> = st.registry.snapshot().into_iter()
+        .map(|(session_id, user_id, role)| json!({ "session_id": session_id, "user_id": user_id, "role": role }))
+        .collect();
+    respond(Ok((StatusCode::OK, json!({ "users": users, "total": users.len() }))))
+}
+
+/// 정§16-1 스냅샷 평면 — 위 셋을 한 번에. ★운영자가 세 번 묻지 않게 하는 자리다.
+pub async fn admin_snapshot(State(st): State<Arc<RestState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap) -> axum::response::Response {
+    if let Some(deny) = guard(&st, &peer, &headers) {
+        return deny;
+    }
+    let (sfus, supervising) = sfu_rows(&st).await;
+    let ready = sfus.iter().all(|r| r["live"] == Value::Bool(true));
+    respond(Ok((StatusCode::OK, json!({
+        "ready": ready,
+        "supervising": supervising,
+        "sfus": sfus,
+        "rooms": st.backend.rooms.placements().len(),
+        "users": st.registry.snapshot().len(),
+    }))))
+}
+
+/// 정§16-1 — 토큰 role="admin" ★또는 loopback. ★XFF 를 믿지 않는다(리버스 프록시 뒤 배치 금지가 전제).
+fn guard(st: &Arc<RestState>, peer: &SocketAddr, headers: &HeaderMap) -> Option<axum::response::Response> {
+    if admin_ok(&st.system.hub.auth, peer, headers) {
+        return None;
+    }
+    Some(respond(Err((StatusCode::UNAUTHORIZED, Failure::new(FailCode::NotAuthorized).message("admin only")))))
+}
+
+/// ★판정만 하는 자리 — 응답을 안 만들기 때문에 1층이 경계 자체를 시험할 수 있다.
+fn admin_ok(auth: &HubAuth, peer: &SocketAddr, headers: &HeaderMap) -> bool {
+    peer.ip().is_loopback() || is_admin(auth, headers)
 }
 
 fn is_admin(auth_cfg: &HubAuth, headers: &HeaderMap) -> bool {
@@ -302,8 +378,28 @@ pub async fn get_room(State(st): State<Arc<RestState>>, headers: HeaderMap, Path
     .await)
 }
 
-pub async fn healthz() -> &'static str {
+/// 정§16-1 — ★**프로세스 생존**. 항상 200 이고 무인증이다(probe 가 부른다).
+///
+/// ★`ready` 와 가르는 것이 요점이다: 이쪽이 200 인데 저쪽이 503 이면 *"떠는 있는데 일을 못 한다"*
+/// 이고, 이쪽이 안 뜨면 *"죽었다"* 다. 하나로 두면 재기동해야 할 때와 기다려야 할 때가 안 갈린다.
+pub async fn healthz_live() -> &'static str {
     "ok"
+}
+
+/// 정§16-1 — hub 정상 ∧ ★**enabled sfud 전부 Live** 면 200, 아니면 503.
+///
+/// ★설정에 있는 것이 아니라 **지금 닿는가**를 본다 — 노드 하나가 죽으면 그 방들이 안 서므로
+/// 트래픽을 받으면 안 된다. 무인증이다(probe).
+pub async fn healthz_ready(State(st): State<Arc<RestState>>) -> axum::response::Response {
+    let mut down: Vec<&str> = Vec::new();
+    for node in st.backend.nodes.all() {
+        if node.client().await.is_none() {
+            down.push(node.id.as_str());
+        }
+    }
+    let code = if down.is_empty() { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+    // ★어느 노드가 빠졌는지까지 낸다 — 503 만 주면 운영자가 다시 물어봐야 한다.
+    respond(Ok((code, json!({ "ready": down.is_empty(), "down": down }))))
 }
 
 #[cfg(test)]
@@ -376,6 +472,32 @@ mod tests {
         assert_eq!(p.hub.allowed_origins, vec!["*".to_owned()],
             "웹 SDK 는 고객 앱에 들어가는 물건이라 다른 origin 이 기본이다");
         assert!(cors(&p.hub.allowed_origins).is_some());
+    }
+
+    fn bearer(role: &str) -> HeaderMap {
+        let t = auth::issue("s", "u1", role, 0, None, 60, auth::now_unix()).unwrap().token;
+        let mut h = HeaderMap::new();
+        h.insert("authorization", format!("Bearer {t}").parse().unwrap());
+        h
+    }
+    fn peer(s: &str) -> SocketAddr { s.parse().unwrap() }
+
+    #[test]
+    fn admin_plane_takes_loopback_or_an_admin_token() {
+        assert!(admin_ok(&cfg(), &peer("127.0.0.1:9"), &HeaderMap::new()), "같은 기계에서 온 것은 토큰 없이 본다");
+        assert!(admin_ok(&cfg(), &peer("[::1]:9"), &HeaderMap::new()), "v6 loopback 도 같은 기계다");
+        assert!(admin_ok(&cfg(), &peer("10.0.0.5:9"), &bearer("admin")));
+    }
+
+    #[test]
+    fn admin_plane_turns_the_rest_away() {
+        assert!(!admin_ok(&cfg(), &peer("10.0.0.5:9"), &HeaderMap::new()));
+        assert!(!admin_ok(&cfg(), &peer("10.0.0.5:9"), &bearer("user")), "붙어 있는 사용자라고 관리 평면을 못 본다");
+        let mut forged = HeaderMap::new();
+        forged.insert("x-forwarded-for", "127.0.0.1".parse().unwrap());
+        assert!(!admin_ok(&cfg(), &peer("10.0.0.5:9"), &forged), "XFF 는 아무나 적는다 — 안 믿는다");
+        let other = HubAuth { jwt_secret: "다른 비밀".into(), api_keys: vec![] };
+        assert!(!admin_ok(&other, &peer("10.0.0.5:9"), &bearer("admin")), "우리가 안 낸 토큰은 admin 이라 적혀 있어도 아니다");
     }
 
     #[test]

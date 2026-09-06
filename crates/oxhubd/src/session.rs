@@ -132,6 +132,11 @@ impl SessionRegistry {
         Ok(())
     }
 
+    /// 정§16-1 사용자 평면 — 지금 붙어 있는 세션 전량. ★비밀은 안 낸다(토큰·시크릿은 여기 없다).
+    pub fn snapshot(&self) -> Vec<(String, String, String)> {
+        self.by_id.iter().map(|e| (e.key().clone(), e.user_id.clone(), e.role.clone())).collect()
+    }
+
     pub fn get(&self, session_id: &str) -> Option<Session> {
         self.by_id.get(session_id).map(|s| s.clone())
     }
