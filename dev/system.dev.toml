@@ -17,6 +17,15 @@ participant_types = [0, 1, 2]
 hidden_allowed = true
 ops_allowed = true
 
+# 계정마다 낼 수 있는 것이 다르다(정§3-4) — 제한 계정이 있어야 `2005` 갈래가 실증된다.
+[[hub.auth.api_keys]]
+key = "ox_k_limited"
+secret = "ox_s_limited"
+name = "limited"
+participant_types = [0]
+hidden_allowed = false
+ops_allowed = false
+
 [[unit]]
 role = "sfu"
 id = "sfu-1"
