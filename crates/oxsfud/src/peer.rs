@@ -76,8 +76,6 @@ pub struct Peer {
     pub user_id: String,
     pub participant_type: u8,
     pub pc_mode: PcMode,
-    /// 연§11-3 — 발언권 우선순위의 상한. 토큰 클레임이 권위이고 hub 가 세션값으로 준다.
-    pub floor_priority: u8,
     pub publish_ice: IceCredentials,
     pub subscribe_ice: IceCredentials,
     pub created_at_ms: u64,
@@ -101,18 +99,12 @@ impl Peer {
         Self::with_credentials(user_id, participant_type, pc_mode, now_ms, IceCredentials::generate(), IceCredentials::generate())
     }
 
-    pub fn with_floor_priority(mut self, floor_priority: u8) -> Self {
-        self.floor_priority = floor_priority;
-        self
-    }
-
     /// 연§9-3 — 자격은 Peer 생성 때 한 번이고 세션 동안 불변이다. 시험은 값을 지정해 만든다.
     pub fn with_credentials(user_id: &str, participant_type: u8, pc_mode: PcMode, now_ms: u64, publish_ice: IceCredentials, subscribe_ice: IceCredentials) -> Self {
         Self {
             user_id: user_id.to_owned(),
             participant_type,
             pc_mode,
-            floor_priority: u8::MAX,
             publish_ice,
             subscribe_ice,
             created_at_ms: now_ms,

@@ -56,7 +56,7 @@ pub struct Tls {
 #[serde(deny_unknown_fields)]
 pub struct HubAuth {
     pub jwt_secret: String,
-    /// 정§3-4 계정 목록 — `api_key` → `api_secret` · 허용 role.
+    /// 정§3-4·§16-1-1 계정 목록 — `api_key` → `api_secret` · 허용 `participant_type` · `hidden` 허용 · 운영 허용.
     #[serde(default)]
     pub api_keys: Vec<ApiKey>,
 }
@@ -68,12 +68,19 @@ pub struct ApiKey {
     pub secret: String,
     #[serde(default)]
     pub name: String,
-    #[serde(default = "default_roles")]
-    pub roles: Vec<String>,
+    /// 이 계정이 서명할 수 있는 `participant_type` 집합(연§5-2 — 밖이면 `2005`).
+    #[serde(default = "default_participant_types")]
+    pub participant_types: Vec<u8>,
+    /// `hidden:true` 를 서명할 수 있나. 클라가 스스로 투명해지는 경로는 없으므로 여기가 유일한 출처다.
+    #[serde(default)]
+    pub hidden_allowed: bool,
+    /// 정§16-1-1 — 이 계정의 운영 토큰(`ops`)으로 `/admin/*` 을 열 수 있나.
+    #[serde(default)]
+    pub ops_allowed: bool,
 }
 
-fn default_roles() -> Vec<String> {
-    vec![crate::auth::ROLE_USER.to_owned(), crate::auth::ROLE_ADMIN.to_owned()]
+fn default_participant_types() -> Vec<u8> {
+    vec![crate::auth::PT_USER]
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -228,6 +235,9 @@ fn default_t2() -> u16 {
 pub struct HubPolicy {
     #[serde(default = "default_token_ttl")]
     pub token_ttl_secs: u32,
+    /// 정책서 §3-4 — 토큰 `metadata` 직렬화 길이 상한(연§4-4). `0` = 무제한 규약.
+    #[serde(default = "default_metadata_max")]
+    pub metadata_max_bytes: u32,
     #[serde(default = "default_hb_interval")]
     pub heartbeat_interval_ms: u32,
     #[serde(default = "default_hb_timeout")]
@@ -252,6 +262,7 @@ impl Default for HubPolicy {
     fn default() -> Self {
         Self {
             token_ttl_secs: default_token_ttl(),
+            metadata_max_bytes: default_metadata_max(),
             heartbeat_interval_ms: default_hb_interval(),
             heartbeat_timeout_ms: default_hb_timeout(),
             resume_window_ms: default_resume_window(),
@@ -265,6 +276,9 @@ impl Default for HubPolicy {
 }
 fn default_token_ttl() -> u32 {
     3_600
+}
+fn default_metadata_max() -> u32 {
+    2_048
 }
 fn default_hb_interval() -> u32 {
     10_000
@@ -441,7 +455,10 @@ addr = "127.0.0.1:50051"
     fn system_defaults_and_validation() {
         let sys: SystemConfig = toml::from_str(SYS).unwrap();
         assert!(sys.validate().is_ok());
-        assert_eq!(sys.hub.auth.api_keys[0].roles, vec!["user", "admin"]);
+        // 기본은 사람만 · 투명·운영은 꺼져 있다(정§3-4·§16-1-1 — 켜는 것이 명시적 결정이다).
+        assert_eq!(sys.hub.auth.api_keys[0].participant_types, vec![crate::auth::PT_USER]);
+        assert!(!sys.hub.auth.api_keys[0].hidden_allowed);
+        assert!(!sys.hub.auth.api_keys[0].ops_allowed);
         assert!(sys.units[0].cmd.is_none());
         let tls: SystemConfig = toml::from_str(&SYS.replace("[hub.auth]", "[hub.tls]\nenabled = true\n[hub.auth]")).unwrap();
         assert!(tls.validate().is_err());
@@ -452,7 +469,7 @@ addr = "127.0.0.1:50051"
         let p = PolicyConfig::default();
         assert!(p.validate().is_ok());
         assert_eq!((p.hub.heartbeat_interval_ms, p.hub.heartbeat_timeout_ms, p.hub.resume_window_ms), (10_000, 30_000, 60_000));
-        assert_eq!(p.hub.token_ttl_secs, 3_600);
+        assert_eq!((p.hub.token_ttl_secs, p.hub.metadata_max_bytes), (3_600, 2_048));
         assert_eq!(p.floor.t2_stop_talking_secs, 30);
         let bad: PolicyConfig = toml::from_str("[hub]\nresume_window_ms = 30000\n").unwrap();
         assert!(bad.validate().is_err());

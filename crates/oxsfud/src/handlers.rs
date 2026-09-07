@@ -13,7 +13,7 @@ use crate::media::rewriter::Rewrite;
 use oxsig::body::media::{PublishAction, PublishTrack, PublishTracksReq, PublishTracksRes, PublishedTrack, ReadyReq, ReadyType, SubscribeLayerReq, TrackSetReq};
 use oxsig::mbcp::{self, Msg, MsgType};
 use oxsig::body::notify::{ForcedCause, ParticipantEvent, ParticipantEventType, RoomEvent, RoomEventType, TrackAction, TrackEvent, TrackState, TrackStateType};
-use oxsig::body::room::{PARTICIPANT_RECORDER, RoomJoinReq, RoomJoinRes, RoomLeaveReq, RoomLeaveRes};
+use oxsig::body::room::{PARTICIPANT_USER, RoomJoinReq, RoomJoinRes, RoomLeaveReq, RoomLeaveRes};
 use oxsig::frame::{self, Header, Kind, encode_json};
 use oxsig::op::Op;
 use oxsig::schema::{Affiliation, CodecSpec, DtlsConfig, Duplex, Extmap, IceConfig, MediaKind, PcMode, ServerConfig, TrackEntry, Version};
@@ -296,8 +296,8 @@ impl Sfu {
             }
             other => other,
         };
-        // ③ 정원 — 축출 뒤 값으로 센다.
-        if room.is_full_for(req.participant_type) {
+        // ③ 정원 — 축출 뒤 값으로 센다. ★`hidden` 만 점유하지 않는다(정§4-2 ③).
+        if room.is_full_for(env.hidden) {
             return Err(Failure::new(FailCode::RoomFull).message(format!("capacity {}", room.capacity)));
         }
         // ④ 입장 방 수.
@@ -311,8 +311,8 @@ impl Sfu {
         let peer = match peer {
             Some(p) => p,
             None => {
-                let priority = u8::try_from(env.floor_priority).unwrap_or(u8::MAX);
-                let p = Arc::new(Peer::new(user_id, req.participant_type, pc_mode, now_ms()).with_floor_priority(priority));
+                let pt = u8::try_from(env.participant_type).unwrap_or(PARTICIPANT_USER);
+                let p = Arc::new(Peer::new(user_id, pt, pc_mode, now_ms()));
                 self.peers.insert(p.clone());
                 self.transport.register(&p);
                 p
@@ -323,16 +323,26 @@ impl Sfu {
         // ⑥ 명단 등록 · select 에코 · pub_room · seq++ · emit — 한 임계 구역.
         let version = {
             let _g = room.gate.lock().unwrap_or_else(|e| e.into_inner());
-            if !room.insert(user_id, Member { role: req.role, select: req.select, participant_type: req.participant_type, joined_at_ms: now_ms() }) {
+            // 종류·투명·신원은 ★토큰이 준 것을 그대로 싣는다 — body 에 자리가 없다(연§6-2).
+            let pt = u8::try_from(env.participant_type).unwrap_or(PARTICIPANT_USER);
+            let metadata: Option<Value> = (!env.metadata.is_empty()).then(|| serde_json::from_str(&env.metadata).unwrap_or(Value::Null));
+            if !room.insert(user_id, Member { role: req.role, select: req.select, participant_type: pt, hidden: env.hidden, metadata: metadata.clone(), joined_at_ms: now_ms() }) {
                 return Err(Failure::new(FailCode::InternalError).message("member already present after eviction"));
             }
             peer.join_room(&room, req.select);
-            let v = room.seq.bump(&self.epoch);
-            if req.participant_type != PARTICIPANT_RECORDER {
-                let ev = ParticipantEvent { event_type: ParticipantEventType::Joined, room_id: room.id.clone(), user_id: user_id.to_owned(), role: Some(req.role), select: Some(req.select), version: v.clone() };
+            // ★`seq++` ⟺ 통지 발행(정§14-1). 투명 참가자는 남에게 보이는 변경이 없으므로 판번호도 안 움직인다.
+            if env.hidden {
+                room.version(&self.epoch)
+            } else {
+                let v = room.seq.bump(&self.epoch);
+                let ev = ParticipantEvent {
+                    event_type: ParticipantEventType::Joined, room_id: room.id.clone(), user_id: user_id.to_owned(),
+                    role: Some(req.role), select: Some(req.select),
+                    participant_type: Some(pt), metadata, version: v.clone(),
+                };
                 self.bus.room(&room.id, Op::ParticipantEvent, &ev, &[user_id.to_owned()]);
+                v
             }
-            v
         };
         info!(user = user_id, room = %room.id, select = req.select, seq = version.seq, "joined");
         let res = RoomJoinRes {
@@ -479,12 +489,18 @@ impl Sfu {
                 self.peers.remove(&peer.user_id);
                 self.transport.unregister(&peer.user_id);
             }
-            let v = room.seq.bump(&self.epoch);
-            if !member.is_recorder() {
-                let ev = ParticipantEvent { event_type: ParticipantEventType::Left, room_id: room.id.clone(), user_id: peer.user_id.clone(), role: None, select: None, version: v.clone() };
+            // ★투명은 발신 제외 — 그 사람의 퇴장을 남에게 안 보내고, 그래서 `seq` 도 안 올린다(정§17-2 ⑦).
+            if member.hidden {
+                room.version(&self.epoch)
+            } else {
+                let v = room.seq.bump(&self.epoch);
+                let ev = ParticipantEvent {
+                    event_type: ParticipantEventType::Left, room_id: room.id.clone(), user_id: peer.user_id.clone(),
+                    role: None, select: None, participant_type: None, metadata: None, version: v.clone(),
+                };
                 self.bus.room(&room.id, Op::ParticipantEvent, &ev, std::slice::from_ref(&peer.user_id));
+                v
             }
-            v
         };
         info!(user = %peer.user_id, room = %room.id, seq = version.seq, "left");
         Some(version)
@@ -584,7 +600,7 @@ impl Sfu {
                 let req = Request {
                     user: user_id.to_owned(),
                     // 정§9-5 — 권위는 토큰 클레임이다. 클라 선언값으로 선점을 결정하지 않는다.
-                    eff_priority: msg.get_u8(mbcp::field::PRIORITY).unwrap_or(0).min(peer.floor_priority),
+                    priority: msg.get_u8(mbcp::field::PRIORITY).unwrap_or(0),
                     duration_secs: msg.get_u16(mbcp::field::DURATION),
                     has_half_track: self.has_half_track(&peer, &room),
                     alone: room.user_count() <= 1,
@@ -1901,7 +1917,7 @@ mod tests {
         Arc::new(Sfu::new("sfu-test".into(), MediaParams { public_ip: "10.0.0.1".into(), udp_port: 20000, bwe_mode, auto_layer: AutoLayer::V1, fingerprint: cert.fingerprint.clone(), max_bitrate_bps: 800_000 }, cert))
     }
     fn env(user: &str, op: u16, body: Value) -> Envelope {
-        Envelope { session_id: format!("s-{user}"), user_id: user.into(), room_id: String::new(), target: String::new(), exclude: Vec::new(), wire: encode_json(&Header::msg(op, 7), &body), pc_mode: "2pc".into(), floor_priority: 0 }
+        Envelope { session_id: format!("s-{user}"), user_id: user.into(), room_id: String::new(), target: String::new(), exclude: Vec::new(), wire: encode_json(&Header::msg(op, 7), &body), pc_mode: "2pc".into(), participant_type: 0, hidden: false, metadata: String::new() }
     }
     fn call(s: &Arc<Sfu>, user: &str, op: u16, body: Value) -> (Kind, Value) {
         let w = s.handle(&env(user, op, body));
@@ -2188,7 +2204,7 @@ mod tests {
         room.floor.request(
             &crate::media::floor::Request {
                 user: "u1".into(),
-                eff_priority: 1,
+                priority: 1,
                 duration_secs: None,
                 has_half_track: true,
                 alone: false,

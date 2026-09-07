@@ -19,8 +19,11 @@ pub enum Attach {
 pub struct Session {
     pub id: String,
     pub user_id: String,
-    pub role: String,
-    pub floor_priority: u8,
+    /// 토큰이 준 것 — 서버는 해석하지 않고 명단·통지에 그대로 싣는다(연§4-4).
+    pub participant_type: u8,
+    /// 명단 응답·입퇴장 통지·`user_count` 셋에서만 뺀다. 등록·구독·수명은 남들과 같다.
+    pub hidden: bool,
+    pub metadata: Option<serde_json::Value>,
     pub pc_mode: PcMode,
     pub attach: Attach,
     /// 재접속 `BIND` 가 이어받았다 — 다음 `RESUME` 하나가 유효하다(정§3-3 1).
@@ -83,9 +86,6 @@ impl SessionRegistry {
             VerifyError::Expired => FailCode::TokenExpired,
             VerifyError::Invalid => FailCode::TokenInvalid,
         })?;
-        if !auth::is_known_role(&claims.role) {
-            return Err(FailCode::InvalidRole);
-        }
         // 3. 같은 신원의 산 세션 → 축출(실패가 아니다).
         let mut close_old = None;
         if let Some(old_sid) = self.by_user.get(&claims.sub).map(|r| r.clone())
@@ -97,8 +97,9 @@ impl SessionRegistry {
         let session = Session {
             id: uuid::Uuid::new_v4().simple().to_string(),
             user_id: claims.sub.clone(),
-            role: claims.role.clone(),
-            floor_priority: claims.floor_priority,
+            participant_type: claims.participant_type,
+            hidden: claims.hidden,
+            metadata: claims.metadata.clone(),
             pc_mode: req.pc_mode,
             attach: Attach::Attached { conn_id },
             resume_pending: false,
@@ -113,7 +114,6 @@ impl SessionRegistry {
     fn res_of(&self, s: &Session) -> BindRes {
         BindRes {
             user_id: s.user_id.clone(),
-            role: s.role.clone(),
             server_ver: CLIENT_VER,
             heartbeat_interval: self.heartbeat_interval_ms,
             session_id: s.id.clone(),
@@ -133,8 +133,8 @@ impl SessionRegistry {
     }
 
     /// 정§16-1 사용자 평면 — 지금 붙어 있는 세션 전량. ★비밀은 안 낸다(토큰·시크릿은 여기 없다).
-    pub fn snapshot(&self) -> Vec<(String, String, String)> {
-        self.by_id.iter().map(|e| (e.key().clone(), e.user_id.clone(), e.role.clone())).collect()
+    pub fn snapshot(&self) -> Vec<(String, String, u8, bool)> {
+        self.by_id.iter().map(|e| (e.key().clone(), e.user_id.clone(), e.participant_type, e.hidden)).collect()
     }
 
     pub fn get(&self, session_id: &str) -> Option<Session> {
@@ -187,7 +187,7 @@ mod tests {
         SessionRegistry::new("s", Duration::from_secs(60), 10_000)
     }
     fn token(user: &str, ttl: u64, back: i64) -> String {
-        auth::issue("s", user, auth::ROLE_USER, 3, None, ttl, auth::now_unix() - back).unwrap().token
+        auth::issue("s", user, auth::PT_USER, false, None, ttl, auth::now_unix() - back).unwrap().token
     }
     fn req(token: &str, sid: Option<&str>) -> BindReq {
         BindReq { token: token.to_owned(), session_id: sid.map(str::to_owned), client_ver: 1, pc_mode: PcMode::OnePc }
@@ -200,7 +200,7 @@ mod tests {
         let first = r.bind(&req(&token("u1", 60, 0), None), 1, now).unwrap();
         assert!(!first.resumed && first.close_old.is_none());
         assert_eq!(first.res.pc_mode, PcMode::OnePc);
-        assert_eq!(r.get(&first.session_id).unwrap().floor_priority, 3);
+        assert_eq!(r.get(&first.session_id).unwrap().participant_type, auth::PT_USER);
         // 같은 신원 새 BIND(session_id 없음) → 성공 + 옛 연결 4005
         let dup = r.bind(&req(&token("u1", 60, 0), None), 2, now).unwrap();
         assert_eq!(dup.close_old, Some((1, CloseCode::DuplicateSession)));

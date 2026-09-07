@@ -9,7 +9,8 @@ pub enum CloseCode {
     FlowTimeout = 4001,
     FlowOverflow = 4002,
     HeartbeatTimeout = 4003,
-    TokenExpired = 4004,
+    /// 연§10-3 — 운영자가 이 세션을 끊었다(C 평면). ★새 토큰으로 풀리지 않는다.
+    SessionRevoked = 4004,
     DuplicateSession = 4005,
     ServerShutdown = 4006,
 }
@@ -17,7 +18,7 @@ pub enum CloseCode {
 impl CloseCode {
     pub const ALL: [CloseCode; 7] = [
         CloseCode::ProtocolError, CloseCode::FlowTimeout, CloseCode::FlowOverflow, CloseCode::HeartbeatTimeout,
-        CloseCode::TokenExpired, CloseCode::DuplicateSession, CloseCode::ServerShutdown,
+        CloseCode::SessionRevoked, CloseCode::DuplicateSession, CloseCode::ServerShutdown,
     ];
 
     pub fn code(self) -> u16 {
@@ -34,7 +35,7 @@ impl CloseCode {
             CloseCode::FlowTimeout => "FLOW_TIMEOUT",
             CloseCode::FlowOverflow => "FLOW_OVERFLOW",
             CloseCode::HeartbeatTimeout => "HEARTBEAT_TIMEOUT",
-            CloseCode::TokenExpired => "TOKEN_EXPIRED",
+            CloseCode::SessionRevoked => "SESSION_REVOKED",
             CloseCode::DuplicateSession => "DUPLICATE_SESSION",
             CloseCode::ServerShutdown => "SERVER_SHUTDOWN",
         }

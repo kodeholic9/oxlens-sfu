@@ -33,7 +33,6 @@ pub fn default_pc_mode() -> PcMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BindRes {
     pub user_id: String,
-    pub role: String,
     pub server_ver: u32,
     pub heartbeat_interval: u64,
     pub session_id: String,

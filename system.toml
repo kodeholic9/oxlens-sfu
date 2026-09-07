@@ -10,3 +10,7 @@ jwt_secret = "change-me-in-production"
 key = "ox_k_demo"
 secret = "ox_s_demo"
 name = "demo"
+# 정§3-4·§16-1-1 — 이 계정이 서명할 수 있는 것. 투명·운영은 켜는 것이 명시적 결정이다.
+participant_types = [0, 1, 2]
+hidden_allowed = true
+ops_allowed = true

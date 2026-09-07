@@ -23,6 +23,12 @@ pub struct ParticipantEvent {
     pub role: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub select: Option<bool>,
+    /// 연§6-7 — `joined` 만. 서버가 토큰에서 채운 종류.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub participant_type: Option<u8>,
+    /// 토큰이 서명한 신원. `joined` 만.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
     pub version: Version,
 }
 

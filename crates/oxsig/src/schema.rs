@@ -144,6 +144,12 @@ pub struct MemberInfo {
     pub role: u8,
     #[serde(default = "default_select")]
     pub select: bool,
+    /// 연§4-4 — 서버가 토큰에서 채운다(`0` 사람 · `1` 녹화 · `2` 봇). 클라 선언이 아니다.
+    #[serde(default)]
+    pub participant_type: u8,
+    /// 토큰이 서명한 신원(이름·프로필). 없으면 필드도 없다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
 }
 
 pub fn default_role() -> u8 {

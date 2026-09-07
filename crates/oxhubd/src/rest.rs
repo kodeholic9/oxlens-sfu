@@ -32,16 +32,14 @@ pub struct TokenRequest {
     pub api_key: String,
     pub api_secret: String,
     pub user_id: String,
-    #[serde(default = "default_role")]
-    pub role: String,
+    /// 연§5-2 — `0` 사람(기본) · `1` 녹화 · `2` 봇. 계정이 허용한 값만 서명된다.
     #[serde(default)]
-    pub floor_priority: u8,
+    pub participant_type: u8,
+    /// 명단·통지·정원에서 빠진다. ★클라가 스스로 켜는 경로는 없다 — 여기가 유일한 출처다.
+    #[serde(default)]
+    pub hidden: bool,
     #[serde(default)]
     pub metadata: Option<Value>,
-}
-
-fn default_role() -> String {
-    auth::ROLE_USER.to_owned()
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -52,15 +50,27 @@ pub struct TokenResponse {
 
 type HttpFail = (StatusCode, Failure);
 
-/// 정§3-4 판정 — `2004`(401) · `2005`(400) · `5003`(500).
-pub fn issue_token(auth_cfg: &HubAuth, ttl_secs: u64, req: &TokenRequest, now: i64) -> Result<TokenResponse, HttpFail> {
+/// 정§3-4 판정 — `2004`(401) · `1002`/`2005`(400) · `5003`(500).
+/// ★발급 경로는 이것 하나다 — 운영 토큰은 발급하지 않는다(§16-1-1).
+pub fn issue_token(auth_cfg: &HubAuth, ttl_secs: u64, metadata_max: u32, req: &TokenRequest, now: i64) -> Result<TokenResponse, HttpFail> {
     let Some(account) = auth_cfg.api_keys.iter().find(|k| k.key == req.api_key && k.secret == req.api_secret) else {
         return Err((StatusCode::UNAUTHORIZED, Failure::new(FailCode::InvalidApiKey)));
     };
-    if !auth::is_known_role(&req.role) || !account.roles.iter().any(|r| r == &req.role) {
-        return Err((StatusCode::BAD_REQUEST, Failure::new(FailCode::InvalidRole).message(format!("role '{}' not allowed", req.role))));
+    if !auth::is_known_participant_type(req.participant_type) {
+        return Err((StatusCode::BAD_REQUEST,
+            Failure::new(FailCode::InvalidPayload).message(format!("unknown participant_type {}", req.participant_type))));
     }
-    auth::issue(&auth_cfg.jwt_secret, &req.user_id, &req.role, req.floor_priority, req.metadata.clone(), ttl_secs, now)
+    if !account.participant_types.contains(&req.participant_type) || (req.hidden && !account.hidden_allowed) {
+        return Err((StatusCode::BAD_REQUEST, Failure::new(FailCode::InvalidRole).message("claim not allowed for this account")));
+    }
+    if let Some(m) = &req.metadata
+        && metadata_max > 0
+        && serde_json::to_vec(m).map(|v| v.len()).unwrap_or(usize::MAX) > metadata_max as usize
+    {
+        return Err((StatusCode::BAD_REQUEST,
+            Failure::new(FailCode::InvalidPayload).message(format!("metadata exceeds {metadata_max} bytes"))));
+    }
+    auth::issue(&auth_cfg.jwt_secret, &req.user_id, req.participant_type, req.hidden, req.metadata.clone(), ttl_secs, now)
         .map(|i| TokenResponse { token: i.token, expires_in: i.expires_in })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Failure::new(FailCode::InternalError).message(e.to_string())))
 }
@@ -124,7 +134,7 @@ pub async fn admin_drops(State(st): State<Arc<RestState>>, ConnectInfo(peer): Co
     }
     let mut units: Vec<Value> = Vec::new();
     for node in st.backend.nodes.all() {
-        let env = bplane::Envelope { session_id: String::new(), user_id: String::new(), room_id: String::new(), target: String::new(), exclude: Vec::new(), wire: internal_wire(iop::SFU_STATS, &Value::Null), pc_mode: String::new(), floor_priority: 0 };
+        let env = bplane::Envelope { session_id: String::new(), user_id: String::new(), room_id: String::new(), target: String::new(), exclude: Vec::new(), wire: internal_wire(iop::SFU_STATS, &Value::Null), pc_mode: String::new(), participant_type: 0, hidden: false, metadata: String::new() };
         let row = match st.backend.send_to_node(&node.id, env).await.map_err(fail_of).and_then(|w| unwrap_wire(&w)) {
             Ok(mut v) => {
                 if let Some(map) = v.as_object_mut() {
@@ -145,7 +155,8 @@ pub async fn admin_users(State(st): State<Arc<RestState>>, ConnectInfo(peer): Co
         return deny;
     }
     let users: Vec<Value> = st.registry.snapshot().into_iter()
-        .map(|(session_id, user_id, role)| json!({ "session_id": session_id, "user_id": user_id, "role": role }))
+        .map(|(session_id, user_id, participant_type, hidden)|
+            json!({ "session_id": session_id, "user_id": user_id, "participant_type": participant_type, "hidden": hidden }))
         .collect();
     respond(Ok((StatusCode::OK, json!({ "users": users, "total": users.len() }))))
 }
@@ -180,13 +191,19 @@ fn admin_ok(auth: &HubAuth, peer: &SocketAddr, headers: &HeaderMap) -> bool {
     peer.ip().is_loopback() || is_admin(auth, headers)
 }
 
+/// 정§16-1-1 운영 토큰 — 운영자가 자기 `api_secret` 으로 서명한 것을 검증만 한다.
+/// ★A 평면 사용자 토큰은 여기를 열지 못한다(그 토큰은 `jwt_secret` 으로 서명되고 `ops` 도 없다).
 fn is_admin(auth_cfg: &HubAuth, headers: &HeaderMap) -> bool {
-    headers
+    let Some(token) = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .and_then(|t| auth::verify(&auth_cfg.jwt_secret, t).ok())
-        .is_some_and(|c| c.role == "admin")
+    else {
+        return false;
+    };
+    let Some(iss) = auth::ops_issuer(token) else { return false };
+    let Some(account) = auth_cfg.api_keys.iter().find(|k| k.key == iss) else { return false };
+    account.ops_allowed && auth::verify_ops(&account.secret, token).is_ok_and(|c| c.ops)
 }
 
 /// 연§5-1 — 브라우저 클라가 부르는 세 자리에만 붙인다.
@@ -329,7 +346,7 @@ fn respond(r: Result<(StatusCode, Value), HttpFail>) -> axum::response::Response
 }
 
 pub async fn token(State(st): State<Arc<RestState>>, Json(req): Json<TokenRequest>) -> axum::response::Response {
-    match issue_token(&st.system.hub.auth, u64::from(st.policy.hub.token_ttl_secs), &req, auth::now_unix()) {
+    match issue_token(&st.system.hub.auth, u64::from(st.policy.hub.token_ttl_secs), st.policy.hub.metadata_max_bytes, &req, auth::now_unix()) {
         Ok(res) => (StatusCode::OK, Json(res)).into_response(),
         Err((status, failure)) => (status, Json(failure)).into_response(),
     }
@@ -341,7 +358,7 @@ pub async fn list_rooms(State(st): State<Arc<RestState>>, headers: HeaderMap) ->
         authenticate(&st.system.hub.auth.jwt_secret, &st.registry, &headers)?;
         let mut rooms: Vec<Value> = Vec::new();
         for node in st.backend.nodes.all() {
-            let env = bplane::Envelope { session_id: String::new(), user_id: String::new(), room_id: String::new(), target: String::new(), exclude: Vec::new(), wire: internal_wire(iop::ROOM_LIST, &Value::Null), pc_mode: String::new(), floor_priority: 0 };
+            let env = bplane::Envelope { session_id: String::new(), user_id: String::new(), room_id: String::new(), target: String::new(), exclude: Vec::new(), wire: internal_wire(iop::ROOM_LIST, &Value::Null), pc_mode: String::new(), participant_type: 0, hidden: false, metadata: String::new() };
             match st.backend.send_to_node(&node.id, env).await.map_err(fail_of).and_then(|w| unwrap_wire(&w)) {
                 Ok(v) => rooms.extend(v["rooms"].as_array().cloned().unwrap_or_default()),
                 Err((_, f)) => tracing::warn!(node = %node.id, code = f.code, "ROOM_LIST fan-out: partial merge"),
@@ -366,7 +383,7 @@ pub async fn create_room(State(st): State<Arc<RestState>>, headers: HeaderMap, J
                 st.backend.rooms.assign(&room_id, chosen)
             }
         };
-        let env = bplane::Envelope { session_id: String::new(), user_id: String::new(), room_id: room_id.clone(), target: String::new(), exclude: Vec::new(), wire: internal_wire(iop::ROOM_CREATE, &body), pc_mode: String::new(), floor_priority: 0 };
+        let env = bplane::Envelope { session_id: String::new(), user_id: String::new(), room_id: room_id.clone(), target: String::new(), exclude: Vec::new(), wire: internal_wire(iop::ROOM_CREATE, &body), pc_mode: String::new(), participant_type: 0, hidden: false, metadata: String::new() };
         let out = st.backend.send_to_node(&node_id, env).await.map_err(fail_of).and_then(|w| unwrap_wire(&w));
         if out.is_err() {
             st.backend.rooms.unbind(&room_id);
@@ -395,7 +412,9 @@ pub async fn get_room(State(st): State<Arc<RestState>>, headers: HeaderMap, Path
             exclude: Vec::new(),
             wire: internal_wire(iop::ROOM_GET, &json!({ "room_id": room_id, "tracks": q.tracks == 1 })),
             pc_mode: String::new(),
-            floor_priority: 0,
+            participant_type: 0,
+            hidden: false,
+            metadata: String::new(),
         };
         st.backend.send_to_node(&node_id, env).await.map_err(fail_of).and_then(|w| unwrap_wire(&w)).map(|v| (StatusCode::OK, v))
     }
@@ -433,23 +452,66 @@ mod tests {
     use common::config::ApiKey;
     use std::time::Duration;
 
-    fn cfg() -> HubAuth {
-        HubAuth { jwt_secret: "s".into(), api_keys: vec![ApiKey { key: "k".into(), secret: "p".into(), name: String::new(), roles: vec!["user".into()] }] }
+    fn account(pt: Vec<u8>, hidden: bool, ops: bool) -> ApiKey {
+        ApiKey { key: "k".into(), secret: "p".into(), name: String::new(), participant_types: pt, hidden_allowed: hidden, ops_allowed: ops }
     }
-    fn req(key: &str, role: &str) -> TokenRequest {
-        TokenRequest { api_key: key.into(), api_secret: "p".into(), user_id: "u1".into(), role: role.into(), floor_priority: 9, metadata: None }
+    fn cfg() -> HubAuth {
+        HubAuth { jwt_secret: "s".into(), api_keys: vec![account(vec![auth::PT_USER, auth::PT_RECORDER], false, false)] }
+    }
+    fn req(key: &str, pt: u8, hidden: bool) -> TokenRequest {
+        TokenRequest { api_key: key.into(), api_secret: "p".into(), user_id: "u1".into(), participant_type: pt, hidden, metadata: None }
     }
 
     #[test]
     fn token_judgement() {
         let now = auth::now_unix();
-        let ok = issue_token(&cfg(), 3600, &req("k", "user"), now).unwrap();
+        let ok = issue_token(&cfg(), 3600, 2048, &req("k", auth::PT_RECORDER, false), now).unwrap();
         assert_eq!(ok.expires_in, 3600);
-        assert_eq!(auth::verify("s", &ok.token).unwrap().floor_priority, 9);
-        let (st, f) = issue_token(&cfg(), 3600, &req("x", "user"), now).unwrap_err();
+        let c = auth::verify("s", &ok.token).unwrap();
+        assert_eq!((c.participant_type, c.hidden), (auth::PT_RECORDER, false));
+        let (st, f) = issue_token(&cfg(), 3600, 2048, &req("x", auth::PT_USER, false), now).unwrap_err();
         assert_eq!((st, f.code), (StatusCode::UNAUTHORIZED, 2004));
-        let (st, f) = issue_token(&cfg(), 3600, &req("k", "admin"), now).unwrap_err();
+        // 계정 허용 밖 — 종류(봇)와 투명 둘 다 2005.
+        let (st, f) = issue_token(&cfg(), 3600, 2048, &req("k", auth::PT_BOT, false), now).unwrap_err();
         assert_eq!((st, f.code), (StatusCode::BAD_REQUEST, 2005));
+        let (st, f) = issue_token(&cfg(), 3600, 2048, &req("k", auth::PT_USER, true), now).unwrap_err();
+        assert_eq!((st, f.code), (StatusCode::BAD_REQUEST, 2005));
+        // 모르는 종류는 형이 아니다 — 1002.
+        let (st, f) = issue_token(&cfg(), 3600, 2048, &req("k", 9, false), now).unwrap_err();
+        assert_eq!((st, f.code), (StatusCode::BAD_REQUEST, 1002));
+    }
+
+    #[test]
+    fn metadata_ceiling_rejects_at_issue() {
+        let now = auth::now_unix();
+        let mut r = req("k", auth::PT_USER, false);
+        r.metadata = Some(json!({ "name": "x".repeat(64) }));
+        assert!(issue_token(&cfg(), 3600, 2048, &r, now).is_ok());
+        let (st, f) = issue_token(&cfg(), 3600, 16, &r, now).unwrap_err();
+        assert_eq!((st, f.code), (StatusCode::BAD_REQUEST, 1002));
+        // `0` = 무제한(정책서 §2 규약).
+        assert!(issue_token(&cfg(), 3600, 0, &r, now).is_ok());
+    }
+
+    /// 정§16-1-1 — A 평면 토큰은 `/admin` 을 못 연다. 운영 토큰만, 그것도 운영 허용 계정만.
+    #[test]
+    fn ops_token_only_opens_admin() {
+        let now = auth::now_unix();
+        let mut h = HeaderMap::new();
+        let bearer = |h: &mut HeaderMap, t: &str| { h.insert("authorization", format!("Bearer {t}").parse().unwrap()); };
+
+        let user_token = issue_token(&cfg(), 3600, 2048, &req("k", auth::PT_USER, false), now).unwrap().token;
+        bearer(&mut h, &user_token);
+        assert!(!is_admin(&cfg(), &h), "사용자 토큰이 운영을 열면 안 된다");
+
+        let ops = |secret: &str| auth::sign_ops(secret, "k", 60, now).unwrap();
+        bearer(&mut h, &ops("p"));
+        assert!(!is_admin(&cfg(), &h), "운영 허용이 없는 계정은 못 연다");
+        let allowed = HubAuth { jwt_secret: "s".into(), api_keys: vec![account(vec![auth::PT_USER], false, true)] };
+        assert!(is_admin(&allowed, &h));
+        // 계정 비밀이 아닌 것으로 서명한 것은 통과하지 못한다.
+        bearer(&mut h, &ops("wrong"));
+        assert!(!is_admin(&allowed, &h));
     }
 
     #[test]
@@ -457,7 +519,7 @@ mod tests {
         let reg = SessionRegistry::new("s", Duration::from_secs(60), 10_000);
         let mut h = HeaderMap::new();
         assert_eq!(authenticate("s", &reg, &h).unwrap_err().1.code, 2002);
-        let t = auth::issue("s", "u1", "user", 0, None, 60, auth::now_unix()).unwrap().token;
+        let t = auth::issue("s", "u1", auth::PT_USER, false, None, 60, auth::now_unix()).unwrap().token;
         h.insert("authorization", format!("Bearer {t}").parse().unwrap());
         assert_eq!(authenticate("s", &reg, &h).unwrap().user_id, "u1");
         let mut h2 = HeaderMap::new();
@@ -499,30 +561,41 @@ mod tests {
         assert!(cors(&p.hub.allowed_origins).is_some());
     }
 
-    fn bearer(role: &str) -> HeaderMap {
-        let t = auth::issue("s", "u1", role, 0, None, 60, auth::now_unix()).unwrap().token;
+    /// A 평면 사용자 토큰 — ★운영을 열지 못한다(§16-1-1). 경계 시험에서 "안 열린다" 쪽으로 쓴다.
+    fn bearer(_role: &str) -> HeaderMap {
+        let t = auth::issue("s", "u1", auth::PT_USER, false, None, 60, auth::now_unix()).unwrap().token;
         let mut h = HeaderMap::new();
         h.insert("authorization", format!("Bearer {t}").parse().unwrap());
         h
     }
     fn peer(s: &str) -> SocketAddr { s.parse().unwrap() }
 
+    fn ops_headers(secret: &str) -> HeaderMap {
+        let t = auth::sign_ops(secret, "k", 60, auth::now_unix()).unwrap();
+        let mut h = HeaderMap::new();
+        h.insert("authorization", format!("Bearer {t}").parse().unwrap());
+        h
+    }
+    fn ops_cfg() -> HubAuth {
+        HubAuth { jwt_secret: "s".into(), api_keys: vec![account(vec![auth::PT_USER], false, true)] }
+    }
+
     #[test]
-    fn admin_plane_takes_loopback_or_an_admin_token() {
+    fn admin_plane_takes_loopback_or_an_ops_token() {
         assert!(admin_ok(&cfg(), &peer("127.0.0.1:9"), &HeaderMap::new()), "같은 기계에서 온 것은 토큰 없이 본다");
         assert!(admin_ok(&cfg(), &peer("[::1]:9"), &HeaderMap::new()), "v6 loopback 도 같은 기계다");
-        assert!(admin_ok(&cfg(), &peer("10.0.0.5:9"), &bearer("admin")));
+        assert!(admin_ok(&ops_cfg(), &peer("10.0.0.5:9"), &ops_headers("p")));
     }
 
     #[test]
     fn admin_plane_turns_the_rest_away() {
-        assert!(!admin_ok(&cfg(), &peer("10.0.0.5:9"), &HeaderMap::new()));
-        assert!(!admin_ok(&cfg(), &peer("10.0.0.5:9"), &bearer("user")), "붙어 있는 사용자라고 관리 평면을 못 본다");
+        assert!(!admin_ok(&ops_cfg(), &peer("10.0.0.5:9"), &HeaderMap::new()));
+        assert!(!admin_ok(&ops_cfg(), &peer("10.0.0.5:9"), &bearer("user")), "붙어 있는 사용자라고 관리 평면을 못 본다");
         let mut forged = HeaderMap::new();
         forged.insert("x-forwarded-for", "127.0.0.1".parse().unwrap());
-        assert!(!admin_ok(&cfg(), &peer("10.0.0.5:9"), &forged), "XFF 는 아무나 적는다 — 안 믿는다");
-        let other = HubAuth { jwt_secret: "다른 비밀".into(), api_keys: vec![] };
-        assert!(!admin_ok(&other, &peer("10.0.0.5:9"), &bearer("admin")), "우리가 안 낸 토큰은 admin 이라 적혀 있어도 아니다");
+        assert!(!admin_ok(&ops_cfg(), &peer("10.0.0.5:9"), &forged), "XFF 는 아무나 적는다 — 안 믿는다");
+        assert!(!admin_ok(&cfg(), &peer("10.0.0.5:9"), &ops_headers("p")), "운영 허용이 없는 계정의 서명은 통하지 않는다");
+        assert!(!admin_ok(&ops_cfg(), &peer("10.0.0.5:9"), &ops_headers("다른 비밀")), "그 계정 비밀로 서명한 것이 아니면 아니다");
     }
 
     #[test]

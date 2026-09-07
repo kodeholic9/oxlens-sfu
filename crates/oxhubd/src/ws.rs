@@ -16,7 +16,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use crate::backend::{Backend, Envelope, fail_frame};
+use crate::backend::{Backend, Envelope, Identity, fail_frame};
 use crate::conn::{Action, Conn};
 use crate::session::SessionRegistry;
 
@@ -131,7 +131,11 @@ async fn run(mut socket: WebSocket, hub: Arc<Hub>) {
                     let wire = match hub.registry.get(&sid) {
                         Some(s) if op != Op::Resume || hub.registry.take_resume(&sid).is_ok() => {
                             let pc_mode = serde_json::to_value(s.pc_mode).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
-                            hub.backend.handle(Envelope { session_id: sid, user_id: s.user_id, pc_mode, floor_priority: u32::from(s.floor_priority), op, pid, body }).await
+                            hub.backend.handle(Envelope {
+                                session_id: sid, user_id: s.user_id, pc_mode,
+                                identity: Some(Identity { participant_type: s.participant_type, hidden: s.hidden, metadata: s.metadata }),
+                                op, pid, body,
+                            }).await
                         }
                         Some(_) => fail_frame(op.code(), pid, &Failure::new(FailCode::SessionNotFound)),
                         None => fail_frame(op.code(), pid, &Failure::new(FailCode::SessionNotFound)),

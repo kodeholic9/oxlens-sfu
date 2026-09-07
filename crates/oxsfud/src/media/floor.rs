@@ -77,8 +77,8 @@ impl Action {
 #[derive(Debug, Clone)]
 pub struct Request {
     pub user: String,
-    /// 정§9-5 — 유효 우선순위 `min(요청 TLV 0, 토큰 floor_priority)`. 원값으로 판정하면 255 만 실으면 뺏는다.
-    pub eff_priority: u8,
+    /// 연§11-3 — 요청이 실은 TLV `0` 값이 그대로 우선순위다. 깎는 축이 없다.
+    pub priority: u8,
     pub duration_secs: Option<u16>,
     /// 정§9-6 관문 ② — 반이중 발행 트랙이 없으면 청취 전용이다.
     pub has_half_track: bool,
@@ -224,7 +224,7 @@ impl FloorController {
         match f.state.clone() {
             FloorState::Idle => {
                 let burst = self.burst_of(req.duration_secs);
-                self.grant(&mut f, &req.user, req.eff_priority, burst, now, false)
+                self.grant(&mut f, &req.user, req.priority, burst, now, false)
             }
             // 같은 u 재요청 — 멱등 재응답. 시간엔 `T2` 남은 값을 싣고 발화 시각은 갱신하지 않는다.
             FloorState::Taken { ref speaker, priority, max_burst_ms } if speaker == &req.user => {
@@ -232,11 +232,11 @@ impl FloorController {
                 let left = if spent == 0 { max_burst_ms } else { max_burst_ms.saturating_sub(now.saturating_sub(spent)) };
                 vec![self.granted(&req.user, priority, left)]
             }
-            FloorState::Taken { ref speaker, priority, .. } if req.eff_priority > priority => {
-                self.preempt(&mut f, speaker.clone(), &req.user, req.eff_priority, now)
+            FloorState::Taken { ref speaker, priority, .. } if req.priority > priority => {
+                self.preempt(&mut f, speaker.clone(), &req.user, req.priority, now)
             }
             // 회수가 도는 중이면 우선순위와 무관하게 큐 규칙으로만 받는다(재선점 없음).
-            FloorState::Taken { .. } | FloorState::PendingRevoke { .. } => self.enqueue(&mut f, &req.user, req.eff_priority, now),
+            FloorState::Taken { .. } | FloorState::PendingRevoke { .. } => self.enqueue(&mut f, &req.user, req.priority, now),
         }
     }
 
@@ -502,7 +502,7 @@ mod tests {
         BTreeSet::new()
     }
     fn req(user: &str, priority: u8) -> Request {
-        Request { user: user.into(), eff_priority: priority, duration_secs: None, has_half_track: true, alone: false }
+        Request { user: user.into(), priority, duration_secs: None, has_half_track: true, alone: false }
     }
     /// (타입, 수신자 또는 `None`=broadcast, 사유·순번 같은 판정값)
     fn shape(a: &Action) -> (MsgType, Option<String>, Option<u8>) {

@@ -171,7 +171,7 @@ mod tests {
     fn bound_dispatch_heartbeat_and_ack() {
         let now = Instant::now();
         let mut c = conn(now);
-        let res = BindRes { user_id: "u".into(), role: "user".into(), server_ver: 1, heartbeat_interval: 10_000, session_id: "sid".into(), resume_window_ms: 60_000, pc_mode: PcMode::TwoPc };
+        let res = BindRes { user_id: "u".into(), server_ver: 1, heartbeat_interval: 10_000, session_id: "sid".into(), resume_window_ms: 60_000, pc_mode: PcMode::TwoPc };
         let a = c.bound(7, &res);
         assert_eq!(kind_of(match &a[0] { Action::Send(f) => f, _ => panic!() }), Some((Kind::Ok, Op::Bind.code(), 7)));
         let a = c.on_frame(&msg(Op::Heartbeat.code(), 8, &Value::Null), now);
@@ -203,7 +203,7 @@ mod tests {
         assert_eq!(c.on_frame(&bad, now), vec![Action::Close(CloseCode::ProtocolError)]);
         assert!(c.on_tick(now + Duration::from_secs(9)).is_empty());
         assert_eq!(c.on_tick(now + Duration::from_secs(10)), vec![Action::Close(CloseCode::HeartbeatTimeout)]);
-        let res = BindRes { user_id: "u".into(), role: "user".into(), server_ver: 1, heartbeat_interval: 10_000, session_id: "sid".into(), resume_window_ms: 60_000, pc_mode: PcMode::TwoPc };
+        let res = BindRes { user_id: "u".into(), server_ver: 1, heartbeat_interval: 10_000, session_id: "sid".into(), resume_window_ms: 60_000, pc_mode: PcMode::TwoPc };
         c.bound(1, &res);
         c.on_notify(Op::RoomEvent, &json!({}), now);
         assert_eq!(c.on_tick(now + Duration::from_secs(31)), vec![Action::Close(CloseCode::HeartbeatTimeout)], "무응답이 ACK 보다 먼저 걸린다");

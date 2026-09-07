@@ -15,6 +15,8 @@ t2_stop_talking_secs = 30
 
 [hub]
 token_ttl_secs = 3600
+# 연§4-4 — 토큰 metadata 직렬화 길이 상한. 0 = 무제한.
+metadata_max_bytes = 2048
 heartbeat_interval_ms = 10000
 heartbeat_timeout_ms = 30000
 resume_window_ms = 60000

@@ -18,7 +18,11 @@ use crate::version::Seq;
 pub struct Member {
     pub role: u8,
     pub select: bool,
+    /// 토큰이 준 종류(연§5-2) — 표시용. 서버가 이 값으로 가르는 것은 `rec` 뿐이다.
     pub participant_type: u8,
+    /// ★명단 응답·입퇴장 통지·`user_count` 셋에서만 뺀다. 등록·구독·수명은 남들과 같다(정§4-2).
+    pub hidden: bool,
+    pub metadata: Option<serde_json::Value>,
     pub joined_at_ms: u64,
 }
 
@@ -94,10 +98,11 @@ impl Room {
         self.members.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// 녹화 참가자 제외 인원(연§5-3 `user_count`).
+    /// 연§5-3 `user_count` — ★`hidden` 만 뺀다. 보이는 녹화·봇은 센다.
     pub fn user_count(&self) -> u32 {
-        self.lock().values().filter(|m| !m.is_recorder()).count() as u32
+        self.lock().values().filter(|m| !m.hidden).count() as u32
     }
+    /// 연§5-3 `rec` — ★`hidden` 이어도 참이다. 녹화 사실은 감추지 않는다. 저장하지 않고 명단에서 판다(정§4-1-1).
     pub fn has_recorder(&self) -> bool {
         self.lock().values().any(Member::is_recorder)
     }
@@ -110,18 +115,21 @@ impl Room {
     pub fn is_occupied(&self) -> bool {
         !self.lock().is_empty()
     }
-    /// 연§4-4 명단 — recorder 는 투명이라 뺀다.
+    /// 연§4-4 명단 — ★`hidden` 만 뺀다. 나머지는 종류와 무관하게 전원 오른다.
     pub fn participants(&self) -> Vec<MemberInfo> {
-        self.lock().iter().filter(|(_, m)| !m.is_recorder()).map(|(u, m)| MemberInfo { user_id: u.clone(), role: m.role, select: m.select }).collect()
+        self.lock().iter().filter(|(_, m)| !m.hidden).map(|(u, m)| MemberInfo {
+            user_id: u.clone(), role: m.role, select: m.select,
+            participant_type: m.participant_type, metadata: m.metadata.clone(),
+        }).collect()
     }
     /// 명단 스냅샷 — 배관 산출이 쓴다(§2-3 계약 4: 순회와 삭제를 겹치지 않는다).
     pub fn member_ids(&self) -> Vec<String> {
         self.lock().keys().cloned().collect()
     }
 
-    /// 정§4-2 ③ 정원 — recorder 는 점유하지 않는다. `>=` 이상.
-    pub fn is_full_for(&self, participant_type: u8) -> bool {
-        participant_type != PARTICIPANT_RECORDER && self.user_count() >= self.capacity
+    /// 정§4-2 ③ 정원 — ★`hidden` 만 점유하지 않는다(③-1: 투명에는 상한 축이 없다). `>=` 이상.
+    pub fn is_full_for(&self, hidden: bool) -> bool {
+        !hidden && self.user_count() >= self.capacity
     }
 
     /// 정§4-2 ⑥ 등록 — 첫 입장 표식(`ever_joined`·`empty_since=0`). 이미 있으면 false(재입장은 ② 축출이 먼저다).
@@ -220,7 +228,7 @@ mod tests {
         RoomSpec { room_id: id.into(), name: "n".into(), capacity: 2, unused_ttl_secs: unused, departure_ttl_secs: departure }
     }
     fn user(select: bool) -> Member {
-        Member { role: 255, select, participant_type: PARTICIPANT_USER, joined_at_ms: 1 }
+        Member { role: 255, select, participant_type: PARTICIPANT_USER, hidden: false, metadata: None, joined_at_ms: 1 }
     }
 
     #[test]
@@ -236,17 +244,22 @@ mod tests {
         assert_eq!(reg.len(), 1);
     }
 
+    /// 정§4-2 ③ — 정원·명단에서 빠지는 축은 ★`hidden` 하나다. ★보이는 녹화는 센다.
     #[test]
-    fn capacity_counts_listeners_not_recorders() {
+    fn only_hidden_escapes_capacity_and_roster() {
         let r = Room::new(spec("r", None, None), 0);
         assert!(r.insert("a", user(false)));
         assert!(!r.insert("a", user(true)));
+        // 보이는 녹화 — 명단에도 오르고 정원도 먹는다.
         assert!(r.insert("rec", Member { participant_type: PARTICIPANT_RECORDER, ..user(true) }));
-        assert!(!r.is_full_for(PARTICIPANT_USER));
-        assert!(r.insert("b", user(true)));
-        assert!(r.is_full_for(PARTICIPANT_USER));
-        assert!(!r.is_full_for(PARTICIPANT_RECORDER));
+        assert!(r.is_full_for(false), "사람 1 + 보이는 녹화 1 = 정원 2");
         assert_eq!((r.user_count(), r.has_recorder(), r.participants().len()), (2, true, 2));
+        // 투명 — 정원에 안 걸리고 명단에도 없다. 그래도 등록은 된다(구독·수명은 남들과 같다).
+        assert!(!r.is_full_for(true));
+        assert!(r.insert("ghost", Member { hidden: true, participant_type: PARTICIPANT_RECORDER, ..user(false) }));
+        assert_eq!((r.user_count(), r.participants().len()), (2, 2));
+        assert!(r.is_member("ghost") && r.is_occupied());
+        assert!(r.has_recorder(), "녹화 사실은 투명이어도 감추지 않는다(연§5-3 rec)");
     }
 
     #[test]

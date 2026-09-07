@@ -156,7 +156,7 @@ mod tests {
         let mut inbox = Vec::new();
         for (i, u) in users.iter().enumerate() {
             let conn_id = i as u64 + 1;
-            let token = auth::issue("s", u, auth::ROLE_USER, 3, None, 60, auth::now_unix()).unwrap().token;
+            let token = auth::issue("s", u, auth::PT_USER, false, None, 60, auth::now_unix()).unwrap().token;
             let req = BindReq { token, session_id: None, client_ver: 1, pc_mode: PcMode::TwoPc };
             registry.bind(&req, conn_id, Instant::now()).unwrap();
             let (notify, rx) = mpsc::channel(8);
@@ -190,7 +190,9 @@ mod tests {
             exclude: exclude.iter().map(|s| (*s).to_owned()).collect(),
             wire: oxsig::frame::encode_json(&oxsig::frame::Header::msg(op.code(), 0), &body),
             pc_mode: String::new(),
-            floor_priority: 0,
+            participant_type: 0,
+            hidden: false,
+            metadata: String::new(),
         }
     }
 

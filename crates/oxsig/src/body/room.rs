@@ -5,17 +5,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::schema::{default_role, default_select, Affiliation, MemberInfo, ServerConfig, TrackEntry, Version};
 
-/// `participant_type` — `0` 사용자 / `1` 녹화(투명, admin 토큰만).
+/// `participant_type` — `0` 사람 / `1` 녹화 / `2` 봇. ★토큰이 정한다(연§5-2) — 요청에 자리가 없다.
 pub const PARTICIPANT_USER: u8 = 0;
 pub const PARTICIPANT_RECORDER: u8 = 1;
+pub const PARTICIPANT_BOT: u8 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoomJoinReq {
     pub room_id: String,
     #[serde(default = "default_role")]
     pub role: u8,
-    #[serde(default)]
-    pub participant_type: u8,
     #[serde(default = "default_select")]
     pub select: bool,
 }
