@@ -187,7 +187,10 @@ impl SubscriberStream {
 
     pub fn note_loss(&self, fraction_lost: u8, now_ms: u64) {
         // RFC 3550 — fraction 은 256분율이다. 천분율로 옮겨 담는다.
-        self.loss_permille.store(u16::from(fraction_lost) * 1000 / 256, Ordering::Relaxed);
+        // ★u16 안에서 곱하면 `fraction_lost > 65`(손실 25.6% 초과)에서 넘친다 — 릴리스면
+        //   조용히 감기고 디버그면 워커가 죽어 전달이 멎는다. 넓은 형에서 곱한다.
+        let permille = u32::from(fraction_lost) * 1000 / 256;
+        self.loss_permille.store(u16::try_from(permille).unwrap_or(u16::MAX), Ordering::Relaxed);
         self.loss_at_ms.store(now_ms, Ordering::Relaxed);
     }
 
@@ -543,6 +546,18 @@ mod tests {
             rtx_ssrc: None,
         });
         (ctx, s)
+    }
+
+    #[test]
+    fn loss_fraction_does_not_overflow_at_the_worst_case() {
+        let (_pub, s) = publisher(MediaKind::Video, "VP8");
+        let ctx = SubscribeContext::new();
+        let sub = ctx.insert(&s, SubSpec { subscriber: "u2".into(), room_id: "r1".into(), mid: None, pt: 96, transport: None, now_ms: 0 });
+        // RFC 3550 fraction 은 0~255 다. ★u16 안에서 곱하면 66 부터 넘친다.
+        sub.note_loss(u8::MAX, 1);
+        assert_eq!(sub.reported_loss().map(|(pct, _)| pct), Some(99.6), "255/256 은 99.6% 다");
+        sub.note_loss(66, 2);
+        assert_eq!(sub.reported_loss().map(|(pct, _)| pct), Some(25.7));
     }
 
     #[test]
