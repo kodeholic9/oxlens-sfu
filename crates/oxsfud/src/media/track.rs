@@ -343,7 +343,6 @@ impl PublishContext {
 mod tests {
     use super::*;
     use crate::media::subscribe::{SubSpec, SubscribeContext};
-    use oxsig::schema::PcMode;
 
     fn spec(track_id: &str, kind: MediaKind, ssrc: u32) -> StreamSpec {
         StreamSpec {
@@ -390,7 +389,7 @@ mod tests {
         let ctx = PublishContext::default();
         let s = ctx.insert(spec("t1", MediaKind::Audio, 7));
         let track = s.tracks().remove(0);
-        let subs = SubscribeContext::new(PcMode::TwoPc);
+        let subs = SubscribeContext::new();
         let a = subs.insert(&s, SubSpec { subscriber: "u2".into(), room_id: "r1".into(), mid: Some(0), pt: 111, transport: None, now_ms: 0 });
         {
             let b = subs.insert(&s, SubSpec { subscriber: "u3".into(), room_id: "r1".into(), mid: Some(1), pt: 111, transport: None, now_ms: 0 });

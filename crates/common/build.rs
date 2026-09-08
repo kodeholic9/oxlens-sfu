@@ -1,7 +1,7 @@
 // author: kodeholic (powered by Claude)
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ★빌드 신원 — 돌고 있는 것이 **어느 소스의 산물인지** 서버가 스스로 말하게 한다.
-    //   이게 없으면 옛 바이너리를 상대로 회귀를 돌고도 초록으로 읽는다(20260906 실측 2회).
+    //   이게 없으면 옛 바이너리를 상대로 회귀를 돌고도 초록으로 읽는다.
     let rev = std::process::Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
         .output()

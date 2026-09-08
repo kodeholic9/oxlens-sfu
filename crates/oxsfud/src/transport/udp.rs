@@ -572,7 +572,7 @@ mod tests {
     use super::*;
     use crate::media::subscribe::{SubSpec, SubscribeContext};
     use crate::media::track::{PublishContext, StreamSpec};
-    use oxsig::schema::{Extmap, PcMode};
+    use oxsig::schema::Extmap;
 
     fn packet() -> Vec<u8> {
         // marker=1 · PT=96 — 조립이 PT 만 바꾸고 marker 를 남기는지 함께 본다.
@@ -592,7 +592,7 @@ mod tests {
             kind: MediaKind::Audio, mid: "0".into(), pt: 111, rtx_pt: None, codec: "opus", fmtp: None,
             source: None, duplex: Duplex::Full, simulcast: false, ssrc: 0x1234_5678, rtx_ssrc: None,
         });
-        let subs = SubscribeContext::new(PcMode::TwoPc);
+        let subs = SubscribeContext::new();
         // 이 구독자는 abs-send-time 을 3 번으로 협상했고 twcc 는 아예 없다.
         subs.set_extmap(vec![Extmap { id: 3, uri: crate::media::URI_ABS_SEND_TIME.into() }]);
         let sub = subs.insert(&stream, SubSpec { subscriber: "u2".into(), room_id: "r".into(), mid: Some(0), pt: 111, transport: None, now_ms: 0 });

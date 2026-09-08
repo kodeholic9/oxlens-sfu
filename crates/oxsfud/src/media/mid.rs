@@ -4,12 +4,14 @@
 
 use std::collections::BTreeSet;
 
-use oxsig::schema::{MediaKind, PcMode};
+use oxsig::schema::MediaKind;
 
 /// 형은 십진 정수 문자열, 상한은 u8 이다.
 pub const MID_MAX: u16 = 255;
-/// 정§7-2 — 1pc 는 클라 발행 mid 0..31 과 BUNDLE 을 공유하므로 오프셋을 나눠 갖는다.
-pub const ONE_PC_BASE: u16 = 32;
+/// 정§7-2 — 받기 mid 의 시작. ★`pc_mode` 와 무관하다(발급기를 한 갈래로 둔다).
+/// 1pc 은 클라 발행 mid 0..31 과 BUNDLE 을 공유하므로 이 오프셋이 있어야 겹치지 않고,
+/// 2pc 도 같은 규칙을 쓴다.
+pub const SUB_BASE: u16 = 32;
 
 #[derive(Debug)]
 pub struct MidPool {
@@ -18,14 +20,17 @@ pub struct MidPool {
     free_video: BTreeSet<u16>,
 }
 
-impl MidPool {
-    pub fn new(pc_mode: PcMode) -> Self {
-        let next = match pc_mode {
-            PcMode::OnePc => ONE_PC_BASE,
-            PcMode::TwoPc => 0,
-        };
-        Self { next, free_audio: BTreeSet::new(), free_video: BTreeSet::new() }
+impl Default for MidPool {
+    fn default() -> Self {
+        Self::new()
     }
+}
+
+impl MidPool {
+    pub fn new() -> Self {
+        Self { next: SUB_BASE, free_audio: BTreeSet::new(), free_video: BTreeSet::new() }
+    }
+
 
     fn free_of(&mut self, kind: MediaKind) -> &mut BTreeSet<u16> {
         match kind {
@@ -66,29 +71,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn base_differs_by_mode_and_reuse_is_kind_bound() {
-        let mut two = MidPool::new(PcMode::TwoPc);
-        assert_eq!((two.alloc(MediaKind::Audio), two.alloc(MediaKind::Video)), (Some(0), Some(1)));
-        let mut one = MidPool::new(PcMode::OnePc);
-        assert_eq!(one.alloc(MediaKind::Audio), Some(ONE_PC_BASE));
+    fn base_is_mode_independent_and_reuse_is_kind_bound() {
+        let mut p = MidPool::new();
+        assert_eq!(
+            (p.alloc(MediaKind::Audio), p.alloc(MediaKind::Video)),
+            (Some(SUB_BASE), Some(SUB_BASE + 1)),
+            "받기 mid 는 모드와 무관하게 32 부터다"
+        );
 
-        two.release(MediaKind::Audio, 0);
-        assert_eq!(two.alloc(MediaKind::Video), Some(2), "audio 해제분은 video 가 못 쓴다");
-        assert_eq!(two.alloc(MediaKind::Audio), Some(0), "같은 kind 면 재활용");
-        assert_eq!(two.alloc(MediaKind::Audio), Some(3), "신규는 준 최대값보다 크다");
-        assert_eq!(to_wire(3), "3");
+        p.release(MediaKind::Audio, SUB_BASE);
+        assert_eq!(p.alloc(MediaKind::Video), Some(SUB_BASE + 2), "audio 해제분은 video 가 못 쓴다");
+        assert_eq!(p.alloc(MediaKind::Audio), Some(SUB_BASE), "같은 kind 면 재활용");
+        assert_eq!(p.alloc(MediaKind::Audio), Some(SUB_BASE + 3), "신규는 준 최대값보다 크다");
+        assert_eq!(to_wire(SUB_BASE + 3), "35");
     }
 
     #[test]
     fn exhaustion_is_a_reported_state() {
-        let mut p = MidPool::new(PcMode::TwoPc);
-        for want in 0..=MID_MAX {
+        let mut p = MidPool::new();
+        for want in SUB_BASE..=MID_MAX {
             assert_eq!(p.alloc(MediaKind::Video), Some(want));
         }
-        assert!(p.exhausted(), "0~255 를 다 준 뒤엔 카운터도 해제분도 없다");
+        assert!(p.exhausted(), "32~255 를 다 준 뒤엔 카운터도 해제분도 없다");
         assert_eq!(p.alloc(MediaKind::Video), None);
-        p.release(MediaKind::Video, 7);
+        p.release(MediaKind::Video, SUB_BASE + 7);
         assert!(!p.exhausted(), "고갈은 영구가 아니다");
-        assert_eq!(p.alloc(MediaKind::Video), Some(7));
+        assert_eq!(p.alloc(MediaKind::Video), Some(SUB_BASE + 7));
     }
 }

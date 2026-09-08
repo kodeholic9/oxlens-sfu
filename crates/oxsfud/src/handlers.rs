@@ -2071,8 +2071,8 @@ mod tests {
         assert_eq!(tracks.len(), 2);
         let a = tracks.iter().find(|t| t["kind"] == "audio").unwrap();
         let v = tracks.iter().find(|t| t["kind"] == "video").unwrap();
-        assert_eq!((a["user_id"].as_str(), a["pt"].as_u64(), a["mid"].as_str()), (Some("u1"), Some(111), Some("1")));
-        assert_eq!((v["pt"].as_u64(), v["rtx_pt"].as_u64(), v["codec"].as_str(), v["mid"].as_str()), (Some(96), Some(97), Some("VP8"), Some("2")));
+        assert_eq!((a["user_id"].as_str(), a["pt"].as_u64(), a["mid"].as_str()), (Some("u1"), Some(111), Some("33")));
+        assert_eq!((v["pt"].as_u64(), v["rtx_pt"].as_u64(), v["codec"].as_str(), v["mid"].as_str()), (Some(96), Some(97), Some("VP8"), Some("34")));
         // 정§8-1 — 전이중 non-sim 의 egress SSRC 는 원본이다. 항목의 `ssrc` 가 곧 그것이라야
         // 클라가 지은 받기 m-line 의 `a=ssrc` 와 실제 도착 패킷이 맞는다.
         assert_eq!((a["ssrc"].as_u64(), v["ssrc"].as_u64()), (Some(1111), Some(2222)));
@@ -2088,9 +2088,9 @@ mod tests {
         assert_eq!((k, b["action"].as_str(), b.get("tracks")), (Kind::Ok, Some("remove"), None));
         let removed = track_events(&mut rx, "remove");
         assert_eq!(removed.len(), 1);
-        assert_eq!(removed[0].1["tracks"][0]["mid"].as_str(), Some("1"), "지울 m-line 을 알려 준다");
+        assert_eq!(removed[0].1["tracks"][0]["mid"].as_str(), Some("33"), "지울 m-line 을 알려 준다");
         let u2 = s.peers.get("u2").unwrap();
-        assert_eq!(u2.subscribe.alloc_mid(MediaKind::Audio), Some(1), "회수분이 같은 kind 풀로 돌아왔다");
+        assert_eq!(u2.subscribe.alloc_mid(MediaKind::Audio), Some(33), "회수분이 같은 kind 풀로 돌아왔다");
     }
 
     #[test]
@@ -2880,7 +2880,7 @@ mod tests {
         assert_eq!((g["participants"][0]["select"].as_bool(), g["version"]["seq"].as_u64(), g["tracks"].as_array().map(Vec::len)), (Some(false), Some(1), Some(1)));
         // 정§8-1 — audio 슬롯은 방과 수명이 같아 입장 즉시 배관이 있다(주인 없음 = N:1).
         let slot = &g["tracks"][0];
-        assert_eq!((slot["track_id"].as_str(), slot["kind"].as_str(), slot["mid"].as_str()), (Some("ptt-r-audio"), Some("audio"), Some("0")));
+        assert_eq!((slot["track_id"].as_str(), slot["kind"].as_str(), slot["mid"].as_str()), (Some("ptt-r-audio"), Some("audio"), Some("32")));
         assert_eq!((slot["duplex"].as_str(), slot["pt"].as_u64(), slot["user_id"].is_null()), (Some("half"), Some(111), true));
         let (_, g0) = call(&s, "", iop::ROOM_GET, json!({"room_id": "r"}));
         assert!(g0.get("tracks").is_none());

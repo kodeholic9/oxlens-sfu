@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
-use oxsig::schema::{Duplex, Extmap, MediaKind, PcMode, TrackEntry};
+use oxsig::schema::{Duplex, Extmap, MediaKind, TrackEntry};
 
 use super::autolayer::State as AutoState;
 use super::rtx::RtxCache;
@@ -339,11 +339,17 @@ pub struct SubscribeContext {
     extmap: ArcSwap<Vec<Extmap>>,
 }
 
+impl Default for SubscribeContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SubscribeContext {
-    pub fn new(pc_mode: PcMode) -> Self {
+    pub fn new() -> Self {
         Self {
             streams: DashMap::new(),
-            mids: Mutex::new(MidPool::new(pc_mode)),
+            mids: Mutex::new(MidPool::new()),
             pts: Mutex::new(PtTable::default()),
             // 정§7-2-1 — 구독자 표의 씨앗은 ★서버 선언표(mid 제외)다. 2pc 는 이것이 끝이고,
             // 1pc 도 `READY{transport}` 신고 전까지는 이것으로 본다.
@@ -542,32 +548,32 @@ mod tests {
     #[test]
     fn mid_release_returns_to_the_pool_after_the_index_is_clean() {
         let (_pub, s) = publisher(MediaKind::Video, "VP8");
-        let ctx = SubscribeContext::new(PcMode::TwoPc);
+        let ctx = SubscribeContext::new();
         let mid = ctx.alloc_mid(MediaKind::Video).unwrap();
         let sub = ctx.insert(&s, SubSpec { subscriber: "u2".into(), room_id: "r1".into(), mid: Some(mid), pt: 96, transport: None, now_ms: 0 });
-        assert_eq!((sub.mid(), sub.state()), (Some(0), SubscribeState::Created));
+        assert_eq!((sub.mid(), sub.state()), (Some(crate::media::mid::SUB_BASE), SubscribeState::Created));
         assert!(sub.activate() && !sub.activate(), "READY 는 여러 번 와도 안전하다");
         assert!(ctx.get("r1", "t1").is_some() && ctx.in_room("r1").len() == 1);
         ctx.remove("u2", "r1", "t1");
         assert!(ctx.get("r1", "t1").is_none() && sub.mid().is_none());
-        assert_eq!(ctx.alloc_mid(MediaKind::Video), Some(0), "회수분이 같은 kind 로 돌아왔다");
+        assert_eq!(ctx.alloc_mid(MediaKind::Video), Some(crate::media::mid::SUB_BASE), "회수분이 같은 kind 로 돌아왔다");
     }
 
     #[test]
     fn exhausted_mid_is_refilled_oldest_first() {
         let (_pub, s) = publisher(MediaKind::Video, "VP8");
-        let ctx = SubscribeContext::new(PcMode::TwoPc);
+        let ctx = SubscribeContext::new();
         let a = ctx.insert(&s, SubSpec { subscriber: "u2".into(), room_id: "r1".into(), mid: None, pt: 96, transport: None, now_ms: 0 });
         let b = ctx.insert(&s, SubSpec { subscriber: "u2".into(), room_id: "r2".into(), mid: None, pt: 96, transport: None, now_ms: 0 });
         assert!(ctx.refill_mids().len() == 2, "풀리면 오래된 것부터 다시 발급");
-        assert_eq!((a.mid(), b.mid()), (Some(0), Some(1)));
+        assert_eq!((a.mid(), b.mid()), (Some(crate::media::mid::SUB_BASE), Some(crate::media::mid::SUB_BASE + 1)));
         assert!(ctx.refill_mids().is_empty());
     }
 
     #[test]
     fn entry_carries_everything_the_assembler_needs() {
         let (_pub, s) = publisher(MediaKind::Video, "H264");
-        let ctx = SubscribeContext::new(PcMode::OnePc);
+        let ctx = SubscribeContext::new();
         let sub = ctx.insert(&s, SubSpec { subscriber: "u2".into(), room_id: "r1".into(), mid: ctx.alloc_mid(MediaKind::Video), pt: 102, transport: None, now_ms: 0 });
         sub.set_pt(102, Some(103));
         let e = entry_of(&s, &sub);
@@ -600,7 +606,7 @@ mod tests {
             ssrc: 0x1234,
             rtx_ssrc: None,
         });
-        let subs = SubscribeContext::new(PcMode::TwoPc);
+        let subs = SubscribeContext::new();
         let sub = subs.insert(&slot, SubSpec {
             subscriber: "u2".into(), room_id: "r1".into(),
             mid: subs.alloc_mid(MediaKind::Audio), pt: 111, transport: None, now_ms: 0,
@@ -618,7 +624,7 @@ mod tests {
     /// 구독자가 못 읽는다(대역 추정·음량 표시가 조용히 죽는다). TWCC 자리도 그때 사라진다.
     #[test]
     fn a_fresh_context_already_speaks_the_server_table() {
-        let ctx = SubscribeContext::new(PcMode::TwoPc);
+        let ctx = SubscribeContext::new();
         assert_eq!(ctx.twcc_id(), Some(6), "★TWCC 자리가 처음부터 있다 — v2 스탬핑이 여기 앉는다");
         assert!(ctx.extmap().iter().all(|e| e.uri != crate::media::URI_MID), "구독자에게 mid 는 주지 않는다");
         let table = ctx.ext_table(&[(6, crate::media::URI_TWCC), (4, crate::media::URI_AUDIO_LEVEL)]);
@@ -628,7 +634,7 @@ mod tests {
 
     #[test]
     fn extension_table_maps_by_uri_and_parks_the_unknown() {
-        let ctx = SubscribeContext::new(PcMode::TwoPc);
+        let ctx = SubscribeContext::new();
         ctx.set_extmap(vec![
             Extmap { id: 4, uri: "urn:level".into() },
             Extmap { id: 5, uri: "urn:abs".into() },
