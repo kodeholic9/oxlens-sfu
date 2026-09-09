@@ -14,7 +14,8 @@ pub enum PublishAction {
     Remove,
 }
 
-/// `tracks[]` 원소(`add`). `ssrc`·`mid`·`pt` 필수, video 는 `codec` 필수, offer 에 `fmtp` 가 있으면 반드시 싣는다.
+/// `tracks[]` 원소(`add`). `ssrc`·`mid`·`pt` 필수, video 는 `codec` 필수.
+/// `fmtp` 는 kind 무관 — 협상 확정본(answer)에 있으면 반드시 싣는다(연§6-3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublishTrack {
     pub kind: MediaKind,

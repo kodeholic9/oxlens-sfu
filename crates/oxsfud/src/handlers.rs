@@ -2157,6 +2157,36 @@ mod tests {
         assert_eq!(u2.subscribe.alloc_mid(MediaKind::Audio), Some(1), "회수분이 같은 kind 풀로 돌아왔다");
     }
 
+    /// 연§6-3(D3) — ★`fmtp` 는 kind 를 가리지 않는다. 서버는 해석하지 않고 그대로 나른다.
+    /// opus 협상 결과(연§9-4 예외: `useinbandfec`·`minptime`)가 구독자에게 가는 유일한 길이다.
+    #[test]
+    fn audio_fmtp_is_carried_and_makes_its_own_pt_tuple() {
+        let s = sfu();
+        create(&s, "r", 5);
+        call(&s, "u1", Op::RoomJoin.code(), json!({"room_id": "r"}));
+        call(&s, "u2", Op::RoomJoin.code(), json!({"room_id": "r", "select": false}));
+        let mut rx = s.bus.subscribe();
+
+        let mut mic = audio("0", 1111);
+        mic["fmtp"] = json!("minptime=10;useinbandfec=1;usedtx=1");
+        let (k, _) = call(&s, "u1", Op::PublishTracks.code(), json!({"room_id": "r", "tracks": [mic]}));
+        assert_eq!(k, Kind::Ok);
+
+        let ev = track_events(&mut rx, "add").into_iter().find(|(t, _)| t == "u2").unwrap().1;
+        let a = &ev["tracks"][0];
+        assert_eq!(a["fmtp"].as_str(), Some("minptime=10;useinbandfec=1;usedtx=1"), "★audio 도 나른다");
+        assert!(a["codec"].is_null(), "codec 은 video 만이다 — fmtp 와 열이 다르다");
+        // 정§7-2-1 — 표의 키는 (codec, fmtp) 튜플이다. audio 슬롯(opus·fmtp 없음)이 입장 때 씨앗
+        // 111 을 가져갔으므로, fmtp 가 붙은 이 opus 는 ★다른 튜플이라 동적 구간에서 받는다.
+        // 같은 튜플은 그 연결에서 늘 같은 PT 이고 한 BUNDLE 안 충돌이 없다는 계약은 그대로다.
+        let pt = a["pt"].as_u64().unwrap();
+        assert_ne!(pt, 111, "다른 튜플이면 다른 PT 다");
+        let slot = s.peers.get("u2").unwrap().subscribe.in_room("r")
+            .into_iter().find(|x| x.track_id.starts_with("ptt-")).unwrap();
+        assert_eq!(slot.pt(), 111, "씨앗은 먼저 온 튜플(슬롯 opus)이 가져간다");
+        assert_ne!(u64::from(slot.pt()), pt, "★한 BUNDLE 안에서 둘은 다른 PT 다(RFC 8843)");
+    }
+
     #[test]
     fn publish_checks_run_before_any_registration() {
         let s = sfu();
