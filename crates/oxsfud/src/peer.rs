@@ -109,7 +109,7 @@ impl Peer {
             subscribe_ice,
             created_at_ms: now_ms,
             publish: PublishContext::default(),
-            subscribe: SubscribeContext::new(),
+            subscribe: SubscribeContext::new(pc_mode),
             state: AtomicU8::new(PeerState::Alive.code()),
             last_seen: AtomicU64::new(0),
             suspect_since: AtomicU64::new(0),
