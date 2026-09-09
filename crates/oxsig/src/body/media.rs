@@ -109,7 +109,6 @@ pub struct PublishedTrack {
 /// 응답 — `remove` 는 `tracks` 필드 자체가 없다.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublishTracksRes {
-    pub intent: bool,
     pub action: PublishAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tracks: Option<Vec<PublishedTrack>>,
@@ -246,8 +245,10 @@ mod tests {
         assert_eq!(zero_ssrc.validate(), Err(FailCode::MissingField));
         let rm: PublishTracksReq = serde_json::from_value(json!({"action":"remove","room_id":"r1","track_ids":["t1"]})).unwrap();
         assert_eq!(rm.validate(), Ok(()));
-        let res = PublishTracksRes { intent: true, action: PublishAction::Remove, tracks: None };
-        assert!(serde_json::to_value(&res).unwrap().get("tracks").is_none());
+        let res = PublishTracksRes { action: PublishAction::Remove, tracks: None };
+        let v = serde_json::to_value(&res).unwrap();
+        assert!(v.get("tracks").is_none());
+        assert!(v.get("intent").is_none(), "연§6-3 — intent 필드는 없다");
     }
 
     #[test]

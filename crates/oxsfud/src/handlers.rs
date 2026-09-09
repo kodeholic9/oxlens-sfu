@@ -48,6 +48,11 @@ pub const TWCC_INTERVAL_MS: u64 = 100;
 pub const T_STALL_MS: u64 = 30_000;
 /// 정§11-2 — PLI 스로틀(h 300ms). 인프라 PLI 는 통과한다.
 pub const PLI_MIN_GAP_MS: u64 = 300;
+pub const PLI_MIN_GAP_LOW_MS: u64 = 100;
+
+pub fn pli_gap_ms(rid: Option<&str>) -> u64 {
+    if rid == Some("l") { PLI_MIN_GAP_LOW_MS } else { PLI_MIN_GAP_MS }
+}
 /// 서버가 내는 RTCP 의 보고자 SSRC — 발행자 것을 쓰면 자기 보고로 읽힌다.
 pub const SERVER_RTCP_SSRC: u32 = 1;
 /// 정§11-2 — Ingress RR 주기.
@@ -988,7 +993,7 @@ impl Sfu {
     /// `force` 는 인프라 PLI(게이트 해제·승계·`READY`)로 스로틀을 통과한다.
     pub async fn request_keyframe(&self, egress_ssrc: u32, now_ms: u64, force: bool) -> bool {
         let Some((owner, track)) = self.publisher_of_egress(egress_ssrc) else { return false };
-        if !track.claim_pli(now_ms, PLI_MIN_GAP_MS, force) {
+        if !track.claim_pli(now_ms, pli_gap_ms(track.rid.as_deref()), force) {
             return false;
         }
         self.send_rtcp(&owner, &rtcp::build_pli(SERVER_RTCP_SSRC, track.ssrc)).await
@@ -1550,7 +1555,7 @@ impl Sfu {
             self.announce(room, &announce);
         }
         info!(user = %peer.user_id, room = %room.id, added = fresh.len(), active = peer.publish.active(), "tracks published");
-        let res = PublishTracksRes { intent: true, action: PublishAction::Add, tracks: Some(published) };
+        let res = PublishTracksRes { action: PublishAction::Add, tracks: Some(published) };
         Ok(serde_json::to_value(res).unwrap_or(Value::Null))
     }
 
@@ -1577,7 +1582,7 @@ impl Sfu {
             }
         }
         info!(user = %peer.user_id, room = %room.id, removed = targets.len(), active = peer.publish.active(), "tracks removed");
-        let res = PublishTracksRes { intent: true, action: PublishAction::Remove, tracks: None };
+        let res = PublishTracksRes { action: PublishAction::Remove, tracks: None };
         Ok(serde_json::to_value(res).unwrap_or(Value::Null))
     }
 
@@ -1931,6 +1936,24 @@ mod tests {
     }
 
     #[test]
+    fn pli_gap_is_per_layer() {
+        let ctx = crate::media::track::PublishContext::default();
+        let stream = ctx.insert(StreamSpec {
+            track_id: "t1".into(), vssrc: 0xF000_0001, owner: "u1".into(), room_id: "r1".into(),
+            kind: MediaKind::Video, mid: "0".into(), pt: 96, rtx_pt: None, codec: "VP8", fmtp: None,
+            source: None, duplex: Duplex::Full, simulcast: true, ssrc: 0, rtx_ssrc: None,
+        });
+        let low = stream.add_track(11, None, Some("l".into()));
+        let high = stream.add_track(12, None, Some("h".into()));
+        assert_eq!((pli_gap_ms(Some("l")), pli_gap_ms(Some("h")), pli_gap_ms(None)), (100, 300, 300));
+        assert!(low.claim_pli(1_000, pli_gap_ms(low.rid.as_deref()), false));
+        assert!(low.claim_pli(1_150, pli_gap_ms(low.rid.as_deref()), false), "l 은 100ms 눈금이라 150ms 뒤 둘째도 통과한다");
+        assert!(high.claim_pli(1_000, pli_gap_ms(high.rid.as_deref()), false));
+        assert!(!high.claim_pli(1_150, pli_gap_ms(high.rid.as_deref()), false), "h 는 300ms 눈금이라 150ms 뒤 둘째는 막힌다");
+        assert!(high.claim_pli(1_150, pli_gap_ms(high.rid.as_deref()), true), "인프라 PLI 는 스로틀을 지나간다");
+    }
+
+    #[test]
     fn join_response_shape_and_events() {
         let s = sfu();
         let mut rx = s.bus.subscribe();
@@ -2056,7 +2079,7 @@ mod tests {
         let mut rx = s.bus.subscribe();
 
         let (k, b) = call(&s, "u1", Op::PublishTracks.code(), json!({"room_id": "r", "tracks": [audio("0", 1111), video("1", 2222, "VP8")]}));
-        assert_eq!((k, b["intent"].as_bool(), b["action"].as_str()), (Kind::Ok, Some(true), Some("add")));
+        assert_eq!((k, b.get("intent").is_none(), b["action"].as_str()), (Kind::Ok, true, Some("add")), "연§6-3 — intent 필드는 없다");
         let published = b["tracks"].as_array().unwrap();
         assert_eq!(published.len(), 2);
         assert_eq!(published[0]["mid"].as_str(), Some("0"), "응답의 mid 는 발행자 자신의 신고값이다");
