@@ -1272,11 +1272,13 @@ impl Sfu {
                 self.floor_leave(&room, user_id);
             }
         }
+        // 정§5-2 · §14-1 배달 불변식 — ★소속 변경은 `seq` 를 올리지 않는다.
+        // `pub_room` 은 당사자 말고 볼 사람이 없어 그 방 나머지에게 보낼 프레임이 없다.
+        // 올리면 두 방 전원에게 갭이 나고 발언 방을 바꿀 때마다 방 전원이 헛 재동기한다.
         let mut versions = std::collections::BTreeMap::new();
         for id in changed {
             if let Some(room) = self.rooms.get(&id) {
-                let _g = room.gate.lock().unwrap_or_else(|e| e.into_inner());
-                versions.insert(id, room.seq.bump(&self.epoch));
+                versions.insert(id, room.version(&self.epoch));
             }
         }
         let a = peer.affiliation();
@@ -1371,8 +1373,9 @@ impl Sfu {
 
     /// 정§14-2 — 방 단위. 항목은 구독자마다 다르므로(mid·PT) 메시지도 구독자마다다.
     /// ★방 `gate` 를 쥔 채로 부른다 — `seq` 증가와 enqueue 가 한 임계 구역이어야 한다(정§14-1).
+    /// ★★배달 불변식(정§14-1) — `seq` 를 올렸으면 그 방 전원에게 한 장씩. 델타가 빈 구성원
+    /// (발행자 본인 포함)에게도 `tracks:[]` 로 보낸다. 빼면 그 사람에게 갭이 나고 헛 재동기가 돈다.
     fn emit_track_event(&self, room: &Room, action: TrackAction, targets: Vec<(String, Vec<TrackEntry>)>) {
-        let targets: Vec<_> = targets.into_iter().filter(|(_, t)| !t.is_empty()).collect();
         if targets.is_empty() {
             return;
         }
@@ -1383,8 +1386,23 @@ impl Sfu {
         }
     }
 
+    /// 정§14-2 unicast — 그 Peer 의 배관만 바뀐 것(mid 재발급 · `READY{transport}` PT 재배정).
+    /// ★`seq` 를 올리지 않고 `current()` 를 에코한다 — 남의 보관본은 안 바뀌므로 남에게 갈 프레임이 없다.
+    /// 클라는 이것을 연§4-6 둘째 예외로 받는다(같은 번호 = 에코, 내용 반영·번호 유지).
+    fn echo_track_event(&self, room: &Room, action: TrackAction, targets: Vec<(String, Vec<TrackEntry>)>) {
+        let version = room.version(&self.epoch);
+        for (user, tracks) in targets.into_iter().filter(|(_, t)| !t.is_empty()) {
+            let ev = TrackEvent { action, room_id: room.id.clone(), tracks, version: version.clone() };
+            self.bus.user(&room.id, &user, Op::TrackEvent, &ev);
+        }
+    }
+
     /// 발행 스트림을 그 방 구독자 전원에게 배관하고 `add` 를 낸다. 슬롯은 화자도 받는다(N:1).
     fn announce(&self, room: &Room, streams: &[Arc<PublisherStream>]) {
+        // ★알릴 것이 없으면 사건도 없다 — 슬롯 재사용·simulcast 대기는 방 상태를 안 바꾼다.
+        if streams.is_empty() {
+            return;
+        }
         let mut targets: Vec<(String, Vec<TrackEntry>)> = Vec::new();
         for member in room.member_ids() {
             let Some(peer) = self.peers.get(&member) else { continue };
@@ -1404,6 +1422,9 @@ impl Sfu {
 
     /// 발행 스트림 해제 — 구독자마다 `remove` + mid 회수, 그리고 ★고갈로 밀렸던 구독의 재발급(정§7-2).
     fn withdraw(&self, room: &Room, streams: &[Arc<PublisherStream>]) {
+        if streams.is_empty() {
+            return;
+        }
         let mut removed: Vec<(String, Vec<TrackEntry>)> = Vec::new();
         let mut refilled: Vec<(String, Vec<TrackEntry>)> = Vec::new();
         for member in room.member_ids() {
@@ -1414,10 +1435,12 @@ impl Sfu {
                 mine.push(entry_of(stream, &sub));
                 self.unplumb(&peer, &room.id, stream);
             }
-            if mine.is_empty() {
+            // ★빈 델타도 넣는다(정§14-1 배달 불변식) — 회수는 방 사건이라 전원이 번호를 받는다.
+            let refill_now = !mine.is_empty();
+            removed.push((member.clone(), mine));
+            if !refill_now {
                 continue;
             }
-            removed.push((member.clone(), mine));
             let back: Vec<TrackEntry> = peer
                 .subscribe
                 .refill_mids()
@@ -1427,7 +1450,8 @@ impl Sfu {
             refilled.push((member, back));
         }
         self.emit_track_event(room, TrackAction::Remove, removed);
-        self.emit_track_event(room, TrackAction::Add, refilled);
+        // ★mid 재발급은 그 Peer 의 배관 변경이다 — 방 상태가 아니라서 번호를 안 올린다(정§14-2 unicast).
+        self.echo_track_event(room, TrackAction::Add, refilled);
     }
 
     /// 그 방에 실제로 있는 발행 스트림(슬롯 포함) — 보관본 조립이 쓴다.
@@ -1689,14 +1713,11 @@ impl Sfu {
         Ok(json!({ "ssrc": stream.vssrc, "duplex": duplex }))
     }
 
-    /// 연§6-7 `TRACK_STATE` — ★배관을 가진 구독자에게만 간다(없는 트랙의 속성을 알릴 이유가 없다).
+    /// 연§6-7 `TRACK_STATE` — ★그 방 전원에게 간다(정§8-2 배달 행).
+    /// 구독자 한정·본인 제외 필터를 걸지 않는다 — `seq` 를 올렸으므로 못 받은 사람에게 갭이다(정§14-1).
     /// `seq` 증가와 enqueue 는 한 임계 구역이다(정§14-1).
     fn emit_track_state(&self, room: &Arc<Room>, stream: &Arc<PublisherStream>, state_type: TrackStateType, muted: Option<bool>, duplex: Option<Duplex>, active: Option<bool>) {
-        let targets: Vec<String> = room
-            .member_ids()
-            .into_iter()
-            .filter(|m| self.peers.get(m).is_some_and(|p| p.subscribe.get(&room.id, &stream.track_id).is_some()))
-            .collect();
+        let targets = room.member_ids();
         if targets.is_empty() {
             return;
         }
@@ -1796,8 +1817,9 @@ impl Sfu {
             }
         }
         info!(user = %peer.user_id, room = %room.id, reassigned = changed.len(), "ready transport");
-        let _g = room.gate.lock().unwrap_or_else(|e| e.into_inner());
-        self.emit_track_event(room, TrackAction::Add, vec![(peer.user_id.clone(), changed)]);
+        // ★재배정은 신고한 그 Peer 것이다 — `seq` 를 올리지 않는다(정§7-4 · §14-1 배달 불변식).
+        // 올리면 `1pc` 클라 하나가 붙을 때마다 그 방 나머지 전원이 갭을 보고 헛 재동기한다.
+        self.echo_track_event(room, TrackAction::Add, vec![(peer.user_id.clone(), changed)]);
         Ok(())
     }
 
@@ -1827,7 +1849,8 @@ impl Sfu {
             active: Some(true),
             source: stream.source.clone(),
         };
-        self.bus.room(&pub_room.id, Op::TrackState, &ev, std::slice::from_ref(&peer.user_id));
+        // ★켠 본인도 받는다 — `seq` 를 올렸으므로 빼면 본인에게 갭이다(정§7-4 · §14-1 배달 불변식).
+        self.bus.room(&pub_room.id, Op::TrackState, &ev, &[]);
         Ok(())
     }
 
@@ -2006,16 +2029,26 @@ mod tests {
     }
 
     #[test]
-    fn affiliation_bumps_both_rooms_and_keeps_invariant() {
+    fn affiliation_echoes_both_rooms_without_bumping_and_keeps_invariant() {
         let s = sfu();
         create(&s, "a", 5);
         create(&s, "b", 5);
         call(&s, "u", Op::RoomJoin.code(), json!({"room_id": "a"}));
         call(&s, "u", Op::RoomJoin.code(), json!({"room_id": "b", "select": false}));
+        // ★정§5-2 · §14-1 — 소속 변경은 `seq` 를 올리지 않는다(그 방 나머지에게 갈 프레임이 없다).
+        // 남이 보고 있는 방에서 올리면 그 전원에게 갭이 나고 헛 재동기가 돈다.
+        call(&s, "watcher", Op::RoomJoin.code(), json!({"room_id": "a", "select": false}));
+        call(&s, "watcher", Op::RoomJoin.code(), json!({"room_id": "b", "select": false}));
+        let before = (s.rooms.get("a").unwrap().version(&s.epoch).seq, s.rooms.get("b").unwrap().version(&s.epoch).seq);
+        let mut rx = s.bus.subscribe();
         let (k, b) = call(&s, "u", Op::Affiliation.code(), json!({"pub_select": "b", "change_id": "c1"}));
         let res: AffiliationRes = serde_json::from_value(b).unwrap();
         assert_eq!((k, res.pub_room.as_deref(), res.change_id.as_deref(), res.versions.len()), (Kind::Ok, Some("b"), Some("c1"), 2));
         assert!(res.is_consistent());
+        let after = (s.rooms.get("a").unwrap().version(&s.epoch).seq, s.rooms.get("b").unwrap().version(&s.epoch).seq);
+        assert_eq!(after, before, "★두 방 어느 쪽도 오르지 않는다");
+        assert_eq!((res.versions["a"].seq, res.versions["b"].seq), before, "응답 versions 는 현재값 에코다");
+        assert!(drain(&mut rx).is_empty(), "★남에게 갈 프레임이 없다 — 그래서 올릴 수도 없다");
         let (k, b) = call(&s, "u", Op::Affiliation.code(), json!({"pub_select": "zzz"}));
         assert_eq!((k, b["pub_room"].as_str(), b["versions"].as_object().unwrap().len()), (Kind::Ok, Some("b"), 0));
         let (k, b) = call(&s, "u", Op::Affiliation.code(), json!({}));
@@ -2086,9 +2119,14 @@ mod tests {
         let track_id = published[0]["track_id"].as_str().unwrap().to_owned();
         assert!(track_id.starts_with("tr-") && published[1]["track_id"] != published[0]["track_id"]);
 
+        // ★정§14-1 배달 불변식 — `seq` 를 올렸으므로 방 전원이 한 장씩 받는다.
+        // 발행자 본인은 자기 트랙을 구독하지 않으니 델타가 비지만(`tracks:[]`) 번호는 받는다.
         let events = track_events(&mut rx, "add");
-        assert_eq!(events.len(), 1, "발행자 본인은 자기 트랙을 구독하지 않는다");
-        let (target, ev) = &events[0];
+        assert_eq!(events.len(), 2, "방 전원 — 발행자 본인은 빈 델타로");
+        let mine = events.iter().find(|(t, _)| t == "u1").unwrap();
+        assert_eq!(mine.1["tracks"].as_array().unwrap().len(), 0, "본인 델타는 비어 있다");
+        let (target, ev) = events.iter().find(|(t, _)| t == "u2").unwrap();
+        assert_eq!(mine.1["version"]["seq"], ev["version"]["seq"], "한 사건 = 한 번호");
         assert_eq!((target.as_str(), ev["room_id"].as_str(), ev["version"]["seq"].as_u64()), ("u2", Some("r"), Some(3)));
         let tracks = ev["tracks"].as_array().unwrap();
         assert_eq!(tracks.len(), 2);
@@ -2111,8 +2149,10 @@ mod tests {
         let (k, b) = call(&s, "u1", Op::PublishTracks.code(), json!({"action": "remove", "room_id": "r", "track_ids": [track_id]}));
         assert_eq!((k, b["action"].as_str(), b.get("tracks")), (Kind::Ok, Some("remove"), None));
         let removed = track_events(&mut rx, "remove");
-        assert_eq!(removed.len(), 1);
-        assert_eq!(removed[0].1["tracks"][0]["mid"].as_str(), Some("1"), "지울 m-line 을 알려 준다");
+        assert_eq!(removed.len(), 2, "회수도 방 사건 — 전원이 한 장씩(정§14-1)");
+        assert!(removed.iter().find(|(t, _)| t == "u1").unwrap().1["tracks"].as_array().unwrap().is_empty());
+        let to_u2 = &removed.iter().find(|(t, _)| t == "u2").unwrap().1;
+        assert_eq!(to_u2["tracks"][0]["mid"].as_str(), Some("1"), "지울 m-line 을 알려 준다");
         let u2 = s.peers.get("u2").unwrap();
         assert_eq!(u2.subscribe.alloc_mid(MediaKind::Audio), Some(1), "회수분이 같은 kind 풀로 돌아왔다");
     }
@@ -2523,6 +2563,7 @@ mod tests {
         assert_eq!((k, sub.state()), (Kind::Ok, SubscribeState::Active));
 
         // 1pc 신고 — 씨앗이 먼저 들어가 어긋난 배정이 재배정되고 `add` 가 응답보다 먼저 나간다.
+        let before_report = s.rooms.get("r").unwrap().version(&s.epoch).seq;
         let mut rx = s.bus.subscribe();
         let report = json!({"room_id": "r", "type": "transport",
             "extmap": [{"id": 3, "uri": media::URI_TWCC}],
@@ -2530,9 +2571,13 @@ mod tests {
         let w = s.handle(&Envelope { pc_mode: "1pc".into(), ..env("u2", Op::Ready.code(), report.clone()) });
         assert_eq!(frame::decode(&w).unwrap().0.kind, Kind::Ok);
         assert_eq!((sub.pt(), sub.rtx_pt()), (100, Some(101)));
+        // ★정§7-4 · §14-1 — 재배정은 신고한 그 Peer 것이다: unicast · `seq` 안 오름 · 실린 값은 현재값 에코.
         let moved = track_events(&mut rx, "add");
-        assert_eq!(moved.len(), 1);
+        assert_eq!(moved.len(), 1, "신고한 그 Peer 에게만 — 남의 보관본은 안 바뀐다");
+        assert_eq!(moved[0].0, "u2");
         assert_eq!(moved[0].1["tracks"][0]["pt"].as_u64(), Some(100));
+        assert_eq!(moved[0].1["version"]["seq"].as_u64(), Some(before_report), "★현재값 에코 — 올리지 않는다");
+        assert_eq!(s.rooms.get("r").unwrap().version(&s.epoch).seq, before_report);
         assert_eq!(sub.ext_of(6), Some(3), "발행자 twcc 번호가 구독자 번호로 바뀐다");
         assert_eq!(sub.ext_of(1), Some(14), "구독자 표에 없는 mid 는 표 밖 번호로");
 
@@ -2547,9 +2592,15 @@ mod tests {
         let mut rx = s.bus.subscribe();
         let (k, _) = call(&s, "u1", Op::Ready.code(), json!({"room_id": "r", "type": "camera", "track_id": mine}));
         assert_eq!(k, Kind::Ok);
-        let live: Vec<_> = drain(&mut rx).into_iter().filter(|(op, ..)| *op == Op::TrackState.code()).collect();
+        // ★정§7-4 · §14-1 — `seq` 를 올렸으므로 켠 본인도 받는다(본인 제외를 걸면 본인에게 갭이다).
+        let live: Vec<_> = drain_raw(&mut rx)
+            .into_iter()
+            .filter(|e| frame::decode(&e.wire).unwrap().0.op == Op::TrackState.code())
+            .collect();
         assert_eq!(live.len(), 1);
-        assert_eq!((live[0].2["type"].as_str(), live[0].2["active"].as_bool()), (Some("live"), Some(true)));
+        assert!(live[0].exclude.is_empty(), "★켠 본인을 빼지 않는다 — 방 전원");
+        let body = frame::body_json(frame::decode(&live[0].wire).unwrap().1).unwrap();
+        assert_eq!((body["type"].as_str(), body["active"].as_bool()), (Some("live"), Some(true)));
     }
 
 
@@ -2568,9 +2619,14 @@ mod tests {
         // muted — 논리 Stream 단위. 같은 값이면 noop.
         let (k, b) = call(&s, "u1", Op::TrackSet.code(), json!({"room_id": "r", "ssrc": 0xB1, "muted": true}));
         assert_eq!((k, b["muted"].as_bool(), b["ssrc"].as_u64(), b.get("noop")), (Kind::Ok, Some(true), Some(0xB1), None));
+        // ★정§8-2 배달 행 — 그 방 전원이다(구독자 한정·본인 제외 없음). `seq` 를 올렸으므로 빼면 갭이다.
         let states = drain(&mut rx).into_iter().filter(|(op, ..)| *op == Op::TrackState.code()).collect::<Vec<_>>();
-        assert_eq!(states.len(), 1, "배관을 가진 구독자에게만");
-        assert_eq!((states[0].1.as_str(), states[0].2["type"].as_str(), states[0].2["muted"].as_bool()), ("u2", Some("muted"), Some(true)));
+        assert_eq!(states.len(), 2, "방 전원 — 발행자 본인도 받는다");
+        assert_eq!(states[0].2["version"]["seq"], states[1].2["version"]["seq"], "한 사건 = 한 번호");
+        let seen = states.iter().map(|s| s.1.clone()).collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(seen, ["u1".to_owned(), "u2".to_owned()].into());
+        let to_u2 = states.iter().find(|s| s.1 == "u2").unwrap();
+        assert_eq!((to_u2.2["type"].as_str(), to_u2.2["muted"].as_bool()), (Some("muted"), Some(true)));
         let (_, again) = call(&s, "u1", Op::TrackSet.code(), json!({"room_id": "r", "ssrc": 0xB1, "muted": true}));
         assert_eq!(again["noop"].as_bool(), Some(true));
 
@@ -2581,16 +2637,17 @@ mod tests {
         assert_eq!(s.peers.get("u2").unwrap().subscribe.get("r", &sub.track_id).map(|x| x.mid()), Some(mid), "개인 mid 를 지우지 않는다");
         let half = drain(&mut rx).into_iter().filter(|(op, ..)| *op == Op::TrackState.code()).collect::<Vec<_>>();
         let duplex_ev: Vec<_> = half.iter().filter(|(_, _, b)| b["type"] == "duplex").collect();
-        assert_eq!(duplex_ev.len(), 1);
-        assert_eq!((duplex_ev[0].1.as_str(), duplex_ev[0].2["active"].as_bool()), ("u2", Some(false)), "잔존은 active:false");
+        assert_eq!(duplex_ev.len(), 2, "방 전원 한 장씩");
+        let to_u2 = duplex_ev.iter().find(|e| e.1 == "u2").unwrap();
+        assert_eq!(to_u2.2["active"].as_bool(), Some(false), "잔존은 active:false");
 
         // half→full — 슬롯이 걷히고 active:true 가 간다.
         let (k, b) = call(&s, "u1", Op::TrackSet.code(), json!({"room_id": "r", "ssrc": 0xB1, "duplex": "full"}));
         assert_eq!((k, b["duplex"].as_str()), (Kind::Ok, Some("full")));
         assert!(room.slots.video().is_none(), "마지막 반이중 video 보유자가 빠지면 슬롯을 리셋한다");
         let back: Vec<_> = drain(&mut rx).into_iter().filter(|(op, _, b)| *op == Op::TrackState.code() && b["type"] == "duplex").collect();
-        assert_eq!(back.len(), 1);
-        assert_eq!(back[0].2["active"].as_bool(), Some(true));
+        assert_eq!(back.len(), 2, "방 전원 한 장씩");
+        assert!(back.iter().all(|e| e.2["active"].as_bool() == Some(true)));
 
         // 판정 셋 — 배타·미지 트랙·simulcast.
         let (k, b) = call(&s, "u1", Op::TrackSet.code(), json!({"room_id": "r", "ssrc": 0xB1, "muted": true, "duplex": "half"}));
@@ -2638,8 +2695,9 @@ mod tests {
         // 첫 단 — 배관과 통지가 이때 선다.
         assert!(s.learn_simulcast(&peer, &rid_packet(0xC1, "h", true), 0xC1).is_some());
         let added = track_events(&mut rx, "add");
-        assert_eq!(added.len(), 1, "발행자 본인은 빼고 한 번만");
-        let entry = &added[0].1["tracks"][0];
+        assert_eq!(added.len(), 2, "방 전원 한 장씩 — 발행자 본인은 빈 델타로(정§14-1)");
+        assert!(added.iter().find(|(t, _)| t == "u1").unwrap().1["tracks"].as_array().unwrap().is_empty());
+        let entry = &added.iter().find(|(t, _)| t == "u2").unwrap().1["tracks"][0];
         assert_eq!((entry["simulcast"].as_bool(), entry["scalability"].as_str()), (Some(true), Some("L2T1")));
         assert_eq!(entry["ssrc"].as_u64(), Some(u64::from(stream.vssrc)), "★egress 는 vssrc 하나로 합쳐진다");
 
