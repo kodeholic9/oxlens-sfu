@@ -338,7 +338,7 @@ pub struct SubscribeContext {
     streams: DashMap<(String, String), Arc<SubscriberStream>>,
     mids: Mutex<MidPool>,
     pts: Mutex<PtTable>,
-    /// 2pc 는 `server_config.extmap`(mid 제외), 1pc 는 `READY{transport}` 신고표.
+    /// 2pc 는 `server_config.extmap`, 1pc 는 `READY{transport}` 신고표. ★어느 쪽이든 mid 는 빠져 있다.
     extmap: ArcSwap<Vec<Extmap>>,
 }
 
@@ -362,7 +362,13 @@ impl SubscribeContext {
         }
     }
 
+    /// 정§7-2-1 — 들어오는 표에서 ★mid 를 걷어낸다. 1pc 신고표(`READY{transport}`)는 브라우저가
+    /// **보내기 절까지 합쳐** 만든 표라 `sdes:mid` 가 섞여 온다. 그대로 두면 구독자가 읽을 수 있는
+    /// 번호로 ★발행자의 mid 값이 옮겨 적혀 나가고, 받는 쪽은 그 이름을 자기 보내기 m-line 으로 읽어
+    /// 그 SSRC 의 주인을 옮긴다(연§9-10 — demuxer 기준 등록이 거부되는 경로).
+    /// 거르는 곳을 여기 하나로 두어, 어느 경로로 표가 들어와도 같은 규칙이 걸리게 한다.
     pub fn set_extmap(&self, table: Vec<Extmap>) {
+        let table: Vec<Extmap> = table.into_iter().filter(|e| e.uri != super::URI_MID).collect();
         self.extmap.store(Arc::new(table));
     }
 
@@ -645,6 +651,23 @@ mod tests {
         let table = ctx.ext_table(&[(6, crate::media::URI_TWCC), (4, crate::media::URI_AUDIO_LEVEL)]);
         assert_eq!(table[6], Some(6), "같은 URI 는 구독자 번호로 간다");
         assert_eq!(table[4], Some(4));
+    }
+
+    /// 정§7-2-1 — 1pc 신고표에는 브라우저 보내기 절의 `sdes:mid` 가 섞여 온다.
+    /// 그것이 표에 남으면 구독자가 읽는 번호로 발행자 mid 가 나가고, 받는 쪽 demuxer 가
+    /// 그 SSRC 를 자기 보내기 m-line 으로 옮겨 쥔다(연§9-10).
+    #[test]
+    fn a_reported_table_never_carries_mid_through() {
+        let ctx = SubscribeContext::new();
+        ctx.set_extmap(vec![
+            Extmap { id: 1, uri: crate::media::URI_AUDIO_LEVEL.into() },
+            Extmap { id: 3, uri: crate::media::URI_TWCC.into() },
+            Extmap { id: 4, uri: crate::media::URI_MID.into() },
+        ]);
+        assert!(ctx.extmap().iter().all(|e| e.uri != crate::media::URI_MID), "신고표로 들어와도 mid 는 남지 않는다");
+        let t = ctx.ext_table(&[(4, crate::media::URI_MID), (3, crate::media::URI_TWCC)]);
+        assert_eq!(t[3], Some(3), "나머지는 그대로 구독자 번호로 간다");
+        assert_eq!(t[4], Some(14), "★mid 는 표 밖 번호로 — 구독자가 못 읽는다");
     }
 
     #[test]
