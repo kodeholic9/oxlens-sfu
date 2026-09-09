@@ -9,7 +9,8 @@ pub enum CloseCode {
     FlowTimeout = 4001,
     FlowOverflow = 4002,
     HeartbeatTimeout = 4003,
-    /// 연§10-3 — 운영자가 이 세션을 끊었다(C 평면). ★새 토큰으로 풀리지 않는다.
+    /// 연§10-3 — 운영자가 이 세션을 끊었다(C 평면 `cut`). ★차단이 아니다 — 붙어도 된다.
+    /// 서버가 세션을 즉시 버리므로 다시 붙을 때 `session_id` 를 싣지 않는다(정§16-1-2).
     SessionRevoked = 4004,
     DuplicateSession = 4005,
     ServerShutdown = 4006,
@@ -42,16 +43,6 @@ impl CloseCode {
     }
 }
 
-/// 연§10-3 — `4000`·`4001`·`4002`·`4005` 만 재접속을 막는다. 모르는 코드는 다시 붙는다.
-pub fn reconnectable(code: u16) -> bool {
-    !matches!(code, 4000 | 4001 | 4002 | 4005)
-}
-
-/// 연§10-3 — `4004` 만 새 토큰이 필요하다.
-pub fn needs_new_token(code: u16) -> bool {
-    code == 4004
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,10 +54,5 @@ mod tests {
             assert!(c.reason().is_ascii());
             assert_eq!(CloseCode::from_code(c.code()), Some(c));
         }
-        assert!(!reconnectable(4005));
-        assert!(reconnectable(4003));
-        assert!(reconnectable(4006));
-        assert!(reconnectable(4999));
-        assert!(needs_new_token(4004));
     }
 }
