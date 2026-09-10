@@ -1,6 +1,7 @@
 // author: kodeholic (powered by Claude)
 //! 미디어 서버 노드 표 — 정§18-1 유닛 목록에서(자기 등록·discovery 없음, hub→sfud dial). 연결은 게으르게 맺고 실패하면 다음 요청이 다시 시도한다.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use common::bplane::SfuServiceClient;
@@ -14,6 +15,8 @@ pub struct Node {
     pub id: String,
     pub addr: String,
     client: Mutex<Option<Client>>,
+    /// 정§16-1 — 그 노드의 이벤트 스트림이 서 있나. ★dial 과 다른 물음이다.
+    stream_up: AtomicBool,
 }
 
 pub struct NodeTable {
@@ -24,7 +27,8 @@ pub struct NodeTable {
 impl NodeTable {
     /// `(node_id, addr)` 목록 — role=sfu 유닛. 순서는 배치와 무관하다(HRW).
     pub fn new(units: impl IntoIterator<Item = (String, String)>) -> Self {
-        let nodes: Vec<Arc<Node>> = units.into_iter().map(|(id, addr)| Arc::new(Node { id, addr, client: Mutex::new(None) })).collect();
+        let nodes: Vec<Arc<Node>> =
+            units.into_iter().map(|(id, addr)| Arc::new(Node { id, addr, client: Mutex::new(None), stream_up: AtomicBool::new(false) })).collect();
         let by_id = DashMap::new();
         for n in &nodes {
             by_id.insert(n.id.clone(), n.clone());
@@ -62,5 +66,15 @@ impl Node {
     /// 요청이 실패했다 — 다음 요청이 다시 붙게 한다.
     pub async fn drop_client(&self) {
         *self.client.lock().await = None;
+    }
+
+    /// 정§16-1 — 배치 가능 여부. ★소비자가 `subscribe` 에 성공했을 때만 참이다.
+    pub fn is_live(&self) -> bool {
+        self.stream_up.load(Ordering::Acquire)
+    }
+
+    /// 이벤트 소비자만 부른다(정§16-1) — 스트림이 서면 켜고, 끊기면 끈다.
+    pub fn set_stream_up(&self, up: bool) {
+        self.stream_up.store(up, Ordering::Release);
     }
 }

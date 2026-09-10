@@ -95,12 +95,13 @@ pub async fn admin_sfus(State(st): State<Arc<RestState>>, ConnectInfo(peer): Con
 }
 
 /// ★유닛 한 줄의 정본 — 유닛 평면과 스냅샷 평면이 같은 것을 봐야 한다(두 곳에 적으면 갈린다).
-/// 붙느냐(dial)와 supervisor 가 무엇으로 적었느냐는 다른 물음이라 둘 다 낸다.
+/// ★`live` 는 **배치 가능**과 같은 값이다(정§16-1) — dial 이 아니라 이벤트 스트림이 섰는가다.
+/// supervisor 가 무엇으로 적었느냐는 다른 물음이라 둘 다 낸다.
 async fn sfu_rows(st: &Arc<RestState>) -> (Vec<Value>, bool) {
     let states = st.supervisor.lock().await.states();
     let mut sfus: Vec<Value> = Vec::new();
     for node in st.backend.nodes.all() {
-        let mut row = json!({ "sfu_id": node.id, "addr": node.addr, "live": node.client().await.is_some() });
+        let mut row = json!({ "sfu_id": node.id, "addr": node.addr, "live": node.is_live() });
         // supervisor 가 안 쥔 유닛은 상태 칸 자체가 없다 — 모르는 것을 지어내지 않는다(연§6-6).
         if let Some((_, state)) = states.iter().find(|(id, _)| id == &node.id)
             && let Some(map) = row.as_object_mut()
@@ -378,8 +379,17 @@ pub async fn create_room(State(st): State<Arc<RestState>>, headers: HeaderMap, J
         let node_id = match st.backend.rooms.node_of(&room_id) {
             Some(n) => n,
             None => {
+                // 정§15-1 — 배치는 **전 노드**를 후보로 하는 순수 함수다(HRW). 살아 있는 것만
+                // 후보로 좁히면 노드 하나가 죽는 창에 그 방이 다른 노드로 옮겨 붙어, 정§15-1 의
+                // "한 방은 한 sfud" 안정성이 창마다 흔들린다.
                 let ids = st.backend.nodes.ids();
                 let chosen = crate::route::place(&ids, &room_id).ok_or_else(|| fail_of(FailCode::SfuUnavailable))?;
+                // 정§16-1 — ★그 노드의 이벤트 스트림이 서 있을 때만 배치한다. 스트림이 없으면
+                // 방은 살고 통지는 갈 곳이 없어 그 창의 입퇴장·트랙 통지가 통째로 버려진다.
+                // "매핑은 있는데 그 sfud 에 못 닿는다"(정§15-2)와 같은 자리라 `5001` 이다.
+                if !st.backend.nodes.get(chosen).is_some_and(|n| n.is_live()) {
+                    return Err(fail_of(FailCode::SfuUnavailable));
+                }
                 st.backend.rooms.assign(&room_id, chosen)
             }
         };
@@ -434,12 +444,9 @@ pub async fn healthz_live() -> &'static str {
 /// ★설정에 있는 것이 아니라 **지금 닿는가**를 본다 — 노드 하나가 죽으면 그 방들이 안 서므로
 /// 트래픽을 받으면 안 된다. 무인증이다(probe).
 pub async fn healthz_ready(State(st): State<Arc<RestState>>) -> axum::response::Response {
-    let mut down: Vec<&str> = Vec::new();
-    for node in st.backend.nodes.all() {
-        if node.client().await.is_none() {
-            down.push(node.id.as_str());
-        }
-    }
+    // ★`Live` 는 배치 가능과 같은 값이다(정§16-1) — 스트림이 안 선 노드가 있으면 트래픽을 받지 않는다.
+    // dial 만 보면 재기동 창에 ready 가 200 이고 그 창에 배치된 방은 통지가 없다.
+    let down: Vec<&str> = st.backend.nodes.all().iter().filter(|n| !n.is_live()).map(|n| n.id.as_str()).collect();
     let code = if down.is_empty() { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
     // ★어느 노드가 빠졌는지까지 낸다 — 503 만 주면 운영자가 다시 물어봐야 한다.
     // ★어느 빌드가 돌고 있는지 같이 낸다 — 회귀가 옛 바이너리를 상대로 도는 것을 봉쇄한다.

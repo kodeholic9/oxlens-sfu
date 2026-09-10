@@ -39,6 +39,9 @@ pub async fn run_consumer(ctx: Arc<EventCtx>, node: Arc<Node>) {
         match client.subscribe(bplane::SubscribeRequest { hub_id: ctx.hub_id.clone() }).await {
             Ok(resp) => {
                 info!(node = %node.id, "event stream up");
+                // 정§16-1 — ★여기서부터 배치 가능이다. 스트림보다 방이 먼저 살면
+                // 그 창의 통지는 받을 구독자가 없어 통째로 버려진다.
+                node.set_stream_up(true);
                 backoff = BACKOFF_MIN;
                 let mut stream = resp.into_inner();
                 while let Some(item) = stream.next().await {
@@ -50,11 +53,13 @@ pub async fn run_consumer(ctx: Arc<EventCtx>, node: Arc<Node>) {
                         }
                     }
                 }
+                node.set_stream_up(false);
                 node.drop_client().await;
                 node_down(&ctx, &node.id);
             }
             Err(e) => {
                 warn!(node = %node.id, error = %e, "subscribe failed");
+                node.set_stream_up(false);
                 node.drop_client().await;
             }
         }
