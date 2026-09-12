@@ -122,9 +122,10 @@ impl Sfu {
     }
 
     /// 전달표 갱신을 UDP 루프에 넘긴다.
-    async fn push_routes(&self, routes: Vec<(u32, Vec<crate::transport::udp::Target>)>) {
-        for (ssrc, targets) in routes {
-            let _ = self.udp.send(crate::transport::udp::Cmd::SetRoute { ssrc, targets }).await;
+    async fn push_routes(&self, routes: Vec<(String, u32, Vec<crate::transport::udp::Target>)>) {
+        for (ufrag, ssrc, targets) in routes {
+            let _ =
+                self.udp.send(crate::transport::udp::Cmd::SetRoute { ufrag, ssrc, targets }).await;
         }
     }
 

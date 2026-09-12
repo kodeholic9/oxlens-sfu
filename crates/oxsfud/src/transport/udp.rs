@@ -52,8 +52,13 @@ pub enum Cmd {
     DropSession(String),
     /// DTLS 가 섰다 — 그 자격의 SRTP 두 벌.
     SrtpReady { ufrag: String, keys: Box<super::dtls::SrtpKeys> },
-    /// 그 발행 `ssrc` 가 갈 곳 전부. ★**빈 목록이면 아무 데도 안 간다**(지우는 것과 같다).
-    SetRoute { ssrc: u32, targets: Vec<Target> },
+    /// 그 발행 스트림이 갈 곳 전부. ★**빈 목록이면 아무 데도 안 간다**(지우는 것과 같다).
+    ///
+    /// ★★**키가 `ssrc` 하나면 안 된다** — SSRC 는 ★**발행자마다 제 공간**이라 다른 세션이
+    /// 같은 값을 쓸 수 있다(클라가 재접속하면 흔히 같은 값을 다시 쓴다). `ssrc` 만으로
+    /// 키를 잡으면 ★**죽은 세션의 전달표가 새 세션을 가로채** 산 스트림이 이미 사라진
+    /// 구독자에게 간다(실측 20260912 — 오래 사는 서버에서만 드러난다).
+    SetRoute { ufrag: String, ssrc: u32, targets: Vec<Target> },
     /// 그 자격의 DC 로 한 장. ★**채널이 아직이면 버린다** — 막지 않는다(정§13).
     DcSend { ufrag: String, wire: Vec<u8> },
     /// ★**그 발행 자격에서 `rid` 를 달고 오는 것은 이 `vssrc` 것**이다(정§10-1).
@@ -176,16 +181,17 @@ pub async fn serve(
     let mut by_addr: HashMap<SocketAddr, Arc<Pipe>> = HashMap::new();
     // ★이 둘도 이 태스크 혼자 쓴다 — 자물쇠가 없다.
     let mut srtp: HashMap<String, super::srtp::SrtpPair> = HashMap::new();
-    let mut routes: HashMap<u32, Vec<Target>> = HashMap::new();
+    // ★키는 `(발행 자격, ssrc)` 다 — 위 `SetRoute` 의 이유와 같다.
+    let mut routes: HashMap<(String, u32), Vec<Target>> = HashMap::new();
     // ★**전송로마다 스칼라 둘** — 구간 지도를 두면 화자 교대에서 egress seq 가 역행한다.
     let mut rewriters: HashMap<(String, u32), crate::rewriter::Rewriter> = HashMap::new();
     // ★**발행 스트림마다 수신 통계** — 핫패스가 갱신하고 1초 타이머가 소비한다(정§11-2).
     //   값은 `(그 자격, 통계)` 라 회수 때 같이 간다.
-    let mut stats: HashMap<u32, (String, crate::rtcp::RecvStats)> = HashMap::new();
+    let mut stats: HashMap<(String, u32), crate::rtcp::RecvStats> = HashMap::new();
     // ★시뮬캐스트 — `발행 자격 → vssrc` 는 제어 평면이 알려 주고,
     //   `들어온 ssrc → (vssrc, 단)` 은 rid 로 ★**배운다**(정§10-1).
     let mut sim_of: HashMap<String, u32> = HashMap::new();
-    let mut layer_of: HashMap<u32, (u32, u8)> = HashMap::new();
+    let mut layer_of: HashMap<(String, u32), (u32, u8)> = HashMap::new();
     // ★**구독자마다 지금 내보내는 단** — 키가 `(받는 자격, vssrc)` 다.
     //   상한은 사람마다 다르므로 스트림 하나에 값 하나를 두면 남의 상한이 내 화질을 깎는다.
     let mut chosen: HashMap<(String, u32), u8> = HashMap::new();
@@ -249,11 +255,11 @@ pub async fn serve(
                         for u in &gone {
                             srtp.remove(u);
                             rewriters.retain(|(f, _), _| f != u);
-                            stats.retain(|_, (f, _)| f != u);
+                            stats.retain(|(f, _), _| f != u);
                             egress.retain(|(f, _), _| f != u);
-                            if let Some(v) = sim_of.remove(u) {
-                                layer_of.retain(|_, (x, _)| *x != v);
-                            }
+                            routes.retain(|(f, _), _| f != u);
+                            layer_of.retain(|(f, _), _| f != u);
+                            sim_of.remove(u);
                             chosen.retain(|(f, _), _| f != u);
                             // ★**갈 곳 목록에서도 뺀다** — 안 빼면 죽은 자격으로 계속 잠근다.
                             for t in routes.values_mut() {
@@ -277,18 +283,18 @@ pub async fn serve(
                         // ★★**재발행이면 배운 것을 버린다.** 브라우저는 같은 단 SSRC 를 다시
                         //   쓸 수 있는데, 옛 `vssrc` 로 배워 둔 지도가 남아 있으면 새 패킷이
                         //   ★**이미 지워진 길로 가서 조용히 사라진다**(실측 20260912).
-                        if let Some(old) = sim_of.insert(ufrag, vssrc)
+                        if let Some(old) = sim_of.insert(ufrag.clone(), vssrc)
                             && old != vssrc
                         {
-                            layer_of.retain(|_, (v, _)| *v != old);
+                            layer_of.retain(|(f, _), (v, _)| f != &ufrag || *v != old);
                             chosen.retain(|(_, v), _| *v != old);
                         }
                     }
-                    Cmd::SetRoute { ssrc, targets } => {
+                    Cmd::SetRoute { ufrag, ssrc, targets } => {
                         if targets.is_empty() {
-                            routes.remove(&ssrc);
+                            routes.remove(&(ufrag, ssrc));
                         } else {
-                            routes.insert(ssrc, targets);
+                            routes.insert((ufrag, ssrc), targets);
                         }
                     }
                 }
@@ -389,9 +395,8 @@ pub async fn serve(
                     let seq = u16::from_be_bytes([plain[2], plain[3]]);
                     let ts = u32::from_be_bytes([plain[4], plain[5], plain[6], plain[7]]);
                     stats
-                        .entry(ssrc)
-                        .or_insert_with(|| (ufrag.clone(), crate::rtcp::RecvStats::new(ssrc, 48_000)))
-                        .1
+                        .entry((ufrag.clone(), ssrc))
+                        .or_insert_with(|| crate::rtcp::RecvStats::new(ssrc, 48_000))
                         .on_rtp(seq, ts, now);
                 }
                 // ★**시뮬캐스트는 들어온 ssrc 가 곧 스트림이 아니다** — 단마다 다르다.
@@ -402,10 +407,10 @@ pub async fn serve(
                 //   video 를 같이 올리므로, 자격만 보고 시뮬캐스트 갈래로 보내면 ★**audio 가
                 //   rid 가 없다는 이유로 통째로 버려진다**(실측 20260912: 468 중 1 만 도착).
                 //   갈래를 가르는 것은 자격이 아니라 ★**그 ssrc 를 아는가**다.
-                if !routes.contains_key(&ssrc)
+                if !routes.contains_key(&(ufrag.clone(), ssrc))
                     && let Some(&vssrc) = sim_of.get(&ufrag)
                 {
-                    let known = layer_of.get(&ssrc).copied();
+                    let known = layer_of.get(&(ufrag.clone(), ssrc)).copied();
                     let (v, spatial) = match known {
                         Some(v) => v,
                         None => {
@@ -416,14 +421,14 @@ pub async fn serve(
                                 c.sim_unknown += 1;
                                 continue;
                             };
-                            layer_of.insert(ssrc, (vssrc, spatial));
+                            layer_of.insert((ufrag.clone(), ssrc), (vssrc, spatial));
                             (vssrc, spatial)
                         }
                     };
                     sim_spatial = Some(spatial);
                     out_ssrc = v;
                 }
-                let Some(targets) = routes.get(&out_ssrc) else { continue };
+                let Some(targets) = routes.get(&(ufrag.clone(), out_ssrc)) else { continue };
                 for t in targets {
                     // ★**받지 않겠다는 사람에게는 안 보낸다** — 레이어 축과 별개다.
                     if t.paused {
@@ -549,11 +554,11 @@ fn now_ms() -> u64 {
 
 /// 자격마다 RR 한 장에 담을 칸들. ★**구간은 여기서 한 번만 닫힌다**(정§11-2).
 fn rr_blocks(
-    stats: &mut HashMap<u32, (String, crate::rtcp::RecvStats)>,
+    stats: &mut HashMap<(String, u32), crate::rtcp::RecvStats>,
     now: u64,
 ) -> Vec<(String, Vec<crate::rtcp::ReportBlock>)> {
     let mut by: HashMap<String, Vec<crate::rtcp::ReportBlock>> = HashMap::new();
-    for (ufrag, s) in stats.values_mut() {
+    for ((ufrag, _), s) in stats.iter_mut() {
         // ★아직 한 장도 못 받은 스트림은 낼 것이 없다 — 빈 칸을 지어내지 않는다.
         if s.received() == 0 {
             continue;
@@ -568,9 +573,9 @@ fn rr_blocks(
 async fn on_rtcp(
     plain: &[u8],
     ufrag: &str,
-    stats: &mut HashMap<u32, (String, crate::rtcp::RecvStats)>,
+    stats: &mut HashMap<(String, u32), crate::rtcp::RecvStats>,
     egress: &mut HashMap<(String, u32), (u32, u32)>,
-    routes: &HashMap<u32, Vec<Target>>,
+    routes: &HashMap<(String, u32), Vec<Target>>,
     rewriters: &HashMap<(String, u32), crate::rewriter::Rewriter>,
     table: &Arc<IceTable>,
     srtp: &mut HashMap<String, super::srtp::SrtpPair>,
@@ -583,11 +588,11 @@ async fn on_rtcp(
         match pkt[1] {
             rtcp::PT_SR => {
                 let Some((ssrc, hi, lo)) = rtcp::sr_ntp(pkt) else { continue };
-                if let Some((_, s)) = stats.get_mut(&ssrc) {
+                if let Some(s) = stats.get_mut(&(ufrag.to_string(), ssrc)) {
                     s.on_sr(hi, lo, now);
                 }
                 // ★**자체 생성 금지 — 번역 릴레이다**(정§11-2). 구독자마다 값이 다르다.
-                let Some(targets) = routes.get(&ssrc) else { continue };
+                let Some(targets) = routes.get(&(ufrag.to_string(), ssrc)) else { continue };
                 for t in targets {
                     let (Some(dst), Some(out)) =
                         (table.get(&t.ufrag).and_then(|e| e.addr()), srtp.get_mut(&t.ufrag))
@@ -625,7 +630,6 @@ async fn on_rtcp(
             _ => c.rtcp_ignored += 1,
         }
     }
-    let _ = ufrag;
 }
 
 #[cfg(test)]

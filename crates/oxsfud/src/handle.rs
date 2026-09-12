@@ -57,7 +57,7 @@ pub struct Outcome {
     pub reply: Vec<u8>,
     pub notices: Vec<Notice>,
     /// ★**전달표 갱신** — 제어 평면이 계산해 데이터 평면에 밀어 넣는다(핫패스 규율 H2).
-    pub routes: Vec<(u32, Vec<crate::transport::udp::Target>)>,
+    pub routes: Vec<(String, u32, Vec<crate::transport::udp::Target>)>,
     /// 시뮬캐스트 등록 `(발행 자격, vssrc)`.
     pub sims: Vec<(String, u32)>,
 }
@@ -180,7 +180,7 @@ fn unicast(room_id: &str, user_id: &str, op: Op, body: &impl serde::Serialize) -
 ///
 /// ★**다시 세는 것이 갱신이다** — 델타로 고치면 입·퇴장과 발행·해제가 겹칠 때
 /// 한 걸음이 빠지고, 그 빠짐은 *"한 사람만 영상이 안 나온다"* 로 나타난다.
-pub fn routes_for_room(node: &Node, room_id: &str) -> Vec<(u32, Vec<crate::transport::udp::Target>)> {
+pub fn routes_for_room(node: &Node, room_id: &str) -> Vec<(String, u32, Vec<crate::transport::udp::Target>)> {
     let Some(room) = node.rooms.get(room_id) else { return Vec::new() };
     let members = room.session_ids();
     node.publications
@@ -205,7 +205,9 @@ pub fn routes_for_room(node: &Node, room_id: &str) -> Vec<(u32, Vec<crate::trans
                 })
                 .collect();
             // ★**시뮬캐스트는 vssrc 로 건다** — 들어오는 ssrc 는 단마다 다르고 미리 알 수 없다.
-            (p.vssrc.unwrap_or(p.ssrc), targets)
+            //   ★키에 **발행 자격**을 같이 둔다 — SSRC 는 발행자마다 제 공간이라 값만으로는
+            //   다른 세션과 겹친다.
+            (pub_ufrag(node, &p.session_id), p.vssrc.unwrap_or(p.ssrc), targets)
         })
         .collect()
 }
@@ -465,7 +467,7 @@ pub struct Reaped {
     pub session_id: String,
     pub user_id: String,
     pub notices: Vec<Notice>,
-    pub routes: Vec<(u32, Vec<crate::transport::udp::Target>)>,
+    pub routes: Vec<(String, u32, Vec<crate::transport::udp::Target>)>,
 }
 
 pub fn reap(node: &mut Node, session_id: &str, zombie: bool) -> Option<Reaped> {
@@ -508,11 +510,11 @@ pub fn reap(node: &mut Node, session_id: &str, zombie: bool) -> Option<Reaped> {
     // ④ 전송 등록 해제 — ★자격을 내려야 옛 패킷이 새 Peer 를 못 건드린다.
     node.ice.drop_session(session_id);
     // ★**그 사람이 올리던 것도 끊는다** — 발행자가 갔는데 목록만 남으면 죽은 ssrc 가 표에 남는다.
-    let mut routes: Vec<(u32, Vec<crate::transport::udp::Target>)> = node
+    let mut routes: Vec<(String, u32, Vec<crate::transport::udp::Target>)> = node
         .publications
         .iter()
         .filter(|p| p.session_id == session_id)
-        .map(|p| (p.ssrc, Vec::new()))
+        .map(|p| (pub_ufrag(node, session_id), p.vssrc.unwrap_or(p.ssrc), Vec::new()))
         .collect();
     node.publications.retain(|p| p.session_id != session_id);
     for r in &rooms {
@@ -770,8 +772,10 @@ fn publish_remove(node: &mut Node, ing: &Ingress, header: Header, req: &PublishT
     //
     // ★**끊는 키는 egress 값이다** — 시뮬캐스트의 `ssrc` 는 `0`(신고 안 함)이라 그것으로
     //   끊으면 ★**아무것도 안 끊기고** 옛 vssrc 가 계속 흐른다(실측 20260912).
-    let mut routes: Vec<(u32, Vec<crate::transport::udp::Target>)> =
-        gone.iter().map(|g| (g.vssrc.unwrap_or(g.ssrc), Vec::new())).collect();
+    let mut routes: Vec<(String, u32, Vec<crate::transport::udp::Target>)> = gone
+        .iter()
+        .map(|g| (pub_ufrag(node, &g.session_id), g.vssrc.unwrap_or(g.ssrc), Vec::new()))
+        .collect();
     if let Some(g) = gone.first() {
         routes.extend(routes_for_room(node, &g.room_id));
     }
@@ -885,7 +889,7 @@ pub struct DcOut {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FloorOut {
     pub dc: Vec<DcOut>,
-    pub routes: Vec<(u32, Vec<crate::transport::udp::Target>)>,
+    pub routes: Vec<(String, u32, Vec<crate::transport::udp::Target>)>,
 }
 
 /// 발언권 한 통을 처리한다. ★**판정은 `floor::Floor` 가 하고 여기는 어휘를 옮긴다.**
@@ -944,7 +948,7 @@ pub fn on_floor(node: &mut Node, ufrag: &str, payload: &[u8], now: u64) -> Floor
 ///
 /// ★★**허가가 없으면 목록이 빈다** — 그것이 *"허가 전 발화가 안 나간다"* 의 실체다.
 /// 검사로 막는 것이 아니라 ★**보낼 곳이 없는 것**이라, 검사를 빠뜨릴 자리가 없다.
-pub fn floor_routes(node: &Node, room_id: &str) -> Vec<(u32, Vec<crate::transport::udp::Target>)> {
+pub fn floor_routes(node: &Node, room_id: &str) -> Vec<(String, u32, Vec<crate::transport::udp::Target>)> {
     let speaker = node.floors.get(room_id).and_then(|f| f.speaker()).map(str::to_string);
     let Some(room) = node.rooms.get(room_id) else { return Vec::new() };
     let slot_ssrc = room.slot_audio_ssrc;
@@ -977,9 +981,14 @@ pub fn floor_routes(node: &Node, room_id: &str) -> Vec<(u32, Vec<crate::transpor
             } else {
                 Vec::new()
             };
-            (p.ssrc, targets)
+            (pub_ufrag(node, &p.session_id), p.ssrc, targets)
         })
         .collect()
+}
+
+/// 그 세션의 **발행** 자격 — 전달표의 키 절반이다.
+fn pub_ufrag(node: &Node, session_id: &str) -> String {
+    node.peers.get(session_id).map(|p| p.ice.publish_ufrag.clone()).unwrap_or_default()
 }
 
 /// 발언권 tick — ★**주기는 하나다**(정§9 `2초`). `T1`·`T2` 가 여기서 돈다.
