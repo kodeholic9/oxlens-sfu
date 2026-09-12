@@ -14,6 +14,7 @@ pub mod peer;
 pub mod pt;
 pub mod reaper;
 pub mod rtcp;
+pub mod rtpext;
 pub mod rewriter;
 pub mod room;
 pub mod transport;
