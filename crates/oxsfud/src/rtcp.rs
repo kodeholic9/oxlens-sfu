@@ -336,6 +336,42 @@ mod tests {
         assert_eq!(u16::from_be_bytes([w[2], w[3]]) as usize, w.len() / 4 - 1);
     }
 
+    /// ★**끊김 없이 오면 끝까지 손실 0 이어야 한다** — probation 구간을 포함해서다.
+    /// 2층 `rr_uplink_clean` 이 보는 것이 바로 이 값이고, ★**누적은 한 번 오르면 안 내려간다.**
+    #[test]
+    fn 끊김이_없으면_누적_손실이_0_이다() {
+        let mut s = RecvStats::new(1, 48_000);
+        for i in 0..500u16 {
+            s.on_rtp(i, u32::from(i) * 960, u64::from(i) * 20);
+            if i.is_multiple_of(50) {
+                // 1초 주기로 RR 을 낸다 — 구간이 닫혀도 누적이 오르면 안 된다.
+                let b = s.report(u64::from(i) * 20);
+                assert_eq!((b.fraction_lost, b.cumulative_lost), (0, 0), "seq={i} {b:?}");
+            }
+        }
+        let b = s.report(10_000);
+        assert_eq!((b.fraction_lost, b.cumulative_lost), (0, 0), "{b:?}");
+    }
+
+    /// ★**같은 `ssrc` 로 다시 시작해도 손실이 안 쌓인다**(재발행 형상).
+    ///
+    /// RFC 3550 A.1 은 큰 점프를 두 번 연속 보면 출처 재시작으로 보고 `init_seq` 한다 —
+    /// ★**그 자리가 없으면 재발행 한 번에 누적 손실이 수백으로 뛰고 영영 안 내려간다.**
+    #[test]
+    fn 같은_ssrc_로_다시_시작해도_손실이_안_쌓인다() {
+        let mut s = RecvStats::new(1, 48_000);
+        for i in 0..500u16 {
+            s.on_rtp(i, u32::from(i) * 960, u64::from(i) * 20);
+        }
+        s.report(10_000);
+        // 재발행 — 같은 ssrc, seq 는 0 부터 다시.
+        for i in 0..200u16 {
+            s.on_rtp(i, u32::from(i) * 960, 10_000 + u64::from(i) * 20);
+        }
+        let b = s.report(20_000);
+        assert_eq!((b.fraction_lost, b.cumulative_lost), (0, 0), "{b:?}");
+    }
+
     #[test]
     fn 손실은_구간마다_다시_센다() {
         let mut s = flowing(100);
