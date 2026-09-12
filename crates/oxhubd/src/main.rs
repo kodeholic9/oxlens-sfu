@@ -136,6 +136,7 @@ async fn run(args: Args) -> Result<(), String> {
         .route(&format!("{base}/rooms/:room_id"), get(room_detail))
         .route("/healthz/live", get(|| async { StatusCode::OK }))
         .route("/healthz/ready", get(ready))
+        .route("/admin/rooms", get(admin_rooms))
         .route("/admin/sfus", get(admin_sfus))
         .route("/admin/snapshot", get(admin_snapshot))
         .with_state(hub.clone());
@@ -335,6 +336,46 @@ async fn auth_token(
     token::issue(&hub.resolved.system, p.token_ttl_secs, p.metadata_max_bytes, now_ms() / 1000, &req)
         .map(Json)
         .map_err(|e| fail(e.0))
+}
+
+/// 운영 §3-2 — ★**hub 가 보고 있는 것**이다(정본은 sfud, 상세는 §3-6).
+///
+/// ★**배치가 이 표의 알맹이다** — 방은 폭파됐는데 배치가 남으면 ★**그 방으로 온 다음
+/// 요청이 이미 없는 자리를 가리킨다**(정§4-1 ⑤). 그래서 먼저 대장을 화해시키고 낸다.
+///
+/// ★**명단은 sfud 가 준 현황에서만 온다** — 없으면 그 필드를 안 싣는다(`0` 으로 메우면
+/// *"아직 못 물어봤다"* 와 *"정말 비었다"* 가 한 값이 된다).
+async fn admin_rooms(
+    State(hub): State<Shared>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<oxsig::Failure>)> {
+    authz::admin(&hub.resolved.system, now_ms() / 1000, &peer_of(addr, &headers)).map_err(fail)?;
+    reconcile_rooms(&hub).await;
+    let ids: Vec<String> = { hub.rooms.lock().await.iter().map(|r| r.id.clone()).collect() };
+    let mut rows = Vec::with_capacity(ids.len());
+    for id in &ids {
+        let sfu_id = sfu_of_room(&hub, id).await;
+        let view = { hub.rooms.lock().await.view(id) };
+        let mut row = serde_json::json!({ "room_id": id, "sfu_id": sfu_id });
+        let m = row.as_object_mut().expect("방금 지은 객체다");
+        // 명단은 현황에서 판다 — ★저장하지 않는다(정§4-1-1).
+        if let Some(ps) = view.as_ref().and_then(|v| v.get("participants")).and_then(|v| v.as_array())
+        {
+            let who: Vec<&str> =
+                ps.iter().filter_map(|p| p.get("user_id")).filter_map(|v| v.as_str()).collect();
+            m.insert("members".into(), serde_json::json!(who.len()));
+            m.insert("member_ids".into(), serde_json::json!(who));
+        }
+        rows.push(row);
+    }
+    Ok(Json(serde_json::json!({ "total": rows.len(), "rooms": rows })))
+}
+
+/// 그 방을 쥔 유닛의 이름 — ★**배치는 순수 함수다**(정§15-1 HRW).
+async fn sfu_of_room(hub: &Shared, room_id: &str) -> Option<String> {
+    let nodes = sfu_nodes(hub).await;
+    oxhubd::route::place(&nodes, room_id, now_ms()).map(|n| n.node_id.clone())
 }
 
 async fn admin_sfus(
