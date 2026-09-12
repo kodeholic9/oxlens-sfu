@@ -1,12 +1,6 @@
 // author: kodeholic (powered by Claude)
-//! sfud — 정§1 "두 프로세스" 중 미디어 서버. 방·Peer·트랙·발언권·version 의 상태 마스터(정§2-1).
-//! 이 판: 방·명단·version·소속·통지(정§4·§5·§14) + 전송 수립(정§12·§13·§17). 트랙·발언권은 뒤 판.
+// spec: v1.1 · 정§7 · §9 · §11 · §12 · §15-6 · model: claude-opus-5
 
-pub mod emit;
-pub mod handlers;
-pub mod media;
-pub mod peer;
-pub mod room;
-pub mod service;
-pub mod transport;
-pub mod version;
+//! `oxsfud` — 미디어 서버. 전송·트랙·fan-out·발언권이 여기 산다.
+
+pub mod lifeline;

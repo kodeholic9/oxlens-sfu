@@ -27,6 +27,10 @@ struct Hub {
     resolved: Resolved,
     sup: Mutex<Supervisor>,
     sessions: Mutex<Sessions>,
+    /// ★**살아 있는 자식들.** ★**여기 붙들고 있는 동안 부모 생존 채널이 열려 있다** —
+    /// hub 가 어떤 방식으로 죽든 프로세스가 사라지면 파이프의 쓰기 끝이 닫히고
+    /// 자식은 EOF 를 본다(정§15-6).
+    children: Mutex<Vec<(String, std::process::Child)>>,
 }
 
 type Shared = Arc<Hub>;
@@ -71,10 +75,13 @@ async fn run(args: Args) -> Result<(), String> {
     eprintln!("{}", resolved.banner(&args));
 
     let mut sup = Supervisor::new(&resolved.system.units);
-    for a in sup.start_all(now_ms()) {
-        apply(&a);
-    }
-    let hub: Shared = Arc::new(Hub { resolved, sup: Mutex::new(sup), sessions: Mutex::new(Sessions::new()) });
+    let first = sup.start_all(now_ms());
+    let hub: Shared = Arc::new(Hub {
+        resolved,
+        sup: Mutex::new(sup),
+        sessions: Mutex::new(Sessions::new()),
+        children: Mutex::new(Vec::new()),
+    });
 
     // ★접속점은 `{base}` 아래다 — 앱이 클라에 주는 그 값이다(연§5-0).
     let base = hub.resolved.system.hub.base_path.trim_end_matches('/').to_string();
@@ -92,15 +99,40 @@ async fn run(args: Args) -> Result<(), String> {
     let addr: SocketAddr = hub.resolved.listen.parse().map_err(|e| format!("listen: {e}"))?;
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| e.to_string())?;
 
-    // backoff 시계 — ★판정은 supervisor 가 하고 여기는 손만 쓴다.
+    for a in &first {
+        apply(&hub, a).await;
+    }
+
+    // backoff·회수 시계 — ★판정은 supervisor 가 하고 여기는 손만 쓴다.
     let ticker = hub.clone();
     tokio::spawn(async move {
         let mut iv = tokio::time::interval(std::time::Duration::from_millis(500));
         loop {
             iv.tick().await;
-            let mut s = ticker.sup.lock().await;
-            for a in s.tick(now_ms()) {
-                apply(&a);
+            // ★끝난 자식을 먼저 거둔다 — 그래야 supervisor 가 `Down` 을 제때 본다.
+            let done: Vec<String> = {
+                let mut cs = ticker.children.lock().await;
+                let mut gone = Vec::new();
+                cs.retain_mut(|(id, ch)| match ch.try_wait() {
+                    Ok(Some(_)) => {
+                        gone.push(id.clone());
+                        false
+                    }
+                    _ => true,
+                });
+                gone
+            };
+            let actions = {
+                let mut s = ticker.sup.lock().await;
+                let mut acts = Vec::new();
+                for id in &done {
+                    acts.push(s.on_exit(id, now_ms()));
+                }
+                acts.extend(s.tick(now_ms()));
+                acts
+            };
+            for a in &actions {
+                apply(&ticker, a).await;
             }
         }
     });
@@ -118,16 +150,56 @@ fn now_ms() -> u64 {
 }
 
 /// ★**판단은 supervisor 가 내고 손은 여기서 쓴다** — 콜백을 주입하지 않는다.
-///
-/// ★**부모 생존 채널은 아직 없다**(정§15-6) — 자식 쪽 끝이 `oxsfud` 라 덩어리 4 와 한 쌍이다.
-/// 그때까지 `kill_on_drop` 은 ★**강제 종료를 못 덮는다**는 것을 알고 쓴다.
-fn apply(action: &Action) {
+async fn apply(hub: &Shared, action: &Action) {
     match action {
-        Action::Spawn(id) => eprintln!("[sup] spawn {id}"),
+        Action::Spawn(id) => match spawn_unit(hub, id).await {
+            Ok(()) => eprintln!("[sup] spawn {id}"),
+            Err(e) => {
+                // ★★**못 띄운 것도 기동 시도다** — 안 세면 없는 실행파일에 무한 재시도를 돈다.
+                eprintln!("[sup] spawn {id} 실패: {e}");
+                let next = { hub.sup.lock().await.on_spawn_failed(id, now_ms()) };
+                Box::pin(apply(hub, &next)).await;
+            }
+        },
         Action::Signal(id) => eprintln!("[sup] signal {id}"),
-        Action::ShutdownHub(id) => eprintln!("[sup] ★{id} 가 살아나지 못한다 — hub 를 내린다"),
+        Action::ShutdownHub(id) => {
+            eprintln!("[sup] ★{id} 가 살아나지 못한다 — hub 를 내린다");
+            // ★자식은 우리가 죽이지 않아도 부모 생존 채널로 스스로 끝난다(정§15-6).
+            std::process::exit(1);
+        }
         Action::None => {}
     }
+}
+
+/// ★**자식의 표준입력이 부모 생존 채널이다** — hub 는 거기에 아무것도 쓰지 않는다.
+///
+/// hub 프로세스가 사라지면 쓰기 끝이 닫히고 자식은 EOF 를 본다 —
+/// ★**정상 종료·패닉·강제 종료 어느 쪽이든 성립한다.**
+async fn spawn_unit(hub: &Shared, id: &str) -> Result<(), String> {
+    let unit = hub
+        .resolved
+        .system
+        .units
+        .iter()
+        .find(|u| u.id == id)
+        .ok_or_else(|| format!("{id} 는 목록에 없다"))?
+        .clone();
+    if unit.cmd.is_empty() {
+        return Err(format!("{id} 에 cmd 가 없다"));
+    }
+    let mut cmd = std::process::Command::new(&unit.cmd[0]);
+    cmd.args(&unit.cmd[1..])
+        .arg("--id")
+        .arg(&unit.id)
+        .stdin(std::process::Stdio::piped());
+    if let Some(dir) = &hub.resolved.log_dir {
+        // ★로그 디렉터리는 hub 가 자식에게 넘긴다 — 자식이 자기 파일을 연다(파이프가 아니다).
+        cmd.arg("--log-dir").arg(dir);
+    }
+    let child = cmd.spawn().map_err(|e| e.to_string())?;
+    // ★`stdin` 을 `take()` 하지 않는다 — 쥐고 있는 것이 곧 생존 신호다.
+    hub.children.lock().await.push((id.to_string(), child));
+    Ok(())
 }
 
 fn peer_of(addr: SocketAddr, headers: &HeaderMap) -> Peer {
