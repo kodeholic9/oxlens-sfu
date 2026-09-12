@@ -169,3 +169,108 @@ mod tests {
         assert_eq!(spatial_of("m"), None, "★지어낸 인덱스로 단을 고르면 엉뚱한 화질이 간다");
     }
 }
+
+/// 확장 하나를 ★**써 넣는다** — 있으면 값을 갈고, 없으면 붙인다.
+///
+/// ★★**egress twcc seq 는 서버가 교체 스탬핑한다**(정§11-2) — 발행자 값을 그대로 흘리면
+/// ★**발행자 시계가 우리 측정에 섞인다.** 쓰는 것은 차분(도착 간격)뿐인데 절대 시각이
+/// 두 시계에서 오면 지연 추세가 뜻을 잃는다.
+///
+/// ★**본문은 건드리지 않는다** — 머리와 확장 구역만 다시 짓고 payload 를 그대로 붙인다.
+/// 길이는 는다(정보를 더하는 일이라 원리적으로 불변일 수 없다).
+pub fn stamp(pkt: &[u8], id: u8, val: &[u8]) -> Option<Vec<u8>> {
+    if pkt.len() < FIXED || pkt[0] >> 6 != 2 || id == 0 || id > 14 || val.is_empty() || val.len() > 16 {
+        return None;
+    }
+    let csrc = (pkt[0] & 0x0F) as usize * 4;
+    let head = FIXED + csrc;
+    if pkt.len() < head {
+        return None;
+    }
+    // 기존 확장들을 `(id, 값)` 으로 모은다 — ★**모르는 것도 그대로 옮긴다.**
+    let mut items: Vec<(u8, Vec<u8>)> = Vec::new();
+    let mut payload_at = head;
+    if pkt[0] & 0x10 != 0 {
+        let (start, end, profile) = region(pkt)?;
+        payload_at = end;
+        if profile != ONE_BYTE {
+            // 두 바이트 형은 우리가 짓지 않는다 — 섞어 쓰면 읽는 쪽이 갈린다.
+            return None;
+        }
+        let mut at = start;
+        while at < end {
+            let b = pkt[at];
+            if b == 0 {
+                at += 1;
+                continue;
+            }
+            let (eid, len) = (b >> 4, (b & 0x0F) as usize + 1);
+            if eid == 15 || at + 1 + len > end {
+                break;
+            }
+            if eid != id {
+                items.push((eid, pkt[at + 1..at + 1 + len].to_vec()));
+            }
+            at += 1 + len;
+        }
+    }
+    items.push((id, val.to_vec()));
+
+    let body: usize = items.iter().map(|(_, v)| 1 + v.len()).sum();
+    let words = body.div_ceil(4);
+    let mut out = Vec::with_capacity(head + 4 + words * 4 + (pkt.len() - payload_at));
+    out.extend_from_slice(&pkt[..head]);
+    out[0] |= 0x10;
+    out.extend_from_slice(&ONE_BYTE.to_be_bytes());
+    out.extend_from_slice(&(words as u16).to_be_bytes());
+    for (eid, v) in &items {
+        out.push((eid << 4) | (v.len() as u8 - 1));
+        out.extend_from_slice(v);
+    }
+    out.resize(head + 4 + words * 4, 0);
+    out.extend_from_slice(&pkt[payload_at..]);
+    Some(out)
+}
+
+#[cfg(test)]
+mod stamp_tests {
+    use super::*;
+
+    fn plain() -> Vec<u8> {
+        let mut p = vec![0x80, 96, 0, 1, 0, 0, 0, 0, 0, 0, 0, 7];
+        p.extend_from_slice(b"payload");
+        p
+    }
+
+    #[test]
+    fn 확장이_없던_것에도_찍는다() {
+        let out = stamp(&plain(), 6, &[0x12, 0x34]).expect("찍는다");
+        assert_eq!(out[0] & 0x10, 0x10, "X 비트가 선다");
+        assert_eq!(get(&out, 6), Some(&[0x12, 0x34][..]));
+        assert_eq!(&out[out.len() - 7..], b"payload", "★본문 무접촉");
+    }
+
+    #[test]
+    fn 남의_확장은_그대로_옮긴다() {
+        // rid(10) 를 단 패킷에 twcc(6) 를 더한다.
+        let mut p = vec![0x90, 96, 0, 1, 0, 0, 0, 0, 0, 0, 0, 7];
+        p.extend_from_slice(&ONE_BYTE.to_be_bytes());
+        p.extend_from_slice(&1u16.to_be_bytes());
+        p.extend_from_slice(&[(10 << 4), b'h', 0, 0]);
+        p.extend_from_slice(b"vp8");
+        let out = stamp(&p, 6, &[0, 9]).expect("찍는다");
+        // ★rid 가 살아 있어야 단 분류가 안 깨진다.
+        assert_eq!(rid(&out, 10), Some("h"));
+        assert_eq!(get(&out, 6), Some(&[0, 9][..]));
+        assert_eq!(&out[out.len() - 3..], b"vp8");
+    }
+
+    #[test]
+    fn 이미_있으면_값만_간다() {
+        let once = stamp(&plain(), 6, &[0, 1]).expect("찍는다");
+        let twice = stamp(&once, 6, &[0, 2]).expect("다시 찍는다");
+        assert_eq!(get(&twice, 6), Some(&[0, 2][..]));
+        // ★칸이 두 개로 늘지 않는다 — 늘면 읽는 쪽이 어느 것을 볼지 갈린다.
+        assert_eq!(twice.len(), once.len());
+    }
+}

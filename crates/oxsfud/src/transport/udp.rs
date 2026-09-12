@@ -176,6 +176,8 @@ const RR_MS: u64 = 1_000;
 
 /// 서버가 선언하는 rid 확장 번호(`identity::extmap`) — 발행자 신고가 없으면 이 값이다.
 const RID_EXT_ID: u8 = 10;
+/// 서버가 선언하는 transport-cc 번호 — ★**구독자는 이 번호로 받는 m-line 을 짓는다.**
+const TWCC_EXT_ID: u8 = 6;
 
 /// 서버가 RTCP 에 쓰는 제 SSRC — ★**미디어 SSRC 와 겹치지 않는 고정값**이다.
 const SERVER_SSRC: u32 = 0x0000_0001;
@@ -211,6 +213,8 @@ pub async fn serve(
     let mut chosen: HashMap<(String, u32), u8> = HashMap::new();
     // ★구독자에게 내보낸 수 — SR 번역이 이 값으로 카운터를 갈아 끼운다.
     let mut egress: HashMap<(String, u32), (u32, u32)> = HashMap::new();
+    // ★**전송로마다 twcc 번호 하나** — 시간축이 서버 송신 시각이므로 번호도 서버 것이다(정§11-2).
+    let mut twcc_seq: HashMap<String, u16> = HashMap::new();
     // ★**보낸 것을 잠깐 들고 있는다** — NACK 이 오면 그 자리에서 꺼내 되보낸다(정§11-1 관문 ②).
     //   키는 `(받는 자격, egress ssrc)`, 값은 링버퍼다.
     let mut cache: HashMap<(String, u32), SendCache> = HashMap::new();
@@ -278,6 +282,8 @@ pub async fn serve(
                             layer_of.retain(|(f, _), _| f != u);
                             sim_of.remove(u);
                             chosen.retain(|(f, _), _| f != u);
+                            twcc_seq.remove(u);
+                            cache.retain(|(f, _), _| f != u);
                             // ★**갈 곳 목록에서도 뺀다** — 안 빼면 죽은 자격으로 계속 잠근다.
                             for t in routes.values_mut() {
                                 t.retain(|x| &x.ufrag != u);
@@ -495,6 +501,18 @@ pub async fn serve(
                             }
                             scratch[8..12].copy_from_slice(&slot.to_be_bytes());
                         }
+                    }
+                    // ★**egress twcc seq 는 서버가 교체 스탬핑한다**(정§11-2) — 발행자 값을
+                    //   그대로 흘리면 발행자 시계가 우리 측정에 섞이고, 이것이 없으면
+                    //   구독자가 피드백을 지을 재료 자체가 없다(실측: 봇 합성 축이 통째로 빈다).
+                    let stamped = {
+                        let n = twcc_seq.entry(t.ufrag.clone()).or_default();
+                        *n = n.wrapping_add(1);
+                        crate::rtpext::stamp(&scratch, TWCC_EXT_ID, &n.to_be_bytes())
+                    };
+                    if let Some(v) = stamped {
+                        scratch.clear();
+                        scratch.extend_from_slice(&v);
                     }
                     if let Some(sealed) = out.seal(&scratch) {
                         let _ = socket.send_to(&sealed, dst).await;
