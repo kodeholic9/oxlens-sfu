@@ -42,6 +42,11 @@ pub struct Ingress {
     pub pc_mode: PcMode,
 }
 
+/// 한 발행 스트림이 갈 곳 전부 — `(발행 자격, egress ssrc, 받을 사람들)`.
+///
+/// ★**빈 목록이 곧 끊기다** — 지우는 별도 명령을 두지 않는다(한 어휘로 민다).
+pub type RouteSet = (String, u32, Vec<crate::transport::udp::Target>);
+
 /// 나갈 통지 하나. ★**`exclude` 는 받는 hub 가 적용한다**(정§15-4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Notice {
@@ -59,11 +64,16 @@ pub struct Notice {
 /// 한 프레임을 처리한 결과.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Outcome {
+    /// ★**그 세션의 통로를 끊어라** — 축출처럼 reaper 가 못 보는 경로의 회수다.
+    ///
+    /// ★축출은 자격을 그 자리에서 내리므로 그 세션은 ★**reaper 의 목록에 아예 안 남는다** —
+    /// 여기서 말하지 않으면 옛 DTLS 태스크가 영영 돈다(정§12 *"회수 시 태스크 종료 필수"*).
+    pub drop_sessions: Vec<String>,
     /// 그 요청의 응답 프레임. ★**언제나 하나 있다** — 조용한 성공이 없다.
     pub reply: Vec<u8>,
     pub notices: Vec<Notice>,
     /// ★**전달표 갱신** — 제어 평면이 계산해 데이터 평면에 밀어 넣는다(핫패스 규율 H2).
-    pub routes: Vec<(String, u32, Vec<crate::transport::udp::Target>)>,
+    pub routes: Vec<RouteSet>,
     /// 시뮬캐스트 등록 `(발행 자격, vssrc)`.
     pub sims: Vec<(String, u32, String)>,
 }
@@ -196,7 +206,7 @@ fn unicast(room_id: &str, user_id: &str, op: Op, body: &impl serde::Serialize) -
 ///
 /// ★**다시 세는 것이 갱신이다** — 델타로 고치면 입·퇴장과 발행·해제가 겹칠 때
 /// 한 걸음이 빠지고, 그 빠짐은 *"한 사람만 영상이 안 나온다"* 로 나타난다.
-pub fn routes_for_room(node: &Node, room_id: &str) -> Vec<(String, u32, Vec<crate::transport::udp::Target>)> {
+pub fn routes_for_room(node: &Node, room_id: &str) -> Vec<RouteSet> {
     let Some(room) = node.rooms.get(room_id) else { return Vec::new() };
     let members = room.session_ids();
     node.publications
@@ -273,9 +283,23 @@ fn room_join(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Out
     // ★**Peer 가 단위다** — 같은 신원의 옛 Peer 는 그 서버의 **모든 방**에서 함께 걷힌다(정§4-2 ②).
     let e = node.peers.ensure(&ing.session_id, &ing.user_id, ing.pc_mode);
     let i = e.idx;
-    if let Some(old) = &e.evicted {
+    let mut notices = Vec::new();
+    let mut shed_routes = Vec::new();
+    let mut dropped = Vec::new();
+    if let Some(old) = e.evicted.clone() {
         // ★걷힌 Peer 의 전송 자격도 같이 내린다 — 안 내리면 ★**옛 패킷이 새 Peer 를 건드린다.**
-        node.ice.drop_session(old);
+        node.ice.drop_session(&old);
+        // ★★**걷힌 Peer 의 등록도 같이 걷는다.** 안 걷으면 ★**죽은 발행자로 가는 전달표**가
+        //   서서 ①구독자가 영영 안 오는 트랙을 기다리고 ②정체 판정이 그 자리를 정체로 읽는다
+        //   (실측 20260912 — 흐르는 판에 재동기 지시가 나갔다).
+        let gone: Vec<Publication> =
+            node.publications.iter().filter(|p| p.session_id == old).cloned().collect();
+        node.publications.retain(|p| p.session_id != old);
+        let (n, r) = shed_publications(node, &gone);
+        notices.extend(n);
+        shed_routes.extend(r);
+        // ★자격을 내린 세션은 reaper 가 못 본다 — 통로는 여기서 끊으라고 말한다.
+        dropped.push(old);
     }
     if e.created {
         // ★**자격은 Peer 마다 새로 발급한다**(연§9-3) — 재입장이 새 자격인 근거가 여기다.
@@ -285,7 +309,6 @@ fn room_join(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Out
         node.ice.insert(&pu, &pp, &ing.session_id, IceRole::Publish);
         node.ice.insert(&su, &sp, &ing.session_id, IceRole::Subscribe);
     }
-    let mut notices = Vec::new();
     for r in e.orphaned {
         if let Some(room) = node.rooms.get_mut(&r)
             && room.leave(&ing.user_id)
@@ -377,8 +400,16 @@ fn room_join(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Out
             },
         ));
     }
-    let routes = routes_for_room(node, &req.room_id);
-    Outcome { reply: ok(header, &json(&res)), notices, routes, ..Default::default() }
+    // ★**축출 뒤처리를 먼저 민다** — 죽은 발행자로 가던 표를 끊고 나서 새 표를 얹는다.
+    let mut routes = shed_routes;
+    routes.extend(routes_for_room(node, &req.room_id));
+    Outcome {
+        reply: ok(header, &json(&res)),
+        notices,
+        routes,
+        drop_sessions: dropped,
+        ..Default::default()
+    }
 }
 
 fn left_notice(room_id: &str, user_id: &str, version: oxsig::Version) -> Notice {
@@ -489,7 +520,7 @@ pub struct Reaped {
     pub session_id: String,
     pub user_id: String,
     pub notices: Vec<Notice>,
-    pub routes: Vec<(String, u32, Vec<crate::transport::udp::Target>)>,
+    pub routes: Vec<RouteSet>,
 }
 
 pub fn reap(node: &mut Node, session_id: &str, zombie: bool) -> Option<Reaped> {
@@ -535,7 +566,7 @@ pub fn reap(node: &mut Node, session_id: &str, zombie: bool) -> Option<Reaped> {
     // ④ 전송 등록 해제 — ★자격을 내려야 옛 패킷이 새 Peer 를 못 건드린다.
     node.ice.drop_session(session_id);
     // ★**그 사람이 올리던 것도 끊는다** — 발행자가 갔는데 목록만 남으면 죽은 ssrc 가 표에 남는다.
-    let mut routes: Vec<(String, u32, Vec<crate::transport::udp::Target>)> = node
+    let mut routes: Vec<RouteSet> = node
         .publications
         .iter()
         .filter(|p| p.session_id == session_id)
@@ -852,29 +883,17 @@ fn publish_add(node: &mut Node, ing: &Ingress, header: Header, req: &PublishTrac
     let routes = routes_for_room(node, &req.room_id);
     let sims = simulcast_regs(node, &ing.session_id);
     let res = PublishTracksRes { action: PublishAction::Add, tracks: made };
-    Outcome { reply: ok(header, &json(&res)), notices, routes, sims }
+    Outcome { reply: ok(header, &json(&res)), notices, routes, sims, ..Default::default() }
 }
 
-fn publish_remove(node: &mut Node, ing: &Ingress, header: Header, req: &PublishTracksReq) -> Outcome {
-    // ★★**일부도 안 받고 전체 거절이다**(연§6-3) — 없는 `track_id` 가 하나라도 있으면
-    //   `3005` 다. 조용히 건너뛰면 클라는 지웠다고 믿고 서버엔 남아 있다.
-    if req
-        .track_ids
-        .iter()
-        .any(|id| !node.publications.iter().any(|p| &p.track_id == id && p.session_id == ing.session_id))
-    {
-        return Outcome { reply: fail(header, Code::TrackNotFound), ..Default::default() };
-    }
-    let mut gone = Vec::new();
-    for id in &req.track_ids {
-        if let Some(i) = node
-            .publications
-            .iter()
-            .position(|p| &p.track_id == id && p.session_id == ing.session_id)
-        {
-            gone.push(node.publications.remove(i));
-        }
-    }
+/// 걷어 낸 등록 묶음의 뒤처리 — ★**통지와 배관을 한 자리에서** 낸다.
+///
+/// ★**두 부르는 곳이 같은 것을 쓴다**(해제 요청 · 축출) — 갈라 두면 한쪽이 뒤처지고,
+/// 그 어긋남은 *"한 사람만 유령 트랙이 남는다"* 로 나타난다.
+fn shed_publications(
+    node: &mut Node,
+    gone: &[Publication],
+) -> (Vec<Notice>, Vec<RouteSet>) {
     let mut notices = Vec::new();
     if !gone.is_empty() {
         let room = gone[0].room_id.clone();
@@ -889,7 +908,7 @@ fn publish_remove(node: &mut Node, ing: &Ingress, header: Header, req: &PublishT
         for sid in members {
             let Some(p) = node.peers.get_mut(&sid) else { continue };
             let mut entries = Vec::new();
-            for g in &gone {
+            for g in gone {
                 // ★**세 자료를 같이 지운다**(정§17-2 ⑥) — mid 만 지우고 자리를 안 돌리면
                 //   재입장 영상이 안 나온다(실사고).
                 let mut e = g.entry();
@@ -925,13 +944,37 @@ fn publish_remove(node: &mut Node, ing: &Ingress, header: Header, req: &PublishT
     //
     // ★**끊는 키는 egress 값이다** — 시뮬캐스트의 `ssrc` 는 `0`(신고 안 함)이라 그것으로
     //   끊으면 ★**아무것도 안 끊기고** 옛 vssrc 가 계속 흐른다(실측 20260912).
-    let mut routes: Vec<(String, u32, Vec<crate::transport::udp::Target>)> = gone
+    let mut routes: Vec<RouteSet> = gone
         .iter()
         .map(|g| (pub_ufrag(node, &g.session_id), g.vssrc.unwrap_or(g.ssrc), Vec::new()))
         .collect();
     if let Some(g) = gone.first() {
         routes.extend(routes_for_room(node, &g.room_id));
     }
+    (notices, routes)
+}
+
+fn publish_remove(node: &mut Node, ing: &Ingress, header: Header, req: &PublishTracksReq) -> Outcome {
+    // ★★**일부도 안 받고 전체 거절이다**(연§6-3) — 없는 `track_id` 가 하나라도 있으면
+    //   `3005` 다. 조용히 건너뛰면 클라는 지웠다고 믿고 서버엔 남아 있다.
+    if req
+        .track_ids
+        .iter()
+        .any(|id| !node.publications.iter().any(|p| &p.track_id == id && p.session_id == ing.session_id))
+    {
+        return Outcome { reply: fail(header, Code::TrackNotFound), ..Default::default() };
+    }
+    let mut gone = Vec::new();
+    for id in &req.track_ids {
+        if let Some(i) = node
+            .publications
+            .iter()
+            .position(|p| &p.track_id == id && p.session_id == ing.session_id)
+        {
+            gone.push(node.publications.remove(i));
+        }
+    }
+    let (notices, routes) = shed_publications(node, &gone);
     // ★응답에 `tracks` 필드 자체가 없다(연§6-3).
     let res = PublishTracksRes { action: PublishAction::Remove, tracks: Vec::new() };
     Outcome { reply: ok(header, &json(&res)), notices, routes, ..Default::default() }
@@ -1043,7 +1086,7 @@ pub struct DcOut {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FloorOut {
     pub dc: Vec<DcOut>,
-    pub routes: Vec<(String, u32, Vec<crate::transport::udp::Target>)>,
+    pub routes: Vec<RouteSet>,
 }
 
 /// 발언권 한 통을 처리한다. ★**판정은 `floor::Floor` 가 하고 여기는 어휘를 옮긴다.**
