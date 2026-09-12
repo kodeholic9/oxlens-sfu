@@ -26,12 +26,20 @@ participant_types = [0]
 hidden_allowed = false
 ops_allowed = false
 
+# ★유닛은 hub 가 띄운다(정§16-1) — 하네스가 sfud 를 직접 띄우지 않는다.
+#   그래야 부모 생존 채널이 서고(정§15-6), 기동·정지 순서가 한 곳에서 정해진다.
 [[unit]]
-role = "sfu"
 id = "sfu-1"
+kind = "process"
+order = 1
+role = "sfu"
 addr = "127.0.0.1:50061"
+cmd = ["./target/debug/oxsfud", "--grpc-listen", "127.0.0.1:50061", "--udp-port", "20000"]
 
 [[unit]]
-role = "sfu"
 id = "sfu-2"
+kind = "process"
+order = 1
+role = "sfu"
 addr = "127.0.0.1:50062"
+cmd = ["./target/debug/oxsfud", "--grpc-listen", "127.0.0.1:50062", "--udp-port", "20001"]

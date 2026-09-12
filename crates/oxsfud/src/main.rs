@@ -14,13 +14,19 @@ fn main() -> std::process::ExitCode {
     let no_lifeline = argv.iter().any(|a| a == "--no-lifeline");
     let argv: Vec<String> = argv.into_iter().filter(|a| a != "--no-lifeline").collect();
 
-    let args = match Args::parse(&argv) {
+    // ★이 바이너리만 아는 인자 — 정§18-1 CLI 칸(포트·public-ip)의 sfud 몫.
+    const MINE: &[&str] = &["--grpc-listen", "--udp-port", "--public-ip"];
+    let args = match Args::parse_allowing(&argv, MINE) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("{e}");
             return std::process::ExitCode::from(2);
         }
     };
+    if args.version {
+        println!("{}", common::BuildId::new(args.build.clone()).line());
+        return std::process::ExitCode::SUCCESS;
+    }
     let Some(node_id) = args.id.clone() else {
         eprintln!("args: --id 가 없다 — node_id 는 안정 배치 키라 필수다");
         return std::process::ExitCode::from(2);
@@ -30,9 +36,12 @@ fn main() -> std::process::ExitCode {
     let epoch = format!("sfu-{}", uuid::Uuid::new_v4().simple());
 
     eprintln!(
-        "[boot] node_id={node_id} epoch={epoch} build={} lifeline={}",
-        args.build.as_deref().unwrap_or("unknown"),
-        if no_lifeline { "off" } else { "on" }
+        "[boot] node_id={node_id} epoch={epoch} build={} lifeline={} grpc={} udp={} ip={}",
+        common::BuildId::new(args.build.clone()).line(),
+        if no_lifeline { "off" } else { "on" },
+        args.extra.get("--grpc-listen").map(String::as_str).unwrap_or("-"),
+        args.extra.get("--udp-port").map(String::as_str).unwrap_or("-"),
+        args.extra.get("--public-ip").map(String::as_str).unwrap_or("-"),
     );
 
     if !no_lifeline {

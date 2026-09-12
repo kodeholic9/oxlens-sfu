@@ -46,6 +46,11 @@ async fn main() -> std::process::ExitCode {
             return std::process::ExitCode::from(2);
         }
     };
+    if args.version {
+        // ★**바이너리에게 직접 묻는 자리** — 하네스가 옛 바이너리의 초록을 봉쇄하는 데 쓴다.
+        println!("{}", common::BuildId::new(args.build.clone()).line());
+        return std::process::ExitCode::SUCCESS;
+    }
     if args.help {
         eprintln!("oxhubd --id <node_id> [--system F] [--policy F] [--listen A] [--log-dir D] [--build B]");
         return std::process::ExitCode::SUCCESS;
@@ -232,7 +237,7 @@ async fn ready(State(hub): State<Shared>) -> (StatusCode, Json<serde_json::Value
     let r = healthz::ready(&sup, true);
     let code = if r.ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
     // ★어느 노드가 빠졌는지까지 낸다 — 503 만 주면 운영자가 다시 물어봐야 한다.
-    (code, Json(serde_json::json!({ "ready": r.ok, "down": r.down, "build": hub.resolved.build.as_str() })))
+    (code, Json(serde_json::json!({ "ready": r.ok, "down": r.down, "build": hub.resolved.build.line() })))
 }
 
 async fn auth_token(
@@ -282,7 +287,7 @@ async fn admin_snapshot(
         // ★`shutdown` 확인값의 출처다(운영 §5).
         "hub_id": hub.resolved.node_id,
         "ready": r.ok,
-        "build": hub.resolved.build.as_str(),
+        "build": hub.resolved.build.line(),
         "supervising": !sup.units.is_empty(),
         "rooms": 0,
         "users": 0,

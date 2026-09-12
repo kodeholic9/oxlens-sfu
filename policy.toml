@@ -1,9 +1,15 @@
 # oxlens-sfu 정책 파일 — 정책서 oxlens_policy.md §3 키 전량. 모르는 키는 기동 실패.
 [logging]
 level = "info"
+# ★회전은 날짜 경계 ∨ 이 크기 — 쓰는 순간 판정한다(운영 규격서 §7).
+rotate_max_bytes = 268435456
+# ★회전으로 닫힌 파일만 센다. 0 = 안 지움.
+retention_days = 14
 
 [media]
 bwe_mode = "twcc"
+max_bitrate_bps = 800000
+slot_mid_reserve = 40
 # ★이 파일은 개발 실증용이다(dev/system.dev.toml 과 짝). 상용 기본은 `off`(명시 opt-in — 정책서 §3)이고
 # 그 값은 crates/common/src/config.rs 의 default 가 갖는다. 여기서 v2 를 켜는 이유는 2층 sim_bwe 축이
 # 그것을 전제하기 때문이다 — 끄면 그 세 시나리오가 「선언한 축의 자료 0」으로 정직하게 빨개진다.
@@ -24,7 +30,19 @@ ws_flow_window = 8
 room_default_capacity = 1000
 # 연§5-1 — 브라우저 클라의 origin 허용. 빈 목록이면 같은 origin 배포 전제.
 allowed_origins = ["*"]
+# 정§4-1 — 방 생성 요청이 안 준 때의 기본.
+room_unused_ttl_secs = 300
+room_departure_ttl_secs = 60
 
 [quota]
-max_sessions_per_account = 0
-max_rooms_per_account = 0
+# ★0 = 상한 없음(검사하지 않는다). ★**이 배포 전체**의 상한이지 계정별이 아니다 —
+#   한 배포는 한 고객이라(연§5-4) 계정으로 가를 자리가 없다.
+max_sessions = 0
+max_rooms = 0
+
+# ★대외 발행(webhook) — hub 가 낸다(hook 규격서 §7-1 · 정§15-8).
+[hook]
+retry_backoff_ms = [1000, 2000, 4000, 8000, 16000]
+retry_max = 5
+# ★3rd 마다 따로다 — 넘치면 오래된 것부터 버리고 센다.
+queue_max = 10000

@@ -22,6 +22,11 @@ pub struct Args {
     pub log_dir: Option<String>,
     pub help: bool,
     pub version: bool,
+    /// ★**그 바이너리만 아는 인자** — 부르는 쪽이 미리 선언한 것만 여기 담긴다.
+    ///
+    /// ★**선언하지 않은 것은 여전히 기동 실패다** — 엄격함을 잃지 않으면서
+    /// hub 가 sfud 의 인자를 알 필요도, 그 반대도 없게 한다.
+    pub extra: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +43,15 @@ impl std::error::Error for ArgError {}
 impl Args {
     /// ★**모르는 인자는 기동 실패다** — strict 파싱(정§18-1).
     pub fn parse<I, S>(argv: I) -> Result<Args, ArgError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        Args::parse_allowing(argv, &[])
+    }
+
+    /// 그 바이너리만 아는 인자를 함께 받는다 — ★**선언한 것만**.
+    pub fn parse_allowing<I, S>(argv: I, extra_keys: &[&str]) -> Result<Args, ArgError>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
@@ -66,6 +80,9 @@ impl Args {
                 "--build" => out.build = Some(val),
                 "--listen" => out.listen = Some(val),
                 "--log-dir" => out.log_dir = Some(val),
+                k if extra_keys.contains(&k) => {
+                    out.extra.insert(k.to_string(), val);
+                }
                 _ => return Err(ArgError(format!("모르는 인자: {key}"))),
             }
             i += 2;
@@ -111,6 +128,16 @@ mod tests {
     fn 값이_빠지면_선다() {
         let e = Args::parse(["--id"]).unwrap_err();
         assert!(e.0.contains("값이 없다"), "{}", e.0);
+    }
+
+    #[test]
+    fn 선언한_인자만_받는다() {
+        // ★hub 가 sfud 의 인자를 알 필요가 없고, 그 반대도 없다.
+        let a = Args::parse_allowing(["--id", "s1", "--udp-port", "20000"], &["--udp-port"])
+            .expect("parse");
+        assert_eq!(a.extra.get("--udp-port").map(String::as_str), Some("20000"));
+        // ★선언하지 않으면 여전히 기동 실패다.
+        assert!(Args::parse(["--id", "s1", "--udp-port", "20000"]).is_err());
     }
 
     #[test]

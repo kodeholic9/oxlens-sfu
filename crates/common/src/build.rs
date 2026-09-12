@@ -6,7 +6,10 @@
 //! ★**사람이 기억으로 막을 일이 아니다** — 하네스가 옛 바이너리를 상대로 초록을 내는 것을
 //! 구조로 봉쇄하는 자리다(`--build` 로 받은 값을 `/admin/snapshot` 이 그대로 낸다).
 
-/// 기동 인자가 준 값. 안 주면 `"unknown"` — ★**지어내지 않는다.**
+/// ★**컴파일 때 찍힌 신원** — 이 바이너리가 어느 소스의 산물인가.
+pub const STAMP: &str = env!("OX_BUILD_STAMP");
+
+/// 기동 인자가 준 **배포 라벨**. 안 주면 `"unknown"` — ★**지어내지 않는다.**
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildId(String);
 
@@ -28,11 +31,29 @@ impl BuildId {
     pub fn is_known(&self) -> bool {
         self.0 != Self::UNKNOWN
     }
+
+    /// 밖에 내는 한 줄 — ★**소스 신원이 앞이고 라벨이 뒤다.**
+    pub fn line(&self) -> String {
+        if self.is_known() {
+            format!("{STAMP} ({})", self.0)
+        } else {
+            STAMP.to_string()
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 바이너리가_스스로_말한다() {
+        // ★컴파일 때 찍힌다 — 사람이 안 줘도 소스 신원이 나온다.
+        assert!(!STAMP.is_empty());
+        assert!(STAMP.contains('+'), "SHA+시각 꼴이어야 한다: {STAMP}");
+        assert_eq!(BuildId::new(None).line(), STAMP, "★라벨이 없어도 신원은 있다");
+        assert!(BuildId::new(Some("배포7".into())).line().contains("배포7"));
+    }
 
     #[test]
     fn 없으면_모른다고_말한다() {
