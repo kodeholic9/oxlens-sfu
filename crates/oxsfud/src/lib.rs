@@ -6,6 +6,7 @@
 pub mod autolayer;
 pub mod fanout;
 pub mod floor;
+pub mod gcc;
 pub mod grpc;
 pub mod handle;
 pub mod identity;
