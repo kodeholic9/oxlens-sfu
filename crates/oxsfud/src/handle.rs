@@ -59,7 +59,7 @@ pub struct Outcome {
     /// ★**전달표 갱신** — 제어 평면이 계산해 데이터 평면에 밀어 넣는다(핫패스 규율 H2).
     pub routes: Vec<(String, u32, Vec<crate::transport::udp::Target>)>,
     /// 시뮬캐스트 등록 `(발행 자격, vssrc)`.
-    pub sims: Vec<(String, u32)>,
+    pub sims: Vec<(String, u32, String)>,
 }
 
 /// 이 유닛이 쥔 것 전부.
@@ -220,13 +220,16 @@ pub fn routes_for_room(node: &Node, room_id: &str) -> Vec<(String, u32, Vec<crat
 ///
 /// ★**등록 항목이 `rid` 를 안 싣기 때문에**(연§6-3) 데이터 평면이 RTP 로 배워야 하고,
 /// 배울 대상을 알려 주는 것이 이 한 줄이다.
-pub fn simulcast_regs(node: &Node, session_id: &str) -> Vec<(String, u32)> {
+pub fn simulcast_regs(node: &Node, session_id: &str) -> Vec<(String, u32, String)> {
     let Some(peer) = node.peers.get(session_id) else { return Vec::new() };
     let ufrag = peer.ice.publish_ufrag.clone();
     node.publications
         .iter()
         .filter(|p| p.session_id == session_id)
-        .filter_map(|p| p.vssrc.map(|v| (ufrag.clone(), v)))
+        // ★**코덱을 같이 싣는다** — 단 전환의 경계가 키프레임이고, 판정기는 코덱이 고른다.
+        .filter_map(|p| {
+            p.vssrc.map(|v| (ufrag.clone(), v, p.codec.clone().unwrap_or_default()))
+        })
         .collect()
 }
 

@@ -45,16 +45,30 @@ impl SendLedger {
         Self::default()
     }
 
-    /// ★**서버가 번호를 매긴다** — 발행자 값을 통과시키지 않는다.
-    pub fn stamp(&mut self, now: u64, size: u16) -> u16 {
+    /// 다음 번호를 뗀다. ★**서버가 번호를 매긴다** — 발행자 값을 통과시키지 않는다.
+    ///
+    /// ★**적기는 따로다** — 확장을 써 넣고 나서야 최종 크기를 알기 때문이다
+    /// (크기를 스탬핑 전 값으로 적으면 추정이 제가 보낸 양을 과소로 읽는다).
+    pub fn next_seq(&mut self) -> u16 {
         let seq = self.next_seq;
         self.next_seq = self.next_seq.wrapping_add(1);
+        seq
+    }
+
+    /// 그 번호로 무엇을 언제 보냈는지 적는다.
+    pub fn record(&mut self, seq: u16, now: u64, size: u16) {
         self.sent.insert(seq, (now, size));
         // 장부가 무한히 자라지 않게 걷는다 — 핫패스 밖(피드백 주기)에서 해도 된다.
         while self.sent.len() > 4_096 {
             let Some((&k, _)) = self.sent.iter().next() else { break };
             self.sent.remove(&k);
         }
+    }
+
+    /// 번호를 떼고 곧바로 적는다 — 크기가 이미 정해진 자리용.
+    pub fn stamp(&mut self, now: u64, size: u16) -> u16 {
+        let seq = self.next_seq();
+        self.record(seq, now, size);
         seq
     }
 

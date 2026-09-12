@@ -179,8 +179,12 @@ impl SfuService for Sfu {
         }
         // ★**전달표를 데이터 평면에 민다** — 응답보다 먼저다: 클라가 응답을 보고
         //   RTP 를 시작하는데 표가 아직 없으면 첫 패킷들이 갈 곳을 못 찾는다(연§6-3 절차 ③).
-        for (ufrag, vssrc) in out.sims {
-            let _ = self.udp.send(crate::transport::udp::Cmd::SetSimulcast { ufrag, vssrc }).await;
+        for (ufrag, vssrc, codec) in out.sims {
+            let codec = crate::keyframe::Codec::from_name(&codec);
+            let _ = self
+                .udp
+                .send(crate::transport::udp::Cmd::SetSimulcast { ufrag, vssrc, codec })
+                .await;
         }
         self.push_routes(out.routes).await;
         Ok(Response::new(Envelope { wire: out.reply, ..Default::default() }))
