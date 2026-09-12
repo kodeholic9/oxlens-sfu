@@ -83,6 +83,12 @@ impl Rewriter {
         Ok(())
     }
 
+    /// ★**RTP 와 같은 offset 으로 ts 만 옮긴다** — SR 번역이 쓴다(정§11-2).
+    /// 상태를 바꾸지 않는다: SR 은 흐름이 아니라 그 흐름을 **설명하는** 것이다.
+    pub fn map_ts(&self, in_ts: u32) -> u32 {
+        in_ts.wrapping_add(self.ts_offset)
+    }
+
     pub fn last_seq(&self) -> Option<u16> {
         self.last_out_seq
     }

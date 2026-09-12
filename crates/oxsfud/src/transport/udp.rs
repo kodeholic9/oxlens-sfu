@@ -99,13 +99,18 @@ pub struct Counters {
     /// ★인증이 안 맞아 버린 것 — 위조이거나 열쇠가 어긋난 것이다.
     pub srtp_bad: u64,
     pub srtp_out: u64,
+    pub rtcp_in: u64,
+    pub rtcp_out: u64,
+    pub rtcp_rr_in: u64,
+    pub rtcp_fb_in: u64,
+    pub rtcp_ignored: u64,
     pub unknown: u64,
 }
 
 impl Counters {
     fn line(&self) -> String {
         format!(
-            "stun {}/{}(위조 {}) · dtls {} · srtp in {}(버림 {}) out {} · 모름 {}",
+            "stun {}/{}(위조 {}) · dtls {} · srtp in {}(버림 {}) out {} · rtcp in {} out {} · 모름 {}",
             self.stun_ok,
             self.stun_ok + self.stun_dropped,
             self.forged,
@@ -113,6 +118,8 @@ impl Counters {
             self.srtp_in,
             self.srtp_bad,
             self.srtp_out,
+            self.rtcp_in,
+            self.rtcp_out,
             self.unknown
         )
     }
@@ -120,6 +127,12 @@ impl Counters {
 
 /// 계수 한 줄을 남기는 주기.
 const REPORT_MS: u64 = 30_000;
+
+/// ★발행자에게 RR 을 내는 주기(정§11-2) — ★**소비자는 타이머 하나다.**
+const RR_MS: u64 = 1_000;
+
+/// 서버가 RTCP 에 쓰는 제 SSRC — ★**미디어 SSRC 와 겹치지 않는 고정값**이다.
+const SERVER_SSRC: u32 = 0x0000_0001;
 
 /// 포트를 열고 루프를 돈다. ★**되돌아오지 않는다** — 태스크로 띄운다.
 pub async fn serve(
@@ -139,12 +152,19 @@ pub async fn serve(
     let mut routes: HashMap<u32, Vec<Target>> = HashMap::new();
     // ★**전송로마다 스칼라 둘** — 구간 지도를 두면 화자 교대에서 egress seq 가 역행한다.
     let mut rewriters: HashMap<(String, u32), crate::rewriter::Rewriter> = HashMap::new();
+    // ★**발행 스트림마다 수신 통계** — 핫패스가 갱신하고 1초 타이머가 소비한다(정§11-2).
+    //   값은 `(그 자격, 통계)` 라 회수 때 같이 간다.
+    let mut stats: HashMap<u32, (String, crate::rtcp::RecvStats)> = HashMap::new();
+    // ★구독자에게 내보낸 수 — SR 번역이 이 값으로 카운터를 갈아 끼운다.
+    let mut egress: HashMap<(String, u32), (u32, u32)> = HashMap::new();
     // ★**내보낼 것을 담는 그릇 하나** — 패킷마다 새로 잡지 않는다(H3).
     let mut scratch: Vec<u8> = Vec::with_capacity(MTU);
     let mut c = Counters::default();
     let mut last = Counters::default();
     let mut report = tokio::time::interval(std::time::Duration::from_millis(REPORT_MS));
     report.tick().await;
+    let mut rr = tokio::time::interval(std::time::Duration::from_millis(RR_MS));
+    rr.tick().await;
 
     loop {
         let (n, from) = tokio::select! {
@@ -154,6 +174,24 @@ pub async fn serve(
                     eprintln!("[udp] recv: {e}");
                     continue;
                 }
+            },
+            _ = rr.tick() => {
+                // ★**자체 생성이다** — 발행자가 보는 *"우리 수신 품질"* 이고, 구독자 RR 을
+                //   릴레이한 것이 아니다(릴레이하면 발행자가 남의 품질로 비트레이트를 깎는다).
+                let now = now_ms();
+                for (ufrag, blocks) in rr_blocks(&mut stats, now) {
+                    let (Some(ctx), Some(dst)) =
+                        (srtp.get_mut(&ufrag), table.get(&ufrag).and_then(|e| e.addr()))
+                    else {
+                        continue;
+                    };
+                    let plain = crate::rtcp::build_rr(SERVER_SSRC, &blocks);
+                    if let Some(sealed) = ctx.seal_rtcp(&plain) {
+                        let _ = socket.send_to(&sealed, dst).await;
+                        c.rtcp_out += 1;
+                    }
+                }
+                continue;
             },
             _ = report.tick() => {
                 // ★**바뀐 것이 없으면 안 적는다** — 조용한 로그가 조용한 서버를 말한다.
@@ -177,6 +215,8 @@ pub async fn serve(
                         for u in &gone {
                             srtp.remove(u);
                             rewriters.retain(|(f, _), _| f != u);
+                            stats.retain(|_, (f, _)| f != u);
+                            egress.retain(|(f, _), _| f != u);
                             // ★**갈 곳 목록에서도 뺀다** — 안 빼면 죽은 자격으로 계속 잠근다.
                             for t in routes.values_mut() {
                                 t.retain(|x| &x.ufrag != u);
@@ -261,10 +301,22 @@ pub async fn serve(
                 }
             }
             Packet::Srtp => {
-                c.srtp_in += 1;
                 // ★**latch 를 지난 주소만 미디어를 탄다** — 그 전 것은 아무것도 아니다.
                 let Some(p) = by_addr.get(&from) else { continue };
-                let Some(ctx) = srtp.get_mut(&p.ufrag) else { continue };
+                let ufrag = p.ufrag.clone();
+                // ★RTP 와 RTCP 는 같은 대역으로 온다(RFC 5761) — 둘째 바이트가 가른다.
+                if crate::rtcp::is_rtcp(&buf[..n]) {
+                    c.rtcp_in += 1;
+                    let Some(ctx) = srtp.get_mut(&ufrag) else { continue };
+                    let Some(plain) = ctx.open_rtcp(&buf[..n]) else {
+                        c.srtp_bad += 1;
+                        continue;
+                    };
+                    on_rtcp(&plain, &ufrag, &mut stats, &mut egress, &routes, &rewriters, &table, &mut srtp, &socket, &mut c).await;
+                    continue;
+                }
+                c.srtp_in += 1;
+                let Some(ctx) = srtp.get_mut(&ufrag) else { continue };
                 // ★인증이 안 맞으면 버린다 — 위조가 fan-out 을 타면 남의 화면에 남의 것이 뜬다.
                 let Some(plain) = ctx.open(&buf[..n]) else {
                     c.srtp_bad += 1;
@@ -272,8 +324,18 @@ pub async fn serve(
                 };
                 let Some(ssrc) = super::srtp::ssrc_of(&plain) else { continue };
                 // ★그 자격이 살아 있다는 뜻이다 — 좀비 판정의 두 갱신원 중 하나(정§2-2).
-                if let Some(e) = table.get(&p.ufrag) {
+                if let Some(e) = table.get(&ufrag) {
                     e.touch(now);
+                }
+                {
+                    // ★RR 의 재료 — 핫패스에서 세고 타이머가 소비한다.
+                    let seq = u16::from_be_bytes([plain[2], plain[3]]);
+                    let ts = u32::from_be_bytes([plain[4], plain[5], plain[6], plain[7]]);
+                    stats
+                        .entry(ssrc)
+                        .or_insert_with(|| (ufrag.clone(), crate::rtcp::RecvStats::new(ssrc, 48_000)))
+                        .1
+                        .on_rtp(seq, ts, now);
                 }
                 let Some(targets) = routes.get(&ssrc) else { continue };
                 for t in targets {
@@ -306,6 +368,10 @@ pub async fn serve(
                     if let Some(sealed) = out.seal(&scratch) {
                         let _ = socket.send_to(&sealed, dst).await;
                         c.srtp_out += 1;
+                        // ★SR 번역이 쓸 egress 카운터 — 발행자 수가 아니라 **내보낸 수**다.
+                        let e = egress.entry((t.ufrag.clone(), ssrc)).or_insert((0, 0));
+                        e.0 = e.0.wrapping_add(1);
+                        e.1 = e.1.wrapping_add(scratch.len().saturating_sub(12) as u32);
                     }
                 }
             }
@@ -372,7 +438,87 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// STUN 응답 한 장의 크기 감각 — 상한을 넘지 않는지 본다.
+/// 자격마다 RR 한 장에 담을 칸들. ★**구간은 여기서 한 번만 닫힌다**(정§11-2).
+fn rr_blocks(
+    stats: &mut HashMap<u32, (String, crate::rtcp::RecvStats)>,
+    now: u64,
+) -> Vec<(String, Vec<crate::rtcp::ReportBlock>)> {
+    let mut by: HashMap<String, Vec<crate::rtcp::ReportBlock>> = HashMap::new();
+    for (ufrag, s) in stats.values_mut() {
+        // ★아직 한 장도 못 받은 스트림은 낼 것이 없다 — 빈 칸을 지어내지 않는다.
+        if s.received() == 0 {
+            continue;
+        }
+        by.entry(ufrag.clone()).or_default().push(s.report(now));
+    }
+    by.into_iter().collect()
+}
+
+/// 들어온 RTCP 한 덩어리. ★**복호 뒤 평문에서 패킷 단위로 분해한다**(정§11-2 `1pc` 분해).
+#[allow(clippy::too_many_arguments)]
+async fn on_rtcp(
+    plain: &[u8],
+    ufrag: &str,
+    stats: &mut HashMap<u32, (String, crate::rtcp::RecvStats)>,
+    egress: &mut HashMap<(String, u32), (u32, u32)>,
+    routes: &HashMap<u32, Vec<Target>>,
+    rewriters: &HashMap<(String, u32), crate::rewriter::Rewriter>,
+    table: &Arc<IceTable>,
+    srtp: &mut HashMap<String, super::srtp::SrtpPair>,
+    socket: &Arc<UdpSocket>,
+    c: &mut Counters,
+) {
+    use crate::rtcp;
+    let now = now_ms();
+    for pkt in rtcp::split(plain) {
+        match pkt[1] {
+            rtcp::PT_SR => {
+                let Some((ssrc, hi, lo)) = rtcp::sr_ntp(pkt) else { continue };
+                if let Some((_, s)) = stats.get_mut(&ssrc) {
+                    s.on_sr(hi, lo, now);
+                }
+                // ★**자체 생성 금지 — 번역 릴레이다**(정§11-2). 구독자마다 값이 다르다.
+                let Some(targets) = routes.get(&ssrc) else { continue };
+                for t in targets {
+                    let (Some(dst), Some(out)) =
+                        (table.get(&t.ufrag).and_then(|e| e.addr()), srtp.get_mut(&t.ufrag))
+                    else {
+                        continue;
+                    };
+                    let (packets, octets) =
+                        egress.get(&(t.ufrag.clone(), ssrc)).copied().unwrap_or((0, 0));
+                    let patch = rtcp::SrPatch {
+                        ssrc: t.slot,
+                        // ★**RTP 전달과 같은 offset** — 다르면 NTP↔RTP 사상이 어긋나 AV sync 가 무너진다.
+                        rtp_ts: t.slot.and_then(|slot| {
+                            let rw = rewriters.get(&(t.ufrag.clone(), slot))?;
+                            let raw = u32::from_be_bytes([pkt[16], pkt[17], pkt[18], pkt[19]]);
+                            Some(rw.map_ts(raw))
+                        }),
+                        packet_count: packets,
+                        octet_count: octets,
+                    };
+                    if let Some(translated) = rtcp::translate_sr(pkt, &patch)
+                        && let Some(sealed) = out.seal_rtcp(&translated)
+                    {
+                        let _ = socket.send_to(&sealed, dst).await;
+                        c.rtcp_out += 1;
+                    }
+                }
+            }
+            // ★**구독자 RR 은 서버가 소비한다** — 발행자에게 릴레이하면 발행자가
+            //   남의 수신 품질로 비트레이트를 깎는다(정§11-2).
+            rtcp::PT_RR => c.rtcp_rr_in += 1,
+            // ★**무시한다**(정§11-2) — 조용히가 아니라 세고 무시한다.
+            rtcp::PT_SDES | rtcp::PT_BYE | rtcp::PT_APP => c.rtcp_ignored += 1,
+            // NACK·PLI·REMB·TWCC 는 다음 걸음이다 — 세고 버린다(조용한 drop 금지).
+            rtcp::PT_RTPFB | rtcp::PT_PSFB => c.rtcp_fb_in += 1,
+            _ => c.rtcp_ignored += 1,
+        }
+    }
+    let _ = ufrag;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
