@@ -113,13 +113,17 @@ pub struct Counters {
     pub sim_unknown: u64,
     /// 지금 안 보내는 단이라 버린 것.
     pub sim_dropped: u64,
+    /// latch 를 안 지난 주소에서 온 것 — ★**우리가 버린 자리**다.
+    pub no_latch: u64,
+    /// 열쇠가 아직 없어 못 푼 것.
+    pub no_key: u64,
     pub unknown: u64,
 }
 
 impl Counters {
     fn line(&self) -> String {
         format!(
-            "stun {}/{}(위조 {}) · dtls {} · srtp in {}(버림 {}) out {} · rtcp in {} out {} · 단 모름 {} 안 보냄 {} · 모름 {}",
+            "stun {}/{}(위조 {}) · dtls {} · srtp in {}(버림 {}) out {} · rtcp in {} out {} · 단 모름 {} 안 보냄 {} · latch 전 {} 열쇠 전 {} · 모름 {}",
             self.stun_ok,
             self.stun_ok + self.stun_dropped,
             self.forged,
@@ -131,6 +135,8 @@ impl Counters {
             self.rtcp_out,
             self.sim_unknown,
             self.sim_dropped,
+            self.no_latch,
+            self.no_key,
             self.unknown
         )
     }
@@ -337,7 +343,12 @@ pub async fn serve(
             }
             Packet::Srtp => {
                 // ★**latch 를 지난 주소만 미디어를 탄다** — 그 전 것은 아무것도 아니다.
-                let Some(p) = by_addr.get(&from) else { continue };
+                //   ★**세고 버린다** — 여기가 계수 없는 drop 이면 *"어디서 없어졌나"* 를
+                //   영영 못 짚는다(조용한 drop 금지).
+                let Some(p) = by_addr.get(&from) else {
+                    c.no_latch += 1;
+                    continue;
+                };
                 let ufrag = p.ufrag.clone();
                 // ★RTP 와 RTCP 는 같은 대역으로 온다(RFC 5761) — 둘째 바이트가 가른다.
                 if crate::rtcp::is_rtcp(&buf[..n]) {
@@ -351,7 +362,10 @@ pub async fn serve(
                     continue;
                 }
                 c.srtp_in += 1;
-                let Some(ctx) = srtp.get_mut(&ufrag) else { continue };
+                let Some(ctx) = srtp.get_mut(&ufrag) else {
+                    c.no_key += 1;
+                    continue;
+                };
                 // ★인증이 안 맞으면 버린다 — 위조가 fan-out 을 타면 남의 화면에 남의 것이 뜬다.
                 let Some(plain) = ctx.open(&buf[..n]) else {
                     c.srtp_bad += 1;
