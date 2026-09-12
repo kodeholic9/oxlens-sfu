@@ -40,6 +40,8 @@ pub struct Target {
     pub spatial_cap: Option<u8>,
     /// ★**별개 축이다**(연§6-3) — *"안 받는다"* 와 *"낮은 화질로 받는다"* 는 다른 것이다.
     pub paused: bool,
+    /// 재전송용 `(ssrc, pt)` — ★**발행자가 선언한 값을 쓴다**(정§11-1). 없으면 재전송을 안 한다.
+    pub rtx: Option<(u32, u8)>,
 }
 
 /// 바깥에서 루프에 거는 것. ★**루프의 자료를 직접 만지지 않는다.**
@@ -129,13 +131,20 @@ pub struct Counters {
     pub no_latch: u64,
     /// 열쇠가 아직 없어 못 푼 것.
     pub no_key: u64,
+    pub nack_in: u64,
+    /// 관문별 사유 — ★**조용한 drop 금지**(정§11-1 *"관문마다 사유별 계수"*).
+    pub nack_no_cache: u64,
+    pub nack_no_rtx: u64,
+    pub nack_budget: u64,
+    pub nack_miss: u64,
+    pub rtx_out: u64,
     pub unknown: u64,
 }
 
 impl Counters {
     fn line(&self) -> String {
         format!(
-            "stun {}/{}(위조 {}) · dtls {} · srtp in {}(버림 {}) out {} · rtcp in {} out {} · 단 모름 {} 안 보냄 {} · latch 전 {} 열쇠 전 {} · 모름 {}",
+            "stun {}/{}(위조 {}) · dtls {} · srtp in {}(버림 {}) out {} · rtcp in {} out {} · 단 모름 {} 안 보냄 {} · latch 전 {} 열쇠 전 {} · nack {}(캐시없음 {} rtx없음 {} 못찾음 {}) rtx {} · 모름 {}",
             self.stun_ok,
             self.stun_ok + self.stun_dropped,
             self.forged,
@@ -149,6 +158,11 @@ impl Counters {
             self.sim_dropped,
             self.no_latch,
             self.no_key,
+            self.nack_in,
+            self.nack_no_cache,
+            self.nack_no_rtx,
+            self.nack_miss,
+            self.rtx_out,
             self.unknown
         )
     }
@@ -197,6 +211,9 @@ pub async fn serve(
     let mut chosen: HashMap<(String, u32), u8> = HashMap::new();
     // ★구독자에게 내보낸 수 — SR 번역이 이 값으로 카운터를 갈아 끼운다.
     let mut egress: HashMap<(String, u32), (u32, u32)> = HashMap::new();
+    // ★**보낸 것을 잠깐 들고 있는다** — NACK 이 오면 그 자리에서 꺼내 되보낸다(정§11-1 관문 ②).
+    //   키는 `(받는 자격, egress ssrc)`, 값은 링버퍼다.
+    let mut cache: HashMap<(String, u32), SendCache> = HashMap::new();
     // ★**내보낼 것을 담는 그릇 하나** — 패킷마다 새로 잡지 않는다(H3).
     let mut scratch: Vec<u8> = Vec::with_capacity(MTU);
     let mut c = Counters::default();
@@ -372,7 +389,7 @@ pub async fn serve(
                         c.srtp_bad += 1;
                         continue;
                     };
-                    on_rtcp(&plain, &ufrag, &mut stats, &mut egress, &routes, &rewriters, &table, &mut srtp, &socket, &mut c).await;
+                    on_rtcp(&plain, &ufrag, &mut stats, &mut egress, &mut cache, &routes, &rewriters, &table, &mut srtp, &socket, &mut c).await;
                     continue;
                 }
                 c.srtp_in += 1;
@@ -482,6 +499,13 @@ pub async fn serve(
                     if let Some(sealed) = out.seal(&scratch) {
                         let _ = socket.send_to(&sealed, dst).await;
                         c.srtp_out += 1;
+                        // ★**평문을 들고 있는다** — 되보낼 때 머리를 다시 써야 하므로
+                        //   봉한 것을 그대로 쓸 수 없다(RTX 는 ssrc·pt·seq 가 다르다).
+                        if let Some(rtx) = t.rtx {
+                            let e = cache.entry((t.ufrag.clone(), out_ssrc)).or_default();
+                            e.rtx = Some(rtx);
+                            e.put(&scratch);
+                        }
                         // ★SR 번역이 쓸 egress 카운터 — 발행자 수가 아니라 **내보낸 수**다.
                         let e = egress.entry((t.ufrag.clone(), out_ssrc)).or_insert((0, 0));
                         e.0 = e.0.wrapping_add(1);
@@ -575,6 +599,7 @@ async fn on_rtcp(
     ufrag: &str,
     stats: &mut HashMap<(String, u32), crate::rtcp::RecvStats>,
     egress: &mut HashMap<(String, u32), (u32, u32)>,
+    cache: &mut HashMap<(String, u32), SendCache>,
     routes: &HashMap<(String, u32), Vec<Target>>,
     rewriters: &HashMap<(String, u32), crate::rewriter::Rewriter>,
     table: &Arc<IceTable>,
@@ -623,12 +648,118 @@ async fn on_rtcp(
             // ★**구독자 RR 은 서버가 소비한다** — 발행자에게 릴레이하면 발행자가
             //   남의 수신 품질로 비트레이트를 깎는다(정§11-2).
             rtcp::PT_RR => c.rtcp_rr_in += 1,
+            // ★**하향 복구** — 구독자가 빠졌다고 한 것을 캐시에서 꺼내 되보낸다(정§11-1).
+            rtcp::PT_RTPFB if rtcp::nack_seqs(pkt).is_some() => {
+                let Some((media, seqs)) = rtcp::nack_seqs(pkt) else { continue };
+                c.nack_in += 1;
+                let Some(entry) = cache.get_mut(&(ufrag.to_string(), media)) else {
+                    c.nack_no_cache += 1;
+                    continue;
+                };
+                let Some((rtx_ssrc, rtx_pt)) = entry.rtx else {
+                    c.nack_no_rtx += 1;
+                    continue;
+                };
+                let (Some(dst), Some(out)) =
+                    (table.get(ufrag).and_then(|e| e.addr()), srtp.get_mut(ufrag))
+                else {
+                    continue;
+                };
+                for want in seqs {
+                    // ★**예산**(정§11-1 관문 ③) — 그 구독자만 막고 남은 참가자를 보호한다.
+                    if !entry.spend(now) {
+                        c.nack_budget += 1;
+                        break;
+                    }
+                    let Some(orig) = entry.get(want) else {
+                        c.nack_miss += 1;
+                        continue;
+                    };
+                    let seq = entry.next_rtx_seq();
+                    if let Some(rtx) = rtcp::build_rtx(&orig, rtx_ssrc, rtx_pt, seq)
+                        && let Some(sealed) = out.seal(&rtx)
+                    {
+                        let _ = socket.send_to(&sealed, dst).await;
+                        c.rtx_out += 1;
+                    }
+                }
+            }
             // ★**무시한다**(정§11-2) — 조용히가 아니라 세고 무시한다.
             rtcp::PT_SDES | rtcp::PT_BYE | rtcp::PT_APP => c.rtcp_ignored += 1,
             // NACK·PLI·REMB·TWCC 는 다음 걸음이다 — 세고 버린다(조용한 drop 금지).
             rtcp::PT_RTPFB | rtcp::PT_PSFB => c.rtcp_fb_in += 1,
             _ => c.rtcp_ignored += 1,
         }
+    }
+}
+
+
+/// 한 구독자·한 스트림의 송신 캐시. ★**되보낼 것을 들고 있는 자리**다(정§11-1 관문 ②).
+///
+/// ★**링버퍼다** — 무한히 들면 오래 사는 서버의 메모리가 그만큼 자란다. 30fps 기준
+/// 1,024장이면 ~34초이고, 그보다 늦은 NACK 은 재전송으로 못 메우는 영역이다.
+struct SendCache {
+    /// 재전송용 `(ssrc, pt)` — ★**보낼 때 같이 적어 둔다.** NACK 은 구독자 자격으로 오는데
+    /// 전달표는 발행자 자격으로 걸려 있어, 되짚는 길을 두면 그 길이 또 갈린다.
+    rtx: Option<(u32, u8)>,
+    ring: std::collections::VecDeque<(u16, Vec<u8>)>,
+    rtx_seq: u16,
+    /// 예산 창의 시작과 그 창에서 쓴 수.
+    window_at: u64,
+    spent: u32,
+}
+
+/// 캐시 깊이 — 30fps 기준 ~34초.
+const CACHE_MAX: usize = 1024;
+/// ★**구독자당 예산**(정§11-1) — 정상 10~30 이 통과하고 폭풍은 막힌다.
+const RTX_BUDGET: u32 = 200;
+const RTX_WINDOW_MS: u64 = 3_000;
+
+impl Default for SendCache {
+    fn default() -> Self {
+        Self {
+            rtx: None,
+            ring: std::collections::VecDeque::with_capacity(CACHE_MAX),
+            rtx_seq: 0,
+            window_at: 0,
+            spent: 0,
+        }
+    }
+}
+
+impl SendCache {
+    fn put(&mut self, pkt: &[u8]) {
+        if pkt.len() < 12 {
+            return;
+        }
+        if self.ring.len() == CACHE_MAX {
+            self.ring.pop_front();
+        }
+        let seq = u16::from_be_bytes([pkt[2], pkt[3]]);
+        self.ring.push_back((seq, pkt.to_vec()));
+    }
+
+    fn get(&self, seq: u16) -> Option<Vec<u8>> {
+        self.ring.iter().rev().find(|(s, _)| *s == seq).map(|(_, p)| p.clone())
+    }
+
+    /// ★**예산 하나를 쓴다** — 창이 지나면 새로 찬다. `false` 면 그 구독자는 이 창에서 끝이다.
+    fn spend(&mut self, now: u64) -> bool {
+        if now.saturating_sub(self.window_at) > RTX_WINDOW_MS {
+            self.window_at = now;
+            self.spent = 0;
+        }
+        if self.spent >= RTX_BUDGET {
+            return false;
+        }
+        self.spent += 1;
+        true
+    }
+
+    /// ★**RTX 는 제 seq 공간을 쓴다**(RFC 4588) — 원본 seq 를 재사용하면 수신 지터버퍼가 깨진다.
+    fn next_rtx_seq(&mut self) -> u16 {
+        self.rtx_seq = self.rtx_seq.wrapping_add(1);
+        self.rtx_seq
     }
 }
 

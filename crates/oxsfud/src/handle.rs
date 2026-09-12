@@ -201,6 +201,9 @@ pub fn routes_for_room(node: &Node, room_id: &str) -> Vec<(String, u32, Vec<crat
                         slot: None,
                         spatial_cap: cap.spatial,
                         paused: cap.paused,
+                        // ★**발행자가 선언한 값을 쓴다**(정§11-1) — 상수로 박으면 H264(103)
+                        //   재전송을 통째로 못 본다. 짝이 안 맞으면 재전송을 안 한다.
+                        rtx: p.rtx_ssrc.zip(a.rtx_pt),
                     })
                 })
                 .collect();
@@ -689,7 +692,6 @@ fn publish_add(node: &mut Node, ing: &Ingress, header: Header, req: &PublishTrac
             user_id: ing.user_id.clone(),
             kind: t.kind,
             ssrc: t.ssrc,
-            rtx_ssrc: t.rtx_ssrc,
             codec: t.codec.clone(),
             fmtp: t.fmtp.clone(),
             pt: t.pt,
@@ -700,6 +702,14 @@ fn publish_add(node: &mut Node, ing: &Ingress, header: Header, req: &PublishTrac
             // ★시뮬캐스트면 그 자리에서 발급한다 — 단이 오기 **전에** 있어야
             //   구독자에게 알릴 `TrackEntry.ssrc` 가 선다.
             vssrc: simulcast.then(fresh_ssrc),
+            // ★★**재전송 SSRC 는 egress 값이라 서버가 쥔다.** 발행자가 선언했으면 그것을
+            //   쓰고, 안 했으면 ★**우리가 낸다** — 그래야 구독자가 RTX m-line 을 지을 수
+            //   있고, 없으면 손실 복구가 원리적으로 성립하지 않는다(정§11-1 · §7-2-1).
+            //   ★audio 는 없다 — 오디오 NACK 은 미채택이다.
+            rtx_ssrc: match t.kind {
+                Kind::Audio => None,
+                Kind::Video => Some(t.rtx_ssrc.unwrap_or_else(fresh_ssrc)),
+            },
         });
         made.push(PublishedTrack { mid: t.mid.clone(), track_id });
     }
@@ -984,6 +994,7 @@ pub fn floor_routes(node: &Node, room_id: &str) -> Vec<(String, u32, Vec<crate::
                             // ★반이중 슬롯에는 단이 없다 — 발언권 하나가 흐름을 정한다.
                             spatial_cap: None,
                             paused: false,
+                            rtx: None,
                         })
                     })
                     .collect()

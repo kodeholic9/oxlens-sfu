@@ -87,6 +87,53 @@ pub fn translate_sr(pkt: &[u8], p: &SrPatch) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Generic NACK(RFC 4585 RTPFB `fmt 1`)이 가리키는 seq 들.
+///
+/// ★★**`fmt` 로 갈린다** — RTPFB 라고 다 NACK 이 아니다: `fmt 1` 이 NACK 이고
+/// ★**`fmt 15` 는 TWCC 피드백**(정§11-2). 안 가르면 TWCC 를 NACK 으로 읽어
+/// 있지도 않은 손실에 재전송을 쏜다.
+///
+/// 한 칸은 `PID`(16) + `BLP`(16) — BLP 의 비트 `i` 가 서면 `PID + 1 + i` 도 빠졌다.
+pub fn nack_seqs(pkt: &[u8]) -> Option<(u32, Vec<u16>)> {
+    if pkt.len() < 12 || pkt[1] != PT_RTPFB || pkt[0] & 0x1F != 1 {
+        return None;
+    }
+    let media_ssrc = u32::from_be_bytes([pkt[8], pkt[9], pkt[10], pkt[11]]);
+    let mut out = Vec::new();
+    let mut at = 12;
+    while at + 4 <= pkt.len() {
+        let pid = u16::from_be_bytes([pkt[at], pkt[at + 1]]);
+        let blp = u16::from_be_bytes([pkt[at + 2], pkt[at + 3]]);
+        out.push(pid);
+        for i in 0..16 {
+            if blp & (1 << i) != 0 {
+                out.push(pid.wrapping_add(1 + i));
+            }
+        }
+        at += 4;
+    }
+    Some((media_ssrc, out))
+}
+
+/// ★**RTX 한 장을 짓는다**(RFC 4588) — ★**원본 seq 를 payload 앞 2바이트(OSN)에 싣고**
+/// 머리는 재전송용 `ssrc`·`pt`·제 seq 를 쓴다.
+///
+/// ★**본문을 다시 마샬링하지 않는다** — 머리만 새로 쓰고 원본을 통째로 붙인다.
+pub fn build_rtx(orig: &[u8], rtx_ssrc: u32, rtx_pt: u8, rtx_seq: u16) -> Option<Vec<u8>> {
+    if orig.len() < 12 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(orig.len() + 2);
+    out.extend_from_slice(&orig[..12]);
+    out[1] = (orig[1] & 0x80) | (rtx_pt & 0x7F);
+    out[2..4].copy_from_slice(&rtx_seq.to_be_bytes());
+    out[8..12].copy_from_slice(&rtx_ssrc.to_be_bytes());
+    // ★OSN — 받는 쪽은 이 둘로 원래 자리를 안다.
+    out.extend_from_slice(&orig[2..4]);
+    out.extend_from_slice(&orig[12..]);
+    Some(out)
+}
+
 /// PLI 한 장(RFC 4585 PSFB `fmt 1`) — 12바이트 고정.
 pub fn build_pli(sender_ssrc: u32, media_ssrc: u32) -> [u8; 12] {
     let mut b = [0u8; 12];
@@ -327,6 +374,36 @@ mod tests {
         let mut bad = c.clone();
         bad[3] = 0xFF;
         assert!(split(&bad).is_empty());
+    }
+
+    #[test]
+    fn nack_은_fmt_로_갈린다() {
+        let mut n = vec![0x81, PT_RTPFB, 0, 3];
+        n.extend_from_slice(&1u32.to_be_bytes());
+        n.extend_from_slice(&0xAAAAu32.to_be_bytes());
+        n.extend_from_slice(&43u16.to_be_bytes());
+        // BLP 비트 0·2 → 44·46 도 빠졌다.
+        n.extend_from_slice(&0b101u16.to_be_bytes());
+        assert_eq!(nack_seqs(&n), Some((0xAAAA, vec![43, 44, 46])));
+        // ★`fmt 15` 는 TWCC 다 — NACK 으로 읽으면 없는 손실에 재전송을 쏜다.
+        let mut twcc = n.clone();
+        twcc[0] = 0x80 | 15;
+        assert_eq!(nack_seqs(&twcc), None);
+    }
+
+    #[test]
+    fn rtx_는_osn_을_앞에_싣고_본문을_안_건드린다() {
+        let mut orig = vec![0x80, 96, 0, 43, 0, 0, 0, 9];
+        orig.extend_from_slice(&0x1111_1111u32.to_be_bytes());
+        orig.extend_from_slice(b"frame");
+        let out = build_rtx(&orig, 0x2222_2222, 97, 5).expect("짓는다");
+        assert_eq!(out[1] & 0x7F, 97);
+        assert_eq!(u16::from_be_bytes([out[2], out[3]]), 5, "제 seq 를 쓴다");
+        assert_eq!(&out[8..12], &0x2222_2222u32.to_be_bytes());
+        // ★OSN = 원본 seq 43.
+        assert_eq!(u16::from_be_bytes([out[12], out[13]]), 43);
+        assert_eq!(&out[14..], b"frame", "★본문 무접촉");
+        assert_eq!(out.len(), orig.len() + 2, "★2바이트만 는다");
     }
 
     #[test]
