@@ -49,11 +49,13 @@ pub struct Notice {
 }
 
 /// 한 프레임을 처리한 결과.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Outcome {
     /// 그 요청의 응답 프레임. ★**언제나 하나 있다** — 조용한 성공이 없다.
     pub reply: Vec<u8>,
     pub notices: Vec<Notice>,
+    /// ★**전달표 갱신** — 제어 평면이 계산해 데이터 평면에 밀어 넣는다(핫패스 규율 H2).
+    pub routes: Vec<(u32, Vec<crate::transport::udp::Target>)>,
 }
 
 /// 이 유닛이 쥔 것 전부.
@@ -164,6 +166,35 @@ fn unicast(room_id: &str, user_id: &str, op: Op, body: &impl serde::Serialize) -
     n
 }
 
+/// 그 방의 발행 전부에 대해 ★**지금 갈 곳**을 다시 센다.
+///
+/// ★**다시 세는 것이 갱신이다** — 델타로 고치면 입·퇴장과 발행·해제가 겹칠 때
+/// 한 걸음이 빠지고, 그 빠짐은 *"한 사람만 영상이 안 나온다"* 로 나타난다.
+pub fn routes_for_room(node: &Node, room_id: &str) -> Vec<(u32, Vec<crate::transport::udp::Target>)> {
+    let Some(room) = node.rooms.get(room_id) else { return Vec::new() };
+    let members = room.session_ids();
+    node.publications
+        .iter()
+        .filter(|p| p.room_id == room_id && p.duplex == Duplex::Full)
+        .map(|p| {
+            let targets = members
+                .iter()
+                .filter(|sid| *sid != &p.session_id)
+                .filter_map(|sid| {
+                    let peer = node.peers.get(sid)?;
+                    // ★**배정이 있는 사람에게만 간다** — 배정이 없으면 받을 자리가 없다.
+                    let a = peer.assigns.get(&p.track_id)?;
+                    Some(crate::transport::udp::Target {
+                        ufrag: peer.recv_ufrag().to_string(),
+                        pt: a.pt,
+                    })
+                })
+                .collect();
+            (p.ssrc, targets)
+        })
+        .collect()
+}
+
 /// ★**한 프레임 = 한 응답**(+ 통지 몇). 조용한 성공이 없다.
 pub fn dispatch(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Outcome {
     match header.op {
@@ -173,16 +204,16 @@ pub fn dispatch(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> 
         Op::PublishTracks => publish_tracks(node, ing, header, body),
         Op::Ready => ready(node, ing, header, body),
         // ★미디어 축은 다음 걸음이다 — 조용히 성공하지 않는다.
-        _ => Outcome { reply: fail(header, Code::UnknownOp), notices: Vec::new() },
+        _ => Outcome { reply: fail(header, Code::UnknownOp), ..Default::default() },
     }
 }
 
 fn room_join(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Outcome {
     let Ok(req) = serde_json::from_slice::<RoomJoinReq>(body) else {
-        return Outcome { reply: fail(header, Code::InvalidPayload), notices: Vec::new() };
+        return Outcome { reply: fail(header, Code::InvalidPayload), ..Default::default() };
     };
     if node.rooms.get(&req.room_id).is_none() {
-        return Outcome { reply: fail(header, Code::RoomNotFound), notices: Vec::new() };
+        return Outcome { reply: fail(header, Code::RoomNotFound), ..Default::default() };
     }
     // ★**Peer 가 단위다** — 같은 신원의 옛 Peer 는 그 서버의 **모든 방**에서 함께 걷힌다(정§4-2 ②).
     let e = node.peers.ensure(&ing.session_id, &ing.user_id, ing.pc_mode);
@@ -221,7 +252,7 @@ fn room_join(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Out
         select,
         metadata: ing.metadata.clone(),
     }) {
-        return Outcome { reply: fail(header, code), notices };
+        return Outcome { reply: fail(header, code), notices, routes: Vec::new() };
     }
     let version = room.version(&node.epoch);
     let participants = room.participants();
@@ -272,7 +303,8 @@ fn room_join(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Out
             },
         ));
     }
-    Outcome { reply: ok(header, &json(&res)), notices }
+    let routes = routes_for_room(node, &req.room_id);
+    Outcome { reply: ok(header, &json(&res)), notices, routes }
 }
 
 fn left_notice(room_id: &str, user_id: &str, version: oxsig::Version) -> Notice {
@@ -296,14 +328,14 @@ fn left_notice(room_id: &str, user_id: &str, version: oxsig::Version) -> Notice 
 
 fn room_leave(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Outcome {
     let Ok(req) = serde_json::from_slice::<RoomLeaveReq>(body) else {
-        return Outcome { reply: fail(header, Code::InvalidPayload), notices: Vec::new() };
+        return Outcome { reply: fail(header, Code::InvalidPayload), ..Default::default() };
     };
     let Some(room) = node.rooms.get_mut(&req.room_id) else {
-        return Outcome { reply: fail(header, Code::RoomNotFound), notices: Vec::new() };
+        return Outcome { reply: fail(header, Code::RoomNotFound), ..Default::default() };
     };
     // ★**안 들어간 방에서 나가는 것은 `3002`** 다 — 없는 방(`3001`)과 다른 축이다.
     if !room.leave(&ing.user_id) {
-        return Outcome { reply: fail(header, Code::NotInRoom), notices: Vec::new() };
+        return Outcome { reply: fail(header, Code::NotInRoom), ..Default::default() };
     }
     let version = room.version(&node.epoch);
     let mut notices = Vec::new();
@@ -312,7 +344,7 @@ fn room_leave(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Ou
     }
 
     let Some(peer) = node.peers.get_mut(&ing.session_id) else {
-        return Outcome { reply: fail(header, Code::SessionNotFound), notices };
+        return Outcome { reply: fail(header, Code::SessionNotFound), notices, routes: Vec::new() };
     };
     peer.sub_rooms.retain(|r| r != &req.room_id);
     // ★**딸려 내려간다** — 발행하던 방에서 나가면 발행할 곳이 없다(연§6-2).
@@ -324,7 +356,8 @@ fn room_leave(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Ou
         peer.mids.give(Kind::Audio, &a.mid);
     }
     let res = RoomLeaveRes { room_id: req.room_id.clone(), affiliation: peer.affiliation() };
-    Outcome { reply: ok(header, &json(&res)), notices }
+    let routes = routes_for_room(node, &req.room_id);
+    Outcome { reply: ok(header, &json(&res)), notices, routes }
 }
 
 fn affiliation(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Outcome {
@@ -333,11 +366,11 @@ fn affiliation(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> O
     } else {
         match serde_json::from_slice(body) {
             Ok(v) => v,
-            Err(_) => return Outcome { reply: fail(header, Code::InvalidPayload), notices: Vec::new() },
+            Err(_) => return Outcome { reply: fail(header, Code::InvalidPayload), ..Default::default() },
         }
     };
     let Some(peer) = node.peers.get_mut(&ing.session_id) else {
-        return Outcome { reply: fail(header, Code::SessionNotFound), notices: Vec::new() };
+        return Outcome { reply: fail(header, Code::SessionNotFound), ..Default::default() };
     };
     // ★**적용 순서는 `pub_deselect` → `pub_select`** 다 — 같은 요청에 둘 다 와도(연§6-4).
     if let Some(r) = &req.pub_deselect
@@ -348,7 +381,7 @@ fn affiliation(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> O
     if let Some(r) = &req.pub_select {
         // ★**입장한 방에서만 말한다** — 안 들어간 방은 `3002`(없는 방 `3001` 과 다른 축).
         if !peer.sub_rooms.contains(r) {
-            return Outcome { reply: fail(header, Code::NotInRoom), notices: Vec::new() };
+            return Outcome { reply: fail(header, Code::NotInRoom), ..Default::default() };
         }
         peer.pub_room = Some(r.clone());
     }
@@ -359,7 +392,7 @@ fn affiliation(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> O
         change_id: req.change_id.clone(),
     };
     // ★`version` 을 싣지 않는다 — 소속은 내 세션 것이라 방 공통 스냅샷에 없다(연§4-6-3).
-    Outcome { reply: ok(header, &json(&res)), notices: Vec::new() }
+    Outcome { reply: ok(header, &json(&res)), ..Default::default() }
 }
 
 /// ★**퇴장 정리 — 순서가 계약이다**(정§17-2). `ROOM_LEAVE`·축출·좀비 회수 셋이 이리로 모인다.
@@ -382,6 +415,7 @@ pub struct Reaped {
     pub session_id: String,
     pub user_id: String,
     pub notices: Vec<Notice>,
+    pub routes: Vec<(u32, Vec<crate::transport::udp::Target>)>,
 }
 
 pub fn reap(node: &mut Node, session_id: &str, zombie: bool) -> Option<Reaped> {
@@ -423,7 +457,18 @@ pub fn reap(node: &mut Node, session_id: &str, zombie: bool) -> Option<Reaped> {
     }
     // ④ 전송 등록 해제 — ★자격을 내려야 옛 패킷이 새 Peer 를 못 건드린다.
     node.ice.drop_session(session_id);
-    Some(Reaped { session_id: session_id.to_string(), user_id, notices })
+    // ★**그 사람이 올리던 것도 끊는다** — 발행자가 갔는데 목록만 남으면 죽은 ssrc 가 표에 남는다.
+    let mut routes: Vec<(u32, Vec<crate::transport::udp::Target>)> = node
+        .publications
+        .iter()
+        .filter(|p| p.session_id == session_id)
+        .map(|p| (p.ssrc, Vec::new()))
+        .collect();
+    node.publications.retain(|p| p.session_id != session_id);
+    for r in &rooms {
+        routes.extend(routes_for_room(node, r));
+    }
+    Some(Reaped { session_id: session_id.to_string(), user_id, notices, routes })
 }
 
 /// reaper 한 걸음 — ★**주체는 하나다**(정§2-2). 회수까지 같은 tick 안에서 끝난다.
@@ -506,7 +551,7 @@ impl Publication {
 
 fn publish_tracks(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Outcome {
     let Ok(req) = serde_json::from_slice::<PublishTracksReq>(body) else {
-        return Outcome { reply: fail(header, Code::InvalidPayload), notices: Vec::new() };
+        return Outcome { reply: fail(header, Code::InvalidPayload), ..Default::default() };
     };
     // ★**입장한 방만**(연§6-3 `3002`).
     let in_room = node
@@ -514,7 +559,7 @@ fn publish_tracks(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -
         .get_mut(&ing.session_id)
         .is_some_and(|p| p.sub_rooms.iter().any(|r| r == &req.room_id));
     if !in_room {
-        return Outcome { reply: fail(header, Code::NotInRoom), notices: Vec::new() };
+        return Outcome { reply: fail(header, Code::NotInRoom), ..Default::default() };
     }
     match req.action.unwrap_or_default() {
         PublishAction::Add => publish_add(node, ing, header, &req),
@@ -529,20 +574,20 @@ fn publish_tracks(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -
 fn publish_add(node: &mut Node, ing: &Ingress, header: Header, req: &PublishTracksReq) -> Outcome {
     let none = Vec::new();
     if req.tracks.is_empty() {
-        return Outcome { reply: fail(header, Code::MissingField), notices: none };
+        return Outcome { reply: fail(header, Code::MissingField), notices: none, routes: Vec::new() };
     }
     let active = node.publications.iter().filter(|p| p.user_id == ing.user_id).count();
     if req.tracks.len() > PER_REQUEST_MAX || active + req.tracks.len() > PER_USER_MAX {
-        return Outcome { reply: fail(header, Code::TrackLimit), notices: none };
+        return Outcome { reply: fail(header, Code::TrackLimit), notices: none, routes: Vec::new() };
     }
     for t in &req.tracks {
         // ★`pt`·`ssrc`·`mid` 미신고는 `1003` — audio 도 예외가 아니다(폴백은 무음을 조용히 만든다).
         if t.mid.is_empty() || t.pt == 0 || (t.ssrc == 0 && !t.simulcast.unwrap_or(false)) {
-            return Outcome { reply: fail(header, Code::MissingField), notices: none };
+            return Outcome { reply: fail(header, Code::MissingField), notices: none, routes: Vec::new() };
         }
         // ★`source` 는 video 만 — audio 항목에 실리면 `1002`(닫힌 집합은 oxsig 가 이미 걸렀다).
         if t.kind == Kind::Audio && t.source.is_some() {
-            return Outcome { reply: fail(header, Code::InvalidPayload), notices: none };
+            return Outcome { reply: fail(header, Code::InvalidPayload), notices: none, routes: Vec::new() };
         }
         if t.kind == Kind::Video {
             let ok = t
@@ -556,7 +601,7 @@ fn publish_add(node: &mut Node, ing: &Ingress, header: Header, req: &PublishTrac
                 let b = serde_json::to_vec(&f).unwrap_or_default();
                 let mut out = Vec::with_capacity(frame::HEADER_LEN + b.len());
                 frame::encode(&mut out, Header { kind: FrameKind::Fail, ..header }, &b);
-                return Outcome { reply: out, notices: none };
+                return Outcome { reply: out, notices: none, routes: Vec::new() };
             }
         }
     }
@@ -588,8 +633,9 @@ fn publish_add(node: &mut Node, ing: &Ingress, header: Header, req: &PublishTrac
     }
 
     let notices = announce(node, &made, &req.room_id, &ing.user_id, TrackAction::Add);
+    let routes = routes_for_room(node, &req.room_id);
     let res = PublishTracksRes { action: PublishAction::Add, tracks: made };
-    Outcome { reply: ok(header, &json(&res)), notices }
+    Outcome { reply: ok(header, &json(&res)), notices, routes }
 }
 
 fn publish_remove(node: &mut Node, ing: &Ingress, header: Header, req: &PublishTracksReq) -> Outcome {
@@ -644,9 +690,15 @@ fn publish_remove(node: &mut Node, ing: &Ingress, header: Header, req: &PublishT
             ));
         }
     }
+    // ★지워진 `ssrc` 는 빈 목록으로 밀어 끊는다 — 안 끊으면 죽은 트랙이 계속 흐른다.
+    let mut routes: Vec<(u32, Vec<crate::transport::udp::Target>)> =
+        gone.iter().map(|g| (g.ssrc, Vec::new())).collect();
+    if let Some(g) = gone.first() {
+        routes.extend(routes_for_room(node, &g.room_id));
+    }
     // ★응답에 `tracks` 필드 자체가 없다(연§6-3).
     let res = PublishTracksRes { action: PublishAction::Remove, tracks: Vec::new() };
-    Outcome { reply: ok(header, &json(&res)), notices }
+    Outcome { reply: ok(header, &json(&res)), notices, routes }
 }
 
 /// ★★**수신자마다 프레임이 다르다** — `assign` 이 수신자 것이기 때문이다(연§4-1-1).
@@ -717,13 +769,13 @@ fn announce(
 /// 그래서 게이트는 Peer 에 한 벌만 둔다 — 방마다 두면 같은 것을 여러 번 풀게 된다.
 fn ready(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Outcome {
     let Ok(req) = serde_json::from_slice::<ReadyReq>(body) else {
-        return Outcome { reply: fail(header, Code::InvalidPayload), notices: Vec::new() };
+        return Outcome { reply: fail(header, Code::InvalidPayload), ..Default::default() };
     };
     let Some(peer) = node.peers.get_mut(&ing.session_id) else {
-        return Outcome { reply: fail(header, Code::SessionNotFound), notices: Vec::new() };
+        return Outcome { reply: fail(header, Code::SessionNotFound), ..Default::default() };
     };
     if !peer.sub_rooms.iter().any(|r| r == &req.room_id) {
-        return Outcome { reply: fail(header, Code::NotInRoom), notices: Vec::new() };
+        return Outcome { reply: fail(header, Code::NotInRoom), ..Default::default() };
     }
     match req.ready_type {
         ReadyType::Tracks => peer.ready = true,
@@ -731,5 +783,5 @@ fn ready(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Outcome
         //   남에게 통지도 내지 않는다(정§7-4 · 연§6-3 16차 결재). 정체 감지 덩어리에서 쓴다.
         ReadyType::Camera => {}
     }
-    Outcome { reply: ok(header, b"{}"), notices: Vec::new() }
+    Outcome { reply: ok(header, b"{}"), ..Default::default() }
 }

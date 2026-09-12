@@ -9,6 +9,7 @@ pub mod demux;
 pub mod dtls;
 pub mod ice;
 pub mod sctp;
+pub mod srtp;
 pub mod stun;
 pub mod udp;
 

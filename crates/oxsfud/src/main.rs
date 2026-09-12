@@ -131,7 +131,13 @@ async fn main() -> std::process::ExitCode {
         },
     };
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(64);
-    tokio::spawn(oxsfud::transport::udp::serve(sock, node.ice.clone(), dtls.cert, cmd_rx));
+    tokio::spawn(oxsfud::transport::udp::serve(
+        sock,
+        node.ice.clone(),
+        dtls.cert,
+        cmd_tx.clone(),
+        cmd_rx,
+    ));
     let svc = std::sync::Arc::new(oxsfud::grpc::Sfu::new(
         oxsfud::grpc::Identity {
             epoch,

@@ -483,7 +483,8 @@ async fn room_detail(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<oxsig::Failure>)> {
     // ★인증 두 갈래 — `Bearer` 또는 세션 헤더(새 비밀을 만들지 않는다, 정§14-4).
-    if bearer_user(&hub, &headers).is_err() {
+    let mut who = bearer_user(&hub, &headers).ok();
+    if who.is_none() {
         let sid = headers
             .get("x-oxlens-session")
             .and_then(|v| v.to_str().ok())
@@ -491,10 +492,10 @@ async fn room_detail(
         match sid {
             // ★**세션 갈래의 실패는 `2008`** 이다 — 토큰이 틀린 것(`2002`)과 다른 축이다.
             //   합치면 *"세션이 만료됐다"* 와 *"토큰이 위조됐다"* 가 같은 답을 받아 처방이 갈린다.
-            Some(s) if hub.sessions.lock().await.get(&s).is_none() => {
-                return Err(fail(oxsig::Code::SessionNotFound));
-            }
-            Some(_) => {}
+            Some(s) => match hub.sessions.lock().await.get(&s) {
+                None => return Err(fail(oxsig::Code::SessionNotFound)),
+                Some(sess) => who = Some(sess.user_id.clone()),
+            },
             None => return Err(fail(oxsig::Code::TokenInvalid)),
         }
     }
@@ -506,9 +507,17 @@ async fn room_detail(
     let Some(mut r) = rooms.view(&room_id) else {
         return Err(fail(oxsig::Code::RoomNotFound));
     };
-    // ★**트랙은 물어봤을 때만 나간다**(연§5-5 `?tracks=1`) — 채널 고르기에 쓰는 미리보기가
-    //   방마다 트랙 목록을 끌고 다니지 않게 한다.
-    if q.get("tracks").map(String::as_str) != Some("1")
+    // ★**트랙은 물어봤을 때만, 그리고 입장 중인 사람에게만 나간다**(연§5-5 · 정§14-4).
+    //
+    // ★**남의 mid 는 안 준다** — 배정은 수신자별 층이라 그 방에 없는 사람에게는 뜻이 없고,
+    // 주면 방 밖에서 그 방의 스트림 구성을 읽는 길이 된다.
+    let inside = r
+        .get("participants")
+        .and_then(|p| p.as_array())
+        .is_some_and(|ps| {
+            ps.iter().any(|m| m.get("user_id").and_then(|u| u.as_str()) == who.as_deref())
+        });
+    if (q.get("tracks").map(String::as_str) != Some("1") || !inside)
         && let Some(o) = r.as_object_mut()
     {
         o.remove("tracks");

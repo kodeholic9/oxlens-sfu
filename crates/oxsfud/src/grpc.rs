@@ -65,11 +65,19 @@ impl Sfu {
                     for n in r.notices {
                         me.emit(n);
                     }
+                    me.push_routes(r.routes).await;
                     // ★**태스크 종료까지가 회수다**(정§17-2 ④ · 실사고 20260814).
                     let _ = me.udp.send(crate::transport::udp::Cmd::DropSession(r.session_id)).await;
                 }
             }
         });
+    }
+
+    /// 전달표 갱신을 UDP 루프에 넘긴다.
+    async fn push_routes(&self, routes: Vec<(u32, Vec<crate::transport::udp::Target>)>) {
+        for (ssrc, targets) in routes {
+            let _ = self.udp.send(crate::transport::udp::Cmd::SetRoute { ssrc, targets }).await;
+        }
     }
 
     /// 통지 한 장을 스트림으로. ★**보낼 곳이 없으면 버린다** — 막지 않는다(정§15-4 `Drop`).
@@ -120,6 +128,9 @@ impl SfuService for Sfu {
         for n in out.notices {
             self.emit(n);
         }
+        // ★**전달표를 데이터 평면에 민다** — 응답보다 먼저다: 클라가 응답을 보고
+        //   RTP 를 시작하는데 표가 아직 없으면 첫 패킷들이 갈 곳을 못 찾는다(연§6-3 절차 ③).
+        self.push_routes(out.routes).await;
         Ok(Response::new(Envelope { wire: out.reply, ..Default::default() }))
     }
 

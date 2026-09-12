@@ -92,6 +92,17 @@ impl Peer {
         }
     }
 
+    /// ★**내가 받는 연결의 자격** — `1pc` 은 연결이 하나라 보내기 자격 그것이다(연§9-10).
+    ///
+    /// 여기서 `2pc` 의 것을 `1pc` 에 쓰면 그 자격은 아무도 latch 하지 않아
+    /// ★**보낼 주소가 영영 안 잡힌다** — 영상이 조용히 안 나온다.
+    pub fn recv_ufrag(&self) -> &str {
+        match self.pc_mode {
+            PcMode::One => &self.ice.publish_ufrag,
+            PcMode::Two => &self.ice.subscribe_ufrag,
+        }
+    }
+
     pub fn affiliation(&self) -> oxsig::Affiliation {
         oxsig::Affiliation { sub_rooms: self.sub_rooms.clone(), pub_room: self.pub_room.clone() }
     }
@@ -118,6 +129,10 @@ pub struct Peers {
 impl Peers {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn get(&self, session_id: &str) -> Option<&Peer> {
+        self.items.iter().find(|p| p.session_id == session_id)
     }
 
     pub fn get_mut(&mut self, session_id: &str) -> Option<&mut Peer> {

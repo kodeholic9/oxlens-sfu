@@ -22,11 +22,27 @@ use super::demux::{classify, Packet};
 use super::ice::{Binding, DropWhy, IceTable};
 use super::dtls;
 
+/// 한 스트림이 갈 곳 하나. ★**제어 평면이 미리 계산해 밀어 넣는다.**
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    /// 그 구독자의 **받기** 자격 — 주소는 latch 가, 열쇠는 그 ufrag 의 것이 답한다.
+    pub ufrag: String,
+    /// ★**구독자 표의 PT**(정§7-2-1) — 발행자 값이 아니다.
+    pub pt: u8,
+}
+
 /// 바깥에서 루프에 거는 것. ★**루프의 자료를 직접 만지지 않는다.**
+///
+/// ★★**전달표는 제어 평면이 밀고 데이터 평면은 제 것만 읽는다**(핫패스 규율 H2).
+/// 패킷마다 방·명단·배정을 자물쇠 뒤에서 찾아보면 그 자물쇠가 곧 상한이 된다.
 #[derive(Debug)]
 pub enum Cmd {
     /// 그 세션을 거둔다 — ★**통로를 닫으면 DTLS 태스크가 끝난다**(정§12).
     DropSession(String),
+    /// DTLS 가 섰다 — 그 자격의 SRTP 두 벌.
+    SrtpReady { ufrag: String, keys: Box<super::dtls::SrtpKeys> },
+    /// 그 발행 `ssrc` 가 갈 곳 전부. ★**빈 목록이면 아무 데도 안 간다**(지우는 것과 같다).
+    SetRoute { ssrc: u32, targets: Vec<Target> },
 }
 
 /// 데이터그램 상한 — ★**한 장이 이보다 크면 우리 것이 아니다.**
@@ -40,6 +56,8 @@ const MTU: usize = 2048;
 /// ★**직접 끊는다** — 정§12 가 *"회수 시 태스크 종료 필수"* 라 못박은 자리다.
 struct Pipe {
     session_id: String,
+    /// ★**자격 이름** — SRTP 열쇠도 latch 도 이 키로 찾는다(정§12 세션 동일성).
+    ufrag: String,
     tx: mpsc::Sender<Bytes>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -62,14 +80,24 @@ pub struct Counters {
     pub forged: u64,
     pub dtls_in: u64,
     pub srtp_in: u64,
+    /// ★인증이 안 맞아 버린 것 — 위조이거나 열쇠가 어긋난 것이다.
+    pub srtp_bad: u64,
+    pub srtp_out: u64,
     pub unknown: u64,
 }
 
 impl Counters {
     fn line(&self) -> String {
         format!(
-            "stun {}/{}(위조 {}) · dtls {} · srtp {} · 모름 {}",
-            self.stun_ok, self.stun_ok + self.stun_dropped, self.forged, self.dtls_in, self.srtp_in, self.unknown
+            "stun {}/{}(위조 {}) · dtls {} · srtp in {}(버림 {}) out {} · 모름 {}",
+            self.stun_ok,
+            self.stun_ok + self.stun_dropped,
+            self.forged,
+            self.dtls_in,
+            self.srtp_in,
+            self.srtp_bad,
+            self.srtp_out,
+            self.unknown
         )
     }
 }
@@ -82,12 +110,18 @@ pub async fn serve(
     socket: Arc<UdpSocket>,
     table: Arc<IceTable>,
     cert: dtls::Certificate,
+    cmd_tx: mpsc::Sender<Cmd>,
     mut cmds: mpsc::Receiver<Cmd>,
 ) {
     // ★**그릇을 하나 잡아 재사용한다** — 데이터그램마다 새로 잡지 않는다(H3).
     let mut buf = vec![0u8; MTU];
     let mut by_ufrag: HashMap<String, Arc<Pipe>> = HashMap::new();
     let mut by_addr: HashMap<SocketAddr, Arc<Pipe>> = HashMap::new();
+    // ★이 둘도 이 태스크 혼자 쓴다 — 자물쇠가 없다.
+    let mut srtp: HashMap<String, super::srtp::SrtpPair> = HashMap::new();
+    let mut routes: HashMap<u32, Vec<Target>> = HashMap::new();
+    // ★**내보낼 것을 담는 그릇 하나** — 패킷마다 새로 잡지 않는다(H3).
+    let mut scratch: Vec<u8> = Vec::with_capacity(MTU);
     let mut c = Counters::default();
     let mut last = Counters::default();
     let mut report = tokio::time::interval(std::time::Duration::from_millis(REPORT_MS));
@@ -114,8 +148,33 @@ pub async fn serve(
                 match cmd {
                     Cmd::DropSession(sid) => {
                         // ★통로를 닫는 것이 회수다 — 보내는 끝이 사라지면 DTLS 가 끝난다.
+                        let gone: Vec<String> = by_ufrag
+                            .iter()
+                            .filter(|(_, p)| p.session_id == sid)
+                            .map(|(u, _)| u.clone())
+                            .collect();
                         by_ufrag.retain(|_, p| p.session_id != sid);
                         by_addr.retain(|_, p| p.session_id != sid);
+                        for u in &gone {
+                            srtp.remove(u);
+                            // ★**갈 곳 목록에서도 뺀다** — 안 빼면 죽은 자격으로 계속 잠근다.
+                            for t in routes.values_mut() {
+                                t.retain(|x| &x.ufrag != u);
+                            }
+                        }
+                    }
+                    Cmd::SrtpReady { ufrag, keys } => match super::srtp::SrtpPair::new(&keys) {
+                        Ok(p) => {
+                            srtp.insert(ufrag, p);
+                        }
+                        Err(e) => eprintln!("[srtp] {ufrag}: {e}"),
+                    },
+                    Cmd::SetRoute { ssrc, targets } => {
+                        if targets.is_empty() {
+                            routes.remove(&ssrc);
+                        } else {
+                            routes.insert(ssrc, targets);
+                        }
                     }
                 }
                 continue;
@@ -134,8 +193,13 @@ pub async fn serve(
                                 None => {
                                     let Some(e) = table.get(&ufrag) else { continue };
                                     let (conn, tx) = DemuxConn::new(socket.clone(), e.addr.clone());
-                                    let task = spawn_dtls(conn, cert.clone(), ufrag.clone());
-                                    let p = Arc::new(Pipe { session_id: session_id.clone(), tx, task });
+                                    let task = spawn_dtls(conn, cert.clone(), ufrag.clone(), cmd_tx.clone());
+                                    let p = Arc::new(Pipe {
+                                        session_id: session_id.clone(),
+                                        ufrag: ufrag.clone(),
+                                        tx,
+                                        task,
+                                    });
                                     by_ufrag.insert(ufrag.clone(), p.clone());
                                     p
                                 }
@@ -163,7 +227,34 @@ pub async fn serve(
             }
             Packet::Srtp => {
                 c.srtp_in += 1;
-                // 미디어 루프는 다음 걸음이다 — ★**조용히 성공하지 않는다**(세고 버린다).
+                // ★**latch 를 지난 주소만 미디어를 탄다** — 그 전 것은 아무것도 아니다.
+                let Some(p) = by_addr.get(&from) else { continue };
+                let Some(ctx) = srtp.get_mut(&p.ufrag) else { continue };
+                // ★인증이 안 맞으면 버린다 — 위조가 fan-out 을 타면 남의 화면에 남의 것이 뜬다.
+                let Some(plain) = ctx.open(&buf[..n]) else {
+                    c.srtp_bad += 1;
+                    continue;
+                };
+                let Some(ssrc) = super::srtp::ssrc_of(&plain) else { continue };
+                // ★그 자격이 살아 있다는 뜻이다 — 좀비 판정의 두 갱신원 중 하나(정§2-2).
+                if let Some(e) = table.get(&p.ufrag) {
+                    e.touch(now);
+                }
+                let Some(targets) = routes.get(&ssrc) else { continue };
+                for t in targets {
+                    let Some(dst) = table.get(&t.ufrag).and_then(|e| e.addr()) else { continue };
+                    let Some(out) = srtp.get_mut(&t.ufrag) else { continue };
+                    // ★**제자리 재기록 · 길이 불변** — 본문은 건드리지 않는다(H1).
+                    scratch.clear();
+                    scratch.extend_from_slice(&plain);
+                    if !super::srtp::rewrite_pt(&mut scratch, t.pt) {
+                        continue;
+                    }
+                    if let Some(sealed) = out.seal(&scratch) {
+                        let _ = socket.send_to(&sealed, dst).await;
+                        c.srtp_out += 1;
+                    }
+                }
             }
             Packet::Unknown => c.unknown += 1,
         }
@@ -174,7 +265,12 @@ pub async fn serve(
 ///
 /// ★**둘을 한 태스크에 두는 이유** — DTLS 연결은 SCTP 의 전송로라 수명이 같다.
 /// 태스크를 갈라 두면 회수 신호를 두 번 보내야 하고, 한쪽만 지나가는 창이 생긴다.
-fn spawn_dtls(conn: DemuxConn, cert: dtls::Certificate, ufrag: String) -> tokio::task::JoinHandle<()> {
+fn spawn_dtls(
+    conn: DemuxConn,
+    cert: dtls::Certificate,
+    ufrag: String,
+    cmds: mpsc::Sender<Cmd>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let cfg = super::dtls::server_config(&cert);
         let c = match super::dtls::accept(Arc::new(conn), cfg).await {
@@ -186,7 +282,11 @@ fn spawn_dtls(conn: DemuxConn, cert: dtls::Certificate, ufrag: String) -> tokio:
             }
         };
         match super::dtls::export_srtp(&c).await {
-            Ok(_keys) => eprintln!("[dtls] {ufrag} 섰다 — SRTP 열쇠 넷"),
+            Ok(keys) => {
+                eprintln!("[dtls] {ufrag} 섰다 — SRTP 열쇠 넷");
+                // ★열쇠는 ★**루프에게 넘긴다** — 잠그고 푸는 것은 데이터 평면의 일이다.
+                let _ = cmds.send(Cmd::SrtpReady { ufrag: ufrag.clone(), keys: Box::new(keys) }).await;
+            }
             Err(e) => {
                 eprintln!("[dtls] {ufrag} 열쇠: {e}");
                 return;

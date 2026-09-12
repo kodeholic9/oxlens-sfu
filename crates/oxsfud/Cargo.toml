@@ -24,6 +24,7 @@ bytes = { workspace = true }
 async-trait = { workspace = true }
 dtls = { workspace = true }
 sctp-proto = { workspace = true }
+webrtc-srtp = { workspace = true }
 webrtc-util = { workspace = true }
 
 [[bin]]
