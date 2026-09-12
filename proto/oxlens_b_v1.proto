@@ -19,6 +19,31 @@ service SfuService {
   rpc Rooms(RoomLedger) returns (RoomView);
   // sfud → hub 통지 스트림. target 이 있으면 그 사용자에게, 없으면 room_id 방 전원(exclude 제외).
   rpc Subscribe(SubscribeRequest) returns (stream Envelope);
+  // ★**C 평면(운영)이 시키는 것**(정§16-1-2·§16-1-3) — 대상이 사람이냐 방이냐가 갈린다.
+  //   ★확인값 판정은 **부르는 쪽(hub)**이 한다: 쥔 판 값의 출처가 조회 응답이기 때문이다.
+  rpc Ops(OpsRequest) returns (OpsReply);
+  // 운영 조회 — 그 방의 **정본** 상세(정§3-6: hub 사본이 아니다).
+  rpc RoomSnapshot(RoomKey) returns (RoomView);
+}
+
+message RoomKey {
+  string room_id = 1;
+}
+
+message OpsRequest {
+  // "cut" | "reap" | "destroy"
+  string what = 1;
+  string room_id = 2;
+  string user_id = 3;
+}
+
+message OpsReply {
+  // 그 조작이 실제로 무언가를 바꿨나 — ★**없는 것을 했다고 답하지 않는다.**
+  bool done = 1;
+  // reap·destroy 뒤의 방 판 값(있으면).
+  string version = 2;
+  // destroy 가 알린 사람 수.
+  uint32 notified = 3;
 }
 
 message HelloRequest {

@@ -230,6 +230,92 @@ impl SfuService for Sfu {
         Ok(Response::new(RoomView { epoch: node.epoch.clone(), rooms, expired }))
     }
 
+    /// 운영이 시키는 것(정§16-1-2·§16-1-3) — ★**판정은 여기가 하고 확인값은 hub 가 본다.**
+    ///
+    /// ★**셋을 한 자리에 둔 까닭** — 대상이 사람이냐 방이냐만 다르고 정리 순서(§17-2)는 같다.
+    /// 갈라 두면 한쪽이 그 순서를 빠뜨린다.
+    async fn ops(
+        &self,
+        req: Request<common::b::OpsRequest>,
+    ) -> Result<Response<common::b::OpsReply>, Status> {
+        let r = req.into_inner();
+        let (notices, routes, reply, drop_session) = {
+            let mut node = self.node.lock().await;
+            match r.what.as_str() {
+                // ★**세션을 끊는 것은 이것 하나다**(정§16-1-2) — 미디어도 함께 회수한다.
+                //   세션 없는 Peer 를 남기면 그것이 곧 좀비다.
+                "cut" => {
+                    let sid = node
+                        .peers
+                        .iter()
+                        .find(|p| p.user_id == r.user_id)
+                        .map(|p| p.session_id.clone());
+                    match sid.and_then(|s| handle::reap(&mut node, &s, false).map(|x| (s, x))) {
+                        Some((sid, out)) => (
+                            out.notices,
+                            out.routes,
+                            common::b::OpsReply { done: true, ..Default::default() },
+                            Some(sid),
+                        ),
+                        None => (vec![], vec![], common::b::OpsReply::default(), None),
+                    }
+                }
+                "reap" => match handle::ops_reap(&mut node, &r.room_id, &r.user_id) {
+                    Some((n, rt, v)) => (
+                        n,
+                        rt,
+                        common::b::OpsReply {
+                            done: true,
+                            version: format!("{}:{}", v.epoch, v.seq),
+                            ..Default::default()
+                        },
+                        None,
+                    ),
+                    None => (vec![], vec![], common::b::OpsReply::default(), None),
+                },
+                "destroy" => match handle::ops_destroy(&mut node, &r.room_id) {
+                    Some((n, rt, cnt)) => (
+                        n,
+                        rt,
+                        common::b::OpsReply { done: true, notified: cnt as u32, ..Default::default() },
+                        None,
+                    ),
+                    None => (vec![], vec![], common::b::OpsReply::default(), None),
+                },
+                _ => return Err(Status::invalid_argument("what: cut|reap|destroy")),
+            }
+        };
+        for n in notices {
+            self.emit(n);
+        }
+        self.push_routes(routes).await;
+        // ★**통로까지가 회수다**(정§12) — `cut` 만 세션을 끊는다.
+        if let Some(sid) = drop_session {
+            let _ = self.udp.send(crate::transport::udp::Cmd::DropSession(sid)).await;
+        }
+        Ok(Response::new(reply))
+    }
+
+    /// 운영 §3-6 — ★**정본**이다. hub 사본으로 답하면 *"명단에 있는데 안 들린다"* 를 못 가른다.
+    async fn room_snapshot(
+        &self,
+        req: Request<common::b::RoomKey>,
+    ) -> Result<Response<common::b::RoomView>, Status> {
+        let id = req.into_inner().room_id;
+        let node = self.node.lock().await;
+        let Some(room) = node.rooms.get(&id) else {
+            return Ok(Response::new(common::b::RoomView {
+                epoch: node.epoch.clone(),
+                ..Default::default()
+            }));
+        };
+        Ok(Response::new(common::b::RoomView {
+            epoch: node.epoch.clone(),
+            rooms: vec![view_of(room, &node.epoch)],
+            expired: Vec::new(),
+        }))
+    }
+
     type SubscribeStream = tokio_stream::wrappers::ReceiverStream<Result<Envelope, Status>>;
 
     /// ★**sfud 가 직접 낸다** — hub 가 재발행하지 않는다(정§15-4).

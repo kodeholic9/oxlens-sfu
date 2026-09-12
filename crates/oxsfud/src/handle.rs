@@ -698,6 +698,122 @@ pub fn stall_tick(node: &mut Node, now: u64) -> Vec<Notice> {
     out
 }
 
+/// 운영이 그 방에서 한 사람을 퇴장시킨다(정§16-1-3 `reap`).
+///
+/// ★**`cut` 과 달리 대상이 방이다** — ★**세션은 안 끊는다.** 방에서 빠질 뿐이고,
+/// 세션을 끊는 것은 `cut` 하나다. 방 하나의 조작이 세션 축을 넘으면 ★**다른 방에 함께
+/// 있던 사람이 영문 없이 전부 끊긴다.**
+///
+/// ★**차단이 아니다** — 다시 들어온다(재입장 금지 축은 이 판에 없다).
+pub fn ops_reap(
+    node: &mut Node,
+    room_id: &str,
+    user_id: &str,
+) -> Option<(Vec<Notice>, Vec<RouteSet>, oxsig::Version)> {
+    let room = node.rooms.get_mut(room_id)?;
+    // ★**그 방에 없는 사람은 없는 것이다** — 거짓 성공을 내지 않는다.
+    if !room.leave(user_id) {
+        return None;
+    }
+    let version = room.version(&node.epoch);
+    let session_id = node
+        .peers
+        .iter()
+        .find(|p| p.user_id == user_id && p.sub_rooms.iter().any(|r| r == room_id))
+        .map(|p| p.session_id.clone())
+        .unwrap_or_default();
+
+    // ⑦ 남은 사람에게 — ★**통지 없이 하면 명단에 유령이 남는다**(정§17-2 ⑦).
+    let mut notices = vec![left_notice(room_id, user_id, version.clone())];
+    // 당사자에게 — ★사유가 `kick` 이다(정§5-3).
+    notices.push(unicast(
+        room_id,
+        user_id,
+        Op::RoomEvent,
+        &RoomEvent {
+            event_type: RoomEventType::Affiliation,
+            room_id: room_id.to_string(),
+            affiliation: Some(oxsig::Affiliation { sub_rooms: Vec::new(), pub_room: None }),
+            cause: Some(AffiliationCause::Kick),
+            reason: None,
+        },
+    ));
+
+    // 그 사람이 그 방에 올리던 것을 걷는다 — 남기면 죽은 발행자로 가는 표가 선다.
+    let gone: Vec<Publication> = node
+        .publications
+        .iter()
+        .filter(|p| p.user_id == user_id && p.room_id == room_id)
+        .cloned()
+        .collect();
+    node.publications.retain(|p| !(p.user_id == user_id && p.room_id == room_id));
+    let (n, mut routes) = shed_publications(node, &gone);
+    notices.extend(n);
+
+    if let Some(p) = node.peers.get_mut(&session_id) {
+        p.sub_rooms.retain(|r| r != room_id);
+        if p.pub_room.as_deref() == Some(room_id) {
+            p.pub_room = None;
+        }
+    }
+    routes.extend(routes_for_room(node, room_id));
+    // ★**`Reaped` 를 안 쓴다** — 그 형은 좀비 회수용이고 부르는 쪽이 `session_id` 로
+    //   통로까지 닫는다. 여기서 같은 형을 내면 ★**방 하나의 조작이 세션 축을 넘는다.**
+    let _ = session_id;
+    Some((notices, routes, version))
+}
+
+/// 운영이 방을 즉시 폭파한다(정§16-1-3 `destroy`).
+///
+/// ★**사람이 있어도 지운다** — 빈 방 회수(TTL)와 다른 축이다. ★**확인값은 그 방의 `version`**
+/// 이고 부르는 쪽이 견준다(이름으로 받으면 재생성된 뒤의 요청이 ★**엉뚱한 방을 폭파**한다).
+///
+/// ★**세션은 안 끊는다** — 방에서 빠질 뿐이다.
+pub fn ops_destroy(node: &mut Node, room_id: &str) -> Option<(Vec<Notice>, Vec<RouteSet>, usize)> {
+    let room = node.rooms.get(room_id)?;
+    let members: Vec<String> = room.participants().iter().map(|m| m.user_id.clone()).collect();
+    let sessions = room.session_ids();
+
+    // 당사자 전원에게 — ★**방이 아직 살아 있을 때 낸다**(정§5-3 · §15-4 합성 갈래와 다르다).
+    let mut notices: Vec<Notice> = members
+        .iter()
+        .map(|u| {
+            unicast(
+                room_id,
+                u,
+                Op::RoomEvent,
+                &RoomEvent {
+                    event_type: RoomEventType::Affiliation,
+                    room_id: room_id.to_string(),
+                    affiliation: Some(oxsig::Affiliation { sub_rooms: Vec::new(), pub_room: None }),
+                    cause: Some(AffiliationCause::RoomClosed),
+                    reason: None,
+                },
+            )
+        })
+        .collect();
+
+    let gone: Vec<Publication> =
+        node.publications.iter().filter(|p| p.room_id == room_id).cloned().collect();
+    node.publications.retain(|p| p.room_id != room_id);
+    let (n, routes) = shed_publications(node, &gone);
+    notices.extend(n);
+
+    for sid in &sessions {
+        if let Some(p) = node.peers.get_mut(sid) {
+            p.sub_rooms.retain(|r| r != room_id);
+            if p.pub_room.as_deref() == Some(room_id) {
+                p.pub_room = None;
+            }
+        }
+    }
+    // ★**남은 사람이 없다** — 방이 사라지므로 broadcast 는 안 낸다.
+    node.floors.remove(room_id);
+    node.rooms.remove(room_id);
+    // 끊는 표는 이미 `shed_publications` 가 냈다 — 방이 사라졌으니 다시 셀 것이 없다.
+    Some((notices, routes, members.len()))
+}
+
 /// reaper 한 걸음 — ★**주체는 하나다**(정§2-2). 회수까지 같은 tick 안에서 끝난다.
 ///
 /// ★`Zombie` 는 종착이 아니라 삭제다 — 상태로 남겨 두면 다음 tick 이 또 회수한다.

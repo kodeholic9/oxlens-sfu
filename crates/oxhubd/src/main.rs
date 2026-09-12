@@ -138,6 +138,10 @@ async fn run(args: Args) -> Result<(), String> {
         .route("/healthz/ready", get(ready))
         .route("/admin/rooms", get(admin_rooms))
         .route("/admin/users", get(admin_users))
+        .route("/admin/users/:user_id/cut", axum::routing::post(ops_cut))
+        .route("/admin/rooms/:room_id/snapshot", get(room_snapshot))
+        .route("/admin/rooms/:room_id/reap/:user_id", axum::routing::post(ops_reap))
+        .route("/admin/rooms/:room_id/destroy", axum::routing::post(ops_destroy))
         .route("/admin/supervisor/status", get(sup_status))
         .route("/admin/supervisor/load/:id", axum::routing::post(sup_load))
         .route("/admin/supervisor/stop/:id", axum::routing::post(sup_stop))
@@ -336,6 +340,13 @@ fn peer_of(addr: SocketAddr, headers: &HeaderMap) -> Peer {
     }
 }
 
+/// ★**같은 코드라도 자리에 따라 HTTP 가 다르다** — A 평면의 `2008` 은 *"네 세션이 없다"*(401)이고
+/// 운영 평면의 `2008` 은 *"그런 사람은 안 붙어 있다"*(404)다. ★**둘을 한 상태로 답하면 운영자가
+/// 「권한이 없나」와 「없는 사람인가」를 못 가른다.**
+fn fail_as(code: oxsig::Code, http: StatusCode) -> (StatusCode, Json<oxsig::Failure>) {
+    (http, Json(oxsig::Failure::new(code)))
+}
+
 fn fail(code: oxsig::Code) -> (StatusCode, Json<oxsig::Failure>) {
     let http = match code {
         oxsig::Code::TokenInvalid
@@ -420,6 +431,150 @@ async fn admin_users(
     authz::admin(&hub.resolved.system, now_ms() / 1000, &peer_of(addr, &headers)).map_err(fail)?;
     let users = hub.sessions.lock().await.admin_rows();
     Ok(Json(serde_json::json!({ "total": users.len(), "users": users })))
+}
+
+/// 그 방을 쥔 sfud 에 운영 조작 하나를 넘긴다.
+async fn ops_call(
+    hub: &Shared,
+    room_id: &str,
+    what: &str,
+    user_id: &str,
+) -> Result<common::b::OpsReply, (StatusCode, Json<oxsig::Failure>)> {
+    let addr = addr_for_room(hub, room_id).await.ok_or_else(|| fail(oxsig::Code::SfuUnavailable))?;
+    let mut c = b_client(&addr).await.ok_or_else(|| fail(oxsig::Code::SfuUnavailable))?;
+    let r = c
+        .ops(common::b::OpsRequest {
+            what: what.into(),
+            room_id: room_id.into(),
+            user_id: user_id.into(),
+        })
+        .await
+        .map_err(|_| fail(oxsig::Code::SfuError))?;
+    Ok(r.into_inner())
+}
+
+/// 운영 §4-2 — ★★**`2009 SESSION_REVOKED` 의 유일한 발생처다.**
+///
+/// ★**차단이 아니다** — 같은 토큰으로 다시 붙는다. 쓸모는 ★**강제 재`BIND`** 이고,
+/// 자격이 정말 사라졌으면 그 재`BIND` 가 `2003` 으로 막는다. ★막는 자리는 토큰이다.
+/// ★**세션은 즉시 폐기한다** — 창을 잡아 두면 `RESUME` 으로 그대로 돌아와 아무것도 못 시킨다.
+async fn ops_cut(
+    State(hub): State<Shared>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    axum::extract::Path(user_id): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<oxsig::Failure>)> {
+    authz::admin(&hub.resolved.system, now_ms() / 1000, &peer_of(addr, &headers)).map_err(fail)?;
+    let sessions = { hub.sessions.lock().await.sessions_of(&user_id) };
+    // ★**안 붙어 있으면 `404`**(운영 §4-2) — 없는 것을 끊었다고 답하지 않는다.
+    if sessions.is_empty() {
+        return Err(fail_as(oxsig::Code::SessionNotFound, StatusCode::NOT_FOUND));
+    }
+    // 그 사람이 든 방마다 sfud 에 알린다 — 미디어를 함께 회수해야 좀비가 안 남는다.
+    let rooms: Vec<String> = { hub.rooms.lock().await.iter().map(|r| r.id.clone()).collect() };
+    for r in &rooms {
+        let _ = ops_call(&hub, r, "cut", &user_id).await;
+    }
+    // ★사유를 주고 끊는다(연§6-1 `2009`) — 그 뒤 세션을 **즉시 폐기**한다(정§3-1 예외).
+    let n = oxsig::body::session::LeaveNotice::new(oxsig::Code::SessionRevoked);
+    let mut cut = Vec::new();
+    for sid in &sessions {
+        let tx = { hub.sockets.lock().await.get(sid).map(|(_, t)| t.clone()) };
+        if let Some(tx) = tx {
+            let mut out = Vec::new();
+            send_leave(&tx, &mut out, &n).await;
+        }
+        hub.sessions.lock().await.discard(sid);
+        { hub.members.lock().await.values_mut().for_each(|v| v.retain(|s| s != sid)); }
+        cut.push(serde_json::json!({ "session_id": sid, "code": 2009 }));
+    }
+    Ok(Json(serde_json::json!({ "user_id": user_id, "total": cut.len(), "cut": cut })))
+}
+
+/// 운영 §4-3 — ★**되돌릴 수 있다**(그 사람이 다시 들어오면 된다). 확인값 없음.
+async fn ops_reap(
+    State(hub): State<Shared>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    axum::extract::Path((room_id, user_id)): axum::extract::Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<oxsig::Failure>)> {
+    authz::admin(&hub.resolved.system, now_ms() / 1000, &peer_of(addr, &headers)).map_err(fail)?;
+    if hub.rooms.lock().await.get(&room_id).is_none() {
+        return Err(fail(oxsig::Code::RoomNotFound));
+    }
+    let got = ops_call(&hub, &room_id, "reap", &user_id).await?;
+    // ★**그 방에 없는 사람은 `404`**(운영 §4-3) — 뺐다고 답하지 않는다.
+    if !got.done {
+        return Err(fail_as(oxsig::Code::SessionNotFound, StatusCode::NOT_FOUND));
+    }
+    let (epoch, seq) = got.version.split_once(':').unwrap_or(("", "0"));
+    Ok(Json(serde_json::json!({
+        "room_id": room_id,
+        "user_id": user_id,
+        "left": true,
+        "version": { "epoch": epoch, "seq": seq.parse::<u64>().unwrap_or(0) },
+    })))
+}
+
+/// 운영 §4-3 — ★**되돌릴 수 없다.** `if_version` 필수이고 ★**판 값으로 짚는다**
+/// (이름으로 받으면 방이 재생성된 뒤의 요청이 엉뚱한 방을 폭파한다).
+async fn ops_destroy(
+    State(hub): State<Shared>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    axum::extract::Path(room_id): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<oxsig::Failure>)> {
+    authz::admin(&hub.resolved.system, now_ms() / 1000, &peer_of(addr, &headers)).map_err(fail)?;
+    if hub.rooms.lock().await.get(&room_id).is_none() {
+        return Err(fail(oxsig::Code::RoomNotFound));
+    }
+    // ★확인값의 출처는 §3-6 의 `version` 이다 — 정본을 다시 물어 견준다.
+    let snap = room_snapshot_of(&hub, &room_id).await;
+    let v = snap
+        .as_ref()
+        .and_then(|s| s.get("version"))
+        .map(|v| {
+            let e = v.get("epoch").and_then(|x| x.as_str()).unwrap_or("");
+            let s = v.get("seq").and_then(|x| x.as_u64()).unwrap_or(0);
+            (e.to_string(), s)
+        });
+    let Some((epoch, seq)) = v else {
+        return Err(fail(oxsig::Code::PreconditionFailed));
+    };
+    confirm_with(&q, "if_version", &authz::Confirm::Version { epoch: &epoch, seq })?;
+
+    let got = ops_call(&hub, &room_id, "destroy", "").await?;
+    hub.rooms.lock().await.remove(&room_id);
+    hub.members.lock().await.remove(&room_id);
+    Ok(Json(serde_json::json!({
+        "room_id": room_id,
+        "destroyed": got.done,
+        "notified": got.notified,
+    })))
+}
+
+/// 그 방의 ★**정본** 상세를 sfud 에서 가져온다(운영 §3-6).
+async fn room_snapshot_of(hub: &Shared, room_id: &str) -> Option<serde_json::Value> {
+    let addr = addr_for_room(hub, room_id).await?;
+    let mut c = b_client(&addr).await?;
+    let v = c.room_snapshot(common::b::RoomKey { room_id: room_id.to_string() }).await.ok()?;
+    let line = v.into_inner().rooms.into_iter().next()?;
+    serde_json::from_str(&line).ok()
+}
+
+/// 운영 §3-6 — ★**정본이다.** hub 사본으로 답하면 *"명단에 있는데 안 들린다"* 를 영영 못 가른다.
+async fn room_snapshot(
+    State(hub): State<Shared>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    axum::extract::Path(room_id): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<oxsig::Failure>)> {
+    authz::admin(&hub.resolved.system, now_ms() / 1000, &peer_of(addr, &headers)).map_err(fail)?;
+    let Some(room) = room_snapshot_of(&hub, &room_id).await else {
+        return Err(fail(oxsig::Code::RoomNotFound));
+    };
+    Ok(Json(serde_json::json!({ "room": room })))
 }
 
 /// 운영 §4-1 — 유닛별 상태·backoff 잔량·재기동 횟수·기동 신원.

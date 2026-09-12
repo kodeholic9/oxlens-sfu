@@ -190,6 +190,11 @@ impl Peers {
         Ensured { idx: self.items.len() - 1, orphaned, evicted, created: true }
     }
 
+    /// ★**읽기 전용 훑기** — 세션 이름을 모르고 사람 이름만 아는 자리가 쓴다(운영 경로).
+    pub fn iter(&self) -> impl Iterator<Item = &Peer> {
+        self.items.iter()
+    }
+
     pub fn at(&self, i: usize) -> &Peer {
         &self.items[i]
     }
