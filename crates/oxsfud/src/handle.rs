@@ -712,6 +712,15 @@ fn publish_add(node: &mut Node, ing: &Ingress, header: Header, req: &PublishTrac
 }
 
 fn publish_remove(node: &mut Node, ing: &Ingress, header: Header, req: &PublishTracksReq) -> Outcome {
+    // ★★**일부도 안 받고 전체 거절이다**(연§6-3) — 없는 `track_id` 가 하나라도 있으면
+    //   `3005` 다. 조용히 건너뛰면 클라는 지웠다고 믿고 서버엔 남아 있다.
+    if req
+        .track_ids
+        .iter()
+        .any(|id| !node.publications.iter().any(|p| &p.track_id == id && p.session_id == ing.session_id))
+    {
+        return Outcome { reply: fail(header, Code::TrackNotFound), ..Default::default() };
+    }
     let mut gone = Vec::new();
     for id in &req.track_ids {
         if let Some(i) = node

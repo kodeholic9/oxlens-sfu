@@ -416,7 +416,17 @@ async fn list_rooms(
     State(hub): State<Shared>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<oxsig::Failure>)> {
-    bearer_user(&hub, &headers).map_err(fail)?;
+    // ★**인증 두 갈래는 조회 전부에 같다**(정§14-4) — 상세만 세션 헤더를 받으면
+    //   같은 자격으로 목록은 `2002`, 상세는 `2008` 이 되어 클라의 분기가 갈린다.
+    if bearer_user(&hub, &headers).is_err() {
+        match headers.get("x-oxlens-session").and_then(|v| v.to_str().ok()) {
+            Some(s) if hub.sessions.lock().await.get(s).is_none() => {
+                return Err(fail(oxsig::Code::SessionNotFound));
+            }
+            Some(_) => {}
+            None => return Err(fail(oxsig::Code::TokenInvalid)),
+        }
+    }
     // ★목록도 조회 op 이다 — 노드마다 한 번씩 묻는다(정§15-5 fan-out).
     reconcile_rooms(&hub).await;
     let rooms = hub.rooms.lock().await;
@@ -915,18 +925,38 @@ fn routed(op: oxsig::Op) -> bool {
 }
 
 /// 그 프레임이 가리키는 방. ★**body 를 한 번만 읽는다** — 두 번 읽으면 갈린다.
-fn room_of(op: oxsig::Op, body: &[u8]) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
-    let pick = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+///
+/// ★★**"없다"와 "형이 아니다"를 가른다** — 둘을 한 코드로 답하면 클라가 무엇을 고칠지 모른다.
+/// 없으면 `1003`(필드 부재), 있는데 문자열이 아니면 `1002`(본문 오류)다(연§10-2).
+fn room_of(op: oxsig::Op, body: &[u8]) -> Result<String, Code> {
+    // ★**빈 body 는 "필드가 하나도 없다"** 이지 "형이 틀렸다" 가 아니다 — 클라는 아무것도
+    //   안 실었을 때 0바이트를 보낸다(연§3-1 — 빈 body 는 0바이트다).
+    let v = if body.is_empty() {
+        serde_json::Value::Object(Default::default())
+    } else {
+        match serde_json::from_slice::<serde_json::Value>(body) {
+            Ok(v) => v,
+            Err(_) => return Err(Code::InvalidPayload),
+        }
+    };
+    let pick = |k: &str| -> Option<Result<String, Code>> {
+        v.get(k).map(|x| x.as_str().map(str::to_string).ok_or(Code::InvalidPayload))
+    };
+    let got = room_key(op, &pick);
+    got.unwrap_or(Err(Code::MissingField))
+}
+
+fn room_key(
+    op: oxsig::Op,
+    pick: &dyn Fn(&str) -> Option<Result<String, Code>>,
+) -> Option<Result<String, Code>> {
     match op {
         oxsig::Op::RoomJoin
         | oxsig::Op::RoomLeave
         | oxsig::Op::PublishTracks
         | oxsig::Op::Ready
         | oxsig::Op::TrackSet
-        | oxsig::Op::SubscribeLayer => {
-            pick("room_id")
-        }
+        | oxsig::Op::SubscribeLayer => pick("room_id"),
         // ★한 요청이 두 방을 바꿀 수 있다 — 라우팅은 `pub_select` 가 먼저다(연§6-4).
         oxsig::Op::Affiliation => pick("pub_select").or_else(|| pick("pub_deselect")),
         _ => None,
@@ -977,8 +1007,9 @@ async fn route_frame(
     body: &[u8],
 ) -> Vec<u8> {
     use oxsig::frame::{self, Kind};
-    let Some(room_id) = room_of(header.op, body) else {
-        return fail_wire(header, Code::MissingField);
+    let room_id = match room_of(header.op, body) {
+        Ok(v) => v,
+        Err(code) => return fail_wire(header, code),
     };
     // ★**hub 가 아는 방 전량이 곧 맵이다** — 없으면 방이 없는 것이다(정§15-5).
     if hub.rooms.lock().await.get(&room_id).is_none() {
