@@ -3,5 +3,7 @@
 
 //! `oxsfud` — 미디어 서버. 전송·트랙·fan-out·발언권이 여기 산다.
 
+pub mod fanout;
 pub mod floor;
 pub mod lifeline;
+pub mod rewriter;
