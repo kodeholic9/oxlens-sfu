@@ -15,4 +15,4 @@ pub mod types;
 pub use code::{Code, Family};
 pub use frame::{Header, Kind};
 pub use op::{Lane, Op};
-pub use types::{Affiliation, Assign, Failure, MemberInfo, Permission, Source, StreamType, TrackEntry, Version};
+pub use types::{is_participant_type, Affiliation, Assign, Failure, MemberInfo, Permission, Source, StreamType, TrackEntry, Version};

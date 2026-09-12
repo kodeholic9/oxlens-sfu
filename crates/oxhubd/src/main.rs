@@ -17,6 +17,7 @@ use common::{Args, Policy, System};
 use oxhubd::authz::{self, Peer};
 use oxhubd::boot::Resolved;
 use oxhubd::healthz;
+use oxhubd::room::{Rooms, Ttl};
 use oxhubd::session::Sessions;
 use oxhubd::supervisor::{Action, Supervisor};
 use oxhubd::token::{self, IssueReq};
@@ -31,6 +32,7 @@ struct Hub {
     /// hub 가 어떤 방식으로 죽든 프로세스가 사라지면 파이프의 쓰기 끝이 닫히고
     /// 자식은 EOF 를 본다(정§15-6).
     children: Mutex<Vec<(String, std::process::Child)>>,
+    rooms: Mutex<Rooms>,
 }
 
 type Shared = Arc<Hub>;
@@ -86,6 +88,7 @@ async fn run(args: Args) -> Result<(), String> {
         sup: Mutex::new(sup),
         sessions: Mutex::new(Sessions::new()),
         children: Mutex::new(Vec::new()),
+        rooms: Mutex::new(Rooms::new()),
     });
 
     // ★접속점은 `{base}` 아래다 — 앱이 클라에 주는 그 값이다(연§5-0).
@@ -95,6 +98,11 @@ async fn run(args: Args) -> Result<(), String> {
         //   토큰을 질의값에 실으면 액세스 로그·프록시·리퍼러에 그대로 남는다.
         .route(&format!("{base}/ws"), get(ws_upgrade))
         .route(&format!("{base}/auth/token"), axum::routing::post(auth_token))
+        .route(
+            &format!("{base}/rooms"),
+            get(list_rooms).post(create_room),
+        )
+        .route(&format!("{base}/rooms/:room_id"), get(room_detail))
         .route("/healthz/live", get(|| async { StatusCode::OK }))
         .route("/healthz/ready", get(ready))
         .route("/admin/sfus", get(admin_sfus))
@@ -265,6 +273,7 @@ fn fail(code: oxsig::Code) -> (StatusCode, Json<oxsig::Failure>) {
         | oxsig::Code::TokenExpired
         | oxsig::Code::InvalidApiKey
         | oxsig::Code::NotAuthorized => StatusCode::UNAUTHORIZED,
+        oxsig::Code::SessionNotFound => StatusCode::UNAUTHORIZED,
         oxsig::Code::PreconditionFailed => StatusCode::CONFLICT,
         oxsig::Code::RoomNotFound => StatusCode::NOT_FOUND,
         _ => StatusCode::BAD_REQUEST,
@@ -331,6 +340,144 @@ async fn admin_snapshot(
         "supervising": !sup.units.is_empty(),
         "rooms": 0,
         "users": 0,
+    })))
+}
+
+/// ★**클라 HTTP 는 `Authorization: Bearer` 하나**(연§5-1) — 질의값에 토큰을 싣지 않는다.
+fn bearer_user(hub: &Shared, headers: &HeaderMap) -> Result<String, oxsig::Code> {
+    let t = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or(oxsig::Code::TokenInvalid)?;
+    oxhubd::token::verify_user(&hub.resolved.system, now_ms() / 1000, t)
+        .map(|c| c.sub)
+        .map_err(|e| e.0)
+}
+
+#[derive(serde::Deserialize)]
+struct CreateRoom {
+    #[serde(default)]
+    room_id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    capacity: Option<u32>,
+    #[serde(default)]
+    unused_ttl_secs: Option<u32>,
+    #[serde(default)]
+    departure_ttl_secs: Option<u32>,
+}
+
+/// 방 상한 — ★**기본이자 최대다.** 초과는 조용히 자르지 않고 거절한다.
+const CAPACITY_MAX: u32 = 1_000;
+/// `room_id` 상한 — ★**DC TLV `0x1D` 의 `len` 1바이트가 전 규격의 상한**이다.
+const ROOM_ID_MAX: usize = 255;
+
+async fn list_rooms(
+    State(hub): State<Shared>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<oxsig::Failure>)> {
+    bearer_user(&hub, &headers).map_err(fail)?;
+    let rooms = hub.rooms.lock().await;
+    let list: Vec<serde_json::Value> = rooms
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "room_id": r.id,
+                "name": r.name,
+                "capacity": r.capacity,
+                // ★보이는 수다(투명 제외).
+                "user_count": r.user_count(),
+                "created_at": r.created_at,
+                // ★녹화 사실은 감추지 않는다 — `hidden` 이어도 참이다.
+                "rec": r.rec(),
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "total": list.len(), "rooms": list })))
+}
+
+async fn create_room(
+    State(hub): State<Shared>,
+    headers: HeaderMap,
+    Json(req): Json<CreateRoom>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<oxsig::Failure>)> {
+    bearer_user(&hub, &headers).map_err(fail)?;
+    let Some(name) = req.name.filter(|n| !n.is_empty()) else {
+        return Err(fail(oxsig::Code::MissingField));
+    };
+    let capacity = req.capacity.unwrap_or(CAPACITY_MAX);
+    if capacity == 0 || capacity > CAPACITY_MAX {
+        // ★조용히 자르지 않는다 — 자르면 부른 쪽이 자기가 무엇을 얻었는지 모른다.
+        return Err(fail(oxsig::Code::InvalidPayload));
+    }
+    let id = match req.room_id.filter(|s| !s.is_empty()) {
+        Some(v) if v.len() > ROOM_ID_MAX => return Err(fail(oxsig::Code::InvalidPayload)),
+        Some(v) => v,
+        // ★자동 id 는 hub 가 확정해 주입한다 — sfud 는 명시 id 경로 하나만 탄다.
+        None => uuid::Uuid::new_v4().simple().to_string(),
+    };
+    let max_rooms = hub.resolved.policy.quota.max_rooms;
+    let mut rooms = hub.rooms.lock().await;
+    // ★`0` = 상한 없음. 있으면 ★**이 배포 전체**의 상한이다(방에 주인이 없다).
+    if max_rooms > 0 && rooms.get(&id).is_none() && rooms.len() as u32 >= max_rooms {
+        return Err(fail(oxsig::Code::QuotaExceeded));
+    }
+    let ttl = Ttl {
+        unused_secs: req.unused_ttl_secs,
+        departure_secs: req.departure_ttl_secs,
+    };
+    // ★멱등 — 같은 id 로 다시 부르면 그 방이 그대로 온다(`name` 은 무시).
+    let r = rooms.create(id, name, capacity, ttl, now_ms());
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "room_id": r.id,
+            "name": r.name,
+            "capacity": r.capacity,
+            "created_at": r.created_at,
+        })),
+    ))
+}
+
+/// `GET /rooms/{room_id}` — ★**방 상세.** 없으면 `3001`(그 방이 없는 것이지 서버 사정이 아니다).
+///
+/// ★**미입장 방도 조회를 허용한다** — 막으면 사용자가 채널을 눈감고 고른다(연§5-5).
+async fn room_detail(
+    State(hub): State<Shared>,
+    axum::extract::Path(room_id): axum::extract::Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<oxsig::Failure>)> {
+    // ★인증 두 갈래 — `Bearer` 또는 세션 헤더(새 비밀을 만들지 않는다, 정§14-4).
+    if bearer_user(&hub, &headers).is_err() {
+        let sid = headers
+            .get("x-oxlens-session")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        match sid {
+            // ★**세션 갈래의 실패는 `2008`** 이다 — 토큰이 틀린 것(`2002`)과 다른 축이다.
+            //   합치면 *"세션이 만료됐다"* 와 *"토큰이 위조됐다"* 가 같은 답을 받아 처방이 갈린다.
+            Some(s) if hub.sessions.lock().await.get(&s).is_none() => {
+                return Err(fail(oxsig::Code::SessionNotFound));
+            }
+            Some(_) => {}
+            None => return Err(fail(oxsig::Code::TokenInvalid)),
+        }
+    }
+    let rooms = hub.rooms.lock().await;
+    let Some(r) = rooms.get(&room_id) else {
+        return Err(fail(oxsig::Code::RoomNotFound));
+    };
+    Ok(Json(serde_json::json!({
+        "room_id": r.id,
+        "name": r.name,
+        "capacity": r.capacity,
+        "user_count": r.user_count(),
+        "created_at": r.created_at,
+        "rec": r.rec(),
+        // 명단·트랙·`version` 은 sfud 정본이라 결선 뒤다 — ★지어내지 않는다.
+        "participants": [],
     })))
 }
 

@@ -113,6 +113,17 @@ impl Default for Permission {
     }
 }
 
+/// 참가자 종류 — ★**닫힌 집합이다**(연§4-4·§5-2): `0` 사람 · `1` 녹화 · `2` 봇.
+///
+/// ★**모르는 값은 형이 아니다**(`1002`) — 계정 허용 밖(`2005`)과 ★**다른 축**이다.
+/// 하나로 합치면 *"오타"* 와 *"권한 없음"* 이 같은 답을 받아 발급자가 무엇을 고칠지 모른다.
+pub const PARTICIPANT_TYPES: &[u8] = &[0, 1, 2];
+
+/// 그 값이 닫힌 집합 안인가.
+pub fn is_participant_type(v: u8) -> bool {
+    PARTICIPANT_TYPES.contains(&v)
+}
+
 /// 명단 한 줄(연§4-4). ★**투명(`hidden`) 참가자는 여기 안 오른다.**
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemberInfo {
@@ -183,6 +194,13 @@ impl Failure {
 mod tests {
     use super::*;
     use crate::Code;
+
+    #[test]
+    fn 종류는_닫힌_집합이다() {
+        // ★모르는 값은 형이 아니다 — 허용 밖과 다른 축이다.
+        assert!(is_participant_type(0) && is_participant_type(1) && is_participant_type(2));
+        assert!(!is_participant_type(9));
+    }
 
     #[test]
     fn 권한_부재는_전부_허용이다() {

@@ -160,6 +160,10 @@ impl Rooms {
         self.items.iter_mut().find(|r| r.id == id)
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = &Room> {
+        self.items.iter()
+    }
+
     pub fn len(&self) -> usize {
         self.items.len()
     }

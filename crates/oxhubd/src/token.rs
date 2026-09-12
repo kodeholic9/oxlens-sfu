@@ -125,6 +125,14 @@ pub fn issue(
         // ★없는 키와 틀린 비밀을 가르지 않는다 — 가르면 키 목록을 훑을 수 있다.
         _ => return err(Code::InvalidApiKey, "api_key·api_secret 이 맞지 않는다"),
     };
+    // ★**형이 먼저다** — 모르는 값은 닫힌 집합 밖이라 `1002` 이고, 계정 허용 밖은 `2005` 다.
+    //   합치면 *"오타"* 와 *"권한 없음"* 이 같은 답을 받아 발급자가 무엇을 고칠지 모른다.
+    if !oxsig::is_participant_type(req.participant_type) {
+        return err(
+            Code::InvalidPayload,
+            format!("participant_type {} 는 닫힌 집합(0·1·2) 밖", req.participant_type),
+        );
+    }
     if !acct.participant_types.contains(&req.participant_type) {
         return err(
             Code::ClaimNotAllowed,
@@ -297,6 +305,17 @@ participant_types = [0]
         q.api_key = "ox_k_limited".into();
         q.api_secret = "ox_s_limited".into();
         q.participant_type = 1;
+        assert_eq!(issue(&s, 3600, 2048, 0, &q).unwrap_err().0, Code::ClaimNotAllowed);
+    }
+
+    #[test]
+    fn 모르는_종류는_형이_아니다() {
+        // ★`1002`(형) 와 `2005`(허용 밖)를 가른다.
+        let s = sys();
+        let mut q = req();
+        q.participant_type = 9;
+        assert_eq!(issue(&s, 3600, 2048, 0, &q).unwrap_err().0, Code::InvalidPayload);
+        q.participant_type = 2; // 닫힌 집합 안이지만 이 계정은 못 낸다
         assert_eq!(issue(&s, 3600, 2048, 0, &q).unwrap_err().0, Code::ClaimNotAllowed);
     }
 
