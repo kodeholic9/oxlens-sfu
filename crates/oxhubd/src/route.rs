@@ -21,7 +21,7 @@ pub struct Node {
 /// ★소멸한 노드를 후보에서 빼기까지 기다리는 시간.
 pub const GRACE_MS: u64 = 10_000;
 
-/// FNV-1a — ★**순서가 아니라 값이 배치를 정한다.** 구현이 달라도 같은 답이어야 하므로
+/// FNV-1a 64 — ★**순서가 아니라 값이 배치를 정한다.** 구현이 달라도 같은 답이어야 하므로
 /// 표준 해시(`DefaultHasher`)를 쓰지 않는다(그것은 판마다 값이 바뀔 수 있다).
 fn fnv1a(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -32,12 +32,29 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     h
 }
 
+/// splitmix64 마무리 — ★**FNV 의 상위 비트 쏠림을 푼다.**
+///
+/// ★**성능이 아니라 합의를 위해 있다** — 이 한 걸음이 다르면 배치가 통째로 갈리고,
+/// 2층이 선언한 위상(*"두 방을 같은 노드에"*)이 ★**조용히 거짓**이 된다(실측 20260912:
+/// 그 어긋남으로 `media_lost` 가 방 둘 중 하나만 왔다).
+fn splitmix64(h: u64) -> u64 {
+    let mut z = h.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
+/// ★★**이 셋이 계약이다 — 이어붙임 순서 · 사이의 `0x00` · 마무리.**
+///
+/// 규격은 `hash(node_id‖room_id)` 까지만 말한다(정§15-3). 그 아래는 ★**구현끼리 합의**라
+/// 여기와 2층(`oxe2epy/placement.py`)이 같은 답을 내야 한다 — 다르면 *"배치 정책은 시험
+/// 전제"*(정§15-3)라는 문장이 성립하지 않는다.
 fn score(node_id: &str, room_id: &str) -> u64 {
     let mut buf = Vec::with_capacity(node_id.len() + 1 + room_id.len());
     buf.extend_from_slice(node_id.as_bytes());
-    buf.push(0x1f);
+    buf.push(0x00);
     buf.extend_from_slice(room_id.as_bytes());
-    fnv1a(&buf)
+    splitmix64(fnv1a(&buf))
 }
 
 /// ★**HRW(rendezvous)** — `hash(node_id‖room_id)` 최대, 동점은 사전순.
@@ -117,6 +134,15 @@ impl RoomMap {
 
 #[cfg(test)]
 mod tests {
+    /// ★**2층과 같은 답을 내는가** — `oxe2epy/placement.py` 의 `hrw_score` 와 짝이다.
+    /// 값이 갈리면 선언한 위상이 거짓이 되고, 그 거짓은 ★**시험이 초록인 채로** 온다.
+    #[test]
+    fn 배치_해시는_2층과_같은_값이다() {
+        // 파이썬 쪽에서 같은 식으로 뽑은 값(`hrw_score("sfu-1", "r1")` 등).
+        assert_eq!(super::score("sfu-1", "r1"), 0x2c68_3de8_1ed1_e324);
+        assert_eq!(super::score("sfu-2", "r1"), 0x73c9_bdfe_a64f_6a39);
+    }
+
     use super::*;
 
     fn nodes(ids: &[&str]) -> Vec<Node> {

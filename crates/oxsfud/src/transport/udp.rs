@@ -170,18 +170,45 @@ pub async fn serve(
     }
 }
 
-/// 그 통로 위에 DTLS 를 세운다. ★**passive** 라 우리는 기다린다.
+/// 그 통로 위에 DTLS 를 세우고, 선 뒤에는 ★**같은 태스크에서 SCTP 를 돈다.**
+///
+/// ★**둘을 한 태스크에 두는 이유** — DTLS 연결은 SCTP 의 전송로라 수명이 같다.
+/// 태스크를 갈라 두면 회수 신호를 두 번 보내야 하고, 한쪽만 지나가는 창이 생긴다.
 fn spawn_dtls(conn: DemuxConn, cert: dtls::Certificate, ufrag: String) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let cfg = super::dtls::server_config(&cert);
-        match super::dtls::accept(Arc::new(conn), cfg).await {
-            Ok(c) => match super::dtls::export_srtp(&c).await {
-                Ok(_keys) => eprintln!("[dtls] {ufrag} 섰다 — SRTP 열쇠 넷"),
-                Err(e) => eprintln!("[dtls] {ufrag} 열쇠: {e}"),
-            },
+        let c = match super::dtls::accept(Arc::new(conn), cfg).await {
+            Ok(c) => c,
             // ★**조용히 실패하지 않는다** — 클라는 제 쪽 타임아웃만 보고 이유를 모른다.
-            Err(e) => eprintln!("[dtls] {ufrag} 핸드셰이크: {e}"),
+            Err(e) => {
+                eprintln!("[dtls] {ufrag} 핸드셰이크: {e}");
+                return;
+            }
+        };
+        match super::dtls::export_srtp(&c).await {
+            Ok(_keys) => eprintln!("[dtls] {ufrag} 섰다 — SRTP 열쇠 넷"),
+            Err(e) => {
+                eprintln!("[dtls] {ufrag} 열쇠: {e}");
+                return;
+            }
         }
+        // ★DC 는 ★**보내기용 연결에만** 붙는다(연§3-3) — 클라가 안 열면 아무 일도 없다.
+        let (_out_tx, out_rx) = tokio::sync::mpsc::channel(64);
+        let (ev_tx, mut ev_rx) = tokio::sync::mpsc::channel(64);
+        let who = ufrag.clone();
+        tokio::spawn(async move {
+            while let Some(e) = ev_rx.recv().await {
+                match e {
+                    super::sctp::DcEvent::Open => eprintln!("[dc] {who} \"unreliable\" 열렸다"),
+                    // 발언권은 다음 덩어리다 — ★**조용히 성공하지 않는다**(받은 것을 말한다).
+                    super::sctp::DcEvent::Frame { svc, payload } => {
+                        eprintln!("[dc] {who} svc=0x{svc:02X} {}바이트", payload.len())
+                    }
+                    super::sctp::DcEvent::Closed => eprintln!("[dc] {who} 닫혔다"),
+                }
+            }
+        });
+        super::sctp::run(&c, out_rx, ev_tx).await;
     })
 }
 

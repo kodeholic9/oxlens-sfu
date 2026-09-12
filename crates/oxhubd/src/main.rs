@@ -563,8 +563,22 @@ async fn serve_ws(hub: Shared, socket: axum::extract::ws::WebSocket) {
                 continue;
             }
         };
-        let Some(Ok(Message::Binary(buf))) = msg else { break };
-        // ★text 프레임은 받지 않는다(연§3-1 — binary 고정). 위 패턴이 그것을 거른다.
+        let buf = match msg {
+            Some(Ok(Message::Binary(b))) => b,
+            // ★★**Ping·Pong 은 전송층의 것이다 — 우리 프레임이 아니다.** 끊으면 안 된다:
+            //   브라우저·중계기는 유휴 연결에 주기로 Ping 을 보내고(파이썬 `websockets` 는
+            //   20초), 그것으로 끊기면 ★**조용히 있기만 해도 죽는 연결**이 된다(실측 20260912).
+            //   답은 axum 이 한다 — 여기서는 흘려보낸다.
+            Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+            // ★text 는 받지 않는다(연§3-1 — binary 고정). ★**클라 버그**라 `1008` 이다.
+            Some(Ok(Message::Text(_))) => {
+                let n = oxsig::body::session::LeaveNotice::new(Code::ProtocolError);
+                send_leave(&tx, &mut out, &n).await;
+                break;
+            }
+            // 상대가 닫았거나 전송이 죽었다.
+            _ => break,
+        };
         let (header, body) = match frame::decode(&buf) {
             Ok(v) => v,
             // ★**모르는 op 은 끊지 않는다** — `op`·`pid` 가 멀쩡하니 `1001` **응답**으로 답한다.
