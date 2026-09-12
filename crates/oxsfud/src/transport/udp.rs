@@ -147,6 +147,14 @@ pub struct Counters {
     pub auto_demote: u64,
     /// 프로브로 내보낸 패딩 수.
     pub probe_out: u64,
+    /// 발행자에게 돌려준 TWCC 피드백 수.
+    pub twcc_fb_out: u64,
+    /// 발행자에게 낸 REMB 수.
+    pub remb_out: u64,
+    /// 구독자 PLI 를 발행자에게 옮긴 수.
+    pub pli_relay: u64,
+    /// 되짚을 발행자를 못 찾아 버린 PLI — ★**조용히 버리지 않는다.**
+    pub pli_orphan: u64,
     /// latch 를 안 지난 주소에서 온 것 — ★**우리가 버린 자리**다.
     pub no_latch: u64,
     /// 열쇠가 아직 없어 못 푼 것.
@@ -168,7 +176,7 @@ pub struct Counters {
 impl Counters {
     fn line(&self) -> String {
         format!(
-            "stun {}/{}(위조 {}) · dtls {} · srtp in {}(버림 {}) out {} · rtcp in {} out {} · 단 모름 {} 안 보냄 {} 전환 {} 만료 {} · 자동 ↑{} ↓{} 프로브 {} · latch 전 {} 열쇠 전 {} · nack {}(캐시없음 {} rtx없음 {} 길없음 {} 예산 {} 못찾음 {} 못지음 {}) rtx {} · 모름 {}",
+            "stun {}/{}(위조 {}) · dtls {} · srtp in {}(버림 {}) out {} · rtcp in {} out {} · 단 모름 {} 안 보냄 {} 전환 {} 만료 {} · 자동 ↑{} ↓{} 프로브 {} twcc {} remb {} pli {}(고아 {}) · latch 전 {} 열쇠 전 {} · nack {}(캐시없음 {} rtx없음 {} 길없음 {} 예산 {} 못찾음 {} 못지음 {}) rtx {} · 모름 {}",
             self.stun_ok,
             self.stun_ok + self.stun_dropped,
             self.forged,
@@ -185,6 +193,10 @@ impl Counters {
             self.auto_promote,
             self.auto_demote,
             self.probe_out,
+            self.twcc_fb_out,
+            self.remb_out,
+            self.pli_relay,
+            self.pli_orphan,
             self.no_latch,
             self.no_key,
             self.nack_in,
@@ -211,10 +223,14 @@ const RID_EXT_ID: u8 = 10;
 /// 서버가 선언하는 transport-cc 번호 — ★**구독자는 이 번호로 받는 m-line 을 짓는다.**
 const TWCC_EXT_ID: u8 = 6;
 
+/// ★발행자에게 돌려주는 TWCC 주기(정§11-2) — 브라우저 관례와 같은 값이다.
+const TWCC_FB_MS: u64 = 100;
+
 /// 서버가 RTCP 에 쓰는 제 SSRC — ★**미디어 SSRC 와 겹치지 않는 고정값**이다.
 const SERVER_SSRC: u32 = 0x0000_0001;
 
 /// 포트를 열고 루프를 돈다. ★**되돌아오지 않는다** — 태스크로 띄운다.
+#[allow(clippy::too_many_arguments)]
 pub async fn serve(
     socket: Arc<UdpSocket>,
     table: Arc<IceTable>,
@@ -223,6 +239,8 @@ pub async fn serve(
     mut cmds: mpsc::Receiver<Cmd>,
     dc_in: mpsc::Sender<DcIn>,
     view: Arc<EgressView>,
+    // ★**그 배포의 상한**(정§11-2 REMB) — 우리가 발행자에게 말하는 천장이다.
+    max_bitrate_bps: u64,
 ) {
     // ★**그릇을 하나 잡아 재사용한다** — 데이터그램마다 새로 잡지 않는다(H3).
     let mut buf = vec![0u8; MTU];
@@ -250,6 +268,9 @@ pub async fn serve(
     let mut pli_at: HashMap<(String, u32), u64> = HashMap::new();
     // ★구독자에게 내보낸 수 — SR 번역이 이 값으로 카운터를 갈아 끼운다.
     let mut egress: HashMap<(String, u32), (u32, u32)> = HashMap::new();
+    // ★**발행 전송로마다 도착 장부 하나**(정§11-2) — 발행자가 매긴 seq 를 그대로 돌려준다.
+    //   ★없으면 발행자 송신 추정이 갱신되지 않아 화질이 안 올라간다.
+    let mut up: HashMap<String, crate::twcc::RecvLedger> = HashMap::new();
     // ★★**구독 전송로마다 하나** — 스탬핑 장부·대역 추정·단 판정이 ★**한 자리**에 있다.
     //   흩어 두면 "무엇을 보고 내렸나" 를 되짚을 수 없다(정§10-3 판정은 순수 함수).
     let mut down: HashMap<String, Downlink> = HashMap::new();
@@ -269,6 +290,9 @@ pub async fn serve(
     let mut chunk =
         tokio::time::interval(std::time::Duration::from_millis(crate::autolayer::v::PROBE_CHUNK_MS));
     chunk.tick().await;
+    // ★**발행자에게 돌려주는 TWCC 주기**(정§11-2) — 100ms 다.
+    let mut fb = tokio::time::interval(std::time::Duration::from_millis(TWCC_FB_MS));
+    fb.tick().await;
 
     loop {
         let (n, from) = tokio::select! {
@@ -295,6 +319,35 @@ pub async fn serve(
                         c.rtcp_out += 1;
                     }
                 }
+                // ★**발행자에게 상한을 말한다**(정§11-2) — 값은 `min(수신측 추정, 상한)` 이고,
+                //   ★**추정이 없으면 상한만** 말한다(없는 값을 `0` 으로 지어내지 않는다).
+                for ufrag in stats.keys().map(|(f, _)| f.clone()).collect::<std::collections::BTreeSet<_>>() {
+                    let mine: Vec<u32> = stats
+                        .keys()
+                        .filter(|(f, _)| f == &ufrag)
+                        .map(|(_, s)| *s)
+                        .collect();
+                    let est = routes
+                        .iter()
+                        .filter(|((f, _), _)| f == &ufrag)
+                        .flat_map(|(_, t)| t.iter())
+                        .filter_map(|t| down.get(&t.ufrag))
+                        .filter(|d| d.last_fb_ms.is_some())
+                        .map(|d| d.gcc.estimate_bps())
+                        .min();
+                    let bps = est.map(|e| e.min(max_bitrate_bps)).unwrap_or(max_bitrate_bps);
+                    let (Some(ctx), Some(dst)) =
+                        (srtp.get_mut(&ufrag), table.get(&ufrag).and_then(|e| e.addr()))
+                    else {
+                        continue;
+                    };
+                    let plain = crate::rtcp::build_remb(SERVER_SSRC, bps, &mine);
+                    if let Some(sealed) = ctx.seal_rtcp(&plain) {
+                        let _ = socket.send_to(&sealed, dst).await;
+                        c.rtcp_out += 1;
+                        c.remb_out += 1;
+                    }
+                }
                 // ★**내보낸 수를 제어 평면에 건넨다**(정§14-3) — 사본을 지어 갈아 끼운다.
                 view.store(Arc::new(
                     egress.iter().map(|(k, (p, _))| (k.clone(), *p as u64)).collect(),
@@ -309,6 +362,31 @@ pub async fn serve(
             },
             _ = chunk.tick() => {
                 probe_chunk(&mut down, &mut srtp, &table, &socket, &mut c).await;
+                continue;
+            },
+            _ = fb.tick() => {
+                // ★**발행자 축이다** — 우리가 잰 도착 시각을 그대로 돌려준다.
+                for (ufrag, led) in up.iter_mut() {
+                    if led.is_empty() {
+                        continue;
+                    }
+                    let media = stats
+                        .keys()
+                        .find(|(f, _)| f == ufrag)
+                        .map(|(_, s)| *s)
+                        .unwrap_or(0);
+                    let (Some(ctx), Some(dst)) =
+                        (srtp.get_mut(ufrag), table.get(ufrag).and_then(|e| e.addr()))
+                    else {
+                        continue;
+                    };
+                    while let Some(plain) = led.build(SERVER_SSRC, media) {
+                        let Some(sealed) = ctx.seal_rtcp(&plain) else { break };
+                        let _ = socket.send_to(&sealed, dst).await;
+                        c.rtcp_out += 1;
+                        c.twcc_fb_out += 1;
+                    }
+                }
                 continue;
             },
             _ = report.tick() => {
@@ -342,6 +420,7 @@ pub async fn serve(
                             codec_of.remove(u);
                             pli_at.retain(|(f, _), _| f != u);
                             down.remove(u);
+                            up.remove(u);
                             cache.retain(|(f, _), _| f != u);
                             // ★**갈 곳 목록에서도 뺀다** — 안 빼면 죽은 자격으로 계속 잠근다.
                             for t in routes.values_mut() {
@@ -457,7 +536,7 @@ pub async fn serve(
                         c.srtp_bad += 1;
                         continue;
                     };
-                    on_rtcp(&plain, &ufrag, &mut stats, &mut egress, &mut cache, &routes, &rewriters, &mut down, &table, &mut srtp, &socket, &mut c).await;
+                    on_rtcp(&plain, &ufrag, &mut stats, &mut egress, &mut cache, &routes, &rewriters, &mut down, &sim_out, &layer_of, &mut pli_at, &table, &mut srtp, &socket, &mut c).await;
                     continue;
                 }
                 c.srtp_in += 1;
@@ -474,6 +553,15 @@ pub async fn serve(
                 // ★그 자격이 살아 있다는 뜻이다 — 좀비 판정의 두 갱신원 중 하나(정§2-2).
                 if let Some(e) = table.get(&ufrag) {
                     e.touch(now);
+                }
+                // ★**발행자가 매긴 번호를 그대로 적는다**(정§11-2) — 돌려줄 때도 그 번호다.
+                //   ★egress 와 정반대다: 그쪽은 우리가 매기고, 여기는 받아 적는다.
+                if let Some(v) = crate::rtpext::get(&plain, TWCC_EXT_ID)
+                    && v.len() >= 2
+                {
+                    up.entry(ufrag.clone())
+                        .or_default()
+                        .on_rtp(u16::from_be_bytes([v[0], v[1]]), now);
                 }
                 {
                     // ★RR 의 재료 — 핫패스에서 세고 타이머가 소비한다.
@@ -689,6 +777,9 @@ async fn on_rtcp(
     routes: &HashMap<(String, u32), Vec<Target>>,
     rewriters: &HashMap<(String, u32), crate::rewriter::Rewriter>,
     down: &mut HashMap<String, Downlink>,
+    sim_out: &HashMap<(String, u32), Forward>,
+    layer_of: &HashMap<(String, u32), (u32, u8)>,
+    pli_at: &mut HashMap<(String, u32), u64>,
     table: &Arc<IceTable>,
     srtp: &mut HashMap<String, super::srtp::SrtpPair>,
     socket: &Arc<UdpSocket>,
@@ -790,6 +881,60 @@ async fn on_rtcp(
                 d.fb_lost += lost as u64;
                 d.gcc.on_feedback(&samples, lost, now as f64);
                 d.last_fb_ms = Some(now);
+            }
+            // ★★**구독자가 청한 키프레임을 발행자에게 옮긴다**(정§11-2) — 이것이 없으면
+            //   늦게 들어온 사람이 ★**다음 키프레임까지 검은 화면**을 본다(발행자는 아무도
+            //   안 청했다고 알고 주기대로만 낸다).
+            rtcp::PT_PSFB if pkt[0] & 0x1F == 1 && pkt.len() >= 12 => {
+                c.rtcp_fb_in += 1;
+                let media = u32::from_be_bytes([pkt[8], pkt[9], pkt[10], pkt[11]]);
+                // ★**되짚는 길은 전달표다** — 그 egress 값을 그 구독자에게 보내는 발행이 주인이다.
+                //   ★슬롯이면 `slot` 이, 시뮬캐스트면 키의 vssrc 가 그 값이다.
+                let owner = routes.iter().find(|((_, key), targets)| {
+                    targets.iter().any(|t| t.ufrag == ufrag && t.slot.unwrap_or(*key) == media)
+                });
+                let Some(((pub_ufrag, key), _)) = owner else {
+                    // ★**세고 버린다** — 조용히 버리면 *"왜 화면이 안 뜨나"* 를 못 짚는다.
+                    c.pli_orphan += 1;
+                    continue;
+                };
+                // 시뮬캐스트면 ★**지금 보내는 단**에 청한다 — 안 그러면 안 쓰는 단의 키프레임이 온다.
+                let spatial = sim_out.get(&(ufrag.to_string(), *key)).map(|f| f.current);
+                let target = match spatial {
+                    Some(sp) => layer_of
+                        .iter()
+                        .find(|((f, _), (v, s))| f == pub_ufrag && v == key && *s == sp)
+                        .map(|((_, s), _)| *s),
+                    None => Some(*key),
+                };
+                let Some(ssrc) = target else {
+                    c.pli_orphan += 1;
+                    continue;
+                };
+                // ★**스로틀 버킷은 단마다 다르다**(정§10-3) — 여기도 같은 표를 쓴다.
+                let throttle = match spatial {
+                    Some(0) => crate::autolayer::v::PLI_THROTTLE_L_MS,
+                    _ => crate::autolayer::v::PLI_THROTTLE_H_MS,
+                };
+                let key2 = (pub_ufrag.clone(), ssrc);
+                if let Some(&at) = pli_at.get(&key2)
+                    && now.saturating_sub(at) < throttle
+                {
+                    continue;
+                }
+                let (Some(dst), Some(ctx)) =
+                    (table.get(pub_ufrag).and_then(|e| e.addr()), srtp.get_mut(pub_ufrag))
+                else {
+                    c.pli_orphan += 1;
+                    continue;
+                };
+                let plain = rtcp::build_pli(SERVER_SSRC, ssrc);
+                if let Some(sealed) = ctx.seal_rtcp(&plain) {
+                    let _ = socket.send_to(&sealed, dst).await;
+                    pli_at.insert(key2, now);
+                    c.rtcp_out += 1;
+                    c.pli_relay += 1;
+                }
             }
             // ★**무시한다**(정§11-2) — 조용히가 아니라 세고 무시한다.
             rtcp::PT_SDES | rtcp::PT_BYE | rtcp::PT_APP => c.rtcp_ignored += 1,

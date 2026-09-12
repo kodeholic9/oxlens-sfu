@@ -98,6 +98,124 @@ impl SendLedger {
     }
 }
 
+/// 발행자에게 돌려줄 도착 장부 — ★**우리 시계로 잰 도착 시각만** 담는다.
+///
+/// ★★**이것이 없으면 발행자 송신 추정이 갱신되지 않아 화질이 안 올라간다**(정§11-2).
+/// 발행자가 매긴 seq 를 그대로 돌려주는 자리라, 여기서는 ★**번호를 새로 매기지 않는다**
+/// (egress 쪽과 정반대다 — 그쪽은 우리가 매긴다).
+#[derive(Debug, Default)]
+pub struct RecvLedger {
+    /// 아직 안 보고한 `(발행자 seq, 우리 도착 시각 ms)`.
+    pending: BTreeMap<u16, u64>,
+    /// 보고 묶음 일련번호.
+    count: u8,
+}
+
+impl RecvLedger {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 한 장 받았다. ★**같은 번호가 다시 오면 처음 것을 쥔다** — 재전송이 도착 시각을
+    /// 뒤로 밀면 발행자가 없는 지연을 본다.
+    pub fn on_rtp(&mut self, seq: u16, now: u64) {
+        self.pending.entry(seq).or_insert(now);
+        // ★한 묶음 분량을 크게 넘기면 오래된 것부터 버린다 — 무한히 들지 않는다.
+        while self.pending.len() > 1_024 {
+            let Some((&k, _)) = self.pending.iter().next() else { break };
+            self.pending.remove(&k);
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+
+    /// 모아 둔 것을 한 장으로 짓고 장부를 비운다. ★**빈 장은 안 짓는다.**
+    ///
+    /// ★**연속한 번호만 한 장에 담는다** — 중간이 크게 비면 그 앞까지만 내고 나머지는
+    /// 다음 장으로 미룬다(한 장에 담으면 「못 받음」 칸이 수천 개가 된다).
+    pub fn build(&mut self, sender_ssrc: u32, media_ssrc: u32) -> Option<Vec<u8>> {
+        let base = *self.pending.keys().next()?;
+        // 이번 장에 담을 마지막 번호 — 빈 구간이 255 를 넘으면 거기서 끊는다.
+        let mut last = base;
+        for &k in self.pending.keys() {
+            if k.wrapping_sub(last) > 255 {
+                break;
+            }
+            last = k;
+        }
+        let count = last.wrapping_sub(base) as usize + 1;
+        // ★기준 시각은 64ms 눈금이다 — 그 아래는 델타가 나른다.
+        let first = self.pending[&base];
+        let ref_time = (first / 64) as i64;
+        let mut arrival = ref_time * 64;
+
+        // 1차 — 칸마다 상태와 델타.
+        let mut status: Vec<u8> = Vec::with_capacity(count);
+        let mut deltas: Vec<i64> = Vec::new();
+        for i in 0..count {
+            let seq = base.wrapping_add(i as u16);
+            let Some(&at) = self.pending.get(&seq) else {
+                status.push(0);
+                continue;
+            };
+            // 0.25ms 눈금.
+            let d = ((at as i64) - arrival) * 4;
+            if (0..=255).contains(&d) {
+                status.push(1);
+            } else {
+                status.push(2);
+            }
+            deltas.push(d);
+            arrival += d / 4;
+        }
+
+        let mut b = vec![0u8; 20];
+        b[0] = 0x80 | FMT_TWCC;
+        b[1] = PT_RTPFB;
+        b[4..8].copy_from_slice(&sender_ssrc.to_be_bytes());
+        b[8..12].copy_from_slice(&media_ssrc.to_be_bytes());
+        b[12..14].copy_from_slice(&base.to_be_bytes());
+        b[14..16].copy_from_slice(&(count as u16).to_be_bytes());
+        let raw = (ref_time as i32) & 0x00FF_FFFF;
+        b[16..19].copy_from_slice(&raw.to_be_bytes()[1..]);
+        b[19] = self.count;
+        self.count = self.count.wrapping_add(1);
+
+        // 2차 — ★**2비트 열만 짓는다**(일곱 칸씩). 읽는 쪽은 세 형을 다 읽지만
+        //   우리가 지을 때 형을 섞으면 어느 쪽이 틀렸는지 못 가른다.
+        for chunk in status.chunks(7) {
+            let mut w: u16 = 0xC000;
+            for (i, &sym) in chunk.iter().enumerate() {
+                w |= ((sym & 0x03) as u16) << (12 - i * 2);
+            }
+            b.extend_from_slice(&w.to_be_bytes());
+        }
+        let mut it = deltas.iter();
+        for &sym in &status {
+            match sym {
+                1 => b.push(*it.next()? as u8),
+                2 => b.extend_from_slice(&(*it.next()? as i16).to_be_bytes()),
+                _ => {}
+            }
+        }
+        // ★4바이트 경계로 채운다 — 채운 만큼은 패딩이라고 말한다(P 비트).
+        let pad = (4 - b.len() % 4) % 4;
+        if pad > 0 {
+            b[0] |= 0x20;
+            b.resize(b.len() + pad, 0);
+            let n = b.len();
+            b[n - 1] = pad as u8;
+        }
+        let words = (b.len() / 4 - 1) as u16;
+        b[2..4].copy_from_slice(&words.to_be_bytes());
+
+        self.pending.retain(|&k, _| k.wrapping_sub(base) as usize >= count);
+        Some(b)
+    }
+}
+
 /// 피드백 읽기 — ★**우리가 짓지 않는 청크 형도 읽는다**(브라우저가 보내는 것이 정본이다).
 pub fn parse(pkt: &[u8]) -> Option<Feedback> {
     if pkt.len() < 20 || pkt[1] != PT_RTPFB || (pkt[0] & 0x1F) != FMT_TWCC {
@@ -311,6 +429,72 @@ mod tests {
         let mut p = fb_bytes();
         p[16..19].copy_from_slice(&[0xFF, 0xFF, 0xFE]);
         assert_eq!(parse(&p).expect("읽힌다").reference_time_raw, -2);
+    }
+
+    #[test]
+    fn 지은_것을_도로_읽는다() {
+        // ★우리가 짓고 우리가 읽는다 — 두 쪽이 어긋나면 여기서 걸린다.
+        let mut l = RecvLedger::new();
+        l.on_rtp(100, 1_000);
+        l.on_rtp(101, 1_020);
+        // 102 는 안 왔다.
+        l.on_rtp(103, 1_060);
+        let w = l.build(1, 0xBEEF).expect("짓는다");
+        let f = parse(&w).expect("읽힌다");
+        assert_eq!((f.media_ssrc, f.base_seq), (0xBEEF, 100));
+        assert_eq!(f.packets.len(), 4);
+        assert!(f.packets[0].is_some() && f.packets[1].is_some());
+        assert!(f.packets[2].is_none(), "★안 온 칸은 「못 받음」이다");
+        assert!(f.packets[3].is_some());
+        // 도착 간격이 그대로 나온다 — 기준 시각 눈금(64ms) 아래는 델타가 나른다.
+        let at = |i: usize| f.reference_time_raw as f64 * 64.0
+            + f.packets[..=i].iter().flatten().map(|d| *d as f64 * 0.25).sum::<f64>();
+        assert!((at(1) - at(0) - 20.0).abs() < 0.5, "{} {}", at(0), at(1));
+        assert!(l.is_empty(), "★낸 것은 장부에서 비운다");
+    }
+
+    #[test]
+    fn 빈_장은_안_짓는다() {
+        let mut l = RecvLedger::new();
+        assert!(l.build(1, 2).is_none());
+    }
+
+    #[test]
+    fn 같은_번호가_다시_오면_처음_것을_쥔다() {
+        // ★재전송이 도착 시각을 뒤로 밀면 발행자가 없는 지연을 본다.
+        let mut l = RecvLedger::new();
+        l.on_rtp(5, 1_000);
+        l.on_rtp(5, 9_000);
+        let w = l.build(1, 2).expect("짓는다");
+        let f = parse(&w).expect("읽힌다");
+        assert_eq!(f.reference_time_raw, 1_000 / 64);
+    }
+
+    #[test]
+    fn 크게_빈_구간은_다음_장으로_미룬다() {
+        // ★한 장에 담으면 「못 받음」 칸이 수천 개가 된다.
+        let mut l = RecvLedger::new();
+        l.on_rtp(0, 1_000);
+        l.on_rtp(1_000, 1_010);
+        let w = l.build(1, 2).expect("짓는다");
+        assert_eq!(parse(&w).expect("읽힌다").packets.len(), 1);
+        assert!(!l.is_empty(), "★나머지가 남는다");
+        let w2 = l.build(1, 2).expect("다음 장");
+        assert_eq!(parse(&w2).expect("읽힌다").base_seq, 1_000);
+    }
+
+    #[test]
+    fn 길이는_4바이트_경계다() {
+        for n in 1..12u16 {
+            let mut l = RecvLedger::new();
+            for i in 0..n {
+                l.on_rtp(i, 1_000 + i as u64 * 10);
+            }
+            let w = l.build(1, 2).expect("짓는다");
+            assert_eq!(w.len() % 4, 0, "n={n} len={}", w.len());
+            assert_eq!(u16::from_be_bytes([w[2], w[3]]) as usize, w.len() / 4 - 1, "n={n}");
+            assert_eq!(parse(&w).expect("읽힌다").packets.len(), n as usize, "n={n}");
+        }
     }
 
     #[test]

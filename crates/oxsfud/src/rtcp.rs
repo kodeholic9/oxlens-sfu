@@ -162,6 +162,40 @@ pub fn build_pli(sender_ssrc: u32, media_ssrc: u32) -> [u8; 12] {
     b
 }
 
+/// REMB 한 장(PSFB `fmt 15`, `draft-alvestrand-rmcat-remb`).
+///
+/// ★★**발행자에게 「이만큼까지 올려도 된다」고 말하는 자리**다(정§11-2) — 이것이 없으면
+/// 발행자의 송신 추정이 갱신되지 않아 ★**화질이 안 올라간다.**
+///
+/// ★**값은 지수·가수로 실린다** — 18비트 가수로 못 담으면 지수를 올려 담는다.
+/// ★`ssrcs` 는 그 값이 걸리는 스트림들이다(비어도 형식은 선다).
+pub fn build_remb(sender_ssrc: u32, bitrate_bps: u64, ssrcs: &[u32]) -> Vec<u8> {
+    let n = ssrcs.len().min(255);
+    let total = 20 + 4 * n;
+    let mut b = vec![0u8; total];
+    b[0] = 0x80 | 15;
+    b[1] = PT_PSFB;
+    b[2..4].copy_from_slice(&((total / 4 - 1) as u16).to_be_bytes());
+    b[4..8].copy_from_slice(&sender_ssrc.to_be_bytes());
+    // ★media ssrc 는 `0` 이다 — 대상은 아래 목록이 말한다(RFC 4585 §6.1 의 REMB 관례).
+    b[12..16].copy_from_slice(b"REMB");
+    // 18비트에 들어갈 때까지 지수를 올린다.
+    let (mut mantissa, mut exp) = (bitrate_bps, 0u32);
+    while mantissa > 0x0003_FFFF {
+        mantissa >>= 1;
+        exp += 1;
+    }
+    b[16] = n as u8;
+    b[17] = ((exp as u8) << 2) | ((mantissa >> 16) as u8 & 0x03);
+    b[18] = (mantissa >> 8) as u8;
+    b[19] = mantissa as u8;
+    for (i, s) in ssrcs.iter().take(n).enumerate() {
+        let o = 20 + i * 4;
+        b[o..o + 4].copy_from_slice(&s.to_be_bytes());
+    }
+    b
+}
+
 /// RR 한 칸(RFC 3550 §6.4.1) — 24바이트.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ReportBlock {
@@ -449,6 +483,34 @@ mod tests {
         let bad = vec![0x90, 96, 0, 1, 0, 0, 0, 0, 0, 0, 0, 7, 0xBE, 0xDE, 0xFF, 0xFF];
         assert!(build_rtx(&bad, 1, 97, 1).is_none());
         assert!(build_rtx(&[0u8; 8], 1, 97, 1).is_none());
+    }
+
+    /// REMB 의 값을 도로 읽는다 — 시험이 제 형식을 스스로 견준다.
+    fn remb_bps(p: &[u8]) -> u64 {
+        let exp = (p[17] >> 2) as u32;
+        let mantissa = (((p[17] & 0x03) as u64) << 16) | ((p[18] as u64) << 8) | p[19] as u64;
+        mantissa << exp
+    }
+
+    #[test]
+    fn remb_는_지수_가수로_담는다() {
+        let w = build_remb(1, 300_000, &[0xAABB_CCDD]);
+        assert_eq!((w[0] & 0x1F, w[1]), (15, PT_PSFB));
+        assert_eq!(&w[12..16], b"REMB");
+        assert_eq!(w[16], 1, "대상 수");
+        assert_eq!(u32::from_be_bytes([w[20], w[21], w[22], w[23]]), 0xAABB_CCDD);
+        assert_eq!(remb_bps(&w), 300_000, "★18비트에 그대로 들어간다");
+        assert_eq!(u16::from_be_bytes([w[2], w[3]]) as usize, w.len() / 4 - 1);
+    }
+
+    #[test]
+    fn remb_는_큰_값도_담는다() {
+        // ★18비트(262,143)를 넘으면 지수를 올린다 — 안 올리면 값이 잘린다.
+        let w = build_remb(1, 5_000_000, &[]);
+        let got = remb_bps(&w);
+        assert!(got > 4_900_000 && got <= 5_000_000, "{got}");
+        assert_eq!(w[16], 0, "대상이 없어도 형식은 선다");
+        assert_eq!(w.len(), 20);
     }
 
     #[test]

@@ -140,6 +140,7 @@ async fn main() -> std::process::ExitCode {
         cmd_rx,
         dc_tx,
         node.egress.clone(),
+        policy.media.max_bitrate_bps as u64,
     ));
     let svc = std::sync::Arc::new(oxsfud::grpc::Sfu::new(
         oxsfud::grpc::Identity {
