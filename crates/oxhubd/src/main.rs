@@ -114,6 +114,31 @@ async fn run(args: Args) -> Result<(), String> {
         let mut iv = tokio::time::interval(std::time::Duration::from_millis(500));
         loop {
             iv.tick().await;
+            // ★`Starting` 인 유닛에 인사를 건다 — ★**답하는 순간이 `Running`** 이다(정§16-1).
+            //   ★띄운 적 없는 것이 살아 있을 수 없으므로 `Starting` 에만 건다.
+            let pending: Vec<(String, String)> = {
+                let s = ticker.sup.lock().await;
+                s.units
+                    .iter()
+                    .filter(|u| u.state == oxhubd::supervisor::UnitState::Starting)
+                    .filter_map(|u| {
+                        ticker
+                            .resolved
+                            .system
+                            .units
+                            .iter()
+                            .find(|d| d.id == u.id && !d.addr.is_empty())
+                            .map(|d| (u.id.clone(), d.addr.clone()))
+                    })
+                    .collect()
+            };
+            for (id, addr) in pending {
+                if let Some(epoch) = hello(&ticker.resolved.node_id, &addr).await {
+                    let mut s = ticker.sup.lock().await;
+                    s.on_ready(&id, epoch);
+                }
+            }
+
             // ★끝난 자식을 먼저 거둔다 — 그래야 supervisor 가 `Down` 을 제때 본다.
             let done: Vec<String> = {
                 let mut cs = ticker.children.lock().await;
@@ -145,6 +170,21 @@ async fn run(args: Args) -> Result<(), String> {
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .await
         .map_err(|e| e.to_string())
+}
+
+/// ★**기동 핸드셰이크** — 답하면 그 값이 그 유닛의 기동 신원이다.
+///
+/// ★**못 닿는 것은 실패가 아니라 아직 안 선 것**이다(`Starting` 그대로) — 지어내지 않는다.
+async fn hello(node_id: &str, addr: &str) -> Option<String> {
+    let url = format!("http://{addr}");
+    let mut c = common::b::sfu_service_client::SfuServiceClient::connect(url).await.ok()?;
+    let r = c
+        .hello(common::b::HelloRequest { node_id: node_id.to_string() })
+        .await
+        .ok()?
+        .into_inner();
+    eprintln!("[b] hello → {addr} epoch={} build={}", r.epoch, r.build);
+    Some(r.epoch)
 }
 
 fn now_ms() -> u64 {

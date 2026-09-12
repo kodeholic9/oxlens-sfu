@@ -6,6 +6,7 @@
 pub mod autolayer;
 pub mod fanout;
 pub mod floor;
+pub mod grpc;
 pub mod lifeline;
 pub mod rewriter;
 pub mod twcc;

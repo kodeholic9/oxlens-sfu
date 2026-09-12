@@ -1,14 +1,33 @@
 // author: kodeholic (powered by Claude)
-// B 평면 — hub↔sfud (정§15). 메시지 집합의 정식 규격은 예정이고, 이 파일은 envelope 하나와 구독 하나만 든다.
-// wire 는 클라 프레임(연§3-1) 그대로 통과한다. user_id 는 hub 세션에서 주입한다(body 를 믿지 않는다).
+// spec: v1.1 · 정§15-0 · §15-5 · §16-1 · model: claude-opus-5
+//
+// B 평면 — ★node **안**은 로컬 gRPC 하나이고 node **사이**는 전부 zenoh 다(정§15-0).
+// 이 파일은 그 "안"쪽이다. wire 는 클라 프레임(연§3-1) 그대로 통과한다 —
+// hub 가 재해석하지 않는다. ★user_id 는 hub 세션에서 주입한다(body 를 믿지 않는다).
 syntax = "proto3";
 package oxlens.b.v1;
 
 service SfuService {
+  // ★기동 핸드셰이크 — hub 가 유닛을 등록할 때 ★**기동 신원을 받아 든다**(정§16-1).
+  //   이것이 답하는 순간이 그 유닛의 `Running` 이고, 그 전은 `Starting` 이다.
+  rpc Hello(HelloRequest) returns (HelloReply);
   // 요청 하나 → 응답 wire 하나(성공/실패 프레임). hub 가 재해석하지 않고 클라에 통과시킨다.
   rpc Handle(Envelope) returns (Envelope);
   // sfud → hub 통지 스트림. target 이 있으면 그 사용자에게, 없으면 room_id 방 전원(exclude 제외).
   rpc Subscribe(SubscribeRequest) returns (stream Envelope);
+}
+
+message HelloRequest {
+  // 부르는 hub 의 안정 배치 키(정§15-3).
+  string node_id = 1;
+}
+
+message HelloReply {
+  // ★**기동마다 새 값** — `epoch` = `sfu_id` = §15-1 키의 `{inst}`(정§14-1).
+  //   고정 별칭을 쓰면 클라가 `seq` 재시작을 못 가린다.
+  string epoch = 1;
+  // 이 바이너리가 어느 소스의 산물인가 — ★스스로 말한다.
+  string build = 2;
 }
 
 message Envelope {
@@ -20,7 +39,7 @@ message Envelope {
   bytes wire = 6;
   // 세션 확정값(연§6-1) — sfud 가 server_config.pc_mode 로 에코한다. 통지에는 비어 있다.
   string pc_mode = 7;
-  // 연§4-4 — 토큰이 준 신원. ★ROOM_JOIN 에만 실린다(정§15-2 — 프로필을 핫패스에 태우지 않는다).
+  // 연§4-4 — 토큰이 준 신원. ★ROOM_JOIN 에만 실린다(프로필을 핫패스에 태우지 않는다).
   uint32 participant_type = 8;
   bool hidden = 9;
   // 불투명 JSON 직렬화본. 비어 있으면 없는 것이다.

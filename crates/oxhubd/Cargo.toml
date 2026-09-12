@@ -18,6 +18,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 arc-swap = { workspace = true }
 uuid = { workspace = true }
+tonic = { workspace = true }
 
 [[bin]]
 name = "oxhubd"

@@ -5,6 +5,12 @@
 //!
 //! ★**판별 기준은 하나다** — 프로세스가 2개 떴을 때 서로 **달라져야 하면 인자**, **같아야 하면 파일**.
 
+/// B 평면 — ★**node 안의 유일한 길**(정§15-0). proto 에서 생성된다.
+pub mod b {
+    #![allow(clippy::doc_overindented_list_items)]
+    tonic::include_proto!("oxlens.b.v1");
+}
+
 pub mod args;
 pub mod build;
 pub mod policy;

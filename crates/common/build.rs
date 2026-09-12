@@ -28,6 +28,17 @@ fn main() {
         "cargo:rustc-env=OX_BUILD_STAMP={sha}{}+{at}",
         if dirty { "-dirty" } else { "" }
     );
+    // ★B 평면 proto — node 안의 유일한 길이다(정§15-0).
+    let proto = std::path::Path::new("../../proto/oxlens_b_v1.proto");
+    if proto.exists() {
+        tonic_build::configure()
+            .build_server(true)
+            .build_client(true)
+            .compile_protos(&[proto], &[std::path::Path::new("../../proto")])
+            .expect("proto 를 못 읽으면 B 평면이 통째로 없다");
+        println!("cargo:rerun-if-changed=../../proto/oxlens_b_v1.proto");
+    }
+
     // ★소스가 바뀌면 다시 찍는다 — 안 그러면 stamp 가 첫 빌드에 얼어붙는다.
     println!("cargo:rerun-if-changed=../");
     println!("cargo:rerun-if-changed=../../Cargo.toml");

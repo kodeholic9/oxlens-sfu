@@ -8,7 +8,8 @@
 
 use common::Args;
 
-fn main() -> std::process::ExitCode {
+#[tokio::main]
+async fn main() -> std::process::ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     // `--no-lifeline` 은 사람이 손으로 띄울 때만 쓴다 — supervisor 는 항상 채널을 준다.
     let no_lifeline = argv.iter().any(|a| a == "--no-lifeline");
@@ -49,8 +50,30 @@ fn main() -> std::process::ExitCode {
         oxsfud::lifeline::spawn_watch_stdin();
     }
 
-    // 미디어 축은 다음 걸음이다 — 지금은 서서 채널만 지킨다.
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(3_600));
+    // ★B 평면을 연다 — 이것이 답하는 순간이 `Running` 이다(정§16-1).
+    let Some(addr) = args.extra.get("--grpc-listen").cloned() else {
+        eprintln!("args: --grpc-listen 이 없다 — B 평면 없이는 hub 가 이 유닛을 못 본다");
+        return std::process::ExitCode::from(2);
+    };
+    let listen: std::net::SocketAddr = match addr.parse() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("args: --grpc-listen {addr}: {e}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+    let svc = oxsfud::grpc::Sfu::new(oxsfud::grpc::Identity {
+        epoch,
+        build: common::BuildId::new(args.build.clone()).line(),
+    });
+    eprintln!("[b] listen {listen}");
+    if let Err(e) = tonic::transport::Server::builder()
+        .add_service(svc.into_server())
+        .serve(listen)
+        .await
+    {
+        eprintln!("[b] {e}");
+        return std::process::ExitCode::from(1);
     }
+    std::process::ExitCode::SUCCESS
 }
