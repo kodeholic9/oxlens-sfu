@@ -17,13 +17,16 @@ use common::{Args, Policy, System};
 use oxhubd::authz::{self, Peer};
 use oxhubd::boot::Resolved;
 use oxhubd::healthz;
+use oxhubd::session::Sessions;
 use oxhubd::supervisor::{Action, Supervisor};
 use oxhubd::token::{self, IssueReq};
+use oxhubd::ws::{self, Conn, Reply};
 use tokio::sync::Mutex;
 
 struct Hub {
     resolved: Resolved,
     sup: Mutex<Supervisor>,
+    sessions: Mutex<Sessions>,
 }
 
 type Shared = Arc<Hub>;
@@ -71,12 +74,17 @@ async fn run(args: Args) -> Result<(), String> {
     for a in sup.start_all(now_ms()) {
         apply(&a);
     }
-    let hub: Shared = Arc::new(Hub { resolved, sup: Mutex::new(sup) });
+    let hub: Shared = Arc::new(Hub { resolved, sup: Mutex::new(sup), sessions: Mutex::new(Sessions::new()) });
 
+    // ★접속점은 `{base}` 아래다 — 앱이 클라에 주는 그 값이다(연§5-0).
+    let base = hub.resolved.system.hub.base_path.trim_end_matches('/').to_string();
     let app = Router::new()
+        // ★WS 업그레이드는 무인증으로 열린다 — 인증은 `BIND` 가 한다.
+        //   토큰을 질의값에 실으면 액세스 로그·프록시·리퍼러에 그대로 남는다.
+        .route(&format!("{base}/ws"), get(ws_upgrade))
+        .route(&format!("{base}/auth/token"), axum::routing::post(auth_token))
         .route("/healthz/live", get(|| async { StatusCode::OK }))
         .route("/healthz/ready", get(ready))
-        .route("/auth/token", axum::routing::post(auth_token))
         .route("/admin/sfus", get(admin_sfus))
         .route("/admin/snapshot", get(admin_snapshot))
         .with_state(hub.clone());
@@ -207,4 +215,90 @@ async fn admin_snapshot(
         "rooms": 0,
         "users": 0,
     })))
+}
+
+async fn ws_upgrade(
+    State(hub): State<Shared>,
+    upgrade: axum::extract::ws::WebSocketUpgrade,
+) -> axum::response::Response {
+    // ★서브프로토콜을 쓰지 않는다 — `Sec-WebSocket-Protocol` 을 보지도 않는다.
+    upgrade.on_upgrade(move |socket| serve_ws(hub, socket))
+}
+
+async fn serve_ws(hub: Shared, mut socket: axum::extract::ws::WebSocket) {
+    use axum::extract::ws::Message;
+    use oxsig::frame;
+
+    let mut conn = Conn::Unbound { opened_at: now_ms() };
+    let window_ms = hub.resolved.policy.hub.resume_window_ms as u64;
+    // ★그릇을 하나 잡아 재사용한다 — 프레임마다 새로 잡지 않는다(핫패스 규율 H3).
+    let mut out = Vec::with_capacity(frame::HEADER_LEN + 256);
+
+    loop {
+        let msg = tokio::select! {
+            m = socket.recv() => m,
+            // ★`BIND` 가 제때 안 오면 끊는다 — 무인증 소켓을 열어 두지 않는다.
+            () = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
+                if let Some(n) = ws::bind_overdue(&conn, now_ms()) {
+                    send_leave(&mut socket, &mut out, &n).await;
+                    return;
+                }
+                continue;
+            }
+        };
+        let Some(Ok(Message::Binary(buf))) = msg else { return };
+        // ★text 프레임은 받지 않는다(연§3-1 — binary 고정). 위 패턴이 그것을 거른다.
+        let (header, body) = match frame::decode(&buf) {
+            Ok(v) => v,
+            Err(e) => {
+                if let Reply::Close(n) = ws::on_decode_error(e) {
+                    send_leave(&mut socket, &mut out, &n).await;
+                }
+                return;
+            }
+        };
+        let reply = {
+            let sys = &hub.resolved.system;
+            let verify = |t: &str| {
+                oxhubd::token::verify_user(sys, now_ms() / 1000, t)
+                    .map(|c| oxhubd::session::VerifiedToken {
+                        user_id: c.sub.clone(),
+                        participant_type: c.participant_type,
+                        hidden: c.hidden,
+                        permission: c.permission(),
+                    })
+                    .map_err(|e| e.0)
+            };
+            let mut sessions = hub.sessions.lock().await;
+            ws::dispatch(&mut conn, &mut sessions, &verify, window_ms, now_ms(), header, body)
+        };
+        match reply {
+            Reply::Ok { header, body } | Reply::Fail { header, body } => {
+                frame::encode(&mut out, header, &body);
+                if socket.send(Message::Binary(out.clone())).await.is_err() {
+                    return;
+                }
+            }
+            Reply::Silent => {}
+            Reply::Close(n) => {
+                send_leave(&mut socket, &mut out, &n).await;
+                return;
+            }
+        }
+    }
+}
+
+/// ★**사유는 `LEAVE` 가 나른다** — WS Close 에 싣지 않는다(전송을 바꿔도 이 op 은 그대로 선다).
+async fn send_leave(
+    socket: &mut axum::extract::ws::WebSocket,
+    out: &mut Vec<u8>,
+    notice: &oxsig::body::session::LeaveNotice,
+) {
+    use axum::extract::ws::Message;
+    use oxsig::frame::{self, Header, Kind};
+    let body = serde_json::to_vec(notice).unwrap_or_default();
+    frame::encode(out, Header::new(Kind::Request, oxsig::Op::Leave, 0), &body);
+    let _ = socket.send(Message::Binary(out.clone())).await;
+    // ★보내고 닫는다 — 응답을 기다리면 닫지도 못하고 굳는다.
+    let _ = socket.send(Message::Close(None)).await;
 }
