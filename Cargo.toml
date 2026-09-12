@@ -2,7 +2,7 @@
 # ★재작성 중(spec/v1.1) — 덩어리마다 아래층부터 members 를 되돌린다.
 #   그래야 `cargo build`(workspace 전량)가 게이트로 살아 있다 — `-p` 스코프는 쓰지 않는다.
 #   복구 순서: oxsig → common → oxhubd → oxsfud.
-members = ["crates/oxsig"]
+members = ["crates/oxsig", "crates/common"]
 resolver = "3"
 
 [workspace.package]
