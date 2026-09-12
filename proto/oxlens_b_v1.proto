@@ -13,6 +13,10 @@ service SfuService {
   rpc Hello(HelloRequest) returns (HelloReply);
   // 요청 하나 → 응답 wire 하나(성공/실패 프레임). hub 가 재해석하지 않고 클라에 통과시킨다.
   rpc Handle(Envelope) returns (Envelope);
+  // ★방 대장 반영 + 그 node 가 쥔 방들의 현황. ★**zenoh `room/{R}` 토큰의 대역**이다 —
+  //   node 사이가 열리면 이 RPC 는 토큰 선언/구독으로 갈린다(정§15-2). 그때까지도
+  //   ★**권위는 sfud 다** — hub 는 대장(이름·정원·TTL)을 밀고 현황(명단·seq)을 받아 온다.
+  rpc Rooms(RoomLedger) returns (RoomView);
   // sfud → hub 통지 스트림. target 이 있으면 그 사용자에게, 없으면 room_id 방 전원(exclude 제외).
   rpc Subscribe(SubscribeRequest) returns (stream Envelope);
 }
@@ -48,4 +52,28 @@ message Envelope {
 
 message SubscribeRequest {
   string hub_id = 1;
+}
+
+// 방 대장 한 줄 — ★**hub 가 만든 것**(연§5-4). 명단·seq 는 여기 없다(sfud 것이다).
+message RoomRecord {
+  string room_id = 1;
+  string name = 2;
+  uint32 capacity = 3;
+  // ★부재 = 영구. 0 과 다르다(0 은 "즉시").
+  optional uint32 unused_ttl_secs = 4;
+  optional uint32 departure_ttl_secs = 5;
+}
+
+message RoomLedger {
+  string node_id = 1;
+  repeated RoomRecord put = 2;
+  repeated string drop = 3;
+}
+
+message RoomView {
+  string epoch = 1;
+  // 그 node 가 쥔 방들의 현황 — JSON 한 줄씩(연§5-4 목록 항목 형).
+  repeated string rooms = 2;
+  // ★TTL 로 만료된 방 — hub 는 대장에서 지운다(정§16-1-3). sfud 는 이미 폭파했다.
+  repeated string expired = 3;
 }

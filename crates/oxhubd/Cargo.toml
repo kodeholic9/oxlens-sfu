@@ -19,6 +19,7 @@ tracing-subscriber = { workspace = true }
 arc-swap = { workspace = true }
 uuid = { workspace = true }
 tonic = { workspace = true }
+tokio-stream = { workspace = true }
 futures-util = { workspace = true }
 
 [[bin]]

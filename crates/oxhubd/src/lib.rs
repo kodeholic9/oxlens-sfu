@@ -7,7 +7,7 @@ pub mod authz;
 pub mod boot;
 pub mod flow;
 pub mod healthz;
-pub mod room;
+pub mod ledger;
 pub mod route;
 pub mod session;
 pub mod supervisor;

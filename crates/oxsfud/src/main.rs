@@ -33,6 +33,22 @@ async fn main() -> std::process::ExitCode {
         return std::process::ExitCode::from(2);
     };
 
+    // ★정책은 배포 하나에 하나다 — hub 와 ★**같은 파일**을 읽는다(두 벌을 두면 값이 갈린다).
+    let Some(policy_path) = args.policy.clone() else {
+        eprintln!("args: --policy 가 없다 — `[media]` 값을 지어낼 수는 없다");
+        return std::process::ExitCode::from(2);
+    };
+    let policy = match std::fs::read_to_string(&policy_path)
+        .map_err(|e| format!("policy {policy_path}: {e}"))
+        .and_then(|s| common::Policy::parse(&s).map_err(|e| e.to_string()))
+    {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+
     // ★기동마다 새 값 — 설정의 고정 별칭을 쓰지 않는다(어기면 클라가 `seq` 재시작을 못 가린다).
     let epoch = format!("sfu-{}", uuid::Uuid::new_v4().simple());
 
@@ -62,10 +78,41 @@ async fn main() -> std::process::ExitCode {
             return std::process::ExitCode::from(2);
         }
     };
-    let svc = oxsfud::grpc::Sfu::new(oxsfud::grpc::Identity {
-        epoch,
-        build: common::BuildId::new(args.build.clone()).line(),
-    });
+    // ★**지문은 프로세스 것이다** — 재협상마다 바뀌면 클라가 연결을 새로 세운다.
+    let dtls = match oxsfud::identity::Dtls::bake() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return std::process::ExitCode::from(1);
+        }
+    };
+    // ★`--public-ip` 가 없으면 루프백이다 — 개발 형상이고, 상용은 설정이 준다.
+    let ip = args.extra.get("--public-ip").cloned().unwrap_or_else(|| "127.0.0.1".into());
+    let udp: u16 = match args.extra.get("--udp-port").map(|s| s.parse()) {
+        Some(Ok(v)) => v,
+        Some(Err(e)) => {
+            eprintln!("args: --udp-port {e}");
+            return std::process::ExitCode::from(2);
+        }
+        None => {
+            eprintln!("args: --udp-port 가 없다 — 미디어를 받을 자리가 없다");
+            return std::process::ExitCode::from(2);
+        }
+    };
+    let node = oxsfud::handle::Node::new(
+        epoch.clone(),
+        dtls,
+        ip,
+        udp,
+        policy.media.max_bitrate_bps as u64,
+    );
+    let svc = oxsfud::grpc::Sfu::new(
+        oxsfud::grpc::Identity {
+            epoch,
+            build: common::BuildId::new(args.build.clone()).line(),
+        },
+        node,
+    );
     eprintln!("[b] listen {listen}");
     if let Err(e) = tonic::transport::Server::builder()
         .add_service(svc.into_server())

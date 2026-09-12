@@ -10,7 +10,7 @@ use crate::types::Affiliation;
 /// `0x0401 AFFILIATION` 요청 — ★**어디로 발행할까**. 둘 다 생략하면 조회다.
 ///
 /// ★적용 순서는 `pub_deselect` → `pub_select` 다(같은 요청에 둘 다 와도).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AffiliationReq {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pub_select: Option<String>,
@@ -25,10 +25,12 @@ pub struct AffiliationReq {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AffiliationCause {
-    /// 이 요청이 바꿨다.
-    Explicit,
-    /// 입장·퇴장이 곁들여 바꿨다.
-    Implicit,
+    /// ★`AFFILIATION` 응답의 **유일한** 값 — 내가 이 요청으로 바꿨다(연§6-4).
+    ///
+    /// ★입·퇴장이 곁들여 바꾼 것(`ROOM_JOIN`/`ROOM_LEAVE` 응답)은 ★**`cause` 필드가 아예 없다** —
+    /// 연§6-4 가 그것을 *implicit* 이라 부르지만 ★**wire 값이 아니다.** 값을 두면
+    /// 그 자리에 무엇을 넣을지가 매번 갈린다.
+    User,
     /// 강퇴 — 운영 경로.
     Kick,
     /// 방이 사라졌다.
@@ -102,11 +104,13 @@ mod tests {
     fn 소속_응답은_version_을_안_싣는다() {
         let res = AffiliationRes {
             affiliation: Affiliation { sub_rooms: vec!["r1".into()], pub_room: Some("r1".into()) },
-            cause: AffiliationCause::Explicit,
+            cause: AffiliationCause::User,
             change_id: None,
         };
         let json = serde_json::to_string(&res).expect("ser");
         assert!(!json.contains("version"), "★내 세션 것이라 방 공통 스냅샷 밖이다");
+        // ★응답의 `cause` 는 이 값 하나다 — 입·퇴장이 곁들여 바꾼 것은 `cause` 필드가 없다.
+        assert!(json.contains(r#""cause":"user""#), "{json}");
         assert!(json.contains("sub_rooms"), "★평평하게 편다 — 중첩하면 형이 둘이 된다");
     }
 

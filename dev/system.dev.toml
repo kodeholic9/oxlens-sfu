@@ -34,7 +34,7 @@ kind = "process"
 order = 1
 role = "sfu"
 addr = "127.0.0.1:50061"
-cmd = ["./target/debug/oxsfud", "--grpc-listen", "127.0.0.1:50061", "--udp-port", "20000"]
+cmd = ["./target/debug/oxsfud", "--grpc-listen", "127.0.0.1:50061", "--udp-port", "20000", "--policy", "policy.toml"]
 
 [[unit]]
 id = "sfu-2"
@@ -42,4 +42,4 @@ kind = "process"
 order = 1
 role = "sfu"
 addr = "127.0.0.1:50062"
-cmd = ["./target/debug/oxsfud", "--grpc-listen", "127.0.0.1:50062", "--udp-port", "20001"]
+cmd = ["./target/debug/oxsfud", "--grpc-listen", "127.0.0.1:50062", "--udp-port", "20001", "--policy", "policy.toml"]
