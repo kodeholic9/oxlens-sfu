@@ -118,6 +118,11 @@ impl Room {
         self.members.iter().any(|m| m.participant_type == 1)
     }
 
+    /// 그 사람이 투명으로 들어와 있나 — ★**퇴장 통지를 낼지 가른다**(정§17-2 ⑦).
+    pub fn is_hidden(&self, user_id: &str) -> bool {
+        self.members.iter().any(|m| m.user_id == user_id && m.hidden)
+    }
+
     /// ★**명단 그대로** — 투명은 빠진다(연§4-4).
     pub fn participants(&self) -> Vec<MemberInfo> {
         self.members.iter().filter(|m| !m.hidden).map(Member::info).collect()

@@ -16,7 +16,14 @@ tonic = { workspace = true }
 tokio-stream = { workspace = true }
 getrandom = { workspace = true }
 sha2 = { workspace = true }
-rcgen = { workspace = true }
+arc-swap = { workspace = true }
+hmac = { workspace = true }
+sha1 = { workspace = true }
+crc32fast = { workspace = true }
+bytes = { workspace = true }
+async-trait = { workspace = true }
+dtls = { workspace = true }
+webrtc-util = { workspace = true }
 
 [[bin]]
 name = "oxsfud"

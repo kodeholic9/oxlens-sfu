@@ -84,6 +84,11 @@ impl Sessions {
         self.items.iter().find(|s| s.id == id)
     }
 
+    /// 그 사람의 세션들 — ★**unicast 통지의 대상**이다(정§17-2 ⑧).
+    pub fn sessions_of(&self, user_id: &str) -> Vec<String> {
+        self.items.iter().filter(|s| s.user_id == user_id).map(|s| s.id.clone()).collect()
+    }
+
     pub fn live_of(&self, user_id: &str) -> Option<&Session> {
         self.items.iter().find(|s| s.user_id == user_id && s.dead_at.is_none())
     }

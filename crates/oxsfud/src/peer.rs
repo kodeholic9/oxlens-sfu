@@ -91,6 +91,18 @@ impl Peer {
     }
 }
 
+/// `ensure` 가 낸 것. ★**튜플로 두면 부르는 쪽마다 자리를 헷갈린다.**
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ensured {
+    pub idx: usize,
+    /// 걷힌 Peer 가 듣던 방들 — 부르는 쪽이 방마다 `left` 를 내야 한다(정§4-2 ②).
+    pub orphaned: Vec<String>,
+    /// 걷힌 Peer 의 세션 — ★그 세션의 전송 자격도 같이 내린다.
+    pub evicted: Option<String>,
+    /// ★**이번에 세웠나** — 세웠으면 ICE 자격을 장부에 올려야 한다.
+    pub created: bool,
+}
+
 /// 이 유닛의 Peer 들. ★**키는 세션이다** — 같은 사람의 새 세션은 새 Peer 다.
 #[derive(Debug, Default)]
 pub struct Peers {
@@ -118,18 +130,20 @@ impl Peers {
     ///
     /// 걷힌 Peer 의 방 목록을 돌려준다 — 부르는 쪽이 그 방들에서 ★**퇴장시켜야 한다**
     /// (정§4-2 ② *"옛 Peer 를 통째로 축출"* · 방마다 `left`).
-    pub fn ensure(&mut self, session_id: &str, user_id: &str, mode: PcMode) -> (usize, Vec<String>) {
+    pub fn ensure(&mut self, session_id: &str, user_id: &str, mode: PcMode) -> Ensured {
         if let Some(i) = self.items.iter().position(|p| p.session_id == session_id) {
-            return (i, Vec::new());
+            return Ensured { idx: i, orphaned: Vec::new(), evicted: None, created: false };
         }
         // ★같은 신원의 옛 Peer — 통째로 걷는다(방이 아니라 Peer 가 단위다).
         let mut orphaned = Vec::new();
+        let mut evicted = None;
         if let Some(i) = self.items.iter().position(|p| p.user_id == user_id) {
             orphaned = self.items[i].sub_rooms.clone();
+            evicted = Some(self.items[i].session_id.clone());
             self.items.remove(i);
         }
         self.items.push(Peer::new(session_id.into(), user_id.into(), mode));
-        (self.items.len() - 1, orphaned)
+        Ensured { idx: self.items.len() - 1, orphaned, evicted, created: true }
     }
 
     pub fn at(&self, i: usize) -> &Peer {
@@ -178,12 +192,17 @@ mod tests {
     #[test]
     fn 같은_신원의_새_세션은_옛_peer_를_통째로_걷는다() {
         let mut ps = Peers::new();
-        let (i, orphan) = ps.ensure("s-1", "u1", PcMode::One);
-        assert!(orphan.is_empty());
-        ps.at_mut(i).sub_rooms = vec!["r1".into(), "r2".into()];
-        let (_, orphan) = ps.ensure("s-2", "u1", PcMode::Two);
+        let e = ps.ensure("s-1", "u1", PcMode::One);
+        assert!(e.orphaned.is_empty() && e.created && e.evicted.is_none());
+        ps.at_mut(e.idx).sub_rooms = vec!["r1".into(), "r2".into()];
+        let e = ps.ensure("s-2", "u1", PcMode::Two);
         // ★방 하나가 아니라 ★**그 Peer 의 방 전부**가 딸려 나간다(정§4-2 ②).
-        assert_eq!(orphan, vec!["r1".to_string(), "r2".to_string()]);
+        assert_eq!(e.orphaned, vec!["r1".to_string(), "r2".to_string()]);
+        assert_eq!(e.evicted.as_deref(), Some("s-1"));
         assert_eq!(ps.len(), 1, "옛 Peer 는 남지 않는다");
+
+        // ★같은 세션이 또 들어오면 세우지 않는다 — 자격을 다시 발급하면 전송이 끊긴다.
+        let again = ps.ensure("s-2", "u1", PcMode::Two);
+        assert!(!again.created && again.evicted.is_none());
     }
 }

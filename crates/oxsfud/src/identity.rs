@@ -55,25 +55,27 @@ impl IceCreds {
 }
 
 /// 이 프로세스의 DTLS 신원. ★**기동 때 한 번 굽는다.**
+///
+/// ★★**인증서는 하나다** — `server_config` 가 알리는 지문과 핸드셰이크가 내미는 인증서가
+/// 같은 것이어야 한다. 둘로 두면 클라가 지문 대조에서 끊는다(그리고 그 실패는 조용하다).
 #[derive(Debug, Clone)]
 pub struct Dtls {
     /// `"sha-256 AB:CD:…"` — 클라는 가공 없이 `a=fingerprint:` 뒤에 붙인다.
     pub fingerprint: String,
-    /// DER 인증서와 키 — 전송이 설 때 쓴다.
-    pub cert_der: Vec<u8>,
-    pub key_der: Vec<u8>,
+    /// 핸드셰이크가 내미는 그것.
+    pub cert: dtls::crypto::Certificate,
 }
 
 impl Dtls {
-    /// ★**자가서명 하나** — WebRTC 의 신뢰 기준은 CA 가 아니라 SDP 가 나른 지문이다(RFC 8122).
+    /// ★**자가서명 하나** — WebRTC 의 신뢰 기준은 CA 가 아니라 신호로 나른 지문이다(RFC 8122).
     pub fn bake() -> Result<Self, String> {
-        let kp = rcgen::KeyPair::generate().map_err(|e| format!("dtls: 키 생성 {e}"))?;
-        let cert = rcgen::CertificateParams::new(vec!["oxlens-sfu".to_string()])
-            .map_err(|e| format!("dtls: 파라미터 {e}"))?
-            .self_signed(&kp)
+        let cert = dtls::crypto::Certificate::generate_self_signed(vec!["oxlens-sfu".to_string()])
             .map_err(|e| format!("dtls: 자가서명 {e}"))?;
-        let der = cert.der().to_vec();
-        Ok(Self { fingerprint: fingerprint_of(&der), cert_der: der, key_der: kp.serialize_der() })
+        let der = cert.certificate.first().map(|c| c.as_ref().to_vec()).unwrap_or_default();
+        if der.is_empty() {
+            return Err("dtls: 인증서가 비었다 — 지문을 지어낼 수 없다".into());
+        }
+        Ok(Self { fingerprint: fingerprint_of(&der), cert })
     }
 
     pub fn config(&self) -> DtlsConfig {
@@ -143,7 +145,7 @@ mod tests {
     }
 
     #[test]
-    fn 지문은_프로세스_것이라_두_번_불러도_같다() {
+    fn 지문은_인증서에서_나온다() {
         let d = Dtls::bake().expect("굽는다");
         assert!(d.fingerprint.starts_with("sha-256 "), "{}", d.fingerprint);
         // "sha-256 " + 32바이트 × "AB:" − 콜론 하나

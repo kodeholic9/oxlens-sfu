@@ -8,7 +8,9 @@
 
 use common::b::sfu_service_server::{SfuService, SfuServiceServer};
 use common::b::{Envelope, HelloReply, HelloRequest, RoomLedger, RoomView, SubscribeRequest};
-use tokio::sync::{broadcast, Mutex};
+use std::sync::Arc;
+
+use tokio::sync::{broadcast, mpsc, Mutex};
 use tonic::{Request, Response, Status};
 
 use crate::handle::{self, Ingress, Node};
@@ -28,6 +30,8 @@ pub struct Sfu {
     /// 통지 방송. ★**hub 마다 하나씩 받아 간다** — 한 node 에 hub 는 하나이지만
     /// 재접속 창에 둘이 겹칠 수 있어 방송으로 둔다.
     tx: broadcast::Sender<Envelope>,
+    /// 전송 루프에 거는 손 — ★**회수는 통로를 닫는 것**이다(정§12).
+    udp: mpsc::Sender<crate::transport::udp::Cmd>,
 }
 
 /// ★**밀린 통지의 상한** — 넘으면 그 구독자만 갭을 본다(`seq` 로 드러나고 §14-3 이 메운다).
@@ -35,13 +39,48 @@ pub struct Sfu {
 const NOTICE_LAG: usize = 1024;
 
 impl Sfu {
-    pub fn new(id: Identity, node: Node) -> Self {
+    pub fn new(id: Identity, node: Node, udp: mpsc::Sender<crate::transport::udp::Cmd>) -> Self {
         let (tx, _) = broadcast::channel(NOTICE_LAG);
-        Self { id, node: Mutex::new(node), tx }
+        Self { id, node: Mutex::new(node), tx, udp }
     }
 
-    pub fn into_server(self) -> SfuServiceServer<Self> {
-        SfuServiceServer::new(self)
+    pub fn into_server(self: Arc<Self>) -> SfuServiceServer<Self> {
+        SfuServiceServer::from_arc(self)
+    }
+
+    /// ★**미디어가 죽은 Peer 를 거둔다**(정§2-2 reaper) — 주기는 5초 하나다.
+    pub fn spawn_reaper(self: &Arc<Self>) {
+        let me = self.clone();
+        tokio::spawn(async move {
+            let mut iv = tokio::time::interval(std::time::Duration::from_millis(
+                crate::reaper::TICK_MS,
+            ));
+            loop {
+                iv.tick().await;
+                let reaped = {
+                    let mut node = me.node.lock().await;
+                    handle::reaper_tick(&mut node, now_ms())
+                };
+                for r in reaped {
+                    for n in r.notices {
+                        me.emit(n);
+                    }
+                    // ★**태스크 종료까지가 회수다**(정§17-2 ④ · 실사고 20260814).
+                    let _ = me.udp.send(crate::transport::udp::Cmd::DropSession(r.session_id)).await;
+                }
+            }
+        });
+    }
+
+    /// 통지 한 장을 스트림으로. ★**보낼 곳이 없으면 버린다** — 막지 않는다(정§15-4 `Drop`).
+    fn emit(&self, n: handle::Notice) {
+        let _ = self.tx.send(Envelope {
+            room_id: n.room_id,
+            exclude: n.exclude,
+            target: n.target.unwrap_or_default(),
+            wire: n.wire,
+            ..Default::default()
+        });
     }
 }
 
@@ -79,13 +118,7 @@ impl SfuService for Sfu {
             handle::dispatch(&mut node, &ing, header, body)
         };
         for n in out.notices {
-            // ★보낼 곳이 없으면(hub 가 아직 안 붙었다) 버린다 — 막지 않는다.
-            let _ = self.tx.send(Envelope {
-                room_id: n.room_id,
-                exclude: n.exclude,
-                wire: n.wire,
-                ..Default::default()
-            });
+            self.emit(n);
         }
         Ok(Response::new(Envelope { wire: out.reply, ..Default::default() }))
     }

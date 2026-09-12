@@ -101,18 +101,46 @@ async fn main() -> std::process::ExitCode {
     };
     let node = oxsfud::handle::Node::new(
         epoch.clone(),
-        dtls,
-        ip,
+        dtls.clone(),
+        ip.clone(),
         udp,
         policy.media.max_bitrate_bps as u64,
     );
-    let svc = oxsfud::grpc::Sfu::new(
+
+    // ★★**광고하는 IP 로 바인드한다.** 응답의 **출발 주소**가 요청의 **목적 주소**와 같아야
+    //   하고(RFC 5389 §7.3.1), `0.0.0.0` 으로 열면 커널이 경로를 보고 다른 IP 를 고른다 —
+    //   클라는 그것을 ★**source address mismatch** 로 읽고 그 후보를 버린다(실측 20260912).
+    //
+    //   ★**못 붙으면 `0.0.0.0`** 이다 — 광고값이 이 기계의 주소가 아닌 배치(NAT 뒤 공인 IP)가
+    //   그 경우이고, 거기서는 NAT 이 출발 주소를 도로 공인 IP 로 바꿔 준다. 어느 쪽인지
+    //   로그가 말한다(조용히 갈리지 않는다).
+    let sock = match tokio::net::UdpSocket::bind((ip.as_str(), udp)).await {
+        Ok(v) => {
+            eprintln!("[udp] listen {ip}:{udp}");
+            std::sync::Arc::new(v)
+        }
+        Err(e) => match tokio::net::UdpSocket::bind(("0.0.0.0", udp)).await {
+            Ok(v) => {
+                eprintln!("[udp] listen 0.0.0.0:{udp} — 광고값 {ip} 는 이 기계 것이 아니다({e}). NAT 배치로 본다");
+                std::sync::Arc::new(v)
+            }
+            Err(e) => {
+                eprintln!("udp {udp}: {e}");
+                return std::process::ExitCode::from(1);
+            }
+        },
+    };
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(64);
+    tokio::spawn(oxsfud::transport::udp::serve(sock, node.ice.clone(), dtls.cert, cmd_rx));
+    let svc = std::sync::Arc::new(oxsfud::grpc::Sfu::new(
         oxsfud::grpc::Identity {
             epoch,
             build: common::BuildId::new(args.build.clone()).line(),
         },
         node,
-    );
+        cmd_tx,
+    ));
+    svc.spawn_reaper();
     eprintln!("[b] listen {listen}");
     if let Err(e) = tonic::transport::Server::builder()
         .add_service(svc.into_server())

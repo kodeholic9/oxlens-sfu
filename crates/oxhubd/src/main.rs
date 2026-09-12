@@ -806,7 +806,15 @@ async fn spawn_notice_pump(hub: Shared, addr: String) {
 }
 
 /// 통지 한 장을 그 방의 로컬 멤버에게. ★**`exclude` 는 받는 쪽이 적용한다**(정§15-4).
+///
+/// ★**`target` 이 있으면 그 사람에게만** 간다(정§15-4 가름) — 방 명단을 거치지 않는다.
+/// 회수 통지(`media_lost`)가 그 길이다: 그 사람은 ★**이미 명단에서 빠진 뒤**라 방으로
+/// 흘리면 닿지 않는다.
 async fn deliver(hub: &Shared, env: &common::b::Envelope) {
+    if !env.target.is_empty() {
+        deliver_to_user(hub, env).await;
+        return;
+    }
     let targets: Vec<String> = {
         let m = hub.members.lock().await;
         m.get(&env.room_id).cloned().unwrap_or_default()
@@ -883,6 +891,34 @@ fn room_of(op: oxsig::Op, body: &[u8]) -> Option<String> {
         // ★한 요청이 두 방을 바꿀 수 있다 — 라우팅은 `pub_select` 가 먼저다(연§6-4).
         oxsig::Op::Affiliation => pick("pub_select").or_else(|| pick("pub_deselect")),
         _ => None,
+    }
+}
+
+/// 그 사람의 소켓에만. ★**생존을 판정하지 않는다**(정§17-2 ⑧) — 붙어 있으면 닿고,
+/// 아니면 사라진다. 사라진 것은 재접속의 `RESUME` 스냅샷이 답한다.
+async fn deliver_to_user(hub: &Shared, env: &common::b::Envelope) {
+    let sessions: Vec<String> = {
+        hub.sessions.lock().await.sessions_of(&env.target)
+    };
+    if sessions.is_empty() {
+        return;
+    }
+    // ★그 사람은 그 방에서 이미 빠졌다 — 로컬 장부도 따라간다(안 따라가면 유령이 남는다).
+    if !env.room_id.is_empty() {
+        let mut m = hub.members.lock().await;
+        if let Some(v) = m.get_mut(&env.room_id) {
+            v.retain(|s| !sessions.contains(s));
+        }
+    }
+    let Ok((h, body)) = oxsig::frame::decode(&env.wire) else { return };
+    let body = body.to_vec();
+    let socks = hub.sockets.lock().await;
+    for sid in &sessions {
+        let Some((_, tx)) = socks.get(sid) else { continue };
+        let pid = hub.next_pid.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut out = Vec::with_capacity(oxsig::frame::HEADER_LEN + body.len());
+        oxsig::frame::encode(&mut out, oxsig::frame::Header::new(h.kind, h.op, pid), &body);
+        let _ = tx.send(Out::Frame(out)).await;
     }
 }
 

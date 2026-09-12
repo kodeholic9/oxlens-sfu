@@ -7,16 +7,19 @@
 //! 그래서 이 모듈은 ★**소켓도 시계도 모른다**: 판정만 하고 나갈 것을 낸다(hub 의 `ws` 와 같은 규율).
 
 use oxsig::body::data::{AffiliationCause, AffiliationReq, AffiliationRes};
-use oxsig::body::notify::{ParticipantChange, ParticipantEvent};
+use oxsig::body::notify::{ParticipantChange, ParticipantEvent, RoomEvent, RoomEventType};
 use oxsig::body::room::{RoomJoinReq, RoomJoinRes, RoomLeaveReq, RoomLeaveRes, ServerConfig};
 use oxsig::body::session::PcMode;
 use oxsig::frame::{self, Header, Kind as FrameKind};
 use oxsig::types::{Assign, Kind, StreamType, TrackEntry};
+use std::sync::Arc;
+
 use oxsig::{Code, Failure, Op};
 
 use crate::identity::{self, Dtls};
 use crate::peer::Peers;
 use crate::room::{Member, Rooms};
+use crate::transport::{IceRole, IceTable};
 
 /// hub 가 봉투에 실어 준 신원. ★**body 를 믿지 않는다** — `user_id` 는 hub 세션이 주입한다.
 #[derive(Debug, Clone)]
@@ -29,11 +32,13 @@ pub struct Ingress {
     pub pc_mode: PcMode,
 }
 
-/// 방 전원에게 갈 통지 하나. ★**`exclude` 는 받는 hub 가 적용한다**(정§15-4).
+/// 나갈 통지 하나. ★**`exclude` 는 받는 hub 가 적용한다**(정§15-4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Notice {
     pub room_id: String,
     pub exclude: Vec<String>,
+    /// ★있으면 **그 사람에게만** — 없으면 그 방 전원(정§15-4 가름).
+    pub target: Option<String>,
     pub wire: Vec<u8>,
 }
 
@@ -56,11 +61,26 @@ pub struct Node {
     pub max_bitrate_bps: u64,
     pub rooms: Rooms,
     pub peers: Peers,
+    /// ★**전송의 문패** — ufrag 로 찾는다. 읽는 쪽(UDP 루프)은 자물쇠를 안 잡는다.
+    pub ice: Arc<IceTable>,
+    /// 세션마다의 전송 생존 판정(정§2-2). ★**Peer 와 따로 둔다** — 한 값으로 합치면
+    /// 미디어 흐름 단계와 섞여 비교 반전이 감지를 통째로 죽인다(20260816 실사고).
+    health: std::collections::BTreeMap<String, crate::reaper::Health>,
 }
 
 impl Node {
     pub fn new(epoch: String, dtls: Dtls, ip: String, port: u16, max_bitrate_bps: u64) -> Self {
-        Self { epoch, dtls, ip, port, max_bitrate_bps, rooms: Rooms::new(), peers: Peers::new() }
+        Self {
+            epoch,
+            dtls,
+            ip,
+            port,
+            max_bitrate_bps,
+            rooms: Rooms::new(),
+            peers: Peers::new(),
+            ice: Arc::new(IceTable::new()),
+            health: std::collections::BTreeMap::new(),
+        }
     }
 
     /// 무전 audio 슬롯 하나 — ★**방과 수명이 같아 입장 응답에 이미 배관돼 있다**(정§6-2).
@@ -124,7 +144,15 @@ fn notice(room_id: &str, exclude: Vec<String>, op: Op, body: &impl serde::Serial
     let b = json(body);
     let mut wire = Vec::with_capacity(frame::HEADER_LEN + b.len());
     frame::encode(&mut wire, Header::new(FrameKind::Request, op, 0), &b);
-    Notice { room_id: room_id.to_string(), exclude, wire }
+    Notice { room_id: room_id.to_string(), exclude, target: None, wire }
+}
+
+/// 그 사람에게만 가는 통지. ★**생존을 판정하지 않는다**(정§17-2 ⑧) — 그 사람의 키에
+/// 놓으면 그만이고, 붙어 있으면 닿는다. 안 닿으면 재접속의 `RESUME` 스냅샷이 답한다.
+fn unicast(room_id: &str, user_id: &str, op: Op, body: &impl serde::Serialize) -> Notice {
+    let mut n = notice(room_id, Vec::new(), op, body);
+    n.target = Some(user_id.to_string());
+    n
 }
 
 /// ★**한 프레임 = 한 응답**(+ 통지 몇). 조용한 성공이 없다.
@@ -146,9 +174,22 @@ fn room_join(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Out
         return Outcome { reply: fail(header, Code::RoomNotFound), notices: Vec::new() };
     }
     // ★**Peer 가 단위다** — 같은 신원의 옛 Peer 는 그 서버의 **모든 방**에서 함께 걷힌다(정§4-2 ②).
-    let (i, orphaned) = node.peers.ensure(&ing.session_id, &ing.user_id, ing.pc_mode);
+    let e = node.peers.ensure(&ing.session_id, &ing.user_id, ing.pc_mode);
+    let i = e.idx;
+    if let Some(old) = &e.evicted {
+        // ★걷힌 Peer 의 전송 자격도 같이 내린다 — 안 내리면 ★**옛 패킷이 새 Peer 를 건드린다.**
+        node.ice.drop_session(old);
+    }
+    if e.created {
+        // ★**자격은 Peer 마다 새로 발급한다**(연§9-3) — 재입장이 새 자격인 근거가 여기다.
+        let p = node.peers.at(i);
+        let (pu, su) = (p.ice.publish_ufrag.clone(), p.ice.subscribe_ufrag.clone());
+        let (pp, sp) = (p.ice.publish_pwd.clone(), p.ice.subscribe_pwd.clone());
+        node.ice.insert(&pu, &pp, &ing.session_id, IceRole::Publish);
+        node.ice.insert(&su, &sp, &ing.session_id, IceRole::Subscribe);
+    }
     let mut notices = Vec::new();
-    for r in orphaned {
+    for r in e.orphaned {
         if let Some(room) = node.rooms.get_mut(&r)
             && room.leave(&ing.user_id)
         {
@@ -308,4 +349,95 @@ fn affiliation(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> O
     };
     // ★`version` 을 싣지 않는다 — 소속은 내 세션 것이라 방 공통 스냅샷에 없다(연§4-6-3).
     Outcome { reply: ok(header, &json(&res)), notices: Vec::new() }
+}
+
+/// ★**퇴장 정리 — 순서가 계약이다**(정§17-2). `ROOM_LEAVE`·축출·좀비 회수 셋이 이리로 모인다.
+///
+/// ```text
+/// ① 발언권 정리 먼저      — 발언권 덩어리에서 붙인다(이행)
+/// ② 명단 제거             — 실패하면 멈춘다(거짓 성공 금지)
+/// ③ 구독 역색인 detach    — 구독 덩어리(이행)
+/// ④ 마지막 방이면 전송 해제 — ufrag·주소 내리고 Peer 제거, ★**태스크 종료까지가 회수다**
+/// ⑤ 화자 판정기에서 제거   — 발언권 덩어리(이행)
+/// ⑥ TRACK_EVENT{remove}   — 트랙 덩어리(이행)
+/// ⑦ PARTICIPANT_EVENT{left} broadcast
+/// ⑧ 좀비 경로만 — 방마다 `ROOM_EVENT{media_lost}` unicast
+/// ```
+///
+/// ★**④가 태스크 종료를 빠뜨리면 누수다**(실사고 20260814) — 그래서 부르는 쪽이
+/// `Reaped.session_id` 로 전송 루프의 통로까지 닫는다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reaped {
+    pub session_id: String,
+    pub user_id: String,
+    pub notices: Vec<Notice>,
+}
+
+pub fn reap(node: &mut Node, session_id: &str, zombie: bool) -> Option<Reaped> {
+    let (user_id, hidden) = {
+        let p = node.peers.get_mut(session_id)?;
+        // 투명 여부는 방 명단이 안다 — Peer 는 신원만 쥔다.
+        (p.user_id.clone(), false)
+    };
+    let rooms = node.peers.drop_session(session_id);
+    let mut notices = Vec::new();
+    for r in &rooms {
+        let Some(room) = node.rooms.get_mut(r) else { continue };
+        let was_hidden = room.is_hidden(&user_id);
+        // ② 명단 제거 — 없으면 그 방은 건너뛴다(거짓 성공 금지).
+        if !room.leave(&user_id) {
+            continue;
+        }
+        let version = room.version(&node.epoch);
+        // ⑦ ★`hidden` 은 **발신 제외**다 — 그 사람의 퇴장을 남에게 보내지 않는다.
+        if !was_hidden && !hidden {
+            notices.push(left_notice(r, &user_id, version));
+        }
+        // ⑧ ★**좀비 경로만** — 방마다 하나씩, 당사자에게만.
+        if zombie {
+            notices.push(unicast(
+                r,
+                &user_id,
+                Op::RoomEvent,
+                &RoomEvent {
+                    event_type: RoomEventType::Affiliation,
+                    room_id: r.clone(),
+                    // ★회수 뒤의 스냅샷이다 — 그 서버에서 아무 데도 안 듣고 안 말한다.
+                    affiliation: Some(oxsig::Affiliation { sub_rooms: Vec::new(), pub_room: None }),
+                    cause: Some(AffiliationCause::MediaLost),
+                    reason: None,
+                },
+            ));
+        }
+    }
+    // ④ 전송 등록 해제 — ★자격을 내려야 옛 패킷이 새 Peer 를 못 건드린다.
+    node.ice.drop_session(session_id);
+    Some(Reaped { session_id: session_id.to_string(), user_id, notices })
+}
+
+/// reaper 한 걸음 — ★**주체는 하나다**(정§2-2). 회수까지 같은 tick 안에서 끝난다.
+///
+/// ★`Zombie` 는 종착이 아니라 삭제다 — 상태로 남겨 두면 다음 tick 이 또 회수한다.
+pub fn reaper_tick(node: &mut Node, now: u64) -> Vec<Reaped> {
+    let seen = node.ice.last_seen_by_session();
+    let mut dead = Vec::new();
+    for (sid, last) in seen {
+        let h = node.health.entry(sid.clone()).or_default();
+        *h = h.tick(last, now);
+        if h.state == crate::reaper::PeerState::Zombie {
+            dead.push(sid);
+        }
+    }
+    let mut out = Vec::new();
+    for sid in dead {
+        node.health.remove(&sid);
+        if let Some(r) = reap(node, &sid, true) {
+            eprintln!("[reap] {} 회수 — 방 {}", r.session_id, r.notices.len());
+            out.push(r);
+        }
+    }
+    // 사라진 세션의 판정표도 함께 거둔다 — 안 거두면 표가 단조 증가한다.
+    let live: Vec<String> = node.ice.last_seen_by_session().into_iter().map(|(s, _)| s).collect();
+    node.health.retain(|s, _| live.contains(s));
+    out
 }
