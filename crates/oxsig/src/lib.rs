@@ -6,6 +6,7 @@
 //! ★**body 의 권위는 이 크레이트의 타입이다.** `serde_json::Value` 로 받아 넘기지 않는다 —
 //! 형을 비껴가면 어느 필드가 계약인지가 소스마다 갈린다.
 
+pub mod body;
 pub mod code;
 pub mod frame;
 pub mod op;
