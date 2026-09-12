@@ -503,6 +503,8 @@ async fn create_room(
     if max_rooms > 0 && rooms.get(&id).is_none() && rooms.len() as u32 >= max_rooms {
         return Err(fail(oxsig::Code::QuotaExceeded));
     }
+    // ★**이번에 새로 서는 방인가** — 못 밀었을 때 거둘 대상을 가르는 값이다.
+    let fresh = rooms.get(&id).is_none();
     // ★멱등 — 같은 id 로 다시 부르면 그 방이 그대로 온다(`name` 은 무시).
     let r = rooms.create(Record {
         id: id.clone(),
@@ -520,7 +522,17 @@ async fn create_room(
     });
     drop(rooms);
     // ★**그 자리에서 민다** — tick 을 기다리면 갓 만든 방의 `ROOM_JOIN` 이 `3001` 을 본다.
-    sync_room(&hub, &id).await;
+    //
+    // ★★**못 닿으면 `5001` 이고, 방금 만든 줄은 도로 거둔다**(정§15-5 *"맵은 있는데 그
+    //   node 에 못 닿는다"*). 조용히 성공으로 답하면 hub 장부에만 방이 남아
+    //   ★`GET /rooms/{id}` 는 있다 하고 `ROOM_JOIN` 은 `3001` 을 내는 ★**두 입**이 된다.
+    //   ★**멱등으로 돌아온 방은 안 거둔다** — 남의 방을 내 실패로 지우는 셈이다.
+    if !sync_room(&hub, &id).await {
+        if fresh {
+            hub.rooms.lock().await.remove(&id);
+        }
+        return Err(fail(oxsig::Code::SfuUnavailable));
+    }
     Ok((StatusCode::CREATED, Json(body)))
 }
 
@@ -813,7 +825,9 @@ async fn b_client(addr: &str) -> Option<BClient> {
 /// ★**조회는 그때 묻는다**(정§15-5 조회 op) — tick 캐시로 답하면 방금 들어온 사람이
 /// 목록에 없고(`user_count` 0 · `seq` 0), *"아직 못 물어봤다"* 와 *"정말 비었다"* 가 한 값이 된다.
 /// ★생성 직후에도 민다 — 안 그러면 갓 만든 방의 `ROOM_JOIN` 이 `3001` 을 본다.
-async fn sync_room(hub: &Shared, id: &str) {
+/// 그 방 한 줄을 맡은 sfud 에 민다. ★**닿았는가를 돌려준다** — 조용히 실패하면
+/// hub 장부에만 방이 남아 `GET /rooms/{id}` 는 있다 하고 `ROOM_JOIN` 은 `3001` 을 낸다.
+async fn sync_room(hub: &Shared, id: &str) -> bool {
     let rec = {
         let l = hub.rooms.lock().await;
         l.get(id).map(|r| common::b::RoomRecord {
@@ -825,17 +839,17 @@ async fn sync_room(hub: &Shared, id: &str) {
         })
     };
     let (Some(rec), Some(addr)) = (rec, addr_for_room(hub, id).await) else {
-        return;
+        return false;
     };
-    let Some(mut c) = b_client(&addr).await else { return };
+    let Some(mut c) = b_client(&addr).await else { return false };
     let led = common::b::RoomLedger {
         node_id: hub.resolved.node_id.clone(),
         put: vec![rec],
         drop: Vec::new(),
     };
-    if let Ok(v) = c.rooms(led).await {
-        absorb_view(hub, v.into_inner()).await;
-    }
+    let Ok(v) = c.rooms(led).await else { return false };
+    absorb_view(hub, v.into_inner()).await;
+    true
 }
 
 /// sfud 가 준 현황을 대장에 덧씌운다. ★**만료는 sfud 가 판정한다** — hub 는 지우기만 한다.
