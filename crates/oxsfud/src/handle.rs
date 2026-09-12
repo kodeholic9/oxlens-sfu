@@ -58,6 +58,9 @@ pub struct Notice {
     ///
     /// ★**보내는 쪽이 말한다** — 받는 쪽이 통지를 뜯어 짐작하면 판정이 두 곳으로 갈린다.
     pub evict: bool,
+    /// ★**빠진 것은 그 세션 하나다** — 한 사람이 두 자리에 붙어 있을 수 있으므로
+    /// 사람 이름으로 걷으면 ★**산 세션까지 명단에서 사라진다**(다기기 형상).
+    pub evict_session: Option<String>,
     pub wire: Vec<u8>,
 }
 
@@ -191,7 +194,14 @@ fn notice(room_id: &str, exclude: Vec<String>, op: Op, body: &impl serde::Serial
     let b = json(body);
     let mut wire = Vec::with_capacity(frame::HEADER_LEN + b.len());
     frame::encode(&mut wire, Header::new(FrameKind::Request, op, 0), &b);
-    Notice { room_id: room_id.to_string(), exclude, target: None, evict: false, wire }
+    Notice {
+        room_id: room_id.to_string(),
+        exclude,
+        target: None,
+        evict: false,
+        evict_session: None,
+        wire,
+    }
 }
 
 /// 그 사람에게만 가는 통지. ★**생존을 판정하지 않는다**(정§17-2 ⑧) — 그 사람의 키에
@@ -560,6 +570,7 @@ pub fn reap(node: &mut Node, session_id: &str, zombie: bool) -> Option<Reaped> {
             );
             // ★**이 한 장만 "그 방에서 빠졌다" 는 뜻이다** — hub 가 제 명단에서 뺀다.
             n.evict = true;
+            n.evict_session = Some(session_id.to_string());
             notices.push(n);
         }
     }
@@ -697,6 +708,9 @@ pub fn reaper_tick(node: &mut Node, now: u64) -> Vec<Reaped> {
         let h = node.health.entry(sid.clone()).or_default();
         *h = h.tick(last, now);
         if h.state == crate::reaper::PeerState::Zombie {
+            // ★**무엇을 보고 내렸는지 같이 남긴다** — 사후에 "왜 거뒀나" 를 못 짚으면
+            //   엉뚱한 회수가 다른 시나리오의 빨강으로만 드러난다.
+            eprintln!("[reap] {sid} 좀비 — 마지막 관측 {}ms 전", now.saturating_sub(last));
             dead.push(sid);
         }
     }

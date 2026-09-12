@@ -1032,9 +1032,15 @@ async fn deliver_to_user(hub: &Shared, env: &common::b::Envelope) {
     //   명단에서 사라져** 그 뒤로 그 방의 방송이 아무에게도 안 간다(실측 20260912 —
     //   늦게 들어온 사람의 `joined` 가 기존 참가자에게 통째로 안 갔다).
     if env.evict && !env.room_id.is_empty() {
+        // ★**말한 세션 하나만** 뺀다 — 사람 이름으로 걷으면 같은 사람의 산 세션까지 사라진다.
+        let gone: Vec<String> = if env.evict_session.is_empty() {
+            sessions.clone()
+        } else {
+            vec![env.evict_session.clone()]
+        };
         let mut m = hub.members.lock().await;
         if let Some(v) = m.get_mut(&env.room_id) {
-            v.retain(|s| !sessions.contains(s));
+            v.retain(|s| !gone.contains(s));
         }
     }
     let Ok((h, body)) = oxsig::frame::decode(&env.wire) else { return };

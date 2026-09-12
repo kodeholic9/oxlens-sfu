@@ -53,6 +53,9 @@ message Envelope {
   //   ★이것 없이 "target 이 있으면 뺀다" 로 두면 ★**수신자별 통지(TRACK_EVENT 등) 한 장에
   //   그 사람이 명단에서 사라져** 이후 그 방의 방송이 아무에게도 안 간다(실측 20260912).
   bool evict = 11;
+  // ★**빠진 것은 그 세션 하나다** — 한 사람이 두 자리에 붙어 있을 수 있으므로 사람
+  //   이름으로 걷으면 산 세션까지 명단에서 사라진다. 비어 있으면 그 사람 전부다(옛 뜻).
+  string evict_session = 12;
 }
 
 message SubscribeRequest {

@@ -142,6 +142,7 @@ impl Sfu {
             exclude: n.exclude,
             target: n.target.unwrap_or_default(),
             evict: n.evict,
+            evict_session: n.evict_session.unwrap_or_default(),
             wire: n.wire,
             ..Default::default()
         });
