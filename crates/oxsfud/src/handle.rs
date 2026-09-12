@@ -285,12 +285,31 @@ fn room_join(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Out
     };
     let affiliation = peer.affiliation();
 
+    // ★★**완결 스냅샷이다 — 기존 트랙까지 담는다**(연§6-2 · 정§15-4 안전망).
+    //
+    // ★**늦게 들어온 사람에게는 이것이 유일한 기회다** — `TRACK_EVENT{add}` 는 발행하는
+    // 순간에만 나가므로, 여기서 안 담으면 그 사람은 배정을 ★**영영 못 받고** 이미 흐르는
+    // 스트림이 화면에 안 뜬다(관심 선언과 JOIN 사이의 창을 메우는 것도 이 자리다).
+    let mut tracks = vec![node.audio_slot(&req.room_id, slot_ssrc, mid)];
+    let existing: Vec<Publication> = node
+        .publications
+        .iter()
+        .filter(|p| p.room_id == req.room_id && p.duplex == Duplex::Full)
+        .filter(|p| p.session_id != ing.session_id)
+        .cloned()
+        .collect();
+    for p in &existing {
+        let mut e = p.entry();
+        e.assign = assign_for(node.peers.at_mut(i), p);
+        tracks.push(e);
+    }
+
     let res = RoomJoinRes {
         room_id: req.room_id.clone(),
         participants,
         affiliation,
         server_config: node.server_config(i),
-        tracks: vec![node.audio_slot(&req.room_id, slot_ssrc, mid)],
+        tracks,
         version: version.clone(),
     };
     // ★**당사자에게는 응답이 그 스냅샷을 대신한다** — `exclude` 는 이 한 자리뿐이다(정§14-2).
@@ -709,6 +728,21 @@ fn publish_remove(node: &mut Node, ing: &Ingress, header: Header, req: &PublishT
     Outcome { reply: ok(header, &json(&res)), notices, routes }
 }
 
+/// 그 구독자에게 이 스트림의 자리를 잡아 준다. ★**이미 있으면 그것을 그대로 쓴다** —
+/// 다시 발급하면 클라가 지은 m-line 과 어긋난다.
+///
+/// ★**고갈이면 `None`** — 배정 없이 항목만 간다(연§4-1 *"고갈 시 없다"*).
+fn assign_for(peer: &mut crate::peer::Peer, p: &Publication) -> Option<Assign> {
+    if let Some(a) = peer.assigns.get(&p.track_id) {
+        return Some(a.clone());
+    }
+    let key = crate::pt::Tuple::new(p.kind, p.codec.as_deref().unwrap_or("opus"), p.fmtp.as_deref());
+    let (pt, rtx_pt) = peer.pt.get_or_assign(&key, p.rtx_ssrc.is_some())?;
+    let a = Assign { mid: peer.mids.take(p.kind), pt, rtx_pt };
+    peer.assigns.insert(p.track_id.clone(), a.clone());
+    Some(a)
+}
+
 /// ★★**수신자마다 프레임이 다르다** — `assign` 이 수신자 것이기 때문이다(연§4-1-1).
 ///
 /// 그래서 broadcast 가 아니라 ★**사람마다 한 장**이고, ★**발행자 본인에게도 자기 항목**이 간다
@@ -742,17 +776,9 @@ fn announce(
         let mut entries = Vec::new();
         for p in &pubs {
             let mut e = p.entry();
+            // ★**발행자 본인에게는 `assign` 이 없다** — 자기 트랙이라 배정할 자리가 없다.
             if me != publisher {
-                let key = crate::pt::Tuple::new(p.kind, p.codec.as_deref().unwrap_or("opus"), p.fmtp.as_deref());
-                let Some((pt, rtx_pt)) = peer.pt.get_or_assign(&key, p.rtx_ssrc.is_some()) else {
-                    // ★PT 예산 고갈 — 배정 없이 보낸다(연§4-1 *"고갈 시 없다"*).
-                    entries.push(e);
-                    continue;
-                };
-                let mid = peer.mids.take(p.kind);
-                let a = Assign { mid, pt, rtx_pt };
-                peer.assigns.insert(p.track_id.clone(), a.clone());
-                e.assign = Some(a);
+                e.assign = assign_for(peer, p);
             }
             entries.push(e);
         }
