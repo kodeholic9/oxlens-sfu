@@ -115,22 +115,39 @@ pub fn nack_seqs(pkt: &[u8]) -> Option<(u32, Vec<u16>)> {
     Some((media_ssrc, out))
 }
 
-/// ★**RTX 한 장을 짓는다**(RFC 4588) — ★**원본 seq 를 payload 앞 2바이트(OSN)에 싣고**
+/// 머리 끝 = 본문 시작. ★**고정 12바이트가 아니다** — CSRC 와 확장이 그 뒤에 온다.
+fn head_len(pkt: &[u8]) -> Option<usize> {
+    if pkt.len() < 12 || pkt[0] >> 6 != 2 {
+        return None;
+    }
+    let mut at = 12 + (pkt[0] & 0x0F) as usize * 4;
+    if pkt[0] & 0x10 != 0 {
+        if pkt.len() < at + 4 {
+            return None;
+        }
+        at += 4 + u16::from_be_bytes([pkt[at + 2], pkt[at + 3]]) as usize * 4;
+    }
+    (at <= pkt.len()).then_some(at)
+}
+
+/// ★**RTX 한 장을 짓는다**(RFC 4588) — ★**원본 seq 를 본문 앞 2바이트(OSN)에 싣고**
 /// 머리는 재전송용 `ssrc`·`pt`·제 seq 를 쓴다.
 ///
 /// ★**본문을 다시 마샬링하지 않는다** — 머리만 새로 쓰고 원본을 통째로 붙인다.
+///
+/// ★★**OSN 은 머리 뒤다 — 고정 12바이트 뒤가 아니다.** 확장을 단 패킷에 12바이트만 베끼고
+/// 그 자리에 OSN 을 끼우면 ★**X 비트는 선 채로 확장 시작이 2바이트 밀려** 받는 쪽이 남의
+/// 바이트를 확장으로 읽는다(우리가 egress 에 transport-cc 를 찍기 시작하면서 드러났다).
 pub fn build_rtx(orig: &[u8], rtx_ssrc: u32, rtx_pt: u8, rtx_seq: u16) -> Option<Vec<u8>> {
-    if orig.len() < 12 {
-        return None;
-    }
+    let head = head_len(orig)?;
     let mut out = Vec::with_capacity(orig.len() + 2);
-    out.extend_from_slice(&orig[..12]);
+    out.extend_from_slice(&orig[..head]);
     out[1] = (orig[1] & 0x80) | (rtx_pt & 0x7F);
     out[2..4].copy_from_slice(&rtx_seq.to_be_bytes());
     out[8..12].copy_from_slice(&rtx_ssrc.to_be_bytes());
     // ★OSN — 받는 쪽은 이 둘로 원래 자리를 안다.
     out.extend_from_slice(&orig[2..4]);
-    out.extend_from_slice(&orig[12..]);
+    out.extend_from_slice(&orig[head..]);
     Some(out)
 }
 
@@ -404,6 +421,34 @@ mod tests {
         assert_eq!(u16::from_be_bytes([out[12], out[13]]), 43);
         assert_eq!(&out[14..], b"frame", "★본문 무접촉");
         assert_eq!(out.len(), orig.len() + 2, "★2바이트만 는다");
+    }
+
+    #[test]
+    fn rtx_는_확장을_단_것도_자리를_안_흔든다() {
+        // ★egress 에 transport-cc 를 찍기 시작하면서 드러난 자리다 — 12바이트 뒤에 OSN 을
+        //   끼우면 X 비트는 선 채로 확장 시작이 2바이트 밀린다.
+        let mut orig = vec![0x90, 96, 0, 43, 0, 0, 0, 9];
+        orig.extend_from_slice(&0x1111_1111u32.to_be_bytes());
+        orig.extend_from_slice(&0xBEDEu16.to_be_bytes());
+        orig.extend_from_slice(&1u16.to_be_bytes());
+        orig.extend_from_slice(&[(6 << 4) | 1, 0x12, 0x34, 0]);
+        orig.extend_from_slice(b"frame");
+        let out = build_rtx(&orig, 0x2222_2222, 97, 5).expect("짓는다");
+        // ★확장은 제자리 그대로다.
+        assert_eq!(&out[12..20], &orig[12..20]);
+        assert_eq!(crate::rtpext::get(&out, 6), Some(&[0x12, 0x34][..]));
+        // ★OSN 은 머리(확장 포함) 뒤다.
+        assert_eq!(u16::from_be_bytes([out[20], out[21]]), 43);
+        assert_eq!(&out[22..], b"frame", "★본문 무접촉");
+        assert_eq!(out.len(), orig.len() + 2);
+    }
+
+    #[test]
+    fn 머리가_거짓이면_안_짓는다() {
+        // ★확장 길이가 버퍼를 넘으면 자리를 셀 수 없다 — 지어내지 않는다.
+        let bad = vec![0x90, 96, 0, 1, 0, 0, 0, 0, 0, 0, 0, 7, 0xBE, 0xDE, 0xFF, 0xFF];
+        assert!(build_rtx(&bad, 1, 97, 1).is_none());
+        assert!(build_rtx(&[0u8; 8], 1, 97, 1).is_none());
     }
 
     #[test]

@@ -157,6 +157,10 @@ pub struct Counters {
     pub nack_no_rtx: u64,
     pub nack_budget: u64,
     pub nack_miss: u64,
+    /// 그 구독자의 주소·열쇠를 못 찾은 것.
+    pub nack_no_route: u64,
+    /// RTX 를 못 짓거나 못 봉한 것 — ★**여기가 계수 없이 비면 "왜 0 인가" 를 못 짚는다.**
+    pub nack_build: u64,
     pub rtx_out: u64,
     pub unknown: u64,
 }
@@ -164,7 +168,7 @@ pub struct Counters {
 impl Counters {
     fn line(&self) -> String {
         format!(
-            "stun {}/{}(위조 {}) · dtls {} · srtp in {}(버림 {}) out {} · rtcp in {} out {} · 단 모름 {} 안 보냄 {} 전환 {} 만료 {} · 자동 ↑{} ↓{} 프로브 {} · latch 전 {} 열쇠 전 {} · nack {}(캐시없음 {} rtx없음 {} 못찾음 {}) rtx {} · 모름 {}",
+            "stun {}/{}(위조 {}) · dtls {} · srtp in {}(버림 {}) out {} · rtcp in {} out {} · 단 모름 {} 안 보냄 {} 전환 {} 만료 {} · 자동 ↑{} ↓{} 프로브 {} · latch 전 {} 열쇠 전 {} · nack {}(캐시없음 {} rtx없음 {} 길없음 {} 예산 {} 못찾음 {} 못지음 {}) rtx {} · 모름 {}",
             self.stun_ok,
             self.stun_ok + self.stun_dropped,
             self.forged,
@@ -186,7 +190,10 @@ impl Counters {
             self.nack_in,
             self.nack_no_cache,
             self.nack_no_rtx,
+            self.nack_no_route,
+            self.nack_budget,
             self.nack_miss,
+            self.nack_build,
             self.rtx_out,
             self.unknown
         )
@@ -745,6 +752,7 @@ async fn on_rtcp(
                 let (Some(dst), Some(out)) =
                     (table.get(ufrag).and_then(|e| e.addr()), srtp.get_mut(ufrag))
                 else {
+                    c.nack_no_route += 1;
                     continue;
                 };
                 for want in seqs {
@@ -759,12 +767,15 @@ async fn on_rtcp(
                     };
                     // ★**재전송과 프로브 패딩이 같은 ssrc 를 탄다** — 번호도 한 곳에서 뗀다.
                     let seq = down.entry(ufrag.to_string()).or_default().next_rtx_seq(rtx_ssrc);
-                    if let Some(rtx) = rtcp::build_rtx(&orig, rtx_ssrc, rtx_pt, seq)
-                        && let Some(sealed) = out.seal(&rtx)
-                    {
-                        let _ = socket.send_to(&sealed, dst).await;
-                        c.rtx_out += 1;
-                    }
+                    // ★**못 지었으면 센다** — 여기가 조용하면 "넷 다 0인데 rtx 0" 이 된다.
+                    let sealed =
+                        rtcp::build_rtx(&orig, rtx_ssrc, rtx_pt, seq).and_then(|r| out.seal(&r));
+                    let Some(sealed) = sealed else {
+                        c.nack_build += 1;
+                        continue;
+                    };
+                    let _ = socket.send_to(&sealed, dst).await;
+                    c.rtx_out += 1;
                 }
             }
             // ★★**구독자 피드백을 서버가 소비한다**(정§10-3 v2) — 우리가 매긴 번호로
