@@ -646,7 +646,7 @@ async fn serve_ws(hub: Shared, socket: axum::extract::ws::WebSocket) {
             let mut sessions = hub.sessions.lock().await;
             let before = conn.clone();
             let r = ws::dispatch(&mut conn, &mut sessions, &verify, window_ms, now_ms(), header, body);
-            let ev = ws::evicted_by(&before, &conn, &sessions);
+            let ev = ws::evicted_by(&before, &conn, &mut sessions);
             (r, ev)
         };
         // ★옛 연결에 `LEAVE` `2010` 을 보내고 **소켓을 실제로 닫는다** — 한 세션에 소켓 하나다.

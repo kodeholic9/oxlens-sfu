@@ -131,17 +131,18 @@ pub fn dispatch(
 /// 이 `BIND` 가 누구를 축출했나 — ★**옛 연결에 `LEAVE` `2010` 을 보내야 한다**(정§3-2 #3).
 ///
 /// ★**통보만 하고 유령으로 남기지 않는다** — 남기면 명단에 같은 사람이 둘이다.
-pub fn evicted_by(before: &Conn, after: &Conn, sessions: &Sessions) -> Option<Evicted> {
+pub fn evicted_by(before: &Conn, after: &Conn, sessions: &mut Sessions) -> Option<Evicted> {
     let (Conn::Unbound { .. }, Conn::Bound { session_id }) = (before, after) else {
         return None;
     };
     let me = sessions.get(session_id)?;
+    let (user_id, resumed) = (me.user_id.clone(), me.resumed);
     // ★갈래 둘 — ①판정 3(새 세션이 같은 신원의 산 세션을 축출) ②판정 1(같은 세션을 새 소켓이 이어받음).
     //   ★**둘 다 옛 소켓에 `LEAVE 2010` 을 보내고 닫는다** — 한 세션에 소켓 하나다(정§3-2).
-    if let Some(old) = sessions.evicted_of(&me.user_id, session_id) {
+    if let Some(old) = sessions.take_evicted(&user_id, session_id) {
         return Some(Evicted::Session(old));
     }
-    if me.resumed {
+    if resumed {
         // 같은 `session_id` 를 다른 소켓이 이어받았다 — 그 자리의 옛 소켓을 닫는다.
         return Some(Evicted::Socket(session_id.clone()));
     }
@@ -249,6 +250,33 @@ mod tests {
         let Reply::Ok { body, .. } = r2 else { panic!("이어받아야 한다") };
         let res2: BindRes = serde_json::from_slice(&body).expect("res");
         assert_eq!(res2.session_id, first, "★같으면 세션이 살아 있다는 뜻이다");
+    }
+
+    /// ★**옛 축출 기록이 다음 판정에 새면 안 된다**(실측 20260912).
+    #[test]
+    fn 축출_기록은_한_번만_쓰인다() {
+        let mut s = Sessions::new();
+        let mut c1 = Conn::Unbound { opened_at: 0 };
+        // ①같은 사람이 이미 붙어 있다 — 이 BIND 가 그를 축출한다.
+        dispatch(&mut c1, &mut s, &good, 60_000, 1, h(Op::Bind, 1), br#"{"token":"t"}"#);
+        let mut c2 = Conn::Unbound { opened_at: 0 };
+        let before = c2.clone();
+        dispatch(&mut c2, &mut s, &good, 60_000, 2, h(Op::Bind, 1), br#"{"token":"t"}"#);
+        let first = evicted_by(&before, &c2, &mut s);
+        assert!(matches!(first, Some(Evicted::Session(_))), "{first:?}");
+
+        // ②그 다음 이어받기(판정 1) — ★**옛 기록이 아니라 이 소켓의 자리**가 답이어야 한다.
+        let Conn::Bound { session_id } = c2.clone() else { panic!("붙었다") };
+        let mut c3 = Conn::Unbound { opened_at: 0 };
+        let before = c3.clone();
+        // ★토큰은 형식상 필수다 — 판정 1 은 그 값을 **보지 않는다**(정§3-2).
+        let body = format!(r#"{{"token":"expired","session_id":"{session_id}"}}"#);
+        dispatch(&mut c3, &mut s, &good, 60_000, 3, h(Op::Bind, 1), body.as_bytes());
+        assert_eq!(
+            evicted_by(&before, &c3, &mut s),
+            Some(Evicted::Socket(session_id)),
+            "★기록을 안 비우면 여기서 이미 죽은 옛 세션을 닫으라고 답한다"
+        );
     }
 
     #[test]

@@ -174,12 +174,15 @@ impl Sessions {
         }
     }
 
-    /// 방금 축출된 세션 id — `bind` 가 기록해 둔다.
-    pub fn evicted_of(&self, user_id: &str, except: &str) -> Option<String> {
-        self.last_evicted
-            .iter()
-            .find(|(u, s)| u == user_id && s != except)
-            .map(|(_, s)| s.clone())
+    /// 방금 축출된 세션 id — `bind` 가 기록해 둔 것을 ★**꺼내 온다(비운다).**
+    ///
+    /// ★★**장부가 아니라 한 걸음 들고 있는 것이다.** 안 비우면 옛 축출 기록이 다음 판정에
+    /// 섞여, 이어받기(판정 1)가 ★**이미 죽은 옛 소켓을 닫으라고 답한다** — 그러면 지금
+    /// 살아 있는 옛 소켓은 안 닫히고 `LEAVE` 도 못 받는다(실측 20260912: 한 hub 에
+    /// 같은 `user_id` 가 두 번째로 붙는 순간부터 축출 통지가 사라졌다).
+    pub fn take_evicted(&mut self, user_id: &str, except: &str) -> Option<String> {
+        let i = self.last_evicted.iter().position(|(u, s)| u == user_id && s != except)?;
+        Some(self.last_evicted.remove(i).1)
     }
 
     /// `RESUME` 판정(정§3-3). ★**`2008` 이 유일한 실패다** — 부분 실패 응답 형이 없다.
