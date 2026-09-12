@@ -919,17 +919,57 @@ pub fn on_floor(node: &mut Node, ufrag: &str, payload: &[u8], now: u64) -> Floor
     let Some(entry) = node.ice.get(ufrag) else { return FloorOut::default() };
     let session_id = entry.session_id.clone();
     let Some(msg) = oxsig::mbcp::decode(payload) else { return FloorOut::default() };
+    // ★★**ACK 에는 답하지 않는다 — 어떤 갈래에서도**(정§9-6). 답하면 그 답이 다시 ACK 을
+    //   부르고 둘이 서로를 낳는다(실측 요청 한 번에 33,971통). ★**관문보다 먼저** 본다.
+    if msg.msg_type == oxsig::mbcp::ACK || msg.ack_req {
+        return FloorOut::default();
+    }
+    // ★관문 ① — `0x1D` 가 없으면 ★**계수 후 무응답**이다(돌려줄 방이 없다).
     let Some(room_id) = msg.room().map(str::to_string) else { return FloorOut::default() };
     let Some(peer) = node.peers.get(&session_id) else { return FloorOut::default() };
     let user_id = peer.user_id.clone();
     let in_pub_room = peer.pub_room.as_deref() == Some(room_id.as_str());
-    if !peer.sub_rooms.iter().any(|r| r == &room_id) {
-        return FloorOut::default();
-    }
+    let in_room = peer.sub_rooms.iter().any(|r| r == &room_id);
     let has_half_track = node
         .publications
         .iter()
         .any(|p| p.session_id == session_id && p.duplex == Duplex::Half);
+
+    // ★★**관문 넷은 요청 갈래에만 건다**(정§9-6) — 순서가 계약이다.
+    if msg.msg_type == oxsig::mbcp::REQUEST {
+        use oxsig::mbcp::reject;
+        // ① 미입장 — ★**조용히 첫 방을 고르지 않는다.**
+        // ★사유가 원문에 없으면 `255` + ★**사유 문구**(`0x1B`)로 나른다 — 숫자만 보내면
+        //   클라가 *"기타"* 말고는 아무것도 모른다(정§9-6 — 우리 쪽 오류의 표기법).
+        let why = if !in_room {
+            Some((reject::OTHER, Some("not_in_room")))
+        } else if !has_half_track {
+            // ② ★**무시가 아니다** — 무시하면 클라가 `T101`×3 을 헛되이 태우고 사유를 못 본다.
+            Some((reject::RECEIVE_ONLY, None))
+        } else if !in_pub_room {
+            // ③ 발언권 요청·대기는 `pub_room` 에서만(연§11-5).
+            Some((reject::NOT_PUB_ROOM, None))
+        } else {
+            // ④ 권한 비트는 방이 기억한다(연§4-4-1) — ★**우선순위를 읽기 전이다.**
+            None
+        };
+        if let Some((cause, text)) = why {
+            let mut m = oxsig::mbcp::Msg::new(oxsig::mbcp::DENY)
+                .with_str(oxsig::mbcp::F_ROOM, &room_id)
+                .with_u8(oxsig::mbcp::F_CAUSE, cause)
+                .ack();
+            if let Some(t) = text {
+                m = m.with_str(oxsig::mbcp::F_CAUSE_TEXT, t);
+            }
+            let mut dc = Vec::new();
+            if let Some(body) = m.encode()
+                && let Some(frame) = crate::transport::dc::build(crate::transport::dc::SVC_FLOOR, &body)
+            {
+                dc.push(DcOut { ufrag: entry_pub_ufrag(node, &session_id), wire: frame });
+            }
+            return FloorOut { dc, routes: Vec::new() };
+        }
+    }
 
     let max_burst = node.max_burst_ms;
     let floor = node.floors.entry(room_id.clone()).or_insert_with(|| Floor::new(max_burst));
@@ -1004,6 +1044,11 @@ pub fn floor_routes(node: &Node, room_id: &str) -> Vec<(String, u32, Vec<crate::
             (pub_ufrag(node, &p.session_id), p.ssrc, targets)
         })
         .collect()
+}
+
+/// 그 세션의 발행 자격 — DC 는 ★**보내기용 연결**에 붙는다(연§3-3).
+fn entry_pub_ufrag(node: &Node, session_id: &str) -> String {
+    pub_ufrag(node, session_id)
 }
 
 /// 그 세션의 **발행** 자격 — 전달표의 키 절반이다.
