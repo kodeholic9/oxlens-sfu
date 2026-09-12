@@ -160,3 +160,37 @@ ops_allowed = true
         assert_eq!(check_confirm(Some("sfu-7f3a"), &want), Ok(()));
     }
 }
+
+#[cfg(test)]
+mod confirm_tests {
+    use super::*;
+
+    #[test]
+    fn 안_실으면_누락이고_어긋나면_판_불일치다() {
+        // ★둘을 한 코드로 답하면 부른 쪽이 무엇을 고칠지 모른다.
+        assert_eq!(check_confirm(None, &Confirm::Epoch("e1")), Err(Code::MissingField));
+        assert_eq!(check_confirm(Some("e1"), &Confirm::Epoch("e1")), Ok(()));
+        assert_eq!(
+            check_confirm(Some("e0"), &Confirm::Epoch("e1")),
+            Err(Code::PreconditionFailed)
+        );
+    }
+
+    #[test]
+    fn 이름은_확인값이_될_수_없다는_것을_형이_말한다() {
+        // ★재기동해도 유닛 이름은 같다 — 그래서 `kill` 이 받는 것은 기동 신원이다.
+        assert_eq!(
+            check_confirm(Some("sfu-1"), &Confirm::Epoch("sfu-2894bc56")),
+            Err(Code::PreconditionFailed)
+        );
+    }
+
+    #[test]
+    fn 방은_판까지_본다() {
+        // ★이름만 보면 재생성된 방이 통과한다 — 운영자가 본 방과 지우는 방이 달라진다.
+        let want = Confirm::Version { epoch: "sfu-1", seq: 10 };
+        assert_eq!(check_confirm(Some("sfu-1:10"), &want), Ok(()));
+        assert_eq!(check_confirm(Some("sfu-1:9"), &want), Err(Code::PreconditionFailed));
+        assert_eq!(check_confirm(Some("sfu-1"), &want), Err(Code::PreconditionFailed));
+    }
+}

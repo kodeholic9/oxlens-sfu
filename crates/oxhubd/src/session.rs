@@ -85,6 +85,25 @@ impl Sessions {
     }
 
     /// 그 사람의 세션들 — ★**unicast 통지의 대상**이다(정§17-2 ⑧).
+    /// 운영 §3-3 — ★**붙어 있는 것만** 낸다(소켓이 죽은 것은 창 안에 살아 있어도 "붙어 있지" 않다).
+    ///
+    /// ★**토큰·비밀은 안 낸다.** `hidden` 은 ★여기 나온다 — 명단에서 감추는 것은
+    /// 참가자끼리의 축이고(연§4-4), 운영자는 누가 붙어 있는지 다 본다.
+    pub fn admin_rows(&self) -> Vec<serde_json::Value> {
+        self.items
+            .iter()
+            .filter(|s| s.dead_at.is_none())
+            .map(|s| {
+                serde_json::json!({
+                    "session_id": s.id,
+                    "user_id": s.user_id,
+                    "participant_type": s.participant_type,
+                    "hidden": s.hidden,
+                })
+            })
+            .collect()
+    }
+
     pub fn sessions_of(&self, user_id: &str) -> Vec<String> {
         self.items.iter().filter(|s| s.user_id == user_id).map(|s| s.id.clone()).collect()
     }

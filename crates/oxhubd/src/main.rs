@@ -137,6 +137,12 @@ async fn run(args: Args) -> Result<(), String> {
         .route("/healthz/live", get(|| async { StatusCode::OK }))
         .route("/healthz/ready", get(ready))
         .route("/admin/rooms", get(admin_rooms))
+        .route("/admin/users", get(admin_users))
+        .route("/admin/supervisor/status", get(sup_status))
+        .route("/admin/supervisor/load/:id", axum::routing::post(sup_load))
+        .route("/admin/supervisor/stop/:id", axum::routing::post(sup_stop))
+        .route("/admin/supervisor/kill/:id", axum::routing::post(sup_kill))
+        .route("/admin/supervisor/shutdown", axum::routing::post(sup_shutdown))
         .route("/admin/sfus", get(admin_sfus))
         .route("/admin/snapshot", get(admin_snapshot))
         .with_state(hub.clone());
@@ -253,7 +259,31 @@ async fn apply(hub: &Shared, action: &Action) {
                 Box::pin(apply(hub, &next)).await;
             }
         },
-        Action::Signal(id) => eprintln!("[sup] signal {id}"),
+        // ★★**판단은 supervisor 가 냈고 손은 여기서 쓴다** — 종전엔 한 줄을 적기만 하고
+        //   ★**아무도 안 죽였다.** 그러면 `stop` 이 상태만 바꾸고 프로세스는 그대로 돈다.
+        // ★★**죽이고 그 자리에서 거둔다.** 거두지 않고 두면 다음 `load` 가 같은 이름으로
+        //   자식을 하나 더 만들고, 뒤늦게 옛 자식이 끝났을 때 ★**그 종료가 새 자식의 것으로
+        //   읽힌다** — 상태가 `Starting` 이라 급사로 보여 backoff 가 돌고, 사다리를 다 쓰면
+        //   hub 까지 내려간다(실측 20260913 — 여섯 번 띄우고 hub 가 죽었다).
+        Action::Signal(id) => {
+            let taken = {
+                let mut cs = hub.children.lock().await;
+                cs.iter().position(|(i, _)| i == id).map(|i| cs.remove(i))
+            };
+            match taken {
+                Some((_, mut ch)) => {
+                    let _ = ch.kill();
+                    // ★**기다린다** — 좀비를 남기면 포트가 안 풀려 다음 기동이 조용히 실패한다.
+                    let _ = ch.wait();
+                    eprintln!("[sup] signal {id}");
+                    // ★**끝난 사실을 그 자리에서 알린다** — tick 의 수거기는 이제 이것을 못 본다.
+                    let next = { hub.sup.lock().await.on_exit(id, now_ms()) };
+                    Box::pin(apply(hub, &next)).await;
+                }
+                // ★**없는 것을 죽였다고 적지 않는다** — 이미 끝났거나 우리가 안 띄운 것이다.
+                None => eprintln!("[sup] signal {id} — 자식 목록에 없다(이미 끝났나)"),
+            }
+        }
         Action::ShutdownHub(id) => {
             eprintln!("[sup] ★{id} 가 살아나지 못한다 — hub 를 내린다");
             // ★자식은 우리가 죽이지 않아도 부모 생존 채널로 스스로 끝난다(정§15-6).
@@ -378,6 +408,160 @@ async fn sfu_of_room(hub: &Shared, room_id: &str) -> Option<String> {
     oxhubd::route::place(&nodes, room_id, now_ms()).map(|n| n.node_id.clone())
 }
 
+/// 운영 §3-3 — ★**붙어 있는 세션.** 토큰·비밀은 내지 않는다.
+///
+/// ★`hidden` 은 ★**여기 나온다** — 명단에서 감추는 것은 참가자끼리의 축이고(연§4-4),
+/// 운영자는 누가 붙어 있는지 다 본다.
+async fn admin_users(
+    State(hub): State<Shared>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<oxsig::Failure>)> {
+    authz::admin(&hub.resolved.system, now_ms() / 1000, &peer_of(addr, &headers)).map_err(fail)?;
+    let users = hub.sessions.lock().await.admin_rows();
+    Ok(Json(serde_json::json!({ "total": users.len(), "users": users })))
+}
+
+/// 운영 §4-1 — 유닛별 상태·backoff 잔량·재기동 횟수·기동 신원.
+///
+/// ★`epoch` 를 내는 것은 ★**§5 확인 계약의 입력**이기 때문이다 — `kill` 이 그 값을 되싣는다.
+async fn sup_status(
+    State(hub): State<Shared>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<oxsig::Failure>)> {
+    authz::admin(&hub.resolved.system, now_ms() / 1000, &peer_of(addr, &headers)).map_err(fail)?;
+    let now = now_ms();
+    let sup = hub.sup.lock().await;
+    let units: Vec<serde_json::Value> = sup
+        .units
+        .iter()
+        .map(|u| {
+            serde_json::json!({
+                "id": u.id,
+                "kind": format!("{:?}", u.kind).to_lowercase(),
+                "order": u.order,
+                "state": format!("{:?}", u.state),
+                "restarts": u.restarts,
+                // ★**backoff 중에만 값이 있다** — 아니면 없는 필드다(`0` 으로 메우지 않는다).
+                "next_retry_ms": u.next_retry_ms(now),
+                "epoch": u.epoch,
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "units": units, "supervising": !sup.units.is_empty() })))
+}
+
+/// 운영 §4-1 — 세 손잡이가 같은 모양으로 답한다. ★**`from`·`to` 를 둘 다 낸다**(무엇이
+/// 바뀌었는지 모르면 운영자가 같은 명령을 두 번 친다).
+async fn sup_move(
+    hub: &Shared,
+    id: &str,
+    what: SupMove,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<oxsig::Failure>)> {
+    let moved = {
+        let mut sup = hub.sup.lock().await;
+        match what {
+            SupMove::Load => sup.load(id, now_ms()),
+            SupMove::Stop => sup.stop(id),
+            SupMove::Kill => sup.kill(id),
+        }
+    };
+    // ★**없는 유닛은 `404` 다** — 없는 것을 옮겼다고 답하지 않는다.
+    let Some((from, to, action)) = moved else {
+        return Err(fail(oxsig::Code::RoomNotFound));
+    };
+    apply(hub, &action).await;
+    Ok(Json(serde_json::json!({
+        "id": id,
+        "from": format!("{from:?}"),
+        "to": format!("{to:?}"),
+    })))
+}
+
+enum SupMove {
+    Load,
+    Stop,
+    Kill,
+}
+
+async fn sup_load(
+    State(hub): State<Shared>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<oxsig::Failure>)> {
+    authz::admin(&hub.resolved.system, now_ms() / 1000, &peer_of(addr, &headers)).map_err(fail)?;
+    sup_move(&hub, &id, SupMove::Load).await
+}
+
+async fn sup_stop(
+    State(hub): State<Shared>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<oxsig::Failure>)> {
+    authz::admin(&hub.resolved.system, now_ms() / 1000, &peer_of(addr, &headers)).map_err(fail)?;
+    sup_move(&hub, &id, SupMove::Stop).await
+}
+
+/// ★**되돌릴 수 없다** — `if_epoch` 필수(운영 §5).
+///
+/// ★**이름이 아니라 기동 신원을 받는다** — `epoch` 는 기동마다 새 값이고 유닛 이름은
+/// 재기동해도 같아서, 이름으로는 *"내가 본 그 프로세스"* 를 못 지목한다(정§14-1).
+async fn sup_kill(
+    State(hub): State<Shared>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<oxsig::Failure>)> {
+    authz::admin(&hub.resolved.system, now_ms() / 1000, &peer_of(addr, &headers)).map_err(fail)?;
+    // ★**쥔 값이 없으면 확인이 성립하지 않는다** — 아직 안 떴거나 이미 사라진 대상이다.
+    let Some(epoch) = ({ hub.sup.lock().await.get(&id).and_then(|u| u.epoch.clone()) }) else {
+        return Err(fail(oxsig::Code::PreconditionFailed));
+    };
+    confirm_with(&q, "if_epoch", &authz::Confirm::Epoch(&epoch))?;
+    sup_move(&hub, &id, SupMove::Kill).await
+}
+
+/// ★**되돌릴 수 없다** — `confirm` 필수(운영 §5). hub 는 쥔 판 값이 없어 이름이 유일한 수단이다.
+///
+/// ★**순서가 계약이다**(정§16-1) — ①클라 전원에 `LEAVE 5004` ②유닛 graceful ③hub.
+/// 순서를 안 지키면 클라가 사유 없이 끊긴 것으로 보고 ★**백오프 없이 몰려 재접속한다.**
+async fn sup_shutdown(
+    State(hub): State<Shared>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<oxsig::Failure>)> {
+    authz::admin(&hub.resolved.system, now_ms() / 1000, &peer_of(addr, &headers)).map_err(fail)?;
+    confirm_with(&q, "confirm", &authz::Confirm::Name(&hub.resolved.node_id))?;
+
+    // ① 클라 전원 — ★**사유를 주고 끊는다**(연§6-1 `5004`).
+    let n = oxsig::body::session::LeaveNotice::new(oxsig::Code::ServerShutdown);
+    let socks: Vec<_> = { hub.sockets.lock().await.values().map(|(_, tx)| tx.clone()).collect() };
+    let mut out = Vec::new();
+    for tx in &socks {
+        out.clear();
+        send_leave(tx, &mut out, &n).await;
+    }
+    // ② 유닛 — 기동의 역순이다(정§15-6).
+    let order: Vec<String> = { hub.sup.lock().await.stop_order().iter().map(|u| u.id.clone()).collect() };
+    for id in &order {
+        let act = { hub.sup.lock().await.stop(id).map(|(_, _, a)| a) };
+        if let Some(a) = act {
+            apply(&hub, &a).await;
+        }
+    }
+    // ③ hub — ★**답을 먼저 내보내고 내린다**(안 그러면 부른 쪽이 결과를 못 본다).
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        std::process::exit(0);
+    });
+    Ok(Json(serde_json::json!({ "accepted": true, "order": ["clients", "units", "hub"] })))
+}
+
 async fn admin_sfus(
     State(hub): State<Shared>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -409,6 +593,11 @@ async fn admin_snapshot(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<oxsig::Failure>)> {
     authz::admin(&hub.resolved.system, now_ms() / 1000, &peer_of(addr, &headers)).map_err(fail)?;
+    let (rooms, users) = {
+        let n = hub.rooms.lock().await.iter().count();
+        let u = hub.sessions.lock().await.admin_rows().len();
+        (n, u)
+    };
     let sup = hub.sup.lock().await;
     let r = healthz::ready(&sup, true);
     Ok(Json(serde_json::json!({
@@ -417,9 +606,25 @@ async fn admin_snapshot(
         "ready": r.ok,
         "build": hub.resolved.build.line(),
         "supervising": !sup.units.is_empty(),
-        "rooms": 0,
-        "users": 0,
+        // ★**값의 정본은 §3-2·§3-3 이고 여기는 사본이다** — 어긋나면 그쪽이 옳다.
+        //   ★그래도 `0` 을 박아 두지 않는다: 사본이 늘 0이면 운영자가 그것을 믿는다.
+        "rooms": rooms,
+        "users": users,
     })))
+}
+
+/// ★★**되돌릴 수 없는 것은 확인값을 받는다**(운영 §5) — 없으면 `1003`, 안 맞으면 `3009`.
+///
+/// ★**확인값은 대상이 쥔 판 값이다** — *"이름을 한 번 더 치게 하는 것"* 이 아니라
+/// ★**"당신이 본 그것이 아직 그것인가"** 를 서버가 판정하는 것이다.
+/// ★**도구의 물음으로 대신하지 않는다** — 스크립트로 부르면 그 물음이 사라지고,
+/// `curl` 한 줄로 상용 서버가 내려간다.
+fn confirm_with(
+    q: &std::collections::HashMap<String, String>,
+    key: &str,
+    want: &authz::Confirm<'_>,
+) -> Result<(), (StatusCode, Json<oxsig::Failure>)> {
+    authz::check_confirm(q.get(key).map(String::as_str), want).map_err(fail)
 }
 
 /// ★**클라 HTTP 는 `Authorization: Bearer` 하나**(연§5-1) — 질의값에 토큰을 싣지 않는다.

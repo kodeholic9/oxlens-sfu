@@ -220,15 +220,32 @@ impl Supervisor {
     }
 
     /// 운영자가 내렸다 — ★**`Stopped` 로 적고 재기동하지 않는다.**
-    pub fn stop(&mut self, id: &str) -> Option<(UnitState, UnitState)> {
+    ///
+    /// ★**상태를 먼저 `Stopping` 으로 적고 신호를 낸다** — 그래야 자식이 끝났을 때
+    /// `on_exit` 이 그것을 ★**의도적 정지로 읽는다.** 순서가 뒤집히면 급사로 읽혀 되살아난다.
+    pub fn stop(&mut self, id: &str) -> Option<(UnitState, UnitState, Action)> {
         let u = self.get_mut(id)?;
         let from = u.state;
         if from == UnitState::Disabled {
-            return Some((from, from));
+            return Some((from, from, Action::None));
         }
         u.state = UnitState::Stopping;
         u.retry_at = None;
-        Some((from, UnitState::Stopping))
+        Some((from, UnitState::Stopping, Action::Signal(u.id.clone())))
+    }
+
+    /// 운영자가 죽였다 — ★★**급사 경로를 만드는 자리다**(운영 §4-1).
+    ///
+    /// ★**`stop` 과 같은 신호를 내지만 상태를 안 건드린다** — 그 차이 하나가
+    /// `on_exit` 에서 *"의도적 정지"* 와 *"죽었다"* 를 가른다. 그래서 backoff 가 되살린다.
+    /// ★**`to` 는 선언이다** — 실제 전이는 자식이 끝난 것을 본 뒤에 선다(지어내지 않는다).
+    pub fn kill(&mut self, id: &str) -> Option<(UnitState, UnitState, Action)> {
+        let u = self.get(id)?;
+        let from = u.state;
+        if from == UnitState::Disabled {
+            return Some((from, from, Action::None));
+        }
+        Some((from, UnitState::Down, Action::Signal(u.id.clone())))
     }
 
     /// 운영자가 다시 올렸다. ★**`Stopped` 뒤의 기동은 창에 안 쌓는다** — 열 번 껐다 켠 것이
@@ -316,11 +333,52 @@ mod tests {
         let mut s = sup();
         s.start_all(0);
         s.on_ready("sfu-1", "e".into());
-        assert_eq!(s.stop("sfu-1"), Some((UnitState::Running, UnitState::Stopping)));
+        assert_eq!(
+            s.stop("sfu-1"),
+            Some((UnitState::Running, UnitState::Stopping, Action::Signal("sfu-1".into())))
+        );
         s.on_exit("sfu-1", 10);
         assert_eq!(s.get("sfu-1").expect("u").state, UnitState::Stopped);
         // ★backoff 로 되살아나면 안 된다.
         assert!(s.tick(999_999).is_empty(), "★Stopped 는 방치한다");
+    }
+
+    #[test]
+    fn 죽이기와_내리기는_같은_신호에_다른_뜻이다() {
+        // ★★**신호는 같고 상태가 다르다** — 그 차이 하나가 `on_exit` 에서 갈린다.
+        let mut s = sup();
+        s.start_all(0);
+        s.on_ready("sfu-1", "e1".into());
+
+        // 내리기 — 미리 `Stopping` 으로 적어 두어 급사로 안 읽힌다.
+        let (from, to, act) = s.stop("sfu-1").expect("있다");
+        assert_eq!((from, to), (UnitState::Running, UnitState::Stopping));
+        assert_eq!(act, Action::Signal("sfu-1".into()));
+        assert_eq!(s.on_exit("sfu-1", 1_000), Action::None);
+        assert_eq!(s.get("sfu-1").expect("있다").state, UnitState::Stopped);
+        assert!(s.tick(10_000).is_empty(), "★내린 것은 안 되살린다");
+
+        // 죽이기 — 상태를 안 건드리므로 그대로 급사 경로다.
+        s.load("sfu-1", 20_000);
+        s.on_ready("sfu-1", "e2".into());
+        let (from, to, act) = s.kill("sfu-1").expect("있다");
+        assert_eq!((from, to), (UnitState::Running, UnitState::Down));
+        assert_eq!(act, Action::Signal("sfu-1".into()));
+        s.on_exit("sfu-1", 21_000);
+        assert_eq!(s.get("sfu-1").expect("있다").state, UnitState::Down);
+        assert!(!s.tick(30_000).is_empty(), "★죽은 것은 backoff 가 되살린다");
+    }
+
+    #[test]
+    fn 죽이기는_기동_신원을_지운다() {
+        // ★`epoch` 는 기동마다 새 값이라, 그것이 살아 있으면 "내가 본 그 프로세스" 가 흐려진다.
+        let mut s = sup();
+        s.start_all(0);
+        s.on_ready("sfu-1", "e1".into());
+        assert_eq!(s.get("sfu-1").expect("있다").epoch.as_deref(), Some("e1"));
+        s.kill("sfu-1");
+        s.on_exit("sfu-1", 1_000);
+        assert_eq!(s.get("sfu-1").expect("있다").epoch, None);
     }
 
     #[test]
