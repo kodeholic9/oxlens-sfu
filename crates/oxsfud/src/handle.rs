@@ -9,7 +9,7 @@
 use oxsig::body::data::{AffiliationCause, AffiliationReq, AffiliationRes};
 use oxsig::body::media::{
     PublishAction, PublishTracksReq, PublishTracksRes, PublishedTrack, ReadyReq, ReadyType,
-    TrackSetReq,
+    SubscribeLayerReq, TrackSetReq,
 };
 use oxsig::body::notify::{
     ParticipantChange, ParticipantEvent, RoomEvent, RoomEventType, TrackAction, TrackEvent,
@@ -194,10 +194,13 @@ pub fn routes_for_room(node: &Node, room_id: &str) -> Vec<(u32, Vec<crate::trans
                     let peer = node.peers.get(sid)?;
                     // ★**배정이 있는 사람에게만 간다** — 배정이 없으면 받을 자리가 없다.
                     let a = peer.assigns.get(&p.track_id)?;
+                    let cap = peer.layers.get(&p.track_id).copied().unwrap_or_default();
                     Some(crate::transport::udp::Target {
                         ufrag: peer.recv_ufrag().to_string(),
                         pt: a.pt,
                         slot: None,
+                        spatial_cap: cap.spatial,
+                        paused: cap.paused,
                     })
                 })
                 .collect();
@@ -230,6 +233,7 @@ pub fn dispatch(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> 
         Op::PublishTracks => publish_tracks(node, ing, header, body),
         Op::Ready => ready(node, ing, header, body),
         Op::TrackSet => track_set(node, ing, header, body),
+        Op::SubscribeLayer => subscribe_layer(node, ing, header, body),
         // ★미디어 축은 다음 걸음이다 — 조용히 성공하지 않는다.
         _ => Outcome { reply: fail(header, Code::UnknownOp), ..Default::default() },
     }
@@ -964,6 +968,9 @@ pub fn floor_routes(node: &Node, room_id: &str) -> Vec<(u32, Vec<crate::transpor
                             ufrag: peer.recv_ufrag().to_string(),
                             pt: a.pt,
                             slot: Some(slot_ssrc),
+                            // ★반이중 슬롯에는 단이 없다 — 발언권 하나가 흐름을 정한다.
+                            spatial_cap: None,
+                            paused: false,
                         })
                     })
                     .collect()
@@ -1117,4 +1124,55 @@ fn track_set(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Out
     // 전환 자체(잔존 항목 교체·mid 반납·`TRACK_EVENT{add}`)는 트랙 전환 덩어리다 —
     // ★**조용히 성공하지 않는다**: 아직 못 하는 것은 `3006` 으로 답한다.
     Outcome { reply: fail(header, Code::TrackOpUnsupported), ..Default::default() }
+}
+
+/// `0x0303 SUBSCRIBE_LAYER` — ★**받을 레이어 고르기.** 응답은 빈 body(연§6-3).
+///
+/// ★★**"지정"이 아니라 "상한"이다** — 그 단이 없거나 대역이 부족하면 실제 선택은 그 아래에서
+/// 난다. 그래서 범위를 넘겨도 ★**거절하지 않고 그 축의 최대로 자른다**(상한의 뜻에 맞다).
+///
+/// ★**대상은 `track_id` 다** — `user_id` 가 아니다. 한 사람이 카메라와 화면공유를 둘 다
+/// 올리면 사람으로는 어느 쪽인지 지목할 수 없다.
+fn subscribe_layer(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Outcome {
+    let Ok(req) = serde_json::from_slice::<SubscribeLayerReq>(body) else {
+        return Outcome { reply: fail(header, Code::InvalidPayload), ..Default::default() };
+    };
+    // 그 방의 스트림이 가진 단 수 — 상한을 자를 기준이다.
+    let tops: std::collections::BTreeMap<String, u8> = node
+        .publications
+        .iter()
+        .filter(|p| p.room_id == req.room_id)
+        // 이 세대의 인코딩은 `l`·`h` 두 단 고정이다(정§10-1 `L2T1`).
+        .map(|p| (p.track_id.clone(), if p.simulcast { 1 } else { 0 }))
+        .collect();
+    let Some(peer) = node.peers.get_mut(&ing.session_id) else {
+        return Outcome { reply: fail(header, Code::SessionNotFound), ..Default::default() };
+    };
+    if !peer.sub_rooms.iter().any(|r| r == &req.room_id) {
+        return Outcome { reply: fail(header, Code::NotInRoom), ..Default::default() };
+    }
+    for t in &req.targets {
+        // ★**대상별 실패는 조용히 건너뛰고 응답은 성공**이다(연§6-3) — 부분 갱신이라
+        //   하나가 사라졌다고 나머지를 되돌릴 자리가 없다.
+        let Some(top) = tops.get(&t.track_id).copied() else { continue };
+        let cap = peer.layers.entry(t.track_id.clone()).or_default();
+        // ★**생략한 축은 안 바꾼다** — 부분 갱신이다.
+        if let Some(s) = t.spatial {
+            // ★**범위 초과는 그 축 최대로 자른다** — 거절이 아니다.
+            cap.spatial = Some(s.min(top));
+        }
+        if let Some(v) = t.temporal {
+            // 이 세대는 공간 2단뿐이라 시간 축은 ★**받아만 둔다**(정§10-1 — 수용 자리 확정).
+            cap.temporal = Some(v);
+        }
+        if let Some(p) = t.paused {
+            cap.paused = p;
+        }
+        if let Some(p) = t.priority {
+            cap.priority = p;
+        }
+    }
+    let rooms: Vec<String> = vec![req.room_id.clone()];
+    let routes = rooms.iter().flat_map(|r| routes_for_room(node, r)).collect();
+    Outcome { reply: ok(header, b"{}"), routes, ..Default::default() }
 }

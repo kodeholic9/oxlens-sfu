@@ -910,6 +910,7 @@ fn routed(op: oxsig::Op) -> bool {
             | oxsig::Op::PublishTracks
             | oxsig::Op::Ready
             | oxsig::Op::TrackSet
+            | oxsig::Op::SubscribeLayer
     )
 }
 
@@ -922,7 +923,8 @@ fn room_of(op: oxsig::Op, body: &[u8]) -> Option<String> {
         | oxsig::Op::RoomLeave
         | oxsig::Op::PublishTracks
         | oxsig::Op::Ready
-        | oxsig::Op::TrackSet => {
+        | oxsig::Op::TrackSet
+        | oxsig::Op::SubscribeLayer => {
             pick("room_id")
         }
         // ★한 요청이 두 방을 바꿀 수 있다 — 라우팅은 `pub_select` 가 먼저다(연§6-4).

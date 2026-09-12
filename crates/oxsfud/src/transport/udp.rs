@@ -33,6 +33,13 @@ pub struct Target {
     ///
     /// ★**N:1 이라 화자가 바뀌어도 재협상이 없다** — 그 대가가 이 재기록이다.
     pub slot: Option<u32>,
+    /// ★★**공간 단 상한 — 이 구독자 것이다**(연§6-3 `SUBSCRIBE_LAYER`).
+    ///
+    /// ★**"지정"이 아니라 "상한"이다** — 그 단이 없으면 실제 선택은 그 아래에서 난다.
+    /// ★**스트림당 하나로 두면 안 된다**: 한 사람이 낮춰 달라고 한 것이 방 전원의 화질을 깎는다.
+    pub spatial_cap: Option<u8>,
+    /// ★**별개 축이다**(연§6-3) — *"안 받는다"* 와 *"낮은 화질로 받는다"* 는 다른 것이다.
+    pub paused: bool,
 }
 
 /// 바깥에서 루프에 거는 것. ★**루프의 자료를 직접 만지지 않는다.**
@@ -179,8 +186,9 @@ pub async fn serve(
     //   `들어온 ssrc → (vssrc, 단)` 은 rid 로 ★**배운다**(정§10-1).
     let mut sim_of: HashMap<String, u32> = HashMap::new();
     let mut layer_of: HashMap<u32, (u32, u8)> = HashMap::new();
-    // 그 vssrc 로 지금 내보내는 단 — ★**가장 높은 것부터**(제약이 없으면 제일 좋은 것).
-    let mut sending: HashMap<u32, u8> = HashMap::new();
+    // ★**구독자마다 지금 내보내는 단** — 키가 `(받는 자격, vssrc)` 다.
+    //   상한은 사람마다 다르므로 스트림 하나에 값 하나를 두면 남의 상한이 내 화질을 깎는다.
+    let mut chosen: HashMap<(String, u32), u8> = HashMap::new();
     // ★구독자에게 내보낸 수 — SR 번역이 이 값으로 카운터를 갈아 끼운다.
     let mut egress: HashMap<(String, u32), (u32, u32)> = HashMap::new();
     // ★**내보낼 것을 담는 그릇 하나** — 패킷마다 새로 잡지 않는다(H3).
@@ -245,8 +253,8 @@ pub async fn serve(
                             egress.retain(|(f, _), _| f != u);
                             if let Some(v) = sim_of.remove(u) {
                                 layer_of.retain(|_, (x, _)| *x != v);
-                                sending.remove(&v);
                             }
+                            chosen.retain(|(f, _), _| f != u);
                             // ★**갈 곳 목록에서도 뺀다** — 안 빼면 죽은 자격으로 계속 잠근다.
                             for t in routes.values_mut() {
                                 t.retain(|x| &x.ufrag != u);
@@ -273,7 +281,7 @@ pub async fn serve(
                             && old != vssrc
                         {
                             layer_of.retain(|_, (v, _)| *v != old);
-                            sending.remove(&old);
+                            chosen.retain(|(_, v), _| *v != old);
                         }
                     }
                     Cmd::SetRoute { ssrc, targets } => {
@@ -389,6 +397,7 @@ pub async fn serve(
                 // ★**시뮬캐스트는 들어온 ssrc 가 곧 스트림이 아니다** — 단마다 다르다.
                 //   rid 로 배워서 vssrc 로 합치고, 지금 고른 단만 내보낸다.
                 let mut out_ssrc = ssrc;
+                let mut sim_spatial: Option<u8> = None;
                 // ★★**이미 아는 ssrc 는 그 스트림 것이다** — 같은 발행자가 audio 와 시뮬캐스트
                 //   video 를 같이 올리므로, 자격만 보고 시뮬캐스트 갈래로 보내면 ★**audio 가
                 //   rid 가 없다는 이유로 통째로 버려진다**(실측 20260912: 468 중 1 만 도착).
@@ -408,27 +417,37 @@ pub async fn serve(
                                 continue;
                             };
                             layer_of.insert(ssrc, (vssrc, spatial));
-                            // ★**제약이 없으면 제일 좋은 것** — 본 것 중 가장 높은 단을 쓴다.
-                            let cur = sending.entry(vssrc).or_insert(spatial);
-                            if spatial > *cur {
-                                // ★**여기는 키프레임 경계가 아니다**(정§10-2) — 전환을
-                                //   키프레임에서만 하는 가드는 아직 없다(이행). 첫 선택
-                                //   구간이라 실측 피해는 없지만, 자동 레이어를 붙일 때
-                                //   이 자리가 그 가드의 자리다.
-                                *cur = spatial;
-                            }
                             (vssrc, spatial)
                         }
                     };
-                    if sending.get(&v).copied() != Some(spatial) {
-                        // 지금 안 보내는 단이다 — 버리되 센다.
-                        c.sim_dropped += 1;
-                        continue;
-                    }
+                    sim_spatial = Some(spatial);
                     out_ssrc = v;
                 }
                 let Some(targets) = routes.get(&out_ssrc) else { continue };
                 for t in targets {
+                    // ★**받지 않겠다는 사람에게는 안 보낸다** — 레이어 축과 별개다.
+                    if t.paused {
+                        continue;
+                    }
+                    // ★**단 고르기는 사람마다** 한다(연§6-3 — 상한은 그 구독자 것이다).
+                    if let Some(spatial) = sim_spatial {
+                        let cap = t.spatial_cap.unwrap_or(u8::MAX);
+                        let cur = chosen.entry((t.ufrag.clone(), out_ssrc)).or_insert(spatial.min(cap));
+                        // ★**상한이 내려오면 그 자리에서 내린다** — 안 내리면 요청이 무시된다.
+                        if *cur > cap {
+                            *cur = cap;
+                        }
+                        // ★**상한 아래에서는 제일 좋은 것** — 본 것 중 가장 높은 단으로 올린다.
+                        //   ★**여기는 키프레임 경계가 아니다**(정§10-2) — 그 가드는 이행 항목이고,
+                        //   붙일 자리가 바로 이 한 줄이다.
+                        if spatial <= cap && spatial > *cur {
+                            *cur = spatial;
+                        }
+                        if spatial != *cur {
+                            c.sim_dropped += 1;
+                            continue;
+                        }
+                    }
                     let Some(dst) = table.get(&t.ufrag).and_then(|e| e.addr()) else { continue };
                     let Some(out) = srtp.get_mut(&t.ufrag) else { continue };
                     // ★**제자리 재기록 · 길이 불변** — 본문은 건드리지 않는다(H1).

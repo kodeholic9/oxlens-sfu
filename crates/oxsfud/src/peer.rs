@@ -74,6 +74,20 @@ pub struct Peer {
     pub pt: crate::pt::PtTable,
     /// `READY{tracks}` 를 받았나 — ★**게이트는 전이중 video 에만** 걸린다(정§7-4).
     pub ready: bool,
+    /// `track_id` → 그 구독자가 건 상한(연§6-3 `SUBSCRIBE_LAYER`).
+    ///
+    /// ★**부분 갱신이다** — 생략한 축은 안 바꾼다. 그래서 값이 아니라 **표**를 들고 있는다.
+    pub layers: BTreeMap<String, LayerCap>,
+}
+
+/// 한 트랙에 건 상한. ★**`paused` 는 레이어 값이 아니다** — 다른 축이다(연§6-3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LayerCap {
+    pub spatial: Option<u8>,
+    pub temporal: Option<u8>,
+    pub paused: bool,
+    /// 대역이 모자랄 때 채울 순서(기본 `128`) — 값만 보관한다(쓰는 것은 자동 레이어).
+    pub priority: u16,
 }
 
 impl Peer {
@@ -89,6 +103,7 @@ impl Peer {
             assigns: BTreeMap::new(),
             pt: crate::pt::PtTable::new(),
             ready: false,
+            layers: BTreeMap::new(),
         }
     }
 
