@@ -141,6 +141,7 @@ impl Sfu {
             room_id: n.room_id,
             exclude: n.exclude,
             target: n.target.unwrap_or_default(),
+            evict: n.evict,
             wire: n.wire,
             ..Default::default()
         });

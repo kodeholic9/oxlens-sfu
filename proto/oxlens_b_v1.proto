@@ -48,6 +48,11 @@ message Envelope {
   bool hidden = 9;
   // 불투명 JSON 직렬화본. 비어 있으면 없는 것이다.
   string metadata = 10;
+  // ★★**이 통지는 "그 사람이 그 방에서 빠졌다" 는 뜻이다** — 받는 hub 가 제 명단에서 뺀다.
+  //   ★sfud 가 말한다 — hub 가 통지 내용을 뜯어 짐작하면 판정이 두 곳으로 갈린다.
+  //   ★이것 없이 "target 이 있으면 뺀다" 로 두면 ★**수신자별 통지(TRACK_EVENT 등) 한 장에
+  //   그 사람이 명단에서 사라져** 이후 그 방의 방송이 아무에게도 안 간다(실측 20260912).
+  bool evict = 11;
 }
 
 message SubscribeRequest {

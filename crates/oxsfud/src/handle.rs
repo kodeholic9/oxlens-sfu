@@ -49,6 +49,10 @@ pub struct Notice {
     pub exclude: Vec<String>,
     /// ★있으면 **그 사람에게만** — 없으면 그 방 전원(정§15-4 가름).
     pub target: Option<String>,
+    /// ★**"그 사람은 그 방에서 빠졌다"** — 받는 hub 가 제 명단에서 뺀다.
+    ///
+    /// ★**보내는 쪽이 말한다** — 받는 쪽이 통지를 뜯어 짐작하면 판정이 두 곳으로 갈린다.
+    pub evict: bool,
     pub wire: Vec<u8>,
 }
 
@@ -177,7 +181,7 @@ fn notice(room_id: &str, exclude: Vec<String>, op: Op, body: &impl serde::Serial
     let b = json(body);
     let mut wire = Vec::with_capacity(frame::HEADER_LEN + b.len());
     frame::encode(&mut wire, Header::new(FrameKind::Request, op, 0), &b);
-    Notice { room_id: room_id.to_string(), exclude, target: None, wire }
+    Notice { room_id: room_id.to_string(), exclude, target: None, evict: false, wire }
 }
 
 /// 그 사람에게만 가는 통지. ★**생존을 판정하지 않는다**(정§17-2 ⑧) — 그 사람의 키에
@@ -510,7 +514,7 @@ pub fn reap(node: &mut Node, session_id: &str, zombie: bool) -> Option<Reaped> {
         }
         // ⑧ ★**좀비 경로만** — 방마다 하나씩, 당사자에게만.
         if zombie {
-            notices.push(unicast(
+            let mut n = unicast(
                 r,
                 &user_id,
                 Op::RoomEvent,
@@ -522,7 +526,10 @@ pub fn reap(node: &mut Node, session_id: &str, zombie: bool) -> Option<Reaped> {
                     cause: Some(AffiliationCause::MediaLost),
                     reason: None,
                 },
-            ));
+            );
+            // ★**이 한 장만 "그 방에서 빠졌다" 는 뜻이다** — hub 가 제 명단에서 뺀다.
+            n.evict = true;
+            notices.push(n);
         }
     }
     // ④ 전송 등록 해제 — ★자격을 내려야 옛 패킷이 새 Peer 를 못 건드린다.
@@ -566,7 +573,7 @@ pub fn stall_tick(node: &mut Node, now: u64) -> Vec<Notice> {
     let seen = node.egress.load();
     // 1차 — 읽기만 한다(자격·시작점·계수). 흘릴 자격 판정은 ★**전달표와 같은 것**을 쓴다:
     //   여기 조건을 다시 열거하면 그 사본이 §7-3 보다 뒤처지고, 그 어긋남이 곧 오탐이다.
-    let mut watch: Vec<((String, u32), u64, String, String)> = Vec::new();
+    let mut watch: Vec<((String, u32), String, String)> = Vec::new();
     let rooms: Vec<String> = node.rooms.iter().map(|r| r.id.clone()).collect();
     for room_id in &rooms {
         for (owner, key_ssrc, targets) in routes_for_room(node, room_id) {
@@ -595,28 +602,24 @@ pub fn stall_tick(node: &mut Node, now: u64) -> Vec<Notice> {
                     continue;
                 }
                 let Some(sub) = node.peers.get(&sess) else { continue };
-                // ★**게이트 해제 전의 무패킷은 정체가 아니다**(정§14-3 시작점).
-                let Some(ready) = sub.ready_at else { continue };
-                let start = match (video, camera_at) {
-                    (true, None) => continue,
-                    (true, Some(c)) => ready.max(c),
-                    (false, _) => ready,
-                };
-                watch.push((
-                    (t.ufrag.clone(), key_ssrc),
-                    start,
-                    sub.user_id.clone(),
-                    room_id.clone(),
-                ));
+                // ★**시작점은 "보기 시작할 자격"이다**(정§14-3) — 게이트 해제 전의 무패킷,
+                //   카메라 신고 전의 무패킷은 정체가 아니라 ★**아직 볼 때가 아닌 것**이다.
+                if sub.ready_at.is_none() || (video && camera_at.is_none()) {
+                    continue;
+                }
+                watch.push(((t.ufrag.clone(), key_ssrc), sub.user_id.clone(), room_id.clone()));
             }
         }
     }
 
     // 2차 — 앵커를 옮기고, 창이 찬 것만 알린다.
     let mut out = Vec::new();
-    for (key, start, user_id, room_id) in &watch {
+    for (key, user_id, room_id) in &watch {
         let cur = seen.get(key).copied().unwrap_or(0);
-        let anchor = node.stall_anchor.entry(key.clone()).or_insert((cur, *start));
+        // ★★**앵커는 「보기 시작한 순간」에 선다 — 시작점이 아니다.** 시작점에 놓으면
+        //   ★**우리가 안 본 구간까지 정체로 세어** 흐르는 중에도 첫 회차가 곧바로 터진다
+        //   (실측 20260912 — 흐르는 판에 재동기 지시가 나갔다).
+        let anchor = node.stall_anchor.entry(key.clone()).or_insert((cur, now));
         if anchor.0 != cur {
             // 움직였다 — 창을 여기서 다시 연다.
             *anchor = (cur, now);
@@ -649,7 +652,7 @@ pub fn stall_tick(node: &mut Node, now: u64) -> Vec<Notice> {
     }
     // ★**사라진 구독의 앵커는 거둔다** — 안 거두면 표가 단조 증가한다.
     node.stall_anchor.retain(|k, _| watch.iter().any(|(w, ..)| w == k));
-    node.stall_sent.retain(|(u, r), _| watch.iter().any(|(_, _, wu, wr)| wu == u && wr == r));
+    node.stall_sent.retain(|(u, r), _| watch.iter().any(|(_, wu, wr)| wu == u && wr == r));
     out
 }
 
@@ -1538,10 +1541,11 @@ mod stall_tests {
         let mut n = node_with_pair(Kind::Video, Some(0), None);
         say_sent(&n, 0);
         assert!(stall_tick(&mut n, 1_000_000).is_empty());
-        // 신고가 오면 그때부터 센다.
+        // 신고가 오면 그때부터 본다 — 첫 회차는 앵커를 세울 뿐이다.
         let i = n.peers.ensure(PUB, "u-pub", PcMode::Two).idx;
         n.peers.at_mut(i).camera_at = Some(0);
-        let got = stall_tick(&mut n, 1_000_000);
+        assert!(stall_tick(&mut n, 1_000_000).is_empty(), "★보기 시작한 회차는 앵커만 세운다");
+        let got = stall_tick(&mut n, 1_000_000 + stall::WINDOW_MS + 1);
         assert_eq!(got.len(), 1, "★시작점이 서면 판정이 산다");
     }
 
@@ -1549,7 +1553,8 @@ mod stall_tests {
     fn 창은_초과라야_찬다() {
         let mut n = node_with_pair(Kind::Audio, Some(0), None);
         say_sent(&n, 0);
-        // 앵커는 시작점(0)에 선다 — 창과 같은 순간은 아직 아니다.
+        // ★앵커는 보기 시작한 순간에 선다 — 안 본 구간은 정체가 아니다.
+        assert!(stall_tick(&mut n, 0).is_empty(), "★첫 회차는 앵커만 세운다");
         assert!(stall_tick(&mut n, stall::WINDOW_MS).is_empty(), "★경계는 초과다");
         assert_eq!(stall_tick(&mut n, stall::WINDOW_MS + 1).len(), 1);
     }
@@ -1560,10 +1565,13 @@ mod stall_tests {
         //   2주기로 잡으면 규격대로 도는 서버가 오탐으로 적힌다.
         let mut n = node_with_pair(Kind::Audio, Some(1), None);
         say_sent(&n, 0);
-        // 1회차(t=5,000): 시작점 1 기준 4,999ms — 1ms 모자라 못 뜬다.
-        assert!(stall_tick(&mut n, crate::reaper::TICK_MS).is_empty());
-        // 2회차(t=10,000)에서야 뜬다 — 정지 시각에서 두 주기가 지났다.
-        assert_eq!(stall_tick(&mut n, crate::reaper::TICK_MS * 2).len(), 1);
+        let tick = crate::reaper::TICK_MS;
+        // 1회차 — 보기 시작한다(앵커만).
+        assert!(stall_tick(&mut n, tick).is_empty());
+        // 2회차 — 꼭 한 주기가 지났다. 창과 같은 값이라 ★**1ms 가 모자라** 아직이다.
+        assert!(stall_tick(&mut n, tick * 2).is_empty(), "★창과 주기가 같아 한 회차를 잃는다");
+        // 3회차에서야 뜬다 — 그래서 감지 상한이 2주기가 아니라 3주기다.
+        assert_eq!(stall_tick(&mut n, tick * 3).len(), 1);
     }
 
     #[test]
@@ -1582,6 +1590,7 @@ mod stall_tests {
     fn 같은_사람_같은_방에는_쿨다운만큼_한_번이다() {
         let mut n = node_with_pair(Kind::Audio, Some(0), None);
         say_sent(&n, 0);
+        stall_tick(&mut n, 0);
         let t = stall::WINDOW_MS + 1;
         assert_eq!(stall_tick(&mut n, t).len(), 1);
         // ★폭풍 방지 — 창은 계속 차 있지만 다시 안 보낸다.
@@ -1594,6 +1603,7 @@ mod stall_tests {
         // ★`paused` 는 자격을 내린 것이다 — 안 나가는 것이 계약이다.
         let mut n = node_with_pair(Kind::Audio, Some(0), None);
         let i = n.peers.ensure(SUB, "u-sub", PcMode::Two).idx;
+        #[allow(clippy::needless_update)]
         n.peers.at_mut(i).layers.insert(
             "t1".into(),
             crate::peer::LayerCap { paused: true, ..Default::default() },
@@ -1606,6 +1616,7 @@ mod stall_tests {
     fn 통지는_당사자에게만_간다() {
         let mut n = node_with_pair(Kind::Audio, Some(0), None);
         say_sent(&n, 0);
+        stall_tick(&mut n, 0);
         let got = stall_tick(&mut n, stall::WINDOW_MS + 1);
         let one = got.first().expect("하나");
         assert_eq!(one.target.as_deref(), Some("u-sub"), "★unicast 다");

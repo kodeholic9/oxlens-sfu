@@ -972,8 +972,11 @@ async fn deliver_to_user(hub: &Shared, env: &common::b::Envelope) {
     if sessions.is_empty() {
         return;
     }
-    // ★그 사람은 그 방에서 이미 빠졌다 — 로컬 장부도 따라간다(안 따라가면 유령이 남는다).
-    if !env.room_id.is_empty() {
+    // ★★**보내는 쪽이 "빠졌다" 고 말한 것만** 명단에서 뺀다(`evict`).
+    //   ★`target` 이 있다는 것만으로 빼면 ★**수신자별 통지(TRACK_EVENT 등) 한 장에 그 사람이
+    //   명단에서 사라져** 그 뒤로 그 방의 방송이 아무에게도 안 간다(실측 20260912 —
+    //   늦게 들어온 사람의 `joined` 가 기존 참가자에게 통째로 안 갔다).
+    if env.evict && !env.room_id.is_empty() {
         let mut m = hub.members.lock().await;
         if let Some(v) = m.get_mut(&env.room_id) {
             v.retain(|s| !sessions.contains(s));
