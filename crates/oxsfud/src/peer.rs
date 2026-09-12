@@ -70,6 +70,10 @@ pub struct Peer {
     pub mids: MidPool,
     /// `track_id` → 내 자리. ★**수신자별 층**이라 Peer 가 쥔다(연§4-1-1).
     pub assigns: BTreeMap<String, Assign>,
+    /// ★**구독자 PT 표 — 연결마다 하나**(정§7-2-1). egress 의 PT 가 이 표의 값이다.
+    pub pt: crate::pt::PtTable,
+    /// `READY{tracks}` 를 받았나 — ★**게이트는 전이중 video 에만** 걸린다(정§7-4).
+    pub ready: bool,
 }
 
 impl Peer {
@@ -83,6 +87,8 @@ impl Peer {
             pub_room: None,
             mids: MidPool::new(pc_mode),
             assigns: BTreeMap::new(),
+            pt: crate::pt::PtTable::new(),
+            ready: false,
         }
     }
 

@@ -7,11 +7,17 @@
 //! 그래서 이 모듈은 ★**소켓도 시계도 모른다**: 판정만 하고 나갈 것을 낸다(hub 의 `ws` 와 같은 규율).
 
 use oxsig::body::data::{AffiliationCause, AffiliationReq, AffiliationRes};
-use oxsig::body::notify::{ParticipantChange, ParticipantEvent, RoomEvent, RoomEventType};
+use oxsig::body::media::{
+    PublishAction, PublishTracksReq, PublishTracksRes, PublishedTrack, ReadyReq, ReadyType,
+};
+use oxsig::body::notify::{
+    ParticipantChange, ParticipantEvent, RoomEvent, RoomEventType, TrackAction, TrackEvent,
+};
 use oxsig::body::room::{RoomJoinReq, RoomJoinRes, RoomLeaveReq, RoomLeaveRes, ServerConfig};
 use oxsig::body::session::PcMode;
 use oxsig::frame::{self, Header, Kind as FrameKind};
-use oxsig::types::{Assign, Kind, StreamType, TrackEntry};
+use oxsig::body::session::Duplex;
+use oxsig::types::{Assign, Kind, Source, StreamType, TrackEntry, Version};
 use std::sync::Arc;
 
 use oxsig::{Code, Failure, Op};
@@ -61,6 +67,8 @@ pub struct Node {
     pub max_bitrate_bps: u64,
     pub rooms: Rooms,
     pub peers: Peers,
+    /// ★**등록 층** — 스냅샷 밖이라 방이 아니라 node 가 쥔다(연§4-1-1).
+    pub publications: Vec<Publication>,
     /// ★**전송의 문패** — ufrag 로 찾는다. 읽는 쪽(UDP 루프)은 자물쇠를 안 잡는다.
     pub ice: Arc<IceTable>,
     /// 세션마다의 전송 생존 판정(정§2-2). ★**Peer 와 따로 둔다** — 한 값으로 합치면
@@ -78,6 +86,7 @@ impl Node {
             max_bitrate_bps,
             rooms: Rooms::new(),
             peers: Peers::new(),
+            publications: Vec::new(),
             ice: Arc::new(IceTable::new()),
             health: std::collections::BTreeMap::new(),
         }
@@ -161,6 +170,8 @@ pub fn dispatch(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> 
         Op::RoomJoin => room_join(node, ing, header, body),
         Op::RoomLeave => room_leave(node, ing, header, body),
         Op::Affiliation => affiliation(node, ing, header, body),
+        Op::PublishTracks => publish_tracks(node, ing, header, body),
+        Op::Ready => ready(node, ing, header, body),
         // ★미디어 축은 다음 걸음이다 — 조용히 성공하지 않는다.
         _ => Outcome { reply: fail(header, Code::UnknownOp), notices: Vec::new() },
     }
@@ -440,4 +451,285 @@ pub fn reaper_tick(node: &mut Node, now: u64) -> Vec<Reaped> {
     let live: Vec<String> = node.ice.last_seen_by_session().into_iter().map(|(s, _)| s).collect();
     node.health.retain(|s, _| live.contains(s));
     out
+}
+
+// ─── 트랙 등록(연§6-3) ──────────────────────────────────────────────────────
+
+/// 등록 층 하나 — ★**스냅샷 밖이다**(연§4-1-1). 서버와 발행자 본인만 안다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Publication {
+    pub track_id: String,
+    pub room_id: String,
+    pub session_id: String,
+    pub user_id: String,
+    pub kind: Kind,
+    pub ssrc: u32,
+    pub rtx_ssrc: Option<u32>,
+    pub codec: Option<String>,
+    pub fmtp: Option<String>,
+    /// 발행자가 쓰는 PT — ★**egress 에 그대로 나가지 않는다**(구독자 표가 정한다, 정§7-2-1).
+    pub pt: u8,
+    pub duplex: Duplex,
+    pub simulcast: bool,
+    pub source: Option<Source>,
+}
+
+/// ★**지원하는 video 코덱 전량**(정§6-2 1차) — 키프레임 판정기가 없으면 지원이 아니다.
+pub const SUPPORTED_VIDEO: &[&str] = &["VP8", "H264"];
+/// 요청당 상한 · 한 사람 활성 상한(연§6-3).
+const PER_REQUEST_MAX: usize = 8;
+const PER_USER_MAX: usize = 16;
+
+impl Publication {
+    /// 이 스트림이 구독자에게 보이는 모습(스트림 층). ★**배정은 부르는 쪽이 얹는다.**
+    fn entry(&self) -> TrackEntry {
+        TrackEntry {
+            stream_type: StreamType::Individual,
+            room_id: self.room_id.clone(),
+            track_id: self.track_id.clone(),
+            kind: self.kind,
+            // ★전이중 non-sim 의 egress SSRC 는 ★**원본**이다(정§8-1) — 항목의 값이 곧 도착할 값이라야
+            //   클라가 지은 받기 m-line 의 `a=ssrc` 와 맞는다.
+            ssrc: self.ssrc,
+            rtx_ssrc: self.rtx_ssrc,
+            codec: self.codec.clone(),
+            fmtp: self.fmtp.clone(),
+            user_id: Some(self.user_id.clone()),
+            source: self.source,
+            active: None,
+            muted: None,
+            scalability: if self.simulcast { Some("L2T1".into()) } else { None },
+            assign: None,
+        }
+    }
+}
+
+fn publish_tracks(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Outcome {
+    let Ok(req) = serde_json::from_slice::<PublishTracksReq>(body) else {
+        return Outcome { reply: fail(header, Code::InvalidPayload), notices: Vec::new() };
+    };
+    // ★**입장한 방만**(연§6-3 `3002`).
+    let in_room = node
+        .peers
+        .get_mut(&ing.session_id)
+        .is_some_and(|p| p.sub_rooms.iter().any(|r| r == &req.room_id));
+    if !in_room {
+        return Outcome { reply: fail(header, Code::NotInRoom), notices: Vec::new() };
+    }
+    match req.action.unwrap_or_default() {
+        PublishAction::Add => publish_add(node, ing, header, &req),
+        PublishAction::Remove => publish_remove(node, ing, header, &req),
+    }
+}
+
+/// ★★**전량 수용 또는 전량 거절** — 부분 수용이 없다(연§6-3).
+///
+/// ★**검사를 먼저 다 하고 그다음에 담는다** — 담으면서 검사하면 뒤엣것이 틀렸을 때
+/// 앞엣것이 이미 들어가 있다(되돌리는 코드가 또 필요해지고, 그 코드가 빠진다).
+fn publish_add(node: &mut Node, ing: &Ingress, header: Header, req: &PublishTracksReq) -> Outcome {
+    let none = Vec::new();
+    if req.tracks.is_empty() {
+        return Outcome { reply: fail(header, Code::MissingField), notices: none };
+    }
+    let active = node.publications.iter().filter(|p| p.user_id == ing.user_id).count();
+    if req.tracks.len() > PER_REQUEST_MAX || active + req.tracks.len() > PER_USER_MAX {
+        return Outcome { reply: fail(header, Code::TrackLimit), notices: none };
+    }
+    for t in &req.tracks {
+        // ★`pt`·`ssrc`·`mid` 미신고는 `1003` — audio 도 예외가 아니다(폴백은 무음을 조용히 만든다).
+        if t.mid.is_empty() || t.pt == 0 || (t.ssrc == 0 && !t.simulcast.unwrap_or(false)) {
+            return Outcome { reply: fail(header, Code::MissingField), notices: none };
+        }
+        // ★`source` 는 video 만 — audio 항목에 실리면 `1002`(닫힌 집합은 oxsig 가 이미 걸렀다).
+        if t.kind == Kind::Audio && t.source.is_some() {
+            return Outcome { reply: fail(header, Code::InvalidPayload), notices: none };
+        }
+        if t.kind == Kind::Video {
+            let ok = t
+                .codec
+                .as_deref()
+                .is_some_and(|c| SUPPORTED_VIDEO.iter().any(|s| s.eq_ignore_ascii_case(c)));
+            if !ok {
+                // ★**무엇이 되는지 같이 준다** — 거절만 하면 클라가 찍어 보며 배운다.
+                let f = Failure::new(Code::CodecRequired)
+                    .with_details(serde_json::json!({ "supported": SUPPORTED_VIDEO }));
+                let b = serde_json::to_vec(&f).unwrap_or_default();
+                let mut out = Vec::with_capacity(frame::HEADER_LEN + b.len());
+                frame::encode(&mut out, Header { kind: FrameKind::Fail, ..header }, &b);
+                return Outcome { reply: out, notices: none };
+            }
+        }
+    }
+
+    // 검사를 다 지났다 — 이제 담는다.
+    let mut made = Vec::new();
+    for t in &req.tracks {
+        let track_id = format!("tr-{}", uuid::Uuid::new_v4().simple());
+        node.publications.push(Publication {
+            track_id: track_id.clone(),
+            room_id: req.room_id.clone(),
+            session_id: ing.session_id.clone(),
+            user_id: ing.user_id.clone(),
+            kind: t.kind,
+            ssrc: t.ssrc,
+            rtx_ssrc: t.rtx_ssrc,
+            codec: t.codec.clone(),
+            fmtp: t.fmtp.clone(),
+            pt: t.pt,
+            duplex: t.duplex.unwrap_or(Duplex::Full),
+            // ★추론은 video 만 — audio 는 언제나 `false`(오디오에 시뮬캐스트는 없다).
+            simulcast: match t.kind {
+                Kind::Audio => false,
+                Kind::Video => t.simulcast.unwrap_or(t.duplex.unwrap_or(Duplex::Full) == Duplex::Full),
+            },
+            source: t.source,
+            });
+        made.push(PublishedTrack { mid: t.mid.clone(), track_id });
+    }
+
+    let notices = announce(node, &made, &req.room_id, &ing.user_id, TrackAction::Add);
+    let res = PublishTracksRes { action: PublishAction::Add, tracks: made };
+    Outcome { reply: ok(header, &json(&res)), notices }
+}
+
+fn publish_remove(node: &mut Node, ing: &Ingress, header: Header, req: &PublishTracksReq) -> Outcome {
+    let mut gone = Vec::new();
+    for id in &req.track_ids {
+        if let Some(i) = node
+            .publications
+            .iter()
+            .position(|p| &p.track_id == id && p.session_id == ing.session_id)
+        {
+            gone.push(node.publications.remove(i));
+        }
+    }
+    let mut notices = Vec::new();
+    if !gone.is_empty() {
+        let room = gone[0].room_id.clone();
+        let version = match node.rooms.get_mut(&room) {
+            Some(r) => {
+                r.bump_stream();
+                r.version(&node.epoch)
+            }
+            None => Version { epoch: node.epoch.clone(), seq: 0 },
+        };
+        let members = node.rooms.get(&room).map(|r| r.session_ids()).unwrap_or_default();
+        for sid in members {
+            let Some(p) = node.peers.get_mut(&sid) else { continue };
+            let mut entries = Vec::new();
+            for g in &gone {
+                // ★**세 자료를 같이 지운다**(정§17-2 ⑥) — mid 만 지우고 자리를 안 돌리면
+                //   재입장 영상이 안 나온다(실사고).
+                if let Some(a) = p.assigns.remove(&g.track_id) {
+                    p.mids.give(g.kind, &a.mid);
+                    let mut e = g.entry();
+                    e.assign = Some(a);
+                    entries.push(e);
+                }
+            }
+            if entries.is_empty() {
+                continue;
+            }
+            let user = p.user_id.clone();
+            notices.push(unicast(
+                &room,
+                &user,
+                Op::TrackEvent,
+                &TrackEvent {
+                    action: TrackAction::Remove,
+                    room_id: room.clone(),
+                    tracks: entries,
+                    version: version.clone(),
+                },
+            ));
+        }
+    }
+    // ★응답에 `tracks` 필드 자체가 없다(연§6-3).
+    let res = PublishTracksRes { action: PublishAction::Remove, tracks: Vec::new() };
+    Outcome { reply: ok(header, &json(&res)), notices }
+}
+
+/// ★★**수신자마다 프레임이 다르다** — `assign` 이 수신자 것이기 때문이다(연§4-1-1).
+///
+/// 그래서 broadcast 가 아니라 ★**사람마다 한 장**이고, ★**발행자 본인에게도 자기 항목**이 간다
+/// (`assign` 없이 — 자기 트랙이라 배정할 자리가 없다, 정§14-2).
+fn announce(
+    node: &mut Node,
+    made: &[PublishedTrack],
+    room_id: &str,
+    publisher: &str,
+    action: TrackAction,
+) -> Vec<Notice> {
+    let pubs: Vec<Publication> = made
+        .iter()
+        .filter_map(|m| node.publications.iter().find(|p| p.track_id == m.track_id).cloned())
+        // ★**반이중 개인 트랙은 구독자 항목을 만들지 않는다**(연§4-1-1) — 슬롯으로 흐른다.
+        .filter(|p| p.duplex == Duplex::Full)
+        .collect();
+    if pubs.is_empty() {
+        return Vec::new();
+    }
+    let Some(room) = node.rooms.get_mut(room_id) else { return Vec::new() };
+    // ★스트림 층이 바뀌었다 — `seq` 가 오른다(연§4-6-1).
+    room.bump_stream();
+    let version = room.version(&node.epoch);
+    let members = room.session_ids();
+
+    let mut out = Vec::new();
+    for sid in members {
+        let Some(peer) = node.peers.get_mut(&sid) else { continue };
+        let me = peer.user_id.clone();
+        let mut entries = Vec::new();
+        for p in &pubs {
+            let mut e = p.entry();
+            if me != publisher {
+                let key = crate::pt::Tuple::new(p.kind, p.codec.as_deref().unwrap_or("opus"), p.fmtp.as_deref());
+                let Some((pt, rtx_pt)) = peer.pt.get_or_assign(&key, p.rtx_ssrc.is_some()) else {
+                    // ★PT 예산 고갈 — 배정 없이 보낸다(연§4-1 *"고갈 시 없다"*).
+                    entries.push(e);
+                    continue;
+                };
+                let mid = peer.mids.take(p.kind);
+                let a = Assign { mid, pt, rtx_pt };
+                peer.assigns.insert(p.track_id.clone(), a.clone());
+                e.assign = Some(a);
+            }
+            entries.push(e);
+        }
+        out.push(unicast(
+            room_id,
+            &me,
+            Op::TrackEvent,
+            &TrackEvent {
+                action,
+                room_id: room_id.to_string(),
+                tracks: entries,
+                version: version.clone(),
+            },
+        ));
+    }
+    out
+}
+
+/// `0x0302 READY` — ★**클라의 준비 신호**다(연§6-3). 응답은 빈 body.
+///
+/// ★**`tracks` 가 푸는 것은 그 서버의 내 것 전부**이고 키프레임 요청만 그 방 것이다.
+/// 그래서 게이트는 Peer 에 한 벌만 둔다 — 방마다 두면 같은 것을 여러 번 풀게 된다.
+fn ready(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Outcome {
+    let Ok(req) = serde_json::from_slice::<ReadyReq>(body) else {
+        return Outcome { reply: fail(header, Code::InvalidPayload), notices: Vec::new() };
+    };
+    let Some(peer) = node.peers.get_mut(&ing.session_id) else {
+        return Outcome { reply: fail(header, Code::SessionNotFound), notices: Vec::new() };
+    };
+    if !peer.sub_rooms.iter().any(|r| r == &req.room_id) {
+        return Outcome { reply: fail(header, Code::NotInRoom), notices: Vec::new() };
+    }
+    match req.ready_type {
+        ReadyType::Tracks => peer.ready = true,
+        // ★`camera` 는 ★**정체 판정의 시작점**일 뿐 — 키프레임을 요청하지 않고
+        //   남에게 통지도 내지 않는다(정§7-4 · 연§6-3 16차 결재). 정체 감지 덩어리에서 쓴다.
+        ReadyType::Camera => {}
+    }
+    Outcome { reply: ok(header, b"{}"), notices: Vec::new() }
 }

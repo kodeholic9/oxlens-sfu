@@ -168,6 +168,16 @@ impl Room {
         gone
     }
 
+    /// ★**스트림 층이 바뀌었다** — 명단과 같은 축이라 같은 카운터가 오른다(연§4-6-1).
+    pub fn bump_stream(&mut self) {
+        self.seq += 1;
+    }
+
+    /// 지금 이 방에 있는 세션들 — ★**투명도 받는다**(빠지는 것은 명단·통지 넷뿐).
+    pub fn session_ids(&self) -> Vec<String> {
+        self.members.iter().map(|m| m.session_id.clone()).collect()
+    }
+
     /// 이 방 것으로 나가는 판번호.
     pub fn version(&self, epoch: &str) -> Version {
         Version { epoch: epoch.to_string(), seq: self.seq }

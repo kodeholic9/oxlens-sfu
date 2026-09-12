@@ -11,6 +11,7 @@ pub mod handle;
 pub mod identity;
 pub mod lifeline;
 pub mod peer;
+pub mod pt;
 pub mod reaper;
 pub mod rewriter;
 pub mod room;

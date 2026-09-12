@@ -893,7 +893,14 @@ async fn reconcile_rooms(hub: &Shared) {
 
 /// 그 op 이 sfud 로 가는가 — ★**방 축은 전부 간다**(정§15-5 *"wire 는 그대로 통과"*).
 fn routed(op: oxsig::Op) -> bool {
-    matches!(op, oxsig::Op::RoomJoin | oxsig::Op::RoomLeave | oxsig::Op::Affiliation)
+    matches!(
+        op,
+        oxsig::Op::RoomJoin
+            | oxsig::Op::RoomLeave
+            | oxsig::Op::Affiliation
+            | oxsig::Op::PublishTracks
+            | oxsig::Op::Ready
+    )
 }
 
 /// 그 프레임이 가리키는 방. ★**body 를 한 번만 읽는다** — 두 번 읽으면 갈린다.
@@ -901,7 +908,9 @@ fn room_of(op: oxsig::Op, body: &[u8]) -> Option<String> {
     let v: serde_json::Value = serde_json::from_slice(body).ok()?;
     let pick = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
     match op {
-        oxsig::Op::RoomJoin | oxsig::Op::RoomLeave => pick("room_id"),
+        oxsig::Op::RoomJoin | oxsig::Op::RoomLeave | oxsig::Op::PublishTracks | oxsig::Op::Ready => {
+            pick("room_id")
+        }
         // ★한 요청이 두 방을 바꿀 수 있다 — 라우팅은 `pub_select` 가 먼저다(연§6-4).
         oxsig::Op::Affiliation => pick("pub_select").or_else(|| pick("pub_deselect")),
         _ => None,
