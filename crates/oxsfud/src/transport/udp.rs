@@ -29,6 +29,10 @@ pub struct Target {
     pub ufrag: String,
     /// ★**구독자 표의 PT**(정§7-2-1) — 발행자 값이 아니다.
     pub pt: u8,
+    /// ★**반이중이면 방 슬롯의 SSRC**(정§8-1). 있으면 그 값으로 갈아 끼우고 seq 를 이어 붙인다.
+    ///
+    /// ★**N:1 이라 화자가 바뀌어도 재협상이 없다** — 그 대가가 이 재기록이다.
+    pub slot: Option<u32>,
 }
 
 /// 바깥에서 루프에 거는 것. ★**루프의 자료를 직접 만지지 않는다.**
@@ -43,6 +47,16 @@ pub enum Cmd {
     SrtpReady { ufrag: String, keys: Box<super::dtls::SrtpKeys> },
     /// 그 발행 `ssrc` 가 갈 곳 전부. ★**빈 목록이면 아무 데도 안 간다**(지우는 것과 같다).
     SetRoute { ssrc: u32, targets: Vec<Target> },
+    /// 그 자격의 DC 로 한 장. ★**채널이 아직이면 버린다** — 막지 않는다(정§13).
+    DcSend { ufrag: String, wire: Vec<u8> },
+}
+
+/// DC 로 들어온 것 — ★**판정은 제어 평면이 한다**(여기는 나르기만).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DcIn {
+    pub ufrag: String,
+    pub svc: u8,
+    pub payload: Vec<u8>,
 }
 
 /// 데이터그램 상한 — ★**한 장이 이보다 크면 우리 것이 아니다.**
@@ -59,6 +73,8 @@ struct Pipe {
     /// ★**자격 이름** — SRTP 열쇠도 latch 도 이 키로 찾는다(정§12 세션 동일성).
     ufrag: String,
     tx: mpsc::Sender<Bytes>,
+    /// DC 로 내보낼 것. ★**채널이 서기 전에도 받아 둔다** — SCTP 루프가 열리면 흘린다.
+    dc: mpsc::Sender<Vec<u8>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -112,6 +128,7 @@ pub async fn serve(
     cert: dtls::Certificate,
     cmd_tx: mpsc::Sender<Cmd>,
     mut cmds: mpsc::Receiver<Cmd>,
+    dc_in: mpsc::Sender<DcIn>,
 ) {
     // ★**그릇을 하나 잡아 재사용한다** — 데이터그램마다 새로 잡지 않는다(H3).
     let mut buf = vec![0u8; MTU];
@@ -120,6 +137,8 @@ pub async fn serve(
     // ★이 둘도 이 태스크 혼자 쓴다 — 자물쇠가 없다.
     let mut srtp: HashMap<String, super::srtp::SrtpPair> = HashMap::new();
     let mut routes: HashMap<u32, Vec<Target>> = HashMap::new();
+    // ★**전송로마다 스칼라 둘** — 구간 지도를 두면 화자 교대에서 egress seq 가 역행한다.
+    let mut rewriters: HashMap<(String, u32), crate::rewriter::Rewriter> = HashMap::new();
     // ★**내보낼 것을 담는 그릇 하나** — 패킷마다 새로 잡지 않는다(H3).
     let mut scratch: Vec<u8> = Vec::with_capacity(MTU);
     let mut c = Counters::default();
@@ -157,6 +176,7 @@ pub async fn serve(
                         by_addr.retain(|_, p| p.session_id != sid);
                         for u in &gone {
                             srtp.remove(u);
+                            rewriters.retain(|(f, _), _| f != u);
                             // ★**갈 곳 목록에서도 뺀다** — 안 빼면 죽은 자격으로 계속 잠근다.
                             for t in routes.values_mut() {
                                 t.retain(|x| &x.ufrag != u);
@@ -169,6 +189,12 @@ pub async fn serve(
                         }
                         Err(e) => eprintln!("[srtp] {ufrag}: {e}"),
                     },
+                    Cmd::DcSend { ufrag, wire } => {
+                        if let Some(p) = by_ufrag.get(&ufrag) {
+                            // ★**막지 않는다**(정§13) — 넘치면 그 장을 버리고 계수로 남는다.
+                            let _ = p.dc.try_send(wire);
+                        }
+                    }
                     Cmd::SetRoute { ssrc, targets } => {
                         if targets.is_empty() {
                             routes.remove(&ssrc);
@@ -193,11 +219,20 @@ pub async fn serve(
                                 None => {
                                     let Some(e) = table.get(&ufrag) else { continue };
                                     let (conn, tx) = DemuxConn::new(socket.clone(), e.addr.clone());
-                                    let task = spawn_dtls(conn, cert.clone(), ufrag.clone(), cmd_tx.clone());
+                                    let (dc_tx, dc_rx) = mpsc::channel(64);
+                                    let task = spawn_dtls(
+                                        conn,
+                                        cert.clone(),
+                                        ufrag.clone(),
+                                        cmd_tx.clone(),
+                                        dc_rx,
+                                        dc_in.clone(),
+                                    );
                                     let p = Arc::new(Pipe {
                                         session_id: session_id.clone(),
                                         ufrag: ufrag.clone(),
                                         tx,
+                                        dc: dc_tx,
                                         task,
                                     });
                                     by_ufrag.insert(ufrag.clone(), p.clone());
@@ -247,8 +282,26 @@ pub async fn serve(
                     // ★**제자리 재기록 · 길이 불변** — 본문은 건드리지 않는다(H1).
                     scratch.clear();
                     scratch.extend_from_slice(&plain);
-                    if !super::srtp::rewrite_pt(&mut scratch, t.pt) {
-                        continue;
+                    match t.slot {
+                        None => {
+                            if !super::srtp::rewrite_pt(&mut scratch, t.pt) {
+                                continue;
+                            }
+                        }
+                        // ★반이중 — 방 슬롯 하나를 화자들이 돌려쓴다. SSRC 를 슬롯 것으로 갈고
+                        //   seq·ts 는 ★**직전 egress 의 다음**으로 이어 붙인다(정§8-1).
+                        Some(slot) => {
+                            let rw = rewriters.entry((t.ufrag.clone(), slot)).or_default();
+                            let in_seq = u16::from_be_bytes([scratch[2], scratch[3]]);
+                            let in_ts = u32::from_be_bytes([
+                                scratch[4], scratch[5], scratch[6], scratch[7],
+                            ]);
+                            let out = rw.map(ssrc, in_seq, in_ts);
+                            if crate::rewriter::Rewriter::apply(&mut scratch, out, t.pt).is_err() {
+                                continue;
+                            }
+                            scratch[8..12].copy_from_slice(&slot.to_be_bytes());
+                        }
                     }
                     if let Some(sealed) = out.seal(&scratch) {
                         let _ = socket.send_to(&sealed, dst).await;
@@ -270,6 +323,8 @@ fn spawn_dtls(
     cert: dtls::Certificate,
     ufrag: String,
     cmds: mpsc::Sender<Cmd>,
+    dc_out: mpsc::Receiver<Vec<u8>>,
+    dc_in: mpsc::Sender<DcIn>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let cfg = super::dtls::server_config(&cert);
@@ -293,22 +348,20 @@ fn spawn_dtls(
             }
         }
         // ★DC 는 ★**보내기용 연결에만** 붙는다(연§3-3) — 클라가 안 열면 아무 일도 없다.
-        let (_out_tx, out_rx) = tokio::sync::mpsc::channel(64);
         let (ev_tx, mut ev_rx) = tokio::sync::mpsc::channel(64);
         let who = ufrag.clone();
         tokio::spawn(async move {
             while let Some(e) = ev_rx.recv().await {
                 match e {
                     super::sctp::DcEvent::Open => eprintln!("[dc] {who} \"unreliable\" 열렸다"),
-                    // 발언권은 다음 덩어리다 — ★**조용히 성공하지 않는다**(받은 것을 말한다).
                     super::sctp::DcEvent::Frame { svc, payload } => {
-                        eprintln!("[dc] {who} svc=0x{svc:02X} {}바이트", payload.len())
+                        let _ = dc_in.send(DcIn { ufrag: who.clone(), svc, payload }).await;
                     }
                     super::sctp::DcEvent::Closed => eprintln!("[dc] {who} 닫혔다"),
                 }
             }
         });
-        super::sctp::run(&c, out_rx, ev_tx).await;
+        super::sctp::run(&c, dc_out, ev_tx).await;
     })
 }
 

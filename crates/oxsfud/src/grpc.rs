@@ -73,6 +73,54 @@ impl Sfu {
         });
     }
 
+    /// DC 로 들어온 것을 받아 발언권에 넣고, 나갈 것을 도로 민다.
+    ///
+    /// ★**판정은 `floor` 가 하고 여기는 배선이다** — 여기에 규칙을 한 줄이라도 두면
+    /// 판정이 두 곳으로 갈린다.
+    pub fn spawn_floor(self: &Arc<Self>, mut rx: mpsc::Receiver<crate::transport::udp::DcIn>) {
+        let me = self.clone();
+        tokio::spawn(async move {
+            while let Some(got) = rx.recv().await {
+                if got.svc != crate::transport::dc::SVC_FLOOR {
+                    // ★**발성 감지는 이 문서 밖이다**(연§3-3) — 무전 방은 수신 무시.
+                    continue;
+                }
+                let outs = {
+                    let mut node = me.node.lock().await;
+                    handle::on_floor(&mut node, &got.ufrag, &got.payload, now_ms())
+                };
+                // ★**배관을 먼저 민다** — 허가가 먼저 가면 클라가 바로 말하는데 갈 곳이 없다.
+                me.push_routes(outs.routes).await;
+                me.push_dc(outs.dc).await;
+            }
+        });
+        // ★주기는 하나다(정§9 `2초`) — `T1`·`T2` 가 여기서 돈다.
+        let tick = self.clone();
+        tokio::spawn(async move {
+            let mut iv = tokio::time::interval(std::time::Duration::from_millis(
+                crate::floor::timers::TICK_MS,
+            ));
+            loop {
+                iv.tick().await;
+                let outs = {
+                    let mut node = tick.node.lock().await;
+                    handle::floor_tick(&mut node, now_ms())
+                };
+                tick.push_routes(outs.routes).await;
+                tick.push_dc(outs.dc).await;
+            }
+        });
+    }
+
+    async fn push_dc(&self, outs: Vec<handle::DcOut>) {
+        for o in outs {
+            let _ = self
+                .udp
+                .send(crate::transport::udp::Cmd::DcSend { ufrag: o.ufrag, wire: o.wire })
+                .await;
+        }
+    }
+
     /// 전달표 갱신을 UDP 루프에 넘긴다.
     async fn push_routes(&self, routes: Vec<(u32, Vec<crate::transport::udp::Target>)>) {
         for (ssrc, targets) in routes {

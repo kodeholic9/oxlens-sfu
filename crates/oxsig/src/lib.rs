@@ -9,6 +9,7 @@
 pub mod body;
 pub mod code;
 pub mod frame;
+pub mod mbcp;
 pub mod op;
 pub mod types;
 

@@ -81,10 +81,14 @@ pub enum Out {
     Granted { user_id: String, priority: u8, remaining_ms: u64 },
     Deny { user_id: String, cause: u8 },
     Revoke { user_id: String, cause: u8 },
-    QueueInfo { user_id: String, position: u16, size: u16 },
+    /// ★`priority` 는 ★**지금 허가된 사람의 우선순위**다(연§11-3 TLV `3` byte1) —
+    /// 대기자가 *"내가 끼어들 수 있나"* 를 스스로 판단하는 재료다.
+    QueueInfo { user_id: String, position: u8, size: u8, priority: u8 },
     /// 그 방 청취자 broadcast — ★**화자는 제외한다.**
     Taken { speaker: String, seq: u16 },
-    Idle { seq: u16 },
+    /// ★`prev` 는 ★**직전에 말한 사람**이다(연§11-3 `0x1A`) — 화면이 *"방금 누가 말했나"* 를
+    /// 지울지 남길지 그것으로 정한다. ★**처음부터 조용한 방이면 없다**(지어내지 않는다).
+    Idle { seq: u16, prev: Option<String> },
 }
 
 /// 요청이 들고 온 것.
@@ -93,8 +97,11 @@ pub struct Request {
     pub user_id: String,
     /// ★**요청이 실은 값이 전부다** — 서버가 깎지 않는다.
     pub priority: u8,
-    /// 요청한 발화 시간(상한과 견준다).
-    pub want_ms: u64,
+    /// 요청한 발화 시간 — ★**안 실었으면 `None`** 이고, 그것은 *"서버 상한만큼"* 이다.
+    ///
+    /// ★★**`0` 을 부재의 표식으로 쓰지 않는다** — `0` 은 *"0초만 말하겠다"* 라는 값이고,
+    /// 그렇게 두면 시간을 안 실은 요청이 ★**허가 즉시 만료되는 발언권**을 받는다(무음).
+    pub want_ms: Option<u64>,
     /// 그 방이 이 사람의 `pub_room` 인가.
     pub in_pub_room: bool,
     /// 반이중 발행 트랙이 있나.
@@ -154,21 +161,28 @@ impl Floor {
     }
 
     fn queue_notices(&self) -> Vec<Out> {
-        let size = self.queue.len() as u16;
+        // ★**한 바이트에 담긴다**(연§11-3) — 큐 상한이 10 이라 넘칠 자리가 없다.
+        let size = self.queue.len().min(u8::MAX as usize) as u8;
+        let granted = match &self.state {
+            State::Taken { priority, .. } => *priority,
+            _ => 0,
+        };
         self.queue
             .iter()
             .enumerate()
             .map(|(i, w)| Out::QueueInfo {
                 user_id: w.user_id.clone(),
                 // ★순번은 1부터다.
-                position: i as u16 + 1,
+                position: (i + 1).min(u8::MAX as usize) as u8,
                 size,
+                priority: granted,
             })
             .collect()
     }
 
-    fn grant(&mut self, user_id: String, priority: u8, want_ms: u64, now: u64) -> Vec<Out> {
-        let burst = want_ms.min(self.max_burst_ms);
+    fn grant(&mut self, user_id: String, priority: u8, want_ms: Option<u64>, now: u64) -> Vec<Out> {
+        // ★**상한과 견준다** — 부재는 상한 그것이다(서버가 깎는 자리는 여기 하나).
+        let burst = want_ms.unwrap_or(self.max_burst_ms).min(self.max_burst_ms);
         self.state = State::Taken {
             speaker: user_id.clone(),
             priority,
@@ -190,12 +204,16 @@ impl Floor {
     fn idle_or_succeed(&mut self, now: u64) -> Vec<Out> {
         self.sort_queue();
         if self.queue.is_empty() {
+            // ★**비우기 전에 읽는다** — 지운 뒤에 물으면 직전 화자를 영영 모른다.
+            let prev = self.speaker().map(str::to_string);
             self.state = State::Idle;
             let seq = self.bump();
-            return vec![Out::Idle { seq }];
+            return vec![Out::Idle { seq, prev }];
         }
         let w = self.queue.remove(0);
-        let mut out = self.grant(w.user_id, w.priority, self.max_burst_ms, now);
+        // ★대기에서 올라오는 사람은 ★**상한만큼** 받는다 — 대기표가 처음 요청의 시간을
+        //   들고 있지 않다(들게 하면 오래 기다린 요청의 값이 낡는다).
+        let mut out = self.grant(w.user_id, w.priority, None, now);
         out.extend(self.queue_notices());
         out
     }
@@ -392,7 +410,7 @@ mod tests {
         Request {
             user_id: u.into(),
             priority: p,
-            want_ms: 30_000,
+            want_ms: Some(30_000),
             in_pub_room: true,
             has_half_track: true,
             allowed: true,
@@ -402,6 +420,30 @@ mod tests {
 
     fn floor() -> Floor {
         Floor::new(timers::T2_MS)
+    }
+
+    #[test]
+    fn idle_은_직전_화자를_싣는다() {
+        let mut f = floor();
+        f.on_request(&req("a", 0), 0);
+        let out = f.on_release("a", 1_000);
+        // ★화면이 *"방금 누가 말했나"* 를 지울지 남길지 이 값으로 정한다.
+        assert!(matches!(&out[0], Out::Idle { prev, .. } if prev.as_deref() == Some("a")));
+    }
+
+    #[test]
+    fn 시간을_안_실으면_상한만큼이다() {
+        let mut f = Floor::new(timers::T2_MS);
+        let out = f.on_request(&Request { want_ms: None, ..req("a", 0) }, 0);
+        // ★`0` 이 아니라 상한이다 — `0` 이면 허가 즉시 만료되는 발언권이 된다.
+        assert!(matches!(out.first(), Some(Out::Granted { remaining_ms, .. }) if *remaining_ms == timers::T2_MS));
+    }
+
+    #[test]
+    fn 요청이_상한보다_길면_깎는다() {
+        let mut f = Floor::new(timers::T2_MS);
+        let out = f.on_request(&Request { want_ms: Some(timers::T2_MS * 10), ..req("a", 0) }, 0);
+        assert!(matches!(out.first(), Some(Out::Granted { remaining_ms, .. }) if *remaining_ms == timers::T2_MS));
     }
 
     #[test]
@@ -431,7 +473,8 @@ mod tests {
         f.on_request(&req("a", 100), 0);
         let out = f.on_request(&req("b", 100), 10);
         assert_eq!(f.speaker(), Some("a"));
-        assert!(matches!(&out[0], Out::QueueInfo { user_id, position: 1, size: 1 } if user_id == "b"));
+        // ★`priority` 는 **지금 허가된 사람**의 값이다 — 대기자 자기 값이 아니다.
+        assert!(matches!(&out[0], Out::QueueInfo { user_id, position: 1, size: 1, .. } if user_id == "b"));
     }
 
     #[test]

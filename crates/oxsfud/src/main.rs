@@ -131,12 +131,14 @@ async fn main() -> std::process::ExitCode {
         },
     };
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(64);
+    let (dc_tx, dc_rx) = tokio::sync::mpsc::channel(256);
     tokio::spawn(oxsfud::transport::udp::serve(
         sock,
         node.ice.clone(),
         dtls.cert,
         cmd_tx.clone(),
         cmd_rx,
+        dc_tx,
     ));
     let svc = std::sync::Arc::new(oxsfud::grpc::Sfu::new(
         oxsfud::grpc::Identity {
@@ -147,6 +149,7 @@ async fn main() -> std::process::ExitCode {
         cmd_tx,
     ));
     svc.spawn_reaper();
+    svc.spawn_floor(dc_rx);
     eprintln!("[b] listen {listen}");
     if let Err(e) = tonic::transport::Server::builder()
         .add_service(svc.into_server())

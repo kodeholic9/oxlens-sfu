@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use oxsig::{Code, Failure, Op};
 
+use crate::floor::{self, Floor};
 use crate::identity::{self, Dtls};
 use crate::peer::Peers;
 use crate::room::{Member, Rooms};
@@ -71,6 +72,10 @@ pub struct Node {
     pub peers: Peers,
     /// ★**등록 층** — 스냅샷 밖이라 방이 아니라 node 가 쥔다(연§4-1-1).
     pub publications: Vec<Publication>,
+    /// 방마다 발언권 하나 — ★**권위는 DC 단일이다**(연§11).
+    pub floors: std::collections::BTreeMap<String, Floor>,
+    /// `[floor] t2_stop_talking_secs` — 한 번에 말할 수 있는 상한.
+    pub max_burst_ms: u64,
     /// ★**전송의 문패** — ufrag 로 찾는다. 읽는 쪽(UDP 루프)은 자물쇠를 안 잡는다.
     pub ice: Arc<IceTable>,
     /// 세션마다의 전송 생존 판정(정§2-2). ★**Peer 와 따로 둔다** — 한 값으로 합치면
@@ -89,6 +94,8 @@ impl Node {
             rooms: Rooms::new(),
             peers: Peers::new(),
             publications: Vec::new(),
+            floors: std::collections::BTreeMap::new(),
+            max_burst_ms: floor::timers::T2_MS,
             ice: Arc::new(IceTable::new()),
             health: std::collections::BTreeMap::new(),
         }
@@ -187,6 +194,7 @@ pub fn routes_for_room(node: &Node, room_id: &str) -> Vec<(u32, Vec<crate::trans
                     Some(crate::transport::udp::Target {
                         ufrag: peer.recv_ufrag().to_string(),
                         pt: a.pt,
+                        slot: None,
                     })
                 })
                 .collect();
@@ -784,4 +792,204 @@ fn ready(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Outcome
         ReadyType::Camera => {}
     }
     Outcome { reply: ok(header, b"{}"), ..Default::default() }
+}
+
+// ─── 발언권(연§11) ─────────────────────────────────────────────────────────
+
+/// DC 로 나갈 한 장 — ★**받는 자격과 바이트**.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DcOut {
+    pub ufrag: String,
+    pub wire: Vec<u8>,
+}
+
+/// 발언권 한 걸음이 낸 것 — ★**말과 배관이 한 묶음**이다.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FloorOut {
+    pub dc: Vec<DcOut>,
+    pub routes: Vec<(u32, Vec<crate::transport::udp::Target>)>,
+}
+
+/// 발언권 한 통을 처리한다. ★**판정은 `floor::Floor` 가 하고 여기는 어휘를 옮긴다.**
+///
+/// ★**방은 요청이 들고 온다**(`0x1D` 단수, 연§11-5) — 서버가 추측하지 않는다.
+/// 실을 방이 없으면 ★**돌려줄 곳이 없어** 조용히 버린다(정§9-6 입구 관문).
+pub fn on_floor(node: &mut Node, ufrag: &str, payload: &[u8], now: u64) -> FloorOut {
+    let Some(entry) = node.ice.get(ufrag) else { return FloorOut::default() };
+    let session_id = entry.session_id.clone();
+    let Some(msg) = oxsig::mbcp::decode(payload) else { return FloorOut::default() };
+    let Some(room_id) = msg.room().map(str::to_string) else { return FloorOut::default() };
+    let Some(peer) = node.peers.get(&session_id) else { return FloorOut::default() };
+    let user_id = peer.user_id.clone();
+    let in_pub_room = peer.pub_room.as_deref() == Some(room_id.as_str());
+    if !peer.sub_rooms.iter().any(|r| r == &room_id) {
+        return FloorOut::default();
+    }
+    let has_half_track = node
+        .publications
+        .iter()
+        .any(|p| p.session_id == session_id && p.duplex == Duplex::Half);
+
+    let max_burst = node.max_burst_ms;
+    let floor = node.floors.entry(room_id.clone()).or_insert_with(|| Floor::new(max_burst));
+    let outs = match msg.msg_type {
+        oxsig::mbcp::REQUEST => floor.on_request(
+            &floor::Request {
+                user_id: user_id.clone(),
+                // ★**요청이 실은 값이 전부다** — 서버가 깎지 않는다(연§11-3).
+                priority: msg.get_u8(oxsig::mbcp::F_PRIORITY).unwrap_or(0),
+                // ★**안 실었으면 `None`** — *"0초"* 가 아니다(0 이면 허가 즉시 만료다).
+                want_ms: msg.get_u16(oxsig::mbcp::F_DURATION).map(|s| u64::from(s) * 1_000),
+                in_pub_room,
+                has_half_track,
+                // 권한 비트는 방이 기억한다(연§4-4-1) — 아직 기본이 전부다.
+                allowed: true,
+                others_present: node
+                    .rooms
+                    .get(&room_id)
+                    .is_some_and(|r| r.participants().len() > 1),
+            },
+            now,
+        ),
+        oxsig::mbcp::RELEASE => floor.on_release(&user_id, now),
+        oxsig::mbcp::QUEUE_POS_REQUEST => floor.on_queue_pos(&user_id),
+        // ★**ACK 에 답하지 않는다**(정§9-6 · 22차) — 답하면 ACK 의 ACK 가 생긴다.
+        oxsig::mbcp::ACK => Vec::new(),
+        // 그 밖은 서버가 내는 것이라 받을 일이 없다 — 조용히 버린다.
+        _ => Vec::new(),
+    };
+    // ★**말과 배관을 같이 낸다** — 가르면 허가는 갔는데 소리가 안 나는 창이 생긴다.
+    FloorOut { dc: emit_floor(node, &room_id, outs), routes: floor_routes(node, &room_id) }
+}
+
+/// 지금 말하는 사람의 반이중 발행이 갈 곳. ★**게이트가 곧 배관이다**(정§7-3 prefan).
+///
+/// ★★**허가가 없으면 목록이 빈다** — 그것이 *"허가 전 발화가 안 나간다"* 의 실체다.
+/// 검사로 막는 것이 아니라 ★**보낼 곳이 없는 것**이라, 검사를 빠뜨릴 자리가 없다.
+pub fn floor_routes(node: &Node, room_id: &str) -> Vec<(u32, Vec<crate::transport::udp::Target>)> {
+    let speaker = node.floors.get(room_id).and_then(|f| f.speaker()).map(str::to_string);
+    let Some(room) = node.rooms.get(room_id) else { return Vec::new() };
+    let slot_ssrc = room.slot_audio_ssrc;
+    let slot_track = format!("ptt-{room_id}-audio");
+    let members = room.session_ids();
+    node.publications
+        .iter()
+        .filter(|p| p.room_id == room_id && p.duplex == Duplex::Half && p.kind == Kind::Audio)
+        .map(|p| {
+            let talking = speaker.as_deref() == Some(p.user_id.as_str());
+            let targets = if talking {
+                members
+                    .iter()
+                    .filter(|sid| *sid != &p.session_id)
+                    .filter_map(|sid| {
+                        let peer = node.peers.get(sid)?;
+                        // ★**슬롯의 배정**을 쓴다 — 입장 응답으로 이미 알린 그 값이라야
+                        //   클라가 지은 m-line 과 맞는다.
+                        let a = peer.assigns.get(&slot_track)?;
+                        Some(crate::transport::udp::Target {
+                            ufrag: peer.recv_ufrag().to_string(),
+                            pt: a.pt,
+                            slot: Some(slot_ssrc),
+                        })
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            (p.ssrc, targets)
+        })
+        .collect()
+}
+
+/// 발언권 tick — ★**주기는 하나다**(정§9 `2초`). `T1`·`T2` 가 여기서 돈다.
+pub fn floor_tick(node: &mut Node, now: u64) -> FloorOut {
+    let rooms: Vec<String> = node.floors.keys().cloned().collect();
+    let mut out = FloorOut::default();
+    for r in rooms {
+        let Some(f) = node.floors.get_mut(&r) else { continue };
+        let outs = f.tick(now);
+        if !outs.is_empty() {
+            out.dc.extend(emit_floor(node, &r, outs));
+            out.routes.extend(floor_routes(node, &r));
+        }
+    }
+    out
+}
+
+/// `Out` 을 wire 로 옮긴다. ★**unicast 와 broadcast 를 여기서 가른다.**
+fn emit_floor(node: &Node, room_id: &str, outs: Vec<floor::Out>) -> Vec<DcOut> {
+    use oxsig::mbcp::{self, Msg};
+    let mut wire = Vec::new();
+    for o in outs {
+        let (to, m) = match o {
+            floor::Out::Granted { user_id, priority, remaining_ms } => (
+                Some(user_id),
+                // ★서버가 내는 `GRANTED`·`DENY` 는 `A` 비트를 세운다(연§11-2).
+                Msg::new(mbcp::GRANTED)
+                    .with_str(mbcp::F_ROOM, room_id)
+                    .with_u8(mbcp::F_PRIORITY, priority)
+                    .with_u16(mbcp::F_DURATION, (remaining_ms / 1_000) as u16)
+                    .ack(),
+            ),
+            floor::Out::Deny { user_id, cause } => (
+                Some(user_id),
+                Msg::new(mbcp::DENY)
+                    .with_str(mbcp::F_ROOM, room_id)
+                    .with_u8(mbcp::F_CAUSE, cause)
+                    .ack(),
+            ),
+            floor::Out::Revoke { user_id, cause } => (
+                Some(user_id),
+                Msg::new(mbcp::REVOKE).with_str(mbcp::F_ROOM, room_id).with_u8(mbcp::F_CAUSE, cause),
+            ),
+            floor::Out::QueueInfo { user_id, position, size, priority } => (
+                Some(user_id),
+                Msg::new(mbcp::QUEUE_INFO)
+                    .with_str(mbcp::F_ROOM, room_id)
+                    // ★**두 바이트인데 u16 이 아니다**(연§11-3) — byte0 순번 · byte1 허가된 우선순위.
+                    .with(mbcp::F_QUEUE_INFO, vec![position, priority])
+                    // ★대기 인원은 u8 이다.
+                    .with_u8(mbcp::F_QUEUE_SIZE, size),
+            ),
+            floor::Out::Taken { speaker, seq } => (
+                None,
+                Msg::new(mbcp::TAKEN)
+                    .with_str(mbcp::F_ROOM, room_id)
+                    .with_str(mbcp::F_GRANTED_PARTY, &speaker)
+                    .with_u16(mbcp::F_SEQ, seq),
+            ),
+            floor::Out::Idle { seq, prev } => {
+                let mut m =
+                    Msg::new(mbcp::IDLE).with_str(mbcp::F_ROOM, room_id).with_u16(mbcp::F_SEQ, seq);
+                // ★**있을 때만 싣는다** — 처음부터 조용한 방에는 직전 화자가 없다.
+                if let Some(p) = prev {
+                    m = m.with_str(mbcp::F_PREV_SPEAKER, &p);
+                }
+                (None, m)
+            }
+        };
+        let Some(body) = m.encode() else { continue };
+        let Some(frame) = crate::transport::dc::build(crate::transport::dc::SVC_FLOOR, &body) else {
+            continue;
+        };
+        // ★`TAKEN`·`IDLE` 은 그 방 전원인데 ★**화자는 제외한다**(자기 것은 `GRANTED` 로 안다).
+        let skip = match &m.msg_type {
+            &mbcp::TAKEN => m.get_str(mbcp::F_GRANTED_PARTY).map(str::to_string),
+            _ => None,
+        };
+        for sid in node.rooms.get(room_id).map(|r| r.session_ids()).unwrap_or_default() {
+            let Some(peer) = node.peers.get(&sid) else { continue };
+            if let Some(t) = &to
+                && &peer.user_id != t
+            {
+                continue;
+            }
+            if skip.as_deref() == Some(peer.user_id.as_str()) {
+                continue;
+            }
+            // ★**DC 는 보내기용 연결에 붙는다**(연§3-3) — 받기 자격이 아니다.
+            wire.push(DcOut { ufrag: peer.ice.publish_ufrag.clone(), wire: frame.clone() });
+        }
+    }
+    wire
 }
