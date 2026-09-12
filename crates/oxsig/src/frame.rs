@@ -1,188 +1,205 @@
 // author: kodeholic (powered by Claude)
-//! WS 프레임 — 연§3-1. `ver(1)=0x01 · flags(1) · op(u16 BE) · pid(u32 BE) · body(JSON)`.
-//! 프레임은 두 갈래뿐이다: `00` 요청·통지, `01`/`10` 응답(성공/실패). `11` 은 예약 — 받으면 끊는다.
+// spec: v1.1 · 연§3-1 · 연§3-2 · model: claude-opus-5
 
-use std::fmt;
+//! WS 프레임 — 8B 헤더 + JSON body.
+//!
+//! 헤더는 `ver(1) | flags(1) | op(u16 BE) | pid(u32 BE)` 이고 body 는 그 뒤 전량이다.
+//! 프레임은 두 갈래뿐이다 — 요청·통지(`00`) 하나에 응답(`01`) 또는 실패(`10`) 하나가 돌아온다.
 
-/// 연§3-1 `ver` — 다르면 끊는다.
-pub const VER: u8 = 0x01;
+use crate::code::Code;
+use crate::op::Op;
+
+/// 헤더 길이. body 길이 = 프레임 길이 − 이 값.
 pub const HEADER_LEN: usize = 8;
-/// 연§3-1 끊는 조건 — 프레임 길이 상한.
-pub const MAX_FRAME_LEN: usize = 1_048_576;
-const KIND_MASK: u8 = 0b0000_0011;
 
-/// `flags` bit0-1.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// 우리가 내는 유일한 버전. 다른 값을 받으면 끊는다.
+pub const VER: u8 = 0x01;
+
+/// 프레임 상한. 넘으면 끊는다.
+pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
+
+/// `flags` bit0-1 — 프레임의 갈래.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
-    /// `00` — 요청 또는 통지. 보내는 쪽이 `pid` 를 매긴다.
-    Msg,
-    /// `01` — 성공 응답. `op`·`pid` 를 받은 그대로 되돌린다. 빈 body 면 ACK 이다.
+    /// `00` 요청·통지 — 보내는 쪽이 먼저 말한다.
+    Request,
+    /// `01` 응답(성공). body 가 비면 그것이 ACK 이다.
     Ok,
-    /// `10` — 실패 응답. body 는 `Failure`(연§4-5).
+    /// `10` 응답(실패). body 는 `Failure`.
     Fail,
 }
 
 impl Kind {
-    pub fn bits(self) -> u8 {
+    const MASK: u8 = 0b11;
+
+    fn from_flags(flags: u8) -> Result<Self, DecodeError> {
+        match flags & Self::MASK {
+            0b00 => Ok(Kind::Request),
+            0b01 => Ok(Kind::Ok),
+            0b10 => Ok(Kind::Fail),
+            // ★`11` 은 예약이고 받으면 끊는다 — 조용히 받아 주면 나중에 뜻을 주는 순간 갈린다.
+            _ => Err(DecodeError::ReservedKind),
+        }
+    }
+
+    fn bits(self) -> u8 {
         match self {
-            Kind::Msg => 0b00,
+            Kind::Request => 0b00,
             Kind::Ok => 0b01,
             Kind::Fail => 0b10,
         }
     }
-    pub fn from_flags(flags: u8) -> Result<Self, FrameError> {
-        match flags & KIND_MASK {
-            0b00 => Ok(Kind::Msg),
-            0b01 => Ok(Kind::Ok),
-            0b10 => Ok(Kind::Fail),
-            _ => Err(FrameError::ReservedKind),
-        }
-    }
-    pub fn is_response(self) -> bool {
-        !matches!(self, Kind::Msg)
-    }
 }
 
+/// 헤더 하나. `flags` 의 bit2-7 은 ★원본을 보존한다 — 나중에 늘려도 안 깨지게.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Header {
     pub kind: Kind,
-    /// 연§3-1 — bit2-7 예약. 파서가 원본을 보존한다.
+    /// bit2-7 예약 비트 원본(0b1111_1100 자리).
     pub reserved: u8,
-    pub op: u16,
+    pub op: Op,
     pub pid: u32,
 }
 
 impl Header {
-    pub fn msg(op: u16, pid: u32) -> Self {
-        Self { kind: Kind::Msg, reserved: 0, op, pid }
+    pub fn new(kind: Kind, op: Op, pid: u32) -> Self {
+        Self { kind, reserved: 0, op, pid }
     }
-    /// 응답 — 받은 헤더의 `op`·`pid` 를 그대로 되돌린다.
-    pub fn reply(req: &Header, kind: Kind) -> Self {
-        Self { kind, reserved: 0, op: req.op, pid: req.pid }
-    }
-    pub fn flags(&self) -> u8 {
-        (self.reserved & !KIND_MASK) | self.kind.bits()
-    }
-    pub fn encode(&self) -> [u8; HEADER_LEN] {
-        let mut b = [0u8; HEADER_LEN];
-        b[0] = VER;
-        b[1] = self.flags();
-        b[2..4].copy_from_slice(&self.op.to_be_bytes());
-        b[4..8].copy_from_slice(&self.pid.to_be_bytes());
-        b
-    }
-    pub fn decode(bytes: &[u8]) -> Result<Self, FrameError> {
-        if bytes.len() < HEADER_LEN {
-            return Err(FrameError::TooShort(bytes.len()));
-        }
-        if bytes[0] != VER {
-            return Err(FrameError::BadVersion(bytes[0]));
-        }
-        let kind = Kind::from_flags(bytes[1])?;
-        Ok(Self {
-            kind,
-            reserved: bytes[1] & !KIND_MASK,
-            op: u16::from_be_bytes([bytes[2], bytes[3]]),
-            pid: u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
-        })
+
+    fn flags(self) -> u8 {
+        self.kind.bits() | (self.reserved & !Kind::MASK)
     }
 }
 
-/// 연§3-1 "끊는 조건" — 응답을 지을 수 없는 경우. Close 사유는 `close::CloseCode::ProtocolError`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FrameError {
-    TooShort(usize),
-    BadVersion(u8),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecodeError {
+    /// 8B 헤더도 안 된다.
+    TooShort,
+    /// 상한 초과.
+    TooLong,
+    /// `ver` 가 우리 것이 아니다.
+    Version(u8),
+    /// `flags` 가 `11`.
     ReservedKind,
-    TooLarge(usize),
-    BodyNotJson,
+    /// 카탈로그에 없는 `op`.
+    UnknownOp(u16),
 }
 
-impl fmt::Display for FrameError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl DecodeError {
+    /// 이 실패로 끊을 때 `LEAVE` 가 나를 사유(연§3-1 끊는 조건).
+    ///
+    /// ★응답이 아니라 `LEAVE` 인 이유는 하나다 — `op`·`pid` 를 못 믿으면 응답 프레임을 지을 수가 없다.
+    pub fn leave_reason(self) -> Code {
         match self {
-            FrameError::TooShort(n) => write!(f, "frame shorter than header ({n}B)"),
-            FrameError::BadVersion(v) => write!(f, "ver {v:#04x} != 0x01"),
-            FrameError::ReservedKind => f.write_str("flags 11 reserved"),
-            FrameError::TooLarge(n) => write!(f, "frame {n}B > {MAX_FRAME_LEN}B"),
-            FrameError::BodyNotJson => f.write_str("body is not JSON"),
+            // 모르는 op 은 `op`·`pid` 가 멀쩡하므로 응답으로 답할 수 있다 — 여기 오지 않는다.
+            DecodeError::UnknownOp(_) => Code::UnknownOp,
+            _ => Code::ProtocolError,
         }
     }
 }
 
-impl std::error::Error for FrameError {}
+/// 헤더를 읽는다. body 는 빌려 준 버퍼의 뒤쪽을 그대로 가리킨다 — ★복사하지 않는다.
+pub fn decode(buf: &[u8]) -> Result<(Header, &[u8]), DecodeError> {
+    if buf.len() > MAX_FRAME_BYTES {
+        return Err(DecodeError::TooLong);
+    }
+    if buf.len() < HEADER_LEN {
+        return Err(DecodeError::TooShort);
+    }
+    let ver = buf[0];
+    if ver != VER {
+        return Err(DecodeError::Version(ver));
+    }
+    let flags = buf[1];
+    let kind = Kind::from_flags(flags)?;
+    let raw_op = u16::from_be_bytes([buf[2], buf[3]]);
+    let op = Op::from_u16(raw_op).ok_or(DecodeError::UnknownOp(raw_op))?;
+    let pid = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
+    let header = Header { kind, reserved: flags & !Kind::MASK, op, pid };
+    Ok((header, &buf[HEADER_LEN..]))
+}
 
-/// 헤더 + body. ★빈 body 는 0바이트로 나간다(연§3-1).
-pub fn encode(h: &Header, body: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(HEADER_LEN + body.len());
-    out.extend_from_slice(&h.encode());
+/// 헤더를 그릇 앞에 쓴다. 그릇은 부르는 쪽이 재사용한다 — ★프레임마다 새로 잡지 않는다.
+pub fn encode_header(out: &mut Vec<u8>, header: Header) {
+    out.clear();
+    out.reserve(HEADER_LEN);
+    out.push(VER);
+    out.push(header.flags());
+    out.extend_from_slice(&header.op.as_u16().to_be_bytes());
+    out.extend_from_slice(&header.pid.to_be_bytes());
+}
+
+/// 헤더 + body 를 한 그릇에 잇는다. ★빈 body 는 0바이트다(헤더 8B 만).
+pub fn encode(out: &mut Vec<u8>, header: Header, body: &[u8]) {
+    encode_header(out, header);
     out.extend_from_slice(body);
-    out
-}
-
-/// JSON 값 → 프레임. `Null` 이나 빈 객체는 0바이트 body.
-pub fn encode_json(h: &Header, body: &serde_json::Value) -> Vec<u8> {
-    let empty = body.is_null() || body.as_object().is_some_and(|o| o.is_empty());
-    if empty {
-        encode(h, &[])
-    } else {
-        encode(h, body.to_string().as_bytes())
-    }
-}
-
-pub fn decode(frame: &[u8]) -> Result<(Header, &[u8]), FrameError> {
-    if frame.len() > MAX_FRAME_LEN {
-        return Err(FrameError::TooLarge(frame.len()));
-    }
-    let h = Header::decode(frame)?;
-    Ok((h, &frame[HEADER_LEN..]))
-}
-
-/// body → JSON. 0바이트와 `{}` 는 같은 빈 객체다. JSON 이 아니면 끊는 조건(연§3-1).
-pub fn body_json(body: &[u8]) -> Result<serde_json::Value, FrameError> {
-    if body.is_empty() {
-        return Ok(serde_json::Value::Object(serde_json::Map::new()));
-    }
-    serde_json::from_slice(body).map_err(|_| FrameError::BodyNotJson)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
-    fn roundtrip_and_reserved_bits_preserved() {
-        let h = Header { kind: Kind::Ok, reserved: 0b1010_0100, op: 0x0201, pid: 7 };
-        let f = encode(&h, b"{}");
-        let (d, body) = decode(&f).unwrap();
-        assert_eq!(d, h);
-        assert_eq!(d.flags(), 0b1010_0101);
-        assert_eq!(body_json(body).unwrap(), json!({}));
+    fn 헤더_왕복() {
+        let mut buf = Vec::new();
+        encode(&mut buf, Header::new(Kind::Request, Op::Bind, 7), b"{}");
+        let (h, body) = decode(&buf).expect("decode");
+        assert_eq!(h.kind, Kind::Request);
+        assert_eq!(h.op, Op::Bind);
+        assert_eq!(h.pid, 7);
+        assert_eq!(body, b"{}");
     }
 
     #[test]
-    fn empty_body_is_zero_bytes_and_equals_braces() {
-        let h = Header::msg(0x0103, 1);
-        assert_eq!(encode_json(&h, &json!({})).len(), HEADER_LEN);
-        assert_eq!(encode_json(&h, &serde_json::Value::Null).len(), HEADER_LEN);
-        assert_eq!(body_json(b"").unwrap(), body_json(b"{}").unwrap());
+    fn 빈_body_는_0바이트() {
+        let mut buf = Vec::new();
+        encode(&mut buf, Header::new(Kind::Ok, Op::Heartbeat, 1), b"");
+        assert_eq!(buf.len(), HEADER_LEN);
+        let (_, body) = decode(&buf).expect("decode");
+        // ★ACK = body 가 빈 `01` 응답. `{}` 도 같게 받는다(그쪽은 소비자 몫).
+        assert!(body.is_empty());
     }
 
     #[test]
-    fn disconnect_conditions() {
-        assert_eq!(Header::decode(&[1, 0, 0]).unwrap_err(), FrameError::TooShort(3));
-        assert_eq!(Header::decode(&[2, 0, 0, 0, 0, 0, 0, 0]).unwrap_err(), FrameError::BadVersion(2));
-        assert_eq!(Header::decode(&[1, 0b11, 0, 0, 0, 0, 0, 0]).unwrap_err(), FrameError::ReservedKind);
-        assert_eq!(body_json(b"nope").unwrap_err(), FrameError::BodyNotJson);
-        let big = vec![0u8; MAX_FRAME_LEN + 1];
-        assert!(matches!(decode(&big), Err(FrameError::TooLarge(_))));
+    fn 예약_비트는_보존된다() {
+        let mut buf = Vec::new();
+        encode(&mut buf, Header::new(Kind::Request, Op::Bind, 1), b"");
+        buf[1] |= 0b1111_1100;
+        let (h, _) = decode(&buf).expect("decode");
+        assert_eq!(h.reserved, 0b1111_1100, "★원본을 보존해야 나중에 늘려도 안 깨진다");
+        let mut again = Vec::new();
+        encode(&mut again, h, b"");
+        assert_eq!(again[1], buf[1]);
     }
 
     #[test]
-    fn reply_echoes_op_and_pid() {
-        let req = Header { kind: Kind::Msg, reserved: 0, op: 0x0101, pid: 0xFFFF_FFFF };
-        let r = Header::reply(&req, Kind::Fail);
-        assert_eq!((r.op, r.pid, r.kind), (0x0101, 0xFFFF_FFFF, Kind::Fail));
+    fn 갈래_11_은_끊는다() {
+        let mut buf = Vec::new();
+        encode(&mut buf, Header::new(Kind::Request, Op::Bind, 1), b"");
+        buf[1] = (buf[1] & !0b11) | 0b11;
+        assert_eq!(decode(&buf), Err(DecodeError::ReservedKind));
+    }
+
+    #[test]
+    fn 버전이_다르면_끊는다() {
+        let mut buf = Vec::new();
+        encode(&mut buf, Header::new(Kind::Request, Op::Bind, 1), b"");
+        buf[0] = 0x02;
+        assert_eq!(decode(&buf), Err(DecodeError::Version(0x02)));
+        assert_eq!(DecodeError::Version(0x02).leave_reason(), Code::ProtocolError);
+    }
+
+    #[test]
+    fn 모르는_op_은_끊는_사유가_다르다() {
+        let mut buf = vec![VER, 0, 0xEE, 0xEE, 0, 0, 0, 1];
+        buf.extend_from_slice(b"{}");
+        // ★`op`·`pid` 는 멀쩡하므로 응답으로 답할 수 있다 — 끊는 조건이 아니다.
+        assert_eq!(decode(&buf), Err(DecodeError::UnknownOp(0xEEEE)));
+    }
+
+    #[test]
+    fn 상한을_넘으면_끊는다() {
+        let buf = vec![0u8; MAX_FRAME_BYTES + 1];
+        assert_eq!(decode(&buf), Err(DecodeError::TooLong));
     }
 }

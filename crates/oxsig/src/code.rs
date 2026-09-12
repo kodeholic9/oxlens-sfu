@@ -1,173 +1,120 @@
 // author: kodeholic (powered by Claude)
-//! 실패 응답 body — 연§4-5·§10. 판단은 숫자 `code` 로, `name` 은 로그용.
-//! 모르는 코드는 앞자리로 판단한다(연§10-2). 비워 둔 번호(2007·3003)는 쓰지 않는다.
+// spec: v1.1 · 연§10-1 · 연§10-2 · model: claude-opus-5
 
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+//! 실패 코드 — ★**번호 공간은 하나다.** A 평면 응답·`LEAVE` 사유·C 평면(운영)·대외(`ctl`)가 같은 표를 쓴다.
+//!
+//! ★**모르는 코드는 앞자리로 판단한다** — 그래야 서버가 코드를 늘려도 클라가 안 깨진다.
+//! `permanent` 가 오면 그것을 우선한다.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(u16)]
-pub enum FailCode {
-    UnknownOp = 1001,
-    InvalidPayload = 1002,
-    MissingField = 1003,
-    VersionMismatch = 1004,
-    CodecRequired = 1005,
-    CodecMismatch = 1006,
-    FieldConflict = 1007,
-    NotBound = 2001,
-    TokenInvalid = 2002,
-    TokenExpired = 2003,
-    InvalidApiKey = 2004,
-    InvalidRole = 2005,
-    NotAuthorized = 2006,
-    SessionNotFound = 2008,
-    RoomNotFound = 3001,
-    NotInRoom = 3002,
-    RoomNotEmpty = 3004,
-    TrackNotFound = 3005,
-    TrackOpUnsupported = 3006,
-    RoomFull = 4001,
-    TrackLimit = 4002,
-    QuotaExceeded = 4003,
-    ListenLimit = 4004,
-    MidLimit = 4005,
-    SfuUnavailable = 5001,
-    SfuError = 5002,
-    InternalError = 5003,
-}
-
-/// 연§10-2 앞자리 — "무엇을 고쳐야 하나".
+/// 앞자리 — 모르는 번호를 만났을 때의 처방.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Class {
-    /// 1xxx 요청이 틀렸다(클라 버그, 전부 permanent)
-    Bug,
-    /// 2xxx 신원·권한
-    Auth,
-    /// 3xxx 지금 상태에서 안 된다
+pub enum Family {
+    /// 1xxx 요청이 틀렸다 — 재시도하지 않는다(앱 코드를 고친다).
+    Request,
+    /// 2xxx 신원·권한.
+    Identity,
+    /// 3xxx 지금 상태에서 안 된다.
     State,
-    /// 4xxx 한계(전부 permanent 아님)
+    /// 4xxx 한계에 걸렸다 — 줄이거나 기다린다.
     Limit,
-    /// 5xxx 서버 사정(전부 permanent 아님)
+    /// 5xxx 서버 사정 — 다시 시도한다.
     Server,
-    Unknown,
 }
 
-impl Class {
-    pub fn of(code: u16) -> Class {
-        match code / 1000 {
-            1 => Class::Bug,
-            2 => Class::Auth,
-            3 => Class::State,
-            4 => Class::Limit,
-            5 => Class::Server,
-            _ => Class::Unknown,
+macro_rules! codes {
+    ($( $name:ident = $num:literal, $wire:literal, $perm:expr ; )*) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum Code { $( $name ),* }
+
+        impl Code {
+            pub const ALL: &'static [Code] = &[ $( Code::$name ),* ];
+
+            pub fn from_u16(v: u16) -> Option<Code> {
+                match v { $( $num => Some(Code::$name), )* _ => None }
+            }
+
+            pub fn as_u16(self) -> u16 {
+                match self { $( Code::$name => $num, )* }
+            }
+
+            /// wire 이름 — `Failure.name` 에 그대로 싣는다.
+            pub fn name(self) -> &'static str {
+                match self { $( Code::$name => $wire, )* }
+            }
+
+            /// ★`None` = 이 코드는 `LEAVE` 사유로만 쓰여 응답의 `permanent` 축이 없다.
+            pub fn permanent(self) -> Option<bool> {
+                match self { $( Code::$name => $perm, )* }
+            }
+        }
+    };
+}
+
+codes! {
+    // 1xxx — 요청이 틀렸다(전부 permanent)
+    UnknownOp          = 1001, "UNKNOWN_OP",          Some(true);
+    InvalidPayload     = 1002, "INVALID_PAYLOAD",     Some(true);
+    MissingField       = 1003, "MISSING_FIELD",       Some(true);
+    VersionMismatch    = 1004, "VERSION_MISMATCH",    Some(true);
+    CodecRequired      = 1005, "CODEC_REQUIRED",      Some(true);
+    CodecMismatch      = 1006, "CODEC_MISMATCH",      Some(true);
+    FieldConflict      = 1007, "FIELD_CONFLICT",      Some(true);
+    ProtocolError      = 1008, "PROTOCOL_ERROR",      None;
+    // 2xxx — 신원·권한
+    NotBound           = 2001, "NOT_BOUND",           Some(false);
+    TokenInvalid       = 2002, "TOKEN_INVALID",       Some(true);
+    TokenExpired       = 2003, "TOKEN_EXPIRED",       Some(false);
+    InvalidApiKey      = 2004, "INVALID_API_KEY",     Some(true);
+    ClaimNotAllowed    = 2005, "CLAIM_NOT_ALLOWED",   Some(true);
+    NotAuthorized      = 2006, "NOT_AUTHORIZED",      Some(true);
+    SessionNotFound    = 2008, "SESSION_NOT_FOUND",   Some(false);
+    SessionRevoked     = 2009, "SESSION_REVOKED",     None;
+    DuplicateSession   = 2010, "DUPLICATE_SESSION",   None;
+    // 3xxx — 지금 상태에서 안 된다
+    RoomNotFound       = 3001, "ROOM_NOT_FOUND",      Some(false);
+    NotInRoom          = 3002, "NOT_IN_ROOM",         Some(false);
+    RoomNotEmpty       = 3004, "ROOM_NOT_EMPTY",      Some(false);
+    TrackNotFound      = 3005, "TRACK_NOT_FOUND",     Some(false);
+    TrackOpUnsupported = 3006, "TRACK_OP_UNSUPPORTED",Some(true);
+    TrackBoundToRoom   = 3007, "TRACK_BOUND_TO_ROOM", Some(false);
+    SsrcCollision      = 3008, "SSRC_COLLISION",      Some(true);
+    PreconditionFailed = 3009, "PRECONDITION_FAILED", Some(false);
+    // 4xxx — 한계(전부 permanent 아님)
+    RoomFull           = 4001, "ROOM_FULL",           Some(false);
+    TrackLimit         = 4002, "TRACK_LIMIT",         Some(false);
+    QuotaExceeded      = 4003, "QUOTA_EXCEEDED",      Some(false);
+    ListenLimit        = 4004, "LISTEN_LIMIT",        Some(false);
+    MidLimit           = 4005, "MID_LIMIT",           Some(false);
+    FlowTimeout        = 4006, "FLOW_TIMEOUT",        None;
+    FlowOverflow       = 4007, "FLOW_OVERFLOW",       None;
+    HeartbeatTimeout   = 4008, "HEARTBEAT_TIMEOUT",   None;
+    // 5xxx — 서버 사정(전부 permanent 아님)
+    SfuUnavailable     = 5001, "SFU_UNAVAILABLE",     Some(false);
+    SfuError           = 5002, "SFU_ERROR",           Some(false);
+    InternalError      = 5003, "INTERNAL_ERROR",      Some(false);
+    ServerShutdown     = 5004, "SERVER_SHUTDOWN",     None;
+}
+
+/// ★**폐기 번호 — 비워 둔다.** *"내지 않는다"* 도 계약이라 목록으로 남긴다.
+///
+/// `2007` 세션 중복은 실패가 아니라 축출이고(연§6-1), `3003` 은 발행처가 없어졌다.
+pub const RETIRED: &[u16] = &[2007, 3003];
+
+impl Code {
+    /// 앞자리. ★**모르는 번호도 이것만으로 처방이 선다.**
+    pub fn family_of(v: u16) -> Option<Family> {
+        match v / 1000 {
+            1 => Some(Family::Request),
+            2 => Some(Family::Identity),
+            3 => Some(Family::State),
+            4 => Some(Family::Limit),
+            5 => Some(Family::Server),
+            _ => None,
         }
     }
-}
 
-/// 연§10-2 — 번호는 재사용하지 않고, 없앨 때는 비워 둔다.
-pub const RETIRED: [u16; 2] = [2007, 3003];
-
-impl FailCode {
-    pub const ALL: [FailCode; 27] = [
-        FailCode::UnknownOp, FailCode::InvalidPayload, FailCode::MissingField, FailCode::VersionMismatch,
-        FailCode::CodecRequired, FailCode::CodecMismatch, FailCode::FieldConflict, FailCode::NotBound,
-        FailCode::TokenInvalid, FailCode::TokenExpired, FailCode::InvalidApiKey, FailCode::InvalidRole,
-        FailCode::NotAuthorized, FailCode::SessionNotFound, FailCode::RoomNotFound, FailCode::NotInRoom,
-        FailCode::RoomNotEmpty, FailCode::TrackNotFound, FailCode::TrackOpUnsupported, FailCode::RoomFull,
-        FailCode::TrackLimit, FailCode::QuotaExceeded, FailCode::ListenLimit, FailCode::MidLimit,
-        FailCode::SfuUnavailable, FailCode::SfuError, FailCode::InternalError,
-    ];
-
-    pub fn code(self) -> u16 {
-        self as u16
-    }
-
-    pub fn from_code(code: u16) -> Option<FailCode> {
-        FailCode::ALL.iter().copied().find(|c| c.code() == code)
-    }
-
-    pub fn class(self) -> Class {
-        Class::of(self.code())
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            FailCode::UnknownOp => "UNKNOWN_OP",
-            FailCode::InvalidPayload => "INVALID_PAYLOAD",
-            FailCode::MissingField => "MISSING_FIELD",
-            FailCode::VersionMismatch => "VERSION_MISMATCH",
-            FailCode::CodecRequired => "CODEC_REQUIRED",
-            FailCode::CodecMismatch => "CODEC_MISMATCH",
-            FailCode::FieldConflict => "FIELD_CONFLICT",
-            FailCode::NotBound => "NOT_BOUND",
-            FailCode::TokenInvalid => "TOKEN_INVALID",
-            FailCode::TokenExpired => "TOKEN_EXPIRED",
-            FailCode::InvalidApiKey => "INVALID_API_KEY",
-            FailCode::InvalidRole => "INVALID_ROLE",
-            FailCode::NotAuthorized => "NOT_AUTHORIZED",
-            FailCode::SessionNotFound => "SESSION_NOT_FOUND",
-            FailCode::RoomNotFound => "ROOM_NOT_FOUND",
-            FailCode::NotInRoom => "NOT_IN_ROOM",
-            FailCode::RoomNotEmpty => "ROOM_NOT_EMPTY",
-            FailCode::TrackNotFound => "TRACK_NOT_FOUND",
-            FailCode::TrackOpUnsupported => "TRACK_OP_UNSUPPORTED",
-            FailCode::RoomFull => "ROOM_FULL",
-            FailCode::TrackLimit => "TRACK_LIMIT",
-            FailCode::QuotaExceeded => "QUOTA_EXCEEDED",
-            FailCode::ListenLimit => "LISTEN_LIMIT",
-            FailCode::MidLimit => "MID_LIMIT",
-            FailCode::SfuUnavailable => "SFU_UNAVAILABLE",
-            FailCode::SfuError => "SFU_ERROR",
-            FailCode::InternalError => "INTERNAL_ERROR",
-        }
-    }
-
-    /// 연§10-1 `permanent` — 같은 요청을 다시 보내도 같다.
-    pub fn permanent(self) -> bool {
-        match self.class() {
-            Class::Bug => true,
-            Class::Limit | Class::Server | Class::Unknown => false,
-            Class::Auth => matches!(
-                self,
-                FailCode::TokenInvalid | FailCode::InvalidApiKey | FailCode::InvalidRole | FailCode::NotAuthorized
-            ),
-            Class::State => matches!(self, FailCode::TrackOpUnsupported),
-        }
-    }
-}
-
-/// 연§4-5 실패 body. `permanent` 가 오면 앞자리보다 우선한다(연§10-2).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Failure {
-    pub code: u16,
-    pub name: String,
-    pub permanent: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub details: Option<Value>,
-}
-
-impl Failure {
-    pub fn new(code: FailCode) -> Self {
-        Self { code: code.code(), name: code.name().to_owned(), permanent: code.permanent(), message: None, details: None }
-    }
-    pub fn message(mut self, m: impl Into<String>) -> Self {
-        self.message = Some(m.into());
-        self
-    }
-    pub fn details(mut self, d: Value) -> Self {
-        self.details = Some(d);
-        self
-    }
-    pub fn class(&self) -> Class {
-        Class::of(self.code)
-    }
-    /// 연§7-0-1 — 재시도할 수 있나: 1xxx 아님 ∧ permanent 아님.
-    pub fn retryable(&self) -> bool {
-        !self.permanent && self.class() != Class::Bug
+    pub fn family(self) -> Family {
+        Code::family_of(self.as_u16()).expect("코드는 1xxx~5xxx 다")
     }
 }
 
@@ -176,45 +123,59 @@ mod tests {
     use super::*;
 
     #[test]
-    fn table_is_complete_and_retired_are_absent() {
-        assert_eq!(FailCode::ALL.len(), 27);
-        for r in RETIRED {
-            assert_eq!(FailCode::from_code(r), None);
-        }
-        for c in FailCode::ALL {
-            assert_eq!(FailCode::from_code(c.code()), Some(c));
+    fn 번호_이름_왕복() {
+        for &c in Code::ALL {
+            assert_eq!(Code::from_u16(c.as_u16()), Some(c));
+            assert!(!c.name().is_empty());
         }
     }
 
     #[test]
-    fn permanent_follows_spec_10_2() {
-        assert!(FailCode::UnknownOp.permanent());
-        assert!(FailCode::FieldConflict.permanent());
-        assert!(!FailCode::TokenExpired.permanent());
-        assert!(FailCode::TokenInvalid.permanent());
-        assert!(!FailCode::NotBound.permanent());
-        assert!(!FailCode::SessionNotFound.permanent());
-        assert!(FailCode::TrackOpUnsupported.permanent());
-        assert!(!FailCode::RoomNotFound.permanent());
-        assert!(!FailCode::MidLimit.permanent());
-        assert!(!FailCode::InternalError.permanent());
+    fn 폐기_번호는_내지_않는다() {
+        for &v in RETIRED {
+            assert_eq!(Code::from_u16(v), None, "★{v} 는 비워 둔 번호다");
+        }
     }
 
     #[test]
-    fn unknown_code_judged_by_leading_digit() {
-        let f = Failure { code: 4999, name: "NEW".into(), permanent: false, message: None, details: None };
-        assert_eq!(f.class(), Class::Limit);
-        assert!(f.retryable());
-        let bug = Failure { code: 1999, name: "NEW".into(), permanent: true, message: None, details: None };
-        assert!(!bug.retryable());
+    fn 앞자리가_처방을_준다() {
+        // ★모르는 번호 — 표에 없어도 앞자리로 답이 나와야 한다.
+        assert_eq!(Code::family_of(1999), Some(Family::Request));
+        assert_eq!(Code::family_of(5999), Some(Family::Server));
+        assert_eq!(Code::family_of(999), None);
     }
 
     #[test]
-    fn failure_json_shape() {
-        let j = serde_json::to_value(Failure::new(FailCode::RoomNotFound)).unwrap();
-        assert_eq!(j["code"], 3001);
-        assert_eq!(j["name"], "ROOM_NOT_FOUND");
-        assert_eq!(j["permanent"], false);
-        assert!(j.get("message").is_none());
+    fn 일천번대는_전부_영구다() {
+        for &c in Code::ALL {
+            if c.family() == Family::Request && c.permanent().is_some() {
+                assert_eq!(c.permanent(), Some(true), "{:?}", c);
+            }
+        }
+    }
+
+    #[test]
+    fn 사천오천번대는_영구가_아니다() {
+        for &c in Code::ALL {
+            if matches!(c.family(), Family::Limit | Family::Server) {
+                assert_ne!(c.permanent(), Some(true), "{:?}", c);
+            }
+        }
+    }
+
+    #[test]
+    fn leave_사유는_permanent_축이_없다() {
+        // ★`LEAVE` 는 응답이 아니라 종료 통지다 — 재시도 축을 씌우면 뜻이 갈린다.
+        for c in [
+            Code::ProtocolError,
+            Code::SessionRevoked,
+            Code::DuplicateSession,
+            Code::FlowTimeout,
+            Code::FlowOverflow,
+            Code::HeartbeatTimeout,
+            Code::ServerShutdown,
+        ] {
+            assert_eq!(c.permanent(), None, "{c:?}");
+        }
     }
 }
