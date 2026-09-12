@@ -49,6 +49,11 @@ pub enum Cmd {
     SetRoute { ssrc: u32, targets: Vec<Target> },
     /// 그 자격의 DC 로 한 장. ★**채널이 아직이면 버린다** — 막지 않는다(정§13).
     DcSend { ufrag: String, wire: Vec<u8> },
+    /// ★**그 발행 자격에서 `rid` 를 달고 오는 것은 이 `vssrc` 것**이다(정§10-1).
+    ///
+    /// 등록 항목이 `rid` 를 안 싣기 때문에(연§6-3) 어느 ssrc 가 어느 단인지는
+    /// ★**RTP 로 배워야 한다** — 배울 대상을 알려 주는 것이 이 명령이다.
+    SetSimulcast { ufrag: String, vssrc: u32 },
 }
 
 /// DC 로 들어온 것 — ★**판정은 제어 평면이 한다**(여기는 나르기만).
@@ -104,6 +109,10 @@ pub struct Counters {
     pub rtcp_rr_in: u64,
     pub rtcp_fb_in: u64,
     pub rtcp_ignored: u64,
+    /// rid 가 없어 단을 모르는 패킷 — ★**지어내지 않고 버린 것**이다.
+    pub sim_unknown: u64,
+    /// 지금 안 보내는 단이라 버린 것.
+    pub sim_dropped: u64,
     pub unknown: u64,
 }
 
@@ -131,6 +140,9 @@ const REPORT_MS: u64 = 30_000;
 /// ★발행자에게 RR 을 내는 주기(정§11-2) — ★**소비자는 타이머 하나다.**
 const RR_MS: u64 = 1_000;
 
+/// 서버가 선언하는 rid 확장 번호(`identity::extmap`) — 발행자 신고가 없으면 이 값이다.
+const RID_EXT_ID: u8 = 10;
+
 /// 서버가 RTCP 에 쓰는 제 SSRC — ★**미디어 SSRC 와 겹치지 않는 고정값**이다.
 const SERVER_SSRC: u32 = 0x0000_0001;
 
@@ -155,6 +167,12 @@ pub async fn serve(
     // ★**발행 스트림마다 수신 통계** — 핫패스가 갱신하고 1초 타이머가 소비한다(정§11-2).
     //   값은 `(그 자격, 통계)` 라 회수 때 같이 간다.
     let mut stats: HashMap<u32, (String, crate::rtcp::RecvStats)> = HashMap::new();
+    // ★시뮬캐스트 — `발행 자격 → vssrc` 는 제어 평면이 알려 주고,
+    //   `들어온 ssrc → (vssrc, 단)` 은 rid 로 ★**배운다**(정§10-1).
+    let mut sim_of: HashMap<String, u32> = HashMap::new();
+    let mut layer_of: HashMap<u32, (u32, u8)> = HashMap::new();
+    // 그 vssrc 로 지금 내보내는 단 — ★**가장 높은 것부터**(제약이 없으면 제일 좋은 것).
+    let mut sending: HashMap<u32, u8> = HashMap::new();
     // ★구독자에게 내보낸 수 — SR 번역이 이 값으로 카운터를 갈아 끼운다.
     let mut egress: HashMap<(String, u32), (u32, u32)> = HashMap::new();
     // ★**내보낼 것을 담는 그릇 하나** — 패킷마다 새로 잡지 않는다(H3).
@@ -217,6 +235,10 @@ pub async fn serve(
                             rewriters.retain(|(f, _), _| f != u);
                             stats.retain(|_, (f, _)| f != u);
                             egress.retain(|(f, _), _| f != u);
+                            if let Some(v) = sim_of.remove(u) {
+                                layer_of.retain(|_, (x, _)| *x != v);
+                                sending.remove(&v);
+                            }
                             // ★**갈 곳 목록에서도 뺀다** — 안 빼면 죽은 자격으로 계속 잠근다.
                             for t in routes.values_mut() {
                                 t.retain(|x| &x.ufrag != u);
@@ -234,6 +256,9 @@ pub async fn serve(
                             // ★**막지 않는다**(정§13) — 넘치면 그 장을 버리고 계수로 남는다.
                             let _ = p.dc.try_send(wire);
                         }
+                    }
+                    Cmd::SetSimulcast { ufrag, vssrc } => {
+                        sim_of.insert(ufrag, vssrc);
                     }
                     Cmd::SetRoute { ssrc, targets } => {
                         if targets.is_empty() {
@@ -337,14 +362,55 @@ pub async fn serve(
                         .1
                         .on_rtp(seq, ts, now);
                 }
-                let Some(targets) = routes.get(&ssrc) else { continue };
+                // ★**시뮬캐스트는 들어온 ssrc 가 곧 스트림이 아니다** — 단마다 다르다.
+                //   rid 로 배워서 vssrc 로 합치고, 지금 고른 단만 내보낸다.
+                let mut out_ssrc = ssrc;
+                // ★★**이미 아는 ssrc 는 그 스트림 것이다** — 같은 발행자가 audio 와 시뮬캐스트
+                //   video 를 같이 올리므로, 자격만 보고 시뮬캐스트 갈래로 보내면 ★**audio 가
+                //   rid 가 없다는 이유로 통째로 버려진다**(실측 20260912: 468 중 1 만 도착).
+                //   갈래를 가르는 것은 자격이 아니라 ★**그 ssrc 를 아는가**다.
+                if !routes.contains_key(&ssrc)
+                    && let Some(&vssrc) = sim_of.get(&ufrag)
+                {
+                    let known = layer_of.get(&ssrc).copied();
+                    let (v, spatial) = match known {
+                        Some(v) => v,
+                        None => {
+                            // ★rid 가 없으면 단을 모른다 — 지어내지 않고 버린다.
+                            let Some(spatial) = crate::rtpext::rid(&plain, RID_EXT_ID)
+                                .and_then(crate::rtpext::spatial_of)
+                            else {
+                                c.sim_unknown += 1;
+                                continue;
+                            };
+                            layer_of.insert(ssrc, (vssrc, spatial));
+                            // ★**제약이 없으면 제일 좋은 것** — 본 것 중 가장 높은 단을 쓴다.
+                            let cur = sending.entry(vssrc).or_insert(spatial);
+                            if spatial > *cur {
+                                // ★**여기는 키프레임 경계가 아니다**(정§10-2) — 전환을
+                                //   키프레임에서만 하는 가드는 아직 없다(이행). 첫 선택
+                                //   구간이라 실측 피해는 없지만, 자동 레이어를 붙일 때
+                                //   이 자리가 그 가드의 자리다.
+                                *cur = spatial;
+                            }
+                            (vssrc, spatial)
+                        }
+                    };
+                    if sending.get(&v).copied() != Some(spatial) {
+                        // 지금 안 보내는 단이다 — 버리되 센다.
+                        c.sim_dropped += 1;
+                        continue;
+                    }
+                    out_ssrc = v;
+                }
+                let Some(targets) = routes.get(&out_ssrc) else { continue };
                 for t in targets {
                     let Some(dst) = table.get(&t.ufrag).and_then(|e| e.addr()) else { continue };
                     let Some(out) = srtp.get_mut(&t.ufrag) else { continue };
                     // ★**제자리 재기록 · 길이 불변** — 본문은 건드리지 않는다(H1).
                     scratch.clear();
                     scratch.extend_from_slice(&plain);
-                    match t.slot {
+                    match t.slot.or(if out_ssrc == ssrc { None } else { Some(out_ssrc) }) {
                         None => {
                             if !super::srtp::rewrite_pt(&mut scratch, t.pt) {
                                 continue;
@@ -369,7 +435,7 @@ pub async fn serve(
                         let _ = socket.send_to(&sealed, dst).await;
                         c.srtp_out += 1;
                         // ★SR 번역이 쓸 egress 카운터 — 발행자 수가 아니라 **내보낸 수**다.
-                        let e = egress.entry((t.ufrag.clone(), ssrc)).or_insert((0, 0));
+                        let e = egress.entry((t.ufrag.clone(), out_ssrc)).or_insert((0, 0));
                         e.0 = e.0.wrapping_add(1);
                         e.1 = e.1.wrapping_add(scratch.len().saturating_sub(12) as u32);
                     }

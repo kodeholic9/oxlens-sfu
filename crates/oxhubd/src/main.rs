@@ -909,6 +909,7 @@ fn routed(op: oxsig::Op) -> bool {
             | oxsig::Op::Affiliation
             | oxsig::Op::PublishTracks
             | oxsig::Op::Ready
+            | oxsig::Op::TrackSet
     )
 }
 
@@ -917,7 +918,11 @@ fn room_of(op: oxsig::Op, body: &[u8]) -> Option<String> {
     let v: serde_json::Value = serde_json::from_slice(body).ok()?;
     let pick = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
     match op {
-        oxsig::Op::RoomJoin | oxsig::Op::RoomLeave | oxsig::Op::PublishTracks | oxsig::Op::Ready => {
+        oxsig::Op::RoomJoin
+        | oxsig::Op::RoomLeave
+        | oxsig::Op::PublishTracks
+        | oxsig::Op::Ready
+        | oxsig::Op::TrackSet => {
             pick("room_id")
         }
         // ★한 요청이 두 방을 바꿀 수 있다 — 라우팅은 `pub_select` 가 먼저다(연§6-4).

@@ -9,6 +9,7 @@
 use oxsig::body::data::{AffiliationCause, AffiliationReq, AffiliationRes};
 use oxsig::body::media::{
     PublishAction, PublishTracksReq, PublishTracksRes, PublishedTrack, ReadyReq, ReadyType,
+    TrackSetReq,
 };
 use oxsig::body::notify::{
     ParticipantChange, ParticipantEvent, RoomEvent, RoomEventType, TrackAction, TrackEvent,
@@ -57,6 +58,8 @@ pub struct Outcome {
     pub notices: Vec<Notice>,
     /// ★**전달표 갱신** — 제어 평면이 계산해 데이터 평면에 밀어 넣는다(핫패스 규율 H2).
     pub routes: Vec<(u32, Vec<crate::transport::udp::Target>)>,
+    /// 시뮬캐스트 등록 `(발행 자격, vssrc)`.
+    pub sims: Vec<(String, u32)>,
 }
 
 /// 이 유닛이 쥔 것 전부.
@@ -198,8 +201,23 @@ pub fn routes_for_room(node: &Node, room_id: &str) -> Vec<(u32, Vec<crate::trans
                     })
                 })
                 .collect();
-            (p.ssrc, targets)
+            // ★**시뮬캐스트는 vssrc 로 건다** — 들어오는 ssrc 는 단마다 다르고 미리 알 수 없다.
+            (p.vssrc.unwrap_or(p.ssrc), targets)
         })
+        .collect()
+}
+
+/// 시뮬캐스트 등록 — ★**그 발행 자격에서 rid 를 달고 오는 것은 이 vssrc 것**이다.
+///
+/// ★**등록 항목이 `rid` 를 안 싣기 때문에**(연§6-3) 데이터 평면이 RTP 로 배워야 하고,
+/// 배울 대상을 알려 주는 것이 이 한 줄이다.
+pub fn simulcast_regs(node: &Node, session_id: &str) -> Vec<(String, u32)> {
+    let Some(peer) = node.peers.get(session_id) else { return Vec::new() };
+    let ufrag = peer.ice.publish_ufrag.clone();
+    node.publications
+        .iter()
+        .filter(|p| p.session_id == session_id)
+        .filter_map(|p| p.vssrc.map(|v| (ufrag.clone(), v)))
         .collect()
 }
 
@@ -211,6 +229,7 @@ pub fn dispatch(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> 
         Op::Affiliation => affiliation(node, ing, header, body),
         Op::PublishTracks => publish_tracks(node, ing, header, body),
         Op::Ready => ready(node, ing, header, body),
+        Op::TrackSet => track_set(node, ing, header, body),
         // ★미디어 축은 다음 걸음이다 — 조용히 성공하지 않는다.
         _ => Outcome { reply: fail(header, Code::UnknownOp), ..Default::default() },
     }
@@ -260,7 +279,7 @@ fn room_join(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Out
         select,
         metadata: ing.metadata.clone(),
     }) {
-        return Outcome { reply: fail(header, code), notices, routes: Vec::new() };
+        return Outcome { reply: fail(header, code), notices, ..Default::default() };
     }
     let version = room.version(&node.epoch);
     let participants = room.participants();
@@ -331,7 +350,7 @@ fn room_join(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Out
         ));
     }
     let routes = routes_for_room(node, &req.room_id);
-    Outcome { reply: ok(header, &json(&res)), notices, routes }
+    Outcome { reply: ok(header, &json(&res)), notices, routes, ..Default::default() }
 }
 
 fn left_notice(room_id: &str, user_id: &str, version: oxsig::Version) -> Notice {
@@ -371,7 +390,7 @@ fn room_leave(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Ou
     }
 
     let Some(peer) = node.peers.get_mut(&ing.session_id) else {
-        return Outcome { reply: fail(header, Code::SessionNotFound), notices, routes: Vec::new() };
+        return Outcome { reply: fail(header, Code::SessionNotFound), notices, ..Default::default() };
     };
     peer.sub_rooms.retain(|r| r != &req.room_id);
     // ★**딸려 내려간다** — 발행하던 방에서 나가면 발행할 곳이 없다(연§6-2).
@@ -384,7 +403,7 @@ fn room_leave(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Ou
     }
     let res = RoomLeaveRes { room_id: req.room_id.clone(), affiliation: peer.affiliation() };
     let routes = routes_for_room(node, &req.room_id);
-    Outcome { reply: ok(header, &json(&res)), notices, routes }
+    Outcome { reply: ok(header, &json(&res)), notices, routes, ..Default::default() }
 }
 
 fn affiliation(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Outcome {
@@ -532,6 +551,8 @@ pub fn reaper_tick(node: &mut Node, now: u64) -> Vec<Reaped> {
 pub struct Publication {
     pub track_id: String,
     pub room_id: String,
+    /// 발행자 쪽 m-line 번호 — ★**등록 신고값 그대로다**(서버는 SDP 를 안 본다).
+    pub mid: String,
     pub session_id: String,
     pub user_id: String,
     pub kind: Kind,
@@ -544,6 +565,18 @@ pub struct Publication {
     pub duplex: Duplex,
     pub simulcast: bool,
     pub source: Option<Source>,
+    /// ★**가상 SSRC** — 시뮬캐스트의 egress 값이다(정§4-1 식별 3평면).
+    ///
+    /// ★**물리가 바뀌어도 논리가 산다** — 단이 분화·교체돼도 이 값이 보존되므로
+    /// 구독자는 단 전환에 재협상을 하지 않는다. 시뮬캐스트가 아니면 `None`(원본을 쓴다).
+    pub vssrc: Option<u32>,
+}
+
+/// ★`0` 을 피한다 — RTP 에서 `0` 은 값이 아니라 *"안 정해졌다"* 로 읽히는 자리가 많다.
+fn fresh_ssrc() -> u32 {
+    let mut raw = [0u8; 4];
+    getrandom::fill(&mut raw).expect("OS 난수");
+    u32::from_be_bytes(raw) | 1
 }
 
 /// ★**지원하는 video 코덱 전량**(정§6-2 1차) — 키프레임 판정기가 없으면 지원이 아니다.
@@ -560,9 +593,10 @@ impl Publication {
             room_id: self.room_id.clone(),
             track_id: self.track_id.clone(),
             kind: self.kind,
-            // ★전이중 non-sim 의 egress SSRC 는 ★**원본**이다(정§8-1) — 항목의 값이 곧 도착할 값이라야
-            //   클라가 지은 받기 m-line 의 `a=ssrc` 와 맞는다.
-            ssrc: self.ssrc,
+            // ★전이중 non-sim 의 egress SSRC 는 ★**원본**이고, 시뮬캐스트는 ★**vssrc** 다
+            //   (정§8-1). 항목의 값이 곧 도착할 값이라야 클라가 지은 받기 m-line 의
+            //   `a=ssrc` 와 맞는다 — 여기가 어긋나면 패킷은 오는데 화면이 검다.
+            ssrc: self.vssrc.unwrap_or(self.ssrc),
             rtx_ssrc: self.rtx_ssrc,
             codec: self.codec.clone(),
             fmtp: self.fmtp.clone(),
@@ -601,20 +635,20 @@ fn publish_tracks(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -
 fn publish_add(node: &mut Node, ing: &Ingress, header: Header, req: &PublishTracksReq) -> Outcome {
     let none = Vec::new();
     if req.tracks.is_empty() {
-        return Outcome { reply: fail(header, Code::MissingField), notices: none, routes: Vec::new() };
+        return Outcome { reply: fail(header, Code::MissingField), notices: none, ..Default::default() };
     }
     let active = node.publications.iter().filter(|p| p.user_id == ing.user_id).count();
     if req.tracks.len() > PER_REQUEST_MAX || active + req.tracks.len() > PER_USER_MAX {
-        return Outcome { reply: fail(header, Code::TrackLimit), notices: none, routes: Vec::new() };
+        return Outcome { reply: fail(header, Code::TrackLimit), notices: none, ..Default::default() };
     }
     for t in &req.tracks {
         // ★`pt`·`ssrc`·`mid` 미신고는 `1003` — audio 도 예외가 아니다(폴백은 무음을 조용히 만든다).
         if t.mid.is_empty() || t.pt == 0 || (t.ssrc == 0 && !t.simulcast.unwrap_or(false)) {
-            return Outcome { reply: fail(header, Code::MissingField), notices: none, routes: Vec::new() };
+            return Outcome { reply: fail(header, Code::MissingField), notices: none, ..Default::default() };
         }
         // ★`source` 는 video 만 — audio 항목에 실리면 `1002`(닫힌 집합은 oxsig 가 이미 걸렀다).
         if t.kind == Kind::Audio && t.source.is_some() {
-            return Outcome { reply: fail(header, Code::InvalidPayload), notices: none, routes: Vec::new() };
+            return Outcome { reply: fail(header, Code::InvalidPayload), notices: none, ..Default::default() };
         }
         if t.kind == Kind::Video {
             let ok = t
@@ -628,7 +662,7 @@ fn publish_add(node: &mut Node, ing: &Ingress, header: Header, req: &PublishTrac
                 let b = serde_json::to_vec(&f).unwrap_or_default();
                 let mut out = Vec::with_capacity(frame::HEADER_LEN + b.len());
                 frame::encode(&mut out, Header { kind: FrameKind::Fail, ..header }, &b);
-                return Outcome { reply: out, notices: none, routes: Vec::new() };
+                return Outcome { reply: out, notices: none, ..Default::default() };
             }
         }
     }
@@ -637,9 +671,14 @@ fn publish_add(node: &mut Node, ing: &Ingress, header: Header, req: &PublishTrac
     let mut made = Vec::new();
     for t in &req.tracks {
         let track_id = format!("tr-{}", uuid::Uuid::new_v4().simple());
+        let simulcast = match t.kind {
+            Kind::Audio => false,
+            Kind::Video => t.simulcast.unwrap_or(t.duplex.unwrap_or(Duplex::Full) == Duplex::Full),
+        };
         node.publications.push(Publication {
             track_id: track_id.clone(),
             room_id: req.room_id.clone(),
+            mid: t.mid.clone(),
             session_id: ing.session_id.clone(),
             user_id: ing.user_id.clone(),
             kind: t.kind,
@@ -650,19 +689,20 @@ fn publish_add(node: &mut Node, ing: &Ingress, header: Header, req: &PublishTrac
             pt: t.pt,
             duplex: t.duplex.unwrap_or(Duplex::Full),
             // ★추론은 video 만 — audio 는 언제나 `false`(오디오에 시뮬캐스트는 없다).
-            simulcast: match t.kind {
-                Kind::Audio => false,
-                Kind::Video => t.simulcast.unwrap_or(t.duplex.unwrap_or(Duplex::Full) == Duplex::Full),
-            },
+            simulcast,
             source: t.source,
-            });
+            // ★시뮬캐스트면 그 자리에서 발급한다 — 단이 오기 **전에** 있어야
+            //   구독자에게 알릴 `TrackEntry.ssrc` 가 선다.
+            vssrc: simulcast.then(fresh_ssrc),
+        });
         made.push(PublishedTrack { mid: t.mid.clone(), track_id });
     }
 
     let notices = announce(node, &made, &req.room_id, &ing.user_id, TrackAction::Add);
     let routes = routes_for_room(node, &req.room_id);
+    let sims = simulcast_regs(node, &ing.session_id);
     let res = PublishTracksRes { action: PublishAction::Add, tracks: made };
-    Outcome { reply: ok(header, &json(&res)), notices, routes }
+    Outcome { reply: ok(header, &json(&res)), notices, routes, sims }
 }
 
 fn publish_remove(node: &mut Node, ing: &Ingress, header: Header, req: &PublishTracksReq) -> Outcome {
@@ -725,7 +765,7 @@ fn publish_remove(node: &mut Node, ing: &Ingress, header: Header, req: &PublishT
     }
     // ★응답에 `tracks` 필드 자체가 없다(연§6-3).
     let res = PublishTracksRes { action: PublishAction::Remove, tracks: Vec::new() };
-    Outcome { reply: ok(header, &json(&res)), notices, routes }
+    Outcome { reply: ok(header, &json(&res)), notices, routes, ..Default::default() }
 }
 
 /// 그 구독자에게 이 스트림의 자리를 잡아 준다. ★**이미 있으면 그것을 그대로 쓴다** —
@@ -1018,4 +1058,55 @@ fn emit_floor(node: &Node, room_id: &str, outs: Vec<floor::Out>) -> Vec<DcOut> {
         }
     }
     wire
+}
+
+/// `0x0304 TRACK_SET` — ★**무전↔회의 전환은 이 경로로만** 한다(연§6-3).
+///
+/// ★**축 둘은 배타다** — 둘 다 없거나 둘 다 있으면 `1007`. 한 요청이 두 축을 바꾸면
+/// 되돌리기가 두 갈래가 되고, 그 둘이 갈리는 순간을 아무도 못 짚는다.
+fn track_set(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Outcome {
+    let Ok(req) = serde_json::from_slice::<TrackSetReq>(body) else {
+        return Outcome { reply: fail(header, Code::InvalidPayload), ..Default::default() };
+    };
+    if req.muted.is_some() == req.duplex.is_some() {
+        return Outcome { reply: fail(header, Code::FieldConflict), ..Default::default() };
+    }
+    // ★**`track_id` 를 먼저 쓴다** — `ssrc` 만 보면 다시 발행한 뒤 엉뚱한 트랙이 바뀐다.
+    let found = node.publications.iter().position(|p| {
+        p.session_id == ing.session_id
+            && p.room_id == req.room_id
+            && match (&req.track_id, req.ssrc) {
+                (Some(id), _) => &p.track_id == id,
+                (None, Some(s)) => p.ssrc == s,
+                (None, None) => false,
+            }
+    });
+    let Some(i) = found else {
+        return Outcome { reply: fail(header, Code::TrackNotFound), ..Default::default() };
+    };
+    let p = &node.publications[i];
+    if let Some(m) = req.muted {
+        // ★**반이중에는 mute 가 없다**(연§6-3) — 송출 여부는 발언권 게이트 하나가 정하고,
+        //   상대 화면에 개인 타일이 없어 표시할 자리도 없다.
+        if p.duplex == Duplex::Half {
+            return Outcome { reply: fail(header, Code::TrackOpUnsupported), ..Default::default() };
+        }
+        // 음소거 축은 다음 걸음이다(`TRACK_STATE` 배달) — 지금은 값만 돌려준다.
+        let res = serde_json::json!({ "ssrc": p.ssrc, "muted": m });
+        return Outcome { reply: ok(header, &json(&res)), ..Default::default() };
+    }
+    let want = req.duplex.expect("축 둘 중 하나는 있다");
+    // ★★**시뮬캐스트 트랙은 무전 전환 불가**(연§6-3 · 정§8-1) — 두 재기록기가 같은
+    //   vssrc 를 다툰다. ★**영구다** — 시뮬캐스트를 끄기 전엔 같은 답이라 클라는
+    //   `3006` 을 받으면 바뀌지 않은 것으로 확정하고 다시 시도하지 않는다.
+    if want == Duplex::Half && p.simulcast {
+        return Outcome { reply: fail(header, Code::TrackOpUnsupported), ..Default::default() };
+    }
+    if p.duplex == want {
+        let res = serde_json::json!({ "ssrc": p.ssrc, "duplex": want, "noop": true });
+        return Outcome { reply: ok(header, &json(&res)), ..Default::default() };
+    }
+    // 전환 자체(잔존 항목 교체·mid 반납·`TRACK_EVENT{add}`)는 트랙 전환 덩어리다 —
+    // ★**조용히 성공하지 않는다**: 아직 못 하는 것은 `3006` 으로 답한다.
+    Outcome { reply: fail(header, Code::TrackOpUnsupported), ..Default::default() }
 }
