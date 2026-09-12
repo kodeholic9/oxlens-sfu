@@ -32,6 +32,8 @@ use crate::transport::{IceRole, IceTable};
 /// hub 가 봉투에 실어 준 신원. ★**body 를 믿지 않는다** — `user_id` 는 hub 세션이 주입한다.
 #[derive(Debug, Clone)]
 pub struct Ingress {
+    /// ★**시계는 바깥에서 들어온다** — 판정을 시험이 시계 없이 되짚을 수 있게(정§2-3 계약 6).
+    pub now: u64,
     pub session_id: String,
     pub user_id: String,
     pub participant_type: u8,
@@ -84,6 +86,12 @@ pub struct Node {
     /// 세션마다의 전송 생존 판정(정§2-2). ★**Peer 와 따로 둔다** — 한 값으로 합치면
     /// 미디어 흐름 단계와 섞여 비교 반전이 감지를 통째로 죽인다(20260816 실사고).
     health: std::collections::BTreeMap<String, crate::reaper::Health>,
+    /// ★**데이터 평면이 건네 주는 「내보낸 수」**(정§14-3) — 정체 판정의 유일한 재료다.
+    pub egress: Arc<crate::transport::udp::EgressView>,
+    /// 구독 스트림마다의 정체 앵커 — `(받는 자격, egress ssrc)` → `(그때 계수, 그때 시각)`.
+    stall_anchor: std::collections::BTreeMap<(String, u32), (u64, u64)>,
+    /// ★**같은 (사람, 방) 재통보 쿨다운**(정§14-3 `T-stall`) — 폭풍을 막는다.
+    stall_sent: std::collections::BTreeMap<(String, String), u64>,
 }
 
 impl Node {
@@ -101,6 +109,9 @@ impl Node {
             max_burst_ms: floor::timers::T2_MS,
             ice: Arc::new(IceTable::new()),
             health: std::collections::BTreeMap::new(),
+            egress: Arc::new(crate::transport::udp::EgressView::default()),
+            stall_anchor: std::collections::BTreeMap::new(),
+            stall_sent: std::collections::BTreeMap::new(),
         }
     }
 
@@ -530,6 +541,118 @@ pub fn reap(node: &mut Node, session_id: &str, zombie: bool) -> Option<Reaped> {
     Some(Reaped { session_id: session_id.to_string(), user_id, notices, routes })
 }
 
+/// 정체 판정의 수치(정§14-3).
+pub mod stall {
+    /// 판정 창.
+    pub const WINDOW_MS: u64 = 5_000;
+    /// ★**같은 (사람, 방) 재통보 쿨다운** — 폭풍 방지.
+    pub const COOLDOWN_MS: u64 = 30_000;
+
+    /// ★★**창과 sweep 주기가 같은 값이다** — 그래서 한 회차가 1ms 만 모자라도 판정도
+    /// 앵커 갱신도 통째로 다음 회차로 밀린다. ★**감지 상한은 2주기가 아니라 3주기**(≈15s)이고,
+    /// ★시험도 운영도 그 상한으로 읽는다(2주기로 잡으면 규격대로 도는 서버를 오탐으로 적는다).
+    /// 값을 바꾸는 사람이 ★**여기서 먼저** 둘을 함께 보게 둔다.
+    const _: () = assert!(WINDOW_MS == crate::reaper::TICK_MS);
+}
+
+/// 정체 한 걸음 — ★**"너에게 나가야 할 것이 안 나간다"** 를 당사자에게 알린다(정§14-3).
+///
+/// ★**구간은 구독 egress 다** — *"그 발행자가 안 보낸다"* 가 아니다. 원인이 발행자
+/// 미송신인지 서버 forward 단절인지는 이 통지가 가르지 않는다.
+///
+/// ★**못 보는 것** — 클라 하향이 죽은 경우는 서버 송신 계수가 계속 오르므로 여기 안 걸린다.
+/// 그 축은 UDP 관찰(§2-2) → zombie → §17-2 ⑧ `media_lost` 다. 둘은 다른 축이다.
+pub fn stall_tick(node: &mut Node, now: u64) -> Vec<Notice> {
+    let seen = node.egress.load();
+    // 1차 — 읽기만 한다(자격·시작점·계수). 흘릴 자격 판정은 ★**전달표와 같은 것**을 쓴다:
+    //   여기 조건을 다시 열거하면 그 사본이 §7-3 보다 뒤처지고, 그 어긋남이 곧 오탐이다.
+    let mut watch: Vec<((String, u32), u64, String, String)> = Vec::new();
+    let rooms: Vec<String> = node.rooms.iter().map(|r| r.id.clone()).collect();
+    for room_id in &rooms {
+        for (owner, key_ssrc, targets) in routes_for_room(node, room_id) {
+            // 그 전달표가 어느 발행의 것인지 되짚는다 — `kind` 가 시작점을 가른다.
+            let Some(p) = node.publications.iter().find(|p| {
+                p.room_id == *room_id
+                    && p.vssrc.unwrap_or(p.ssrc) == key_ssrc
+                    && pub_ufrag(node, &p.session_id) == owner
+            }) else {
+                continue;
+            };
+            // ★**individual video 는 발행자의 `READY{camera}` 도 시작점이다**(정§7-4) —
+            //   그 전의 무패킷은 카메라 워밍업이라 정체가 아니다.
+            let camera_at = node.peers.get(&p.session_id).and_then(|x| x.camera_at);
+            let video = p.kind == Kind::Video;
+            for t in &targets {
+                if t.paused {
+                    continue;
+                }
+                let Some(sess) = node.ice.get(&t.ufrag).map(|e| e.session_id.clone()) else {
+                    continue;
+                };
+                // ★**`Alive` 인 Peer 만 본다** — 회수 중인 사람에게 재동기를 시키지 않는다.
+                if node.health.get(&sess).map(|h| h.state) == Some(crate::reaper::PeerState::Zombie)
+                {
+                    continue;
+                }
+                let Some(sub) = node.peers.get(&sess) else { continue };
+                // ★**게이트 해제 전의 무패킷은 정체가 아니다**(정§14-3 시작점).
+                let Some(ready) = sub.ready_at else { continue };
+                let start = match (video, camera_at) {
+                    (true, None) => continue,
+                    (true, Some(c)) => ready.max(c),
+                    (false, _) => ready,
+                };
+                watch.push((
+                    (t.ufrag.clone(), key_ssrc),
+                    start,
+                    sub.user_id.clone(),
+                    room_id.clone(),
+                ));
+            }
+        }
+    }
+
+    // 2차 — 앵커를 옮기고, 창이 찬 것만 알린다.
+    let mut out = Vec::new();
+    for (key, start, user_id, room_id) in &watch {
+        let cur = seen.get(key).copied().unwrap_or(0);
+        let anchor = node.stall_anchor.entry(key.clone()).or_insert((cur, *start));
+        if anchor.0 != cur {
+            // 움직였다 — 창을 여기서 다시 연다.
+            *anchor = (cur, now);
+            continue;
+        }
+        if now.saturating_sub(anchor.1) <= stall::WINDOW_MS {
+            continue;
+        }
+        let ck = (user_id.clone(), room_id.clone());
+        if let Some(&at) = node.stall_sent.get(&ck)
+            && now.saturating_sub(at) < stall::COOLDOWN_MS
+        {
+            continue;
+        }
+        node.stall_sent.insert(ck, now);
+        eprintln!("[stall] {user_id} @{room_id} — 구독 egress 무변동 {}ms", now.saturating_sub(anchor.1));
+        out.push(unicast(
+            room_id,
+            user_id,
+            Op::RoomEvent,
+            &RoomEvent {
+                event_type: RoomEventType::SyncRequired,
+                room_id: room_id.clone(),
+                affiliation: None,
+                cause: None,
+                // ★로그·사람용이다 — 클라는 이 값으로 분기하지 않는다(연§5-5).
+                reason: Some("egress_stalled".to_string()),
+            },
+        ));
+    }
+    // ★**사라진 구독의 앵커는 거둔다** — 안 거두면 표가 단조 증가한다.
+    node.stall_anchor.retain(|k, _| watch.iter().any(|(w, ..)| w == k));
+    node.stall_sent.retain(|(u, r), _| watch.iter().any(|(_, _, wu, wr)| wu == u && wr == r));
+    out
+}
+
 /// reaper 한 걸음 — ★**주체는 하나다**(정§2-2). 회수까지 같은 tick 안에서 끝난다.
 ///
 /// ★`Zombie` 는 종착이 아니라 삭제다 — 상태로 남겨 두면 다음 tick 이 또 회수한다.
@@ -895,10 +1018,11 @@ fn ready(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Outcome
         return Outcome { reply: fail(header, Code::NotInRoom), ..Default::default() };
     }
     match req.ready_type {
-        ReadyType::Tracks => peer.ready = true,
+        // ★**처음 것을 붙든다** — 다시 보내는 `READY` 마다 갱신하면 정체 창이 영영 안 찬다.
+        ReadyType::Tracks => peer.ready_at = peer.ready_at.or(Some(ing.now)),
         // ★`camera` 는 ★**정체 판정의 시작점**일 뿐 — 키프레임을 요청하지 않고
-        //   남에게 통지도 내지 않는다(정§7-4 · 연§6-3 16차 결재). 정체 감지 덩어리에서 쓴다.
-        ReadyType::Camera => {}
+        //   남에게 통지도 내지 않는다(정§7-4 · 연§6-3 16차 결재).
+        ReadyType::Camera => peer.camera_at = peer.camera_at.or(Some(ing.now)),
     }
     Outcome { reply: ok(header, b"{}"), ..Default::default() }
 }
@@ -1310,4 +1434,181 @@ fn subscribe_layer(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) 
     let rooms: Vec<String> = vec![req.room_id.clone()];
     let routes = rooms.iter().flat_map(|r| routes_for_room(node, r)).collect();
     Outcome { reply: ok(header, b"{}"), routes, ..Default::default() }
+}
+
+#[cfg(test)]
+mod stall_tests {
+    use super::*;
+    use crate::room::Member;
+
+    const PUB: &str = "s-pub";
+    const SUB: &str = "s-sub";
+    const ROOM: &str = "r1";
+    const SSRC: u32 = 0xA000_0001;
+
+    /// 발행 하나 · 청취 하나 — ★**전달표가 서는 최소 형상**이다.
+    fn node_with_pair(kind: Kind, ready_at: Option<u64>, camera_at: Option<u64>) -> Node {
+        let mut n = Node::new(
+            "e".into(),
+            Dtls::bake().expect("자가서명"),
+            "127.0.0.1".into(),
+            1,
+            0,
+        );
+        let ttl = crate::room::Ttl { unused_secs: None, departure_secs: None };
+        n.rooms.create(ROOM.into(), ROOM.into(), 10, ttl, 0);
+        for (sid, uid) in [(PUB, "u-pub"), (SUB, "u-sub")] {
+            let e = n.peers.ensure(sid, uid, PcMode::Two);
+            let p = n.peers.at_mut(e.idx);
+            p.sub_rooms.push(ROOM.into());
+            let creds = p.ice.clone();
+            n.ice.insert(
+                &creds.subscribe_ufrag,
+                &creds.subscribe_pwd,
+                sid,
+                crate::transport::ice::IceRole::Subscribe,
+            );
+            n.ice.insert(
+                &creds.publish_ufrag,
+                &creds.publish_pwd,
+                sid,
+                crate::transport::ice::IceRole::Publish,
+            );
+            let room = n.rooms.get_mut(ROOM).expect("방");
+            room.join(Member {
+                session_id: sid.into(),
+                user_id: uid.into(),
+                hidden: false,
+                participant_type: 0,
+                role: 255,
+                select: true,
+                metadata: None,
+            })
+            .expect("입장");
+        }
+        n.publications.push(Publication {
+            track_id: "t1".into(),
+            room_id: ROOM.into(),
+            mid: "1".into(),
+            session_id: PUB.into(),
+            user_id: "u-pub".into(),
+            kind,
+            ssrc: SSRC,
+            rtx_ssrc: None,
+            codec: Some("VP8".into()),
+            fmtp: None,
+            pt: 96,
+            duplex: Duplex::Full,
+            simulcast: false,
+            source: None,
+            muted: false,
+            vssrc: None,
+        });
+        // 구독자에게 배정이 있어야 전달표가 선다.
+        let i = n.peers.ensure(SUB, "u-sub", PcMode::Two).idx;
+        n.peers.at_mut(i).assigns.insert("t1".into(), Assign { mid: "0".into(), pt: 96, rtx_pt: None });
+        n.peers.at_mut(i).ready_at = ready_at;
+        let j = n.peers.ensure(PUB, "u-pub", PcMode::Two).idx;
+        n.peers.at_mut(j).camera_at = camera_at;
+        n
+    }
+
+    fn sub_ufrag(n: &Node) -> String {
+        n.peers.get(SUB).expect("구독자").recv_ufrag().to_string()
+    }
+
+    /// 그 구독으로 이만큼 나갔다고 데이터 평면이 말한 것으로 둔다.
+    fn say_sent(n: &Node, count: u64) {
+        let mut m = std::collections::HashMap::new();
+        m.insert((sub_ufrag(n), SSRC), count);
+        n.egress.store(std::sync::Arc::new(m));
+    }
+
+    #[test]
+    fn 게이트_전에는_정체가_아니다() {
+        // ★`READY` 전의 무패킷은 아직 흘릴 자격이 없는 것이다 — 정체로 읽으면 입장마다 뜬다.
+        let mut n = node_with_pair(Kind::Audio, None, None);
+        say_sent(&n, 0);
+        assert!(stall_tick(&mut n, 1_000_000).is_empty());
+    }
+
+    #[test]
+    fn 카메라_신고_전의_video_는_정체가_아니다() {
+        // ★워밍업 구간이다(정§7-4) — 여기서 재동기를 시키면 켜는 중마다 뜬다.
+        let mut n = node_with_pair(Kind::Video, Some(0), None);
+        say_sent(&n, 0);
+        assert!(stall_tick(&mut n, 1_000_000).is_empty());
+        // 신고가 오면 그때부터 센다.
+        let i = n.peers.ensure(PUB, "u-pub", PcMode::Two).idx;
+        n.peers.at_mut(i).camera_at = Some(0);
+        let got = stall_tick(&mut n, 1_000_000);
+        assert_eq!(got.len(), 1, "★시작점이 서면 판정이 산다");
+    }
+
+    #[test]
+    fn 창은_초과라야_찬다() {
+        let mut n = node_with_pair(Kind::Audio, Some(0), None);
+        say_sent(&n, 0);
+        // 앵커는 시작점(0)에 선다 — 창과 같은 순간은 아직 아니다.
+        assert!(stall_tick(&mut n, stall::WINDOW_MS).is_empty(), "★경계는 초과다");
+        assert_eq!(stall_tick(&mut n, stall::WINDOW_MS + 1).len(), 1);
+    }
+
+    #[test]
+    fn 한_회차가_1ms_모자라면_한_주기를_통째로_잃는다() {
+        // ★★**창과 sweep 주기가 같은 값**이라 생기는 일이다(정§14-3) — 감지 상한을
+        //   2주기로 잡으면 규격대로 도는 서버가 오탐으로 적힌다.
+        let mut n = node_with_pair(Kind::Audio, Some(1), None);
+        say_sent(&n, 0);
+        // 1회차(t=5,000): 시작점 1 기준 4,999ms — 1ms 모자라 못 뜬다.
+        assert!(stall_tick(&mut n, crate::reaper::TICK_MS).is_empty());
+        // 2회차(t=10,000)에서야 뜬다 — 정지 시각에서 두 주기가 지났다.
+        assert_eq!(stall_tick(&mut n, crate::reaper::TICK_MS * 2).len(), 1);
+    }
+
+    #[test]
+    fn 흐르면_창이_다시_열린다() {
+        let mut n = node_with_pair(Kind::Audio, Some(0), None);
+        say_sent(&n, 0);
+        stall_tick(&mut n, 1_000);
+        say_sent(&n, 500);
+        assert!(stall_tick(&mut n, 2_000).is_empty());
+        // ★움직인 그 순간부터 다시 센다 — 시작점이 아니라.
+        assert!(stall_tick(&mut n, 2_000 + stall::WINDOW_MS).is_empty());
+        assert_eq!(stall_tick(&mut n, 2_000 + stall::WINDOW_MS + 1).len(), 1);
+    }
+
+    #[test]
+    fn 같은_사람_같은_방에는_쿨다운만큼_한_번이다() {
+        let mut n = node_with_pair(Kind::Audio, Some(0), None);
+        say_sent(&n, 0);
+        let t = stall::WINDOW_MS + 1;
+        assert_eq!(stall_tick(&mut n, t).len(), 1);
+        // ★폭풍 방지 — 창은 계속 차 있지만 다시 안 보낸다.
+        assert!(stall_tick(&mut n, t + stall::COOLDOWN_MS - 1).is_empty());
+        assert_eq!(stall_tick(&mut n, t + stall::COOLDOWN_MS).len(), 1);
+    }
+
+    #[test]
+    fn 받지_않겠다는_사람은_정체가_아니다() {
+        // ★`paused` 는 자격을 내린 것이다 — 안 나가는 것이 계약이다.
+        let mut n = node_with_pair(Kind::Audio, Some(0), None);
+        let i = n.peers.ensure(SUB, "u-sub", PcMode::Two).idx;
+        n.peers.at_mut(i).layers.insert(
+            "t1".into(),
+            crate::peer::LayerCap { paused: true, ..Default::default() },
+        );
+        say_sent(&n, 0);
+        assert!(stall_tick(&mut n, 1_000_000).is_empty());
+    }
+
+    #[test]
+    fn 통지는_당사자에게만_간다() {
+        let mut n = node_with_pair(Kind::Audio, Some(0), None);
+        say_sent(&n, 0);
+        let got = stall_tick(&mut n, stall::WINDOW_MS + 1);
+        let one = got.first().expect("하나");
+        assert_eq!(one.target.as_deref(), Some("u-sub"), "★unicast 다");
+        assert_eq!(one.room_id, ROOM);
+    }
 }

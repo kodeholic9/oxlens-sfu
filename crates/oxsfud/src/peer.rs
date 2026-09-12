@@ -72,8 +72,15 @@ pub struct Peer {
     pub assigns: BTreeMap<String, Assign>,
     /// ★**구독자 PT 표 — 연결마다 하나**(정§7-2-1). egress 의 PT 가 이 표의 값이다.
     pub pt: crate::pt::PtTable,
-    /// `READY{tracks}` 를 받았나 — ★**게이트는 전이중 video 에만** 걸린다(정§7-4).
-    pub ready: bool,
+    /// `READY{tracks}` 를 받은 시각 — ★**게이트는 전이중 video 에만** 걸린다(정§7-4).
+    ///
+    /// ★**참·거짓이 아니라 시각이다** — 정체 판정의 시작점이 바로 이 순간이고(정§14-3),
+    /// `0` 을 부재 표식으로 두면 *"게이트 열림"* 과 *"시각 미상"* 이 한 값이 된다.
+    pub ready_at: Option<u64>,
+    /// `READY{camera}` 를 받은 시각 — ★**individual video 의 시작점**이다(정§7-4).
+    ///
+    /// 그 전의 무패킷은 카메라 워밍업이라 ★**정체가 아니다.**
+    pub camera_at: Option<u64>,
     /// `track_id` → 그 구독자가 건 상한(연§6-3 `SUBSCRIBE_LAYER`).
     ///
     /// ★**부분 갱신이다** — 생략한 축은 안 바꾼다. 그래서 값이 아니라 **표**를 들고 있는다.
@@ -102,7 +109,8 @@ impl Peer {
             mids: MidPool::new(pc_mode),
             assigns: BTreeMap::new(),
             pt: crate::pt::PtTable::new(),
-            ready: false,
+            ready_at: None,
+            camera_at: None,
             layers: BTreeMap::new(),
         }
     }

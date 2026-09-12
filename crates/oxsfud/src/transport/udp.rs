@@ -81,6 +81,14 @@ pub struct DcIn {
     pub payload: Vec<u8>,
 }
 
+/// ★**데이터 평면이 1초마다 갈아 끼우는 사본** — 읽는 쪽은 자물쇠가 없다(H2 · RCU).
+///
+/// 키는 `(받는 자격, egress ssrc)`, 값은 ★**그 구독으로 내보낸 수**다.
+/// ★★**정체 판정이 보는 것이 이 값이다**(정§14-3) — *"너에게 나가야 할 것이 안 나간다"* 는
+/// 데이터 평면만 아는 사실이라, 제어 평면이 그것을 보려면 이렇게 건너와야 한다.
+/// ★핫패스는 이 자료를 안 만진다 — 타이머가 제 사본을 지어 갈아 끼운다.
+pub type EgressView = arc_swap::ArcSwap<HashMap<(String, u32), u64>>;
+
 /// 데이터그램 상한 — ★**한 장이 이보다 크면 우리 것이 아니다.**
 const MTU: usize = 2048;
 
@@ -207,6 +215,7 @@ pub async fn serve(
     cmd_tx: mpsc::Sender<Cmd>,
     mut cmds: mpsc::Receiver<Cmd>,
     dc_in: mpsc::Sender<DcIn>,
+    view: Arc<EgressView>,
 ) {
     // ★**그릇을 하나 잡아 재사용한다** — 데이터그램마다 새로 잡지 않는다(H3).
     let mut buf = vec![0u8; MTU];
@@ -279,6 +288,10 @@ pub async fn serve(
                         c.rtcp_out += 1;
                     }
                 }
+                // ★**내보낸 수를 제어 평면에 건넨다**(정§14-3) — 사본을 지어 갈아 끼운다.
+                view.store(Arc::new(
+                    egress.iter().map(|(k, (p, _))| (k.clone(), *p as u64)).collect(),
+                ));
                 // ★**판정도 1초 한 번이다**(정§10-3 tick 1,000ms) — 타이머를 또 두지 않는다.
                 downlink_tick(
                     now, &mut down, &routes, &sim_of, &layer_of, &mut sim_out, &mut pli_at,

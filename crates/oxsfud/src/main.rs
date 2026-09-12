@@ -139,6 +139,7 @@ async fn main() -> std::process::ExitCode {
         cmd_tx.clone(),
         cmd_rx,
         dc_tx,
+        node.egress.clone(),
     ));
     let svc = std::sync::Arc::new(oxsfud::grpc::Sfu::new(
         oxsfud::grpc::Identity {

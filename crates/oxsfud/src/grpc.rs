@@ -57,10 +57,16 @@ impl Sfu {
             ));
             loop {
                 iv.tick().await;
-                let reaped = {
+                // ★**주기가 하나다**(정§2-2 · §14-3 — 둘 다 5초). 타이머를 또 두면
+                //   같은 사실을 두 시계로 보게 되고, 그 어긋남이 곧 오탐이다.
+                let (reaped, stalled) = {
                     let mut node = me.node.lock().await;
-                    handle::reaper_tick(&mut node, now_ms())
+                    let now = now_ms();
+                    (handle::reaper_tick(&mut node, now), handle::stall_tick(&mut node, now))
                 };
+                for n in stalled {
+                    me.emit(n);
+                }
                 for r in reaped {
                     for n in r.notices {
                         me.emit(n);
@@ -160,6 +166,7 @@ impl SfuService for Sfu {
             // ★hub 가 이미 읽은 프레임이다 — 여기서 깨졌으면 우리 버그다.
             .map_err(|e| Status::invalid_argument(format!("wire: {e:?}")))?;
         let ing = Ingress {
+            now: now_ms(),
             session_id: env.session_id.clone(),
             user_id: env.user_id.clone(),
             participant_type: env.participant_type as u8,
