@@ -121,6 +121,7 @@ impl Node {
             user_id: None,
             source: None,
             active: None,
+            // ★슬롯에는 `muted` 가 없다 — 송출은 발언권 하나가 정한다(연§4-1).
             muted: None,
             scalability: None,
             assign: Some(Assign { mid, pt: 111, rtx_pt: None }),
@@ -574,6 +575,8 @@ pub struct Publication {
     pub duplex: Duplex,
     pub simulcast: bool,
     pub source: Option<Source>,
+    /// 음소거인가 — ★**스트림 상태로 갖는다**(정§8-2) — 통지로만 나르면 놓친 사람은 영영 안 맞는다.
+    pub muted: bool,
     /// ★**가상 SSRC** — 시뮬캐스트의 egress 값이다(정§4-1 식별 3평면).
     ///
     /// ★**물리가 바뀌어도 논리가 산다** — 단이 분화·교체돼도 이 값이 보존되므로
@@ -612,7 +615,8 @@ impl Publication {
             user_id: Some(self.user_id.clone()),
             source: self.source,
             active: None,
-            muted: None,
+            // ★전이중 개인 트랙만 싣는다(연 14차 K1~K5) — 반이중은 표시할 자리가 없다.
+            muted: (self.duplex == Duplex::Full).then_some(self.muted),
             scalability: if self.simulcast { Some("L2T1".into()) } else { None },
             assign: None,
         }
@@ -699,6 +703,7 @@ fn publish_add(node: &mut Node, ing: &Ingress, header: Header, req: &PublishTrac
             // ★추론은 video 만 — audio 는 언제나 `false`(오디오에 시뮬캐스트는 없다).
             simulcast,
             source: t.source,
+            muted: false,
             // ★시뮬캐스트면 그 자리에서 발급한다 — 단이 오기 **전에** 있어야
             //   구독자에게 알릴 `TrackEntry.ssrc` 가 선다.
             vssrc: simulcast.then(fresh_ssrc),
@@ -1195,9 +1200,62 @@ fn track_set(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Out
         let res = serde_json::json!({ "ssrc": p.ssrc, "duplex": want, "noop": true });
         return Outcome { reply: ok(header, &json(&res)), ..Default::default() };
     }
-    // 전환 자체(잔존 항목 교체·mid 반납·`TRACK_EVENT{add}`)는 트랙 전환 덩어리다 —
-    // ★**조용히 성공하지 않는다**: 아직 못 하는 것은 `3006` 으로 답한다.
-    Outcome { reply: fail(header, Code::TrackOpUnsupported), ..Default::default() }
+    let (room_id, track_id, ssrc, kind) =
+        (p.room_id.clone(), p.track_id.clone(), p.ssrc, p.kind);
+
+    // ★**원자 교체다** — fan-out 경로가 이 값 하나로 갈리므로 새 분기를 만들지 않는다(정§8-2).
+    {
+        let p = &mut node.publications[i];
+        p.duplex = want;
+        // ★`muted` 를 `false` 로 초기화한다 — 없으면 음소거된 카메라가 허가 뒤 검은 화면으로
+        //   나가고, 반이중에는 해제 수단이 없다(연§6-3).
+        p.muted = false;
+    }
+
+    // ★**그 방 전원에게 `TRACK_EVENT{add}`** — 항목 교체다(옛 `TRACK_STATE{duplex}` 는 폐기).
+    let Some(room) = node.rooms.get_mut(&room_id) else {
+        return Outcome { reply: fail(header, Code::RoomNotFound), ..Default::default() };
+    };
+    room.bump_stream();
+    let version = room.version(&node.epoch);
+    let members = room.session_ids();
+    let base = node.publications[i].entry();
+    let mut notices = Vec::new();
+    for sid in members {
+        let Some(peer) = node.peers.get_mut(&sid) else { continue };
+        let me = peer.user_id.clone();
+        let mut e = base.clone();
+        if want == Duplex::Half {
+            // ★**개인 구독 mid 를 풀에 반환한다**(비점유) — 항목은 `active:false` 로 남지만
+            //   그 자리는 *지금 붙어 있는 것*일 뿐 예약이 아니다. 안 돌리면 무전 방에서
+            //   쉬는 개인 m-line 이 받기 몫을 먹는다(정§8-2 · §7-2).
+            if let Some(a) = peer.assigns.remove(&track_id) {
+                peer.mids.give(kind, &a.mid);
+            }
+            e.active = Some(false);
+            e.assign = None;
+        } else {
+            e.active = Some(true);
+            // ★있던 자리가 비어 있으면 같은 값, 재사용됐으면 새 발급 · 고갈이면 `mid` 없이.
+            if me != node.publications[i].user_id {
+                e.assign = assign_for(peer, &node.publications[i]);
+            }
+        }
+        notices.push(unicast(
+            &room_id,
+            &me,
+            Op::TrackEvent,
+            &TrackEvent {
+                action: TrackAction::Add,
+                room_id: room_id.clone(),
+                tracks: vec![e],
+                version: version.clone(),
+            },
+        ));
+    }
+    let routes = routes_for_room(node, &room_id);
+    let res = serde_json::json!({ "ssrc": ssrc, "duplex": want });
+    Outcome { reply: ok(header, &json(&res)), notices, routes, ..Default::default() }
 }
 
 /// `0x0303 SUBSCRIBE_LAYER` — ★**받을 레이어 고르기.** 응답은 빈 body(연§6-3).
