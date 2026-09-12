@@ -733,12 +733,17 @@ fn publish_remove(node: &mut Node, ing: &Ingress, header: Header, req: &PublishT
             for g in &gone {
                 // ★**세 자료를 같이 지운다**(정§17-2 ⑥) — mid 만 지우고 자리를 안 돌리면
                 //   재입장 영상이 안 나온다(실사고).
+                let mut e = g.entry();
                 if let Some(a) = p.assigns.remove(&g.track_id) {
                     p.mids.give(g.kind, &a.mid);
-                    let mut e = g.entry();
                     e.assign = Some(a);
-                    entries.push(e);
+                } else if g.session_id != p.session_id {
+                    // 배정이 없던 남 — 애초에 그 스트림을 안 받고 있었다.
+                    continue;
                 }
+                // ★**발행자 본인에게도 간다**(`assign` 없이, 정§14-2) — 빼면 본인의 `seq` 가
+                //   건너뛰고, 클라는 그것을 ★**통지 유실**로 읽어 재동기 한 벌을 돈다.
+                entries.push(e);
             }
             if entries.is_empty() {
                 continue;
@@ -757,9 +762,12 @@ fn publish_remove(node: &mut Node, ing: &Ingress, header: Header, req: &PublishT
             ));
         }
     }
-    // ★지워진 `ssrc` 는 빈 목록으로 밀어 끊는다 — 안 끊으면 죽은 트랙이 계속 흐른다.
+    // ★지워진 스트림은 빈 목록으로 밀어 끊는다 — 안 끊으면 죽은 트랙이 계속 흐른다.
+    //
+    // ★**끊는 키는 egress 값이다** — 시뮬캐스트의 `ssrc` 는 `0`(신고 안 함)이라 그것으로
+    //   끊으면 ★**아무것도 안 끊기고** 옛 vssrc 가 계속 흐른다(실측 20260912).
     let mut routes: Vec<(u32, Vec<crate::transport::udp::Target>)> =
-        gone.iter().map(|g| (g.ssrc, Vec::new())).collect();
+        gone.iter().map(|g| (g.vssrc.unwrap_or(g.ssrc), Vec::new())).collect();
     if let Some(g) = gone.first() {
         routes.extend(routes_for_room(node, &g.room_id));
     }

@@ -119,7 +119,7 @@ pub struct Counters {
 impl Counters {
     fn line(&self) -> String {
         format!(
-            "stun {}/{}(위조 {}) · dtls {} · srtp in {}(버림 {}) out {} · rtcp in {} out {} · 모름 {}",
+            "stun {}/{}(위조 {}) · dtls {} · srtp in {}(버림 {}) out {} · rtcp in {} out {} · 단 모름 {} 안 보냄 {} · 모름 {}",
             self.stun_ok,
             self.stun_ok + self.stun_dropped,
             self.forged,
@@ -129,6 +129,8 @@ impl Counters {
             self.srtp_out,
             self.rtcp_in,
             self.rtcp_out,
+            self.sim_unknown,
+            self.sim_dropped,
             self.unknown
         )
     }
@@ -258,7 +260,15 @@ pub async fn serve(
                         }
                     }
                     Cmd::SetSimulcast { ufrag, vssrc } => {
-                        sim_of.insert(ufrag, vssrc);
+                        // ★★**재발행이면 배운 것을 버린다.** 브라우저는 같은 단 SSRC 를 다시
+                        //   쓸 수 있는데, 옛 `vssrc` 로 배워 둔 지도가 남아 있으면 새 패킷이
+                        //   ★**이미 지워진 길로 가서 조용히 사라진다**(실측 20260912).
+                        if let Some(old) = sim_of.insert(ufrag, vssrc)
+                            && old != vssrc
+                        {
+                            layer_of.retain(|_, (v, _)| *v != old);
+                            sending.remove(&old);
+                        }
                     }
                     Cmd::SetRoute { ssrc, targets } => {
                         if targets.is_empty() {
