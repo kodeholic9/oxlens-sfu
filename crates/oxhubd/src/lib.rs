@@ -3,6 +3,9 @@
 
 //! `oxhubd` — hub. 세션·방·라우팅·운영 표면·supervisor 가 여기 산다.
 
+pub mod authz;
+pub mod boot;
+pub mod healthz;
 pub mod room;
 pub mod route;
 pub mod session;

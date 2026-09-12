@@ -11,6 +11,17 @@ oxsig = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 jsonwebtoken = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+arc-swap = { workspace = true }
+uuid = { workspace = true }
+
+[[bin]]
+name = "oxhubd"
+path = "src/main.rs"
 
 [lib]
 name = "oxhubd"
