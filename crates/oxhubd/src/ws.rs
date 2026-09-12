@@ -128,6 +128,35 @@ pub fn dispatch(
     }
 }
 
+/// 이 `BIND` 가 누구를 축출했나 — ★**옛 연결에 `LEAVE` `2010` 을 보내야 한다**(정§3-2 #3).
+///
+/// ★**통보만 하고 유령으로 남기지 않는다** — 남기면 명단에 같은 사람이 둘이다.
+pub fn evicted_by(before: &Conn, after: &Conn, sessions: &Sessions) -> Option<Evicted> {
+    let (Conn::Unbound { .. }, Conn::Bound { session_id }) = (before, after) else {
+        return None;
+    };
+    let me = sessions.get(session_id)?;
+    // ★갈래 둘 — ①판정 3(새 세션이 같은 신원의 산 세션을 축출) ②판정 1(같은 세션을 새 소켓이 이어받음).
+    //   ★**둘 다 옛 소켓에 `LEAVE 2010` 을 보내고 닫는다** — 한 세션에 소켓 하나다(정§3-2).
+    if let Some(old) = sessions.evicted_of(&me.user_id, session_id) {
+        return Some(Evicted::Session(old));
+    }
+    if me.resumed {
+        // 같은 `session_id` 를 다른 소켓이 이어받았다 — 그 자리의 옛 소켓을 닫는다.
+        return Some(Evicted::Socket(session_id.clone()));
+    }
+    None
+}
+
+/// 무엇을 닫아야 하나.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Evicted {
+    /// 옛 **세션**이 통째로 축출됐다(판정 3).
+    Session(String),
+    /// 같은 세션의 옛 **소켓**이 남아 있다(판정 1).
+    Socket(String),
+}
+
 /// ★**`BIND` 가 제때 안 왔나** — 무인증 소켓을 열어 두지 않는다.
 pub fn bind_overdue(conn: &Conn, now: u64) -> Option<LeaveNotice> {
     match conn {

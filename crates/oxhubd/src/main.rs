@@ -33,6 +33,24 @@ struct Hub {
     /// 자식은 EOF 를 본다(정§15-6).
     children: Mutex<Vec<(String, std::process::Child)>>,
     rooms: Mutex<Rooms>,
+    /// ★**살아 있는 소켓** — 축출된 옛 연결에 `LEAVE` 를 보내려면 그 소켓을 붙들고 있어야 한다.
+    ///
+    /// ★**통보만 하고 유령으로 남기지 않는다**(정§3-2 #3) — 남기면 명단에 같은 사람이 둘이고
+    /// 옛 소켓의 하트비트 계수가 계속 오른다.
+    /// ★**값에 소켓 세대를 같이 둔다** — 세션 하나를 이어 쥐는 소켓이 갈리므로
+    /// *"이 자리의 주인이 아직 나인가"* 를 묻지 못하면 옛 연결이 새 주인을 지운다.
+    sockets: Mutex<std::collections::BTreeMap<String, (u64, tokio::sync::mpsc::Sender<Out>)>>,
+    /// 소켓 세대 발급기 — ★**락을 잡지 않는다**(핫패스 규율 H2).
+    next_conn: std::sync::atomic::AtomicU64,
+}
+
+/// 펌프에 건네는 것. ★**`Close` 가 있어야 남이 내 소켓을 닫을 수 있다** — 소켓의
+/// 쓰기 끝은 펌프가 혼자 쥐고 있어서, 축출하는 쪽은 옛 연결의 루프를 직접 깨울 수 없다.
+/// 채널만 끊는 것으로는 안 된다: 옛 루프가 제 송신 끝을 아직 쥐고 있어 펌프가 안 깨어난다.
+enum Out {
+    Frame(Vec<u8>),
+    /// ★`LEAVE` 를 보낸 **뒤** 온다 — 사유 먼저, 절단 나중(연§6-1).
+    Close,
 }
 
 type Shared = Arc<Hub>;
@@ -89,6 +107,8 @@ async fn run(args: Args) -> Result<(), String> {
         sessions: Mutex::new(Sessions::new()),
         children: Mutex::new(Vec::new()),
         rooms: Mutex::new(Rooms::new()),
+        sockets: Mutex::new(Default::default()),
+        next_conn: std::sync::atomic::AtomicU64::new(1),
     });
 
     // ★접속점은 `{base}` 아래다 — 앱이 클라에 주는 그 값이다(연§5-0).
@@ -489,10 +509,27 @@ async fn ws_upgrade(
     upgrade.on_upgrade(move |socket| serve_ws(hub, socket))
 }
 
-async fn serve_ws(hub: Shared, mut socket: axum::extract::ws::WebSocket) {
+async fn serve_ws(hub: Shared, socket: axum::extract::ws::WebSocket) {
     use axum::extract::ws::Message;
+    use futures_util::{SinkExt, StreamExt};
     use oxsig::frame;
 
+    // ★내보내기를 한 갈래로 모은다 — 축출 통지가 남의 소켓으로 가야 하므로
+    //   *"이 루프만 쓴다"* 가 성립하지 않는다.
+    let (mut tx_sock, mut rx_sock) = socket.split();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Out>(64);
+    let pump = tokio::spawn(async move {
+        while let Some(o) = rx.recv().await {
+            let Out::Frame(b) = o else { break };
+            if tx_sock.send(Message::Binary(b)).await.is_err() {
+                break;
+            }
+        }
+        // ★WS Close 에 코드를 싣지 않는다 — 사유는 이미 `LEAVE` 가 날랐다(연§6-1).
+        let _ = tx_sock.send(Message::Close(None)).await;
+    });
+
+    let conn_gen = hub.next_conn.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut conn = Conn::Unbound { opened_at: now_ms() };
     let window_ms = hub.resolved.policy.hub.resume_window_ms as u64;
     // ★그릇을 하나 잡아 재사용한다 — 프레임마다 새로 잡지 않는다(핫패스 규율 H3).
@@ -500,28 +537,44 @@ async fn serve_ws(hub: Shared, mut socket: axum::extract::ws::WebSocket) {
 
     loop {
         let msg = tokio::select! {
-            m = socket.recv() => m,
+            m = rx_sock.next() => m,
             // ★`BIND` 가 제때 안 오면 끊는다 — 무인증 소켓을 열어 두지 않는다.
             () = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
                 if let Some(n) = ws::bind_overdue(&conn, now_ms()) {
-                    send_leave(&mut socket, &mut out, &n).await;
-                    return;
+                    send_leave(&tx, &mut out, &n).await;
+                    break;
                 }
                 continue;
             }
         };
-        let Some(Ok(Message::Binary(buf))) = msg else { return };
+        let Some(Ok(Message::Binary(buf))) = msg else { break };
         // ★text 프레임은 받지 않는다(연§3-1 — binary 고정). 위 패턴이 그것을 거른다.
         let (header, body) = match frame::decode(&buf) {
             Ok(v) => v,
+            // ★**모르는 op 은 끊지 않는다** — `op`·`pid` 가 멀쩡하니 `1001` **응답**으로 답한다.
+            Err(oxsig::frame::DecodeError::UnknownOp { op, pid }) => {
+                let body = serde_json::to_vec(&oxsig::Failure::new(oxsig::Code::UnknownOp))
+                    .unwrap_or_default();
+                // 카탈로그 밖 번호를 그대로 되돌리려면 헤더를 손으로 짓는다.
+                out.clear();
+                out.push(oxsig::frame::VER);
+                out.push(0b10);
+                out.extend_from_slice(&op.to_be_bytes());
+                out.extend_from_slice(&pid.to_be_bytes());
+                out.extend_from_slice(&body);
+                if tx.send(Out::Frame(out.clone())).await.is_err() {
+                    break;
+                }
+                continue;
+            }
             Err(e) => {
                 if let Reply::Close(n) = ws::on_decode_error(e) {
-                    send_leave(&mut socket, &mut out, &n).await;
+                    send_leave(&tx, &mut out, &n).await;
                 }
-                return;
+                break;
             }
         };
-        let reply = {
+        let (reply, evicted) = {
             let sys = &hub.resolved.system;
             let verify = |t: &str| {
                 oxhubd::token::verify_user(sys, now_ms() / 1000, t)
@@ -534,35 +587,68 @@ async fn serve_ws(hub: Shared, mut socket: axum::extract::ws::WebSocket) {
                     .map_err(|e| e.0)
             };
             let mut sessions = hub.sessions.lock().await;
-            ws::dispatch(&mut conn, &mut sessions, &verify, window_ms, now_ms(), header, body)
+            let before = conn.clone();
+            let r = ws::dispatch(&mut conn, &mut sessions, &verify, window_ms, now_ms(), header, body);
+            let ev = ws::evicted_by(&before, &conn, &sessions);
+            (r, ev)
         };
+        // ★옛 연결에 `LEAVE` `2010` 을 보내고 **소켓을 실제로 닫는다** — 한 세션에 소켓 하나다.
+        if let Some(ev) = evicted {
+            let key = match &ev {
+                ws::Evicted::Session(id) | ws::Evicted::Socket(id) => id.clone(),
+            };
+            let victim = hub.sockets.lock().await.remove(&key).map(|(_, v)| v);
+            if let Some(v) = victim {
+                let mut buf = Vec::new();
+                let n = oxsig::body::session::LeaveNotice::new(oxsig::Code::DuplicateSession);
+                send_leave(&v, &mut buf, &n).await;
+            }
+        }
+        // 붙었으면 이 소켓을 장부에 올린다 — 다음 축출의 대상이 된다.
+        if let Conn::Bound { session_id } = &conn {
+            let mut socks = hub.sockets.lock().await;
+            socks.insert(session_id.clone(), (conn_gen, tx.clone()));
+        }
         match reply {
             Reply::Ok { header, body } | Reply::Fail { header, body } => {
                 frame::encode(&mut out, header, &body);
-                if socket.send(Message::Binary(out.clone())).await.is_err() {
-                    return;
+                if tx.send(Out::Frame(out.clone())).await.is_err() {
+                    break;
                 }
             }
             Reply::Silent => {}
             Reply::Close(n) => {
-                send_leave(&mut socket, &mut out, &n).await;
-                return;
+                send_leave(&tx, &mut out, &n).await;
+                break;
             }
         }
     }
+    if let Conn::Bound { session_id } = &conn {
+        let mut socks = hub.sockets.lock().await;
+        // ★★**내가 아직 그 세션의 소켓일 때만 거둔다.** 축출된 옛 연결도 `Bound` 인 채로
+        //   여기까지 온다 — 세대를 안 보면 그것이 **새 주인의 자리를 지우고 산 세션을
+        //   죽은 것으로 표시한다**(다음 `BIND` 가 축출할 상대를 못 찾는다).
+        if socks.get(session_id).is_some_and(|(g, _)| *g == conn_gen) {
+            socks.remove(session_id);
+            drop(socks);
+            // ★소켓이 죽었다 — 세션은 창 동안 산다(정§3-1).
+            hub.sessions.lock().await.on_socket_dead(session_id, now_ms());
+        }
+    }
+    drop(tx);
+    let _ = pump.await;
 }
 
 /// ★**사유는 `LEAVE` 가 나른다** — WS Close 에 싣지 않는다(전송을 바꿔도 이 op 은 그대로 선다).
 async fn send_leave(
-    socket: &mut axum::extract::ws::WebSocket,
+    tx: &tokio::sync::mpsc::Sender<Out>,
     out: &mut Vec<u8>,
     notice: &oxsig::body::session::LeaveNotice,
 ) {
-    use axum::extract::ws::Message;
     use oxsig::frame::{self, Header, Kind};
     let body = serde_json::to_vec(notice).unwrap_or_default();
     frame::encode(out, Header::new(Kind::Request, oxsig::Op::Leave, 0), &body);
-    let _ = socket.send(Message::Binary(out.clone())).await;
-    // ★보내고 닫는다 — 응답을 기다리면 닫지도 못하고 굳는다.
-    let _ = socket.send(Message::Close(None)).await;
+    // ★보내고 닫는다 — 응답을 기다리지 않는다(연§6-1 절차). 두 줄의 순서가 계약이다.
+    let _ = tx.send(Out::Frame(out.clone())).await;
+    let _ = tx.send(Out::Close).await;
 }

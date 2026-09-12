@@ -43,6 +43,8 @@ pub enum BindOutcome {
 pub struct Sessions {
     items: Vec<Session>,
     seq: u64,
+    /// ★**방금 축출된 것** — 통보할 대상을 잃지 않으려고 한 걸음 들고 있는다.
+    last_evicted: Vec<(String, String)>,
 }
 
 /// `BIND` 에 실려 온 것 중 판정에 쓰는 것.
@@ -156,10 +158,23 @@ impl Sessions {
             Some(old) => {
                 // 옛 세션은 통보만 하고 남기지 않는다 — ★**유령으로 두면 명단에 같은 사람이 둘.**
                 self.discard(&old);
+                let who = self.items.iter().find(|s| s.id == id).map(|s| s.user_id.clone());
+                if let Some(w) = who {
+                    self.last_evicted.retain(|(u, _)| u != &w);
+                    self.last_evicted.push((w, old.clone()));
+                }
                 BindOutcome::FreshEvicting { session_id: id, evicted: old }
             }
             None => BindOutcome::Fresh { session_id: id },
         }
+    }
+
+    /// 방금 축출된 세션 id — `bind` 가 기록해 둔다.
+    pub fn evicted_of(&self, user_id: &str, except: &str) -> Option<String> {
+        self.last_evicted
+            .iter()
+            .find(|(u, s)| u == user_id && s != except)
+            .map(|(_, s)| s.clone())
     }
 
     /// `RESUME` 판정(정§3-3). ★**`2008` 이 유일한 실패다** — 부분 실패 응답 형이 없다.

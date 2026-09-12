@@ -81,8 +81,8 @@ pub enum DecodeError {
     Version(u8),
     /// `flags` 가 `11`.
     ReservedKind,
-    /// 카탈로그에 없는 `op`.
-    UnknownOp(u16),
+    /// 카탈로그에 없는 `op`. ★**`op`·`pid` 는 멀쩡하므로 응답으로 답할 수 있다** — 끊지 않는다.
+    UnknownOp { op: u16, pid: u32 },
 }
 
 impl DecodeError {
@@ -91,8 +91,8 @@ impl DecodeError {
     /// ★응답이 아니라 `LEAVE` 인 이유는 하나다 — `op`·`pid` 를 못 믿으면 응답 프레임을 지을 수가 없다.
     pub fn leave_reason(self) -> Code {
         match self {
-            // 모르는 op 은 `op`·`pid` 가 멀쩡하므로 응답으로 답할 수 있다 — 여기 오지 않는다.
-            DecodeError::UnknownOp(_) => Code::UnknownOp,
+            // ★모르는 op 은 여기 오지 않는다 — 부르는 쪽이 `1001` **응답**으로 답한다.
+            DecodeError::UnknownOp { .. } => Code::UnknownOp,
             _ => Code::ProtocolError,
         }
     }
@@ -113,8 +113,8 @@ pub fn decode(buf: &[u8]) -> Result<(Header, &[u8]), DecodeError> {
     let flags = buf[1];
     let kind = Kind::from_flags(flags)?;
     let raw_op = u16::from_be_bytes([buf[2], buf[3]]);
-    let op = Op::from_u16(raw_op).ok_or(DecodeError::UnknownOp(raw_op))?;
     let pid = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
+    let op = Op::from_u16(raw_op).ok_or(DecodeError::UnknownOp { op: raw_op, pid })?;
     let header = Header { kind, reserved: flags & !Kind::MASK, op, pid };
     Ok((header, &buf[HEADER_LEN..]))
 }
@@ -193,8 +193,8 @@ mod tests {
     fn 모르는_op_은_끊는_사유가_다르다() {
         let mut buf = vec![VER, 0, 0xEE, 0xEE, 0, 0, 0, 1];
         buf.extend_from_slice(b"{}");
-        // ★`op`·`pid` 는 멀쩡하므로 응답으로 답할 수 있다 — 끊는 조건이 아니다.
-        assert_eq!(decode(&buf), Err(DecodeError::UnknownOp(0xEEEE)));
+        // ★`op`·`pid` 를 그대로 돌려준다 — 그래야 부르는 쪽이 `1001` **응답**을 지을 수 있다.
+        assert_eq!(decode(&buf), Err(DecodeError::UnknownOp { op: 0xEEEE, pid: 1 }));
     }
 
     #[test]
