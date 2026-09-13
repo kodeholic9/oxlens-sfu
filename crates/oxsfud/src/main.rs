@@ -152,7 +152,7 @@ async fn main() -> std::process::ExitCode {
         return std::process::ExitCode::from(2);
     };
     let z_ns = args.extra.get("--zenoh-namespace").cloned().unwrap_or_else(|| "ox".into());
-    let bus = match oxsfud::bus::open(&z_connect, &z_ns).await {
+    let bus = match oxsfud::bus::open(&z_connect, &z_ns, &node_id, &epoch).await {
         Ok(v) => {
             eprintln!("[bus] client → {z_connect} ns={z_ns}");
             std::sync::Arc::new(v)

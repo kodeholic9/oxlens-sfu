@@ -32,6 +32,11 @@ pub struct Sfu {
     bus: Arc<crate::bus::Bus>,
     /// 전송 루프에 거는 손 — ★**회수는 통로를 닫는 것**이다(정§12).
     udp: mpsc::Sender<crate::transport::udp::Cmd>,
+    /// ★★**이 sfud 가 쥔 방의 위치 선언**(정§15-2) — `room/{R}/{node}/{inst}`.
+    ///
+    /// ★**들고 있는 것이 곧 살려 두는 것**이다. 그래서 이 표에서 빼면 그 방의 자리가 꺼지고,
+    /// ★**프로세스가 죽으면 세션째 사라진다** — 지우는 코드를 아무도 안 든다.
+    tokens: Mutex<std::collections::BTreeMap<String, crate::bus::RoomToken>>,
 }
 
 impl Sfu {
@@ -41,7 +46,7 @@ impl Sfu {
         udp: mpsc::Sender<crate::transport::udp::Cmd>,
         bus: Arc<crate::bus::Bus>,
     ) -> Self {
-        Self { id, node: Mutex::new(node), bus, udp }
+        Self { id, node: Mutex::new(node), bus, udp, tokens: Mutex::new(Default::default()) }
     }
 
     pub fn into_server(self: Arc<Self>) -> SfuServiceServer<Self> {
@@ -133,6 +138,28 @@ impl Sfu {
             let _ =
                 self.udp.send(crate::transport::udp::Cmd::SetRoute { ufrag, ssrc, targets }).await;
         }
+    }
+
+    /// 쥔 방과 선 자리를 맞춘다. ★**멱등이라 부르는 자리를 안 센다** — 자리마다 증감을
+    /// 두면 한 곳만 빠져도 ★**죽은 방의 자리가 남거나 산 방의 자리가 없다.**
+    ///
+    /// ★**재선언의 권위도 주체다**(정§15-2) — zenoh 자동 복구에 기대지 않고 ★**현재 상태에서**
+    /// 다시 세운다. 자동 복구는 *"그동안 바뀐 상태"* 를 모른다.
+    async fn sync_room_tokens(&self) {
+        let want: Vec<String> = {
+            let node = self.node.lock().await;
+            node.rooms.iter().map(|r| r.id.clone()).collect()
+        };
+        let mut t = self.tokens.lock().await;
+        // ★**먼저 세우고 나중에 거둔다** — 순서가 뒤집히면 있는 방이 한 순간 없어 보인다.
+        for id in &want {
+            if !t.contains_key(id)
+                && let Some(tok) = self.bus.declare_room(id).await
+            {
+                t.insert(id.clone(), tok);
+            }
+        }
+        t.retain(|k, _| want.iter().any(|w| w == k));
     }
 
     /// 통지 한 장을 버스에. ★**가름은 `target` 하나다**(정§15-4) —
@@ -240,7 +267,11 @@ impl SfuService for Sfu {
             node.rooms.remove(id);
         }
         let rooms = node.rooms.iter().map(|r| view_of(r, &node.epoch)).collect();
-        Ok(Response::new(RoomView { epoch: node.epoch.clone(), rooms, expired }))
+        let epoch = node.epoch.clone();
+        drop(node);
+        // ★**대장이 바뀔 때마다 자리를 맞춘다** — hub 의 화해 주기가 곧 재선언 주기다.
+        self.sync_room_tokens().await;
+        Ok(Response::new(RoomView { epoch, rooms, expired }))
     }
 
     /// 운영이 시키는 것(정§16-1-2·§16-1-3) — ★**판정은 여기가 하고 확인값은 hub 가 본다.**
@@ -306,6 +337,9 @@ impl SfuService for Sfu {
         if let Some(sid) = drop_session {
             let _ = self.udp.send(crate::transport::udp::Cmd::DropSession(sid)).await;
         }
+        // ★`destroy` 는 방을 없앤다 — ★**그 자리를 그 즉시 거둔다**(화해 주기를 안 기다린다).
+        //   기다리면 그 창에 남의 hub 가 없는 방으로 라우팅한다.
+        self.sync_room_tokens().await;
         Ok(Response::new(reply))
     }
 

@@ -19,15 +19,37 @@ const QUEUE: usize = 1024;
 /// 이 sfud 가 쥔 버스 한 자리.
 pub struct Bus {
     pub keys: Keys,
+    /// ★**배치 키**(정§15-3) — 안정값이라 재기동해도 같다.
+    pub node_id: String,
+    /// ★**기동 신원**(`epoch`=`sfu_id`=`{inst}`) — 기동마다 새 값이라 재기동을 가른다.
+    pub inst: String,
     /// ★★**보내는 큐가 하나다** — put 마다 태스크를 띄우면 두 통지가 서로를 앞질러
     /// ★**`version.seq` 가 역전된다**(클라는 뒤엣것을 버린다, 정§15-4 우선순위 줄).
     tx: tokio::sync::mpsc::Sender<(String, Vec<u8>)>,
+    session: zenoh::Session,
+}
+
+/// ★**떨어뜨리면 그 방의 자리가 꺼진다** — 그래서 방이 사는 동안 들고 있는다.
+pub struct RoomToken(#[allow(dead_code)] zenoh::liveliness::LivelinessToken);
+
+impl std::fmt::Debug for RoomToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RoomToken")
+    }
 }
 
 /// 버스를 연다. ★**못 열면 `Err`** — 조용히 없는 채로 돌면 통지가 아무 데도 안 간다.
-pub async fn open(connect: &str, namespace: &str) -> Result<Bus, String> {
-    if !common::bus::is_key_segment(namespace) {
-        return Err(format!("namespace 가 키 조각이 못 된다: {namespace:?}"));
+pub async fn open(
+    connect: &str,
+    namespace: &str,
+    node_id: &str,
+    inst: &str,
+) -> Result<Bus, String> {
+    // ★**키를 깨는 값은 여기서 막는다** — 붙고 나서 아무에게도 안 보이는 것이 제일 나쁘다.
+    for (what, v) in [("namespace", namespace), ("node_id", node_id), ("inst", inst)] {
+        if !common::bus::is_key_segment(v) {
+            return Err(format!("{what} 가 키 조각이 못 된다: {v:?}"));
+        }
     }
     let mut cfg = zenoh::Config::default();
     // ★**client 다** — peer 로 열면 관문이 무너진다(정§15-0).
@@ -41,6 +63,7 @@ pub async fn open(connect: &str, namespace: &str) -> Result<Bus, String> {
         cfg.insert_json5(path, &v).map_err(|e| format!("zenoh 설정 {path}: {e}"))?;
     }
     let session = zenoh::open(cfg).await.map_err(|e| format!("zenoh open: {e}"))?;
+    let session2 = session.clone();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, Vec<u8>)>(QUEUE);
     tokio::spawn(async move {
         while let Some((key, body)) = rx.recv().await {
@@ -50,10 +73,35 @@ pub async fn open(connect: &str, namespace: &str) -> Result<Bus, String> {
             let _ = session.put(key, body).congestion_control(CongestionControl::Drop).await;
         }
     });
-    Ok(Bus { keys: Keys::new(namespace), tx })
+    Ok(Bus {
+        keys: Keys::new(namespace),
+        node_id: node_id.to_string(),
+        inst: inst.to_string(),
+        tx,
+        session: session2,
+    })
 }
 
 impl Bus {
+    /// 이 sfud 가 쥔 방을 버스에 세운다 — ★★**토큰이 곧 「그 방은 여기 있다」**(정§15-2).
+    ///
+    /// ★**선언 주체 = 그 상태의 소유자**다. 통보가 아니라 선언이라 ★**주체가 죽으면
+    /// 아무도 지우지 않아도 키가 사라진다** — 종전 브로드캐스트 방식의 약점
+    /// (*"소멸 통보를 빠뜨리면 죽은 방이 노드를 영원히 문다"*)이 여기엔 없다.
+    pub async fn declare_room(&self, room: &str) -> Option<RoomToken> {
+        // ★키를 깨는 방 이름은 선언하지 않는다 — 선언해도 아무에게도 안 보인다.
+        if !common::bus::is_key_segment(room) {
+            eprintln!("[bus] ★방 이름이 키 조각이 못 된다 — 위치를 못 세운다: {room:?}");
+            return None;
+        }
+        self.session
+            .liveliness()
+            .declare_token(self.keys.room(room, &self.node_id, &self.inst))
+            .await
+            .ok()
+            .map(RoomToken)
+    }
+
     /// ★**낸 순서 그대로 줄에 세운다** — 순서가 `version.seq` 의 뜻이다.
     ///
     /// ★**줄이 차면 버린다**(막지 않는다) — 여기서 기다리면 통지 하나가 dispatch 를 세운다.

@@ -378,9 +378,9 @@ fn print_bus(b: &serde_json::Value) {
         "peers",
         if peers.is_empty() { table::UNKNOWN.into() } else { peers.join(" ") }
     );
-    // ★§3-8 의 `rooms_seen`(방 위치 토큰)을 서버가 아직 안 낸다 — ★**`-` 로 둔다.**
-    //   도구가 `/admin/rooms` 로 대신 채우면 ★**내가 만든 방과 배워서 아는 방이 섞인다.**
-    println!("{:<12} {}", "rooms_seen", cell(b.get("rooms_seen")));
+    // ★★**고립은 「남이 다 죽었다」가 아니라 「내가 끊겼다」다**(§15-7) — 그 한 줄이
+    //   `ready` 503 의 사유라 표에 둔다. 없으면 운영자가 `down` 이 비었는데 왜 503 인지 모른다.
+    println!("{:<12} {}", "isolated", cell(b.get("isolated")));
     let rows: Vec<_> =
         list(b, "nodes").iter().map(|x| row(x, &["node", "inst", "self"])).collect();
     print!("{}", render(&["node", "inst", "self"], &rows));
@@ -397,6 +397,12 @@ fn print_bus(b: &serde_json::Value) {
         cell(e.and_then(|x| x.get("key"))),
         cell(e.and_then(|x| x.get("at_ms"))),
     );
+    // ★**배워서 아는 방**(§3-8) — 내가 만든 방(`rooms`)과 다른 축이다.
+    //   ★둘이 어긋나는 것이 사고의 형상이라 섞어 내지 않는다.
+    let rows: Vec<_> =
+        list(b, "rooms_seen").iter().map(|x| row(x, &["room_id", "node", "inst"])).collect();
+    println!("\nrooms_seen — 토큰으로 배운 자리(정§15-2)");
+    print!("{}", render(&["room_id", "node", "inst"], &rows));
 }
 
 /// ★**견주는 일은 도구가 한다**(§3-8) — 서버는 나란히 놓기까지다.
@@ -412,14 +418,15 @@ fn print_bus_all(b: &serde_json::Value) {
             vec![
                 cell(r.get("node")),
                 cell(r.get("error")),
-                cell(bus.and_then(|x| x.get("inst"))),
+                cell(bus.and_then(|x| x.get("isolated"))),
                 if seen.is_empty() { table::UNKNOWN.into() } else { seen.join(",") },
+                cell(bus.and_then(|x| x.get("rooms_seen")).and_then(|x| x.as_array()).map(|a| serde_json::json!(a.len())).as_ref()),
                 cell(bus.and_then(|x| x.get("pending")).and_then(|x| x.get("rooms_unplaced"))),
                 cell(bus.and_then(|x| x.get("pending")).and_then(|x| x.get("rooms_no_view"))),
             ]
         })
         .collect();
-    let head = ["node", "error", "inst", "본 node", "unplaced", "no_view"];
+    let head = ["node", "error", "isolated", "본 node", "배운 방", "unplaced", "no_view"];
     print!("{}", render(&head, &rows));
     // ★**어긋난 곳을 짚어 준다** — 나란히만 놓으면 사람이 매번 눈으로 맞춰야 한다(§3-8 까닭).
     let views: Vec<(String, Vec<String>)> = list(b, "nodes")

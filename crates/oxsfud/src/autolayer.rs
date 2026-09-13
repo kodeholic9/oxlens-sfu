@@ -142,7 +142,10 @@ pub struct Policy {
     clean_since_ms: Option<u64>,
     /// 지금 승격에 요구되는 깨끗 창 길이.
     pub backoff_ms: u64,
-    /// 마지막 승격 시각 — ★`None` = 승격한 적 없다(`0` 을 부재 표식으로 쓰지 않는다).
+    /// ★**지금 `cap` 이 선 시각** — `0` 을 부재 표식으로 쓰지 않는다.
+    ///
+    /// ★★**첫 tick 이 여기를 채운다.** `High` 로 서는 것 자체가 *"올렸다"* 이므로
+    /// ★**첫 걸음도 승격과 같은 유예를 받는다**(아래 `policy_tick`).
     pub promoted_at: Option<u64>,
     /// 프로브 판정 창 만료 — ★`None` = 프로브 중이 아니다.
     probing_until_ms: Option<u64>,
@@ -205,8 +208,14 @@ fn demote_cause(s: &Signals, suppress_remb: bool) -> Option<&'static str> {
 pub fn policy_tick(st: &mut Policy, s: &Signals) -> Decision {
     match st.cap {
         Layer::High => {
-            let in_grace = matches!(st.promoted_at,
-                Some(p) if s.now_ms.saturating_sub(p) < v::PROMOTE_GRACE_MS);
+            // ★★**첫 tick 이 시작점이다** — 안 박으면 ★**추정의 첫값이 측정으로 읽힌다.**
+            //   GCC 는 300kbps 짐작에서 출발하는데 `High` 수요는 1.65Mbps 라
+            //   `below_headroom` 이 곧바로 참이 되고 ★**두 tick 만에 강등된다.**
+            //   실측 20260913: 정직한 피드백만 오는 판에서 ★**2.3초에 `l` 로 떨어져 55초
+            //   내내 안 올라왔다**(여섯 번 중 두 번 빨강 — 올라오느냐가 프로브 운이었다).
+            //   ★**유예는 `remb` 사유만 침묵시킨다** — 진짜 붕괴는 loss·nack 이 잡는다.
+            let started = *st.promoted_at.get_or_insert(s.now_ms);
+            let in_grace = s.now_ms.saturating_sub(started) < v::PROMOTE_GRACE_MS;
             match demote_cause(s, in_grace) {
                 Some(cause) => {
                     st.demote_streak = st.demote_streak.saturating_add(1);
@@ -320,16 +329,41 @@ mod tests {
     #[test]
     fn 한_tick_으로는_안_내린다() {
         // ★한 수 튀었다고 내리면 단이 널뛴다 — 두 tick 연속이 계약이다.
+        //   ★유예 밖에서 센다 — 안에서는 `remb` 사유가 아예 침묵한다(아래 시험).
         let mut st = Policy::new();
-        let mut s = sig(1_000);
+        policy_tick(&mut st, &sig(0));
+        let out = v::PROMOTE_GRACE_MS + 1_000;
+        let mut s = sig(out);
         s.remb_bps = Some(100_000);
         assert_eq!(policy_tick(&mut st, &s), Decision::Hold);
-        assert_eq!(policy_tick(&mut st, &sig(2_000)), Decision::Hold, "깨끗하면 연속이 끊긴다");
-        s.now_ms = 3_000;
+        assert_eq!(policy_tick(&mut st, &sig(out + 1_000)), Decision::Hold, "깨끗하면 연속이 끊긴다");
+        s.now_ms = out + 2_000;
         assert_eq!(policy_tick(&mut st, &s), Decision::Hold);
-        s.now_ms = 4_000;
+        s.now_ms = out + 3_000;
         assert_eq!(policy_tick(&mut st, &s), Decision::Demote("remb"));
         assert_eq!(st.cap, Layer::Low);
+    }
+
+    #[test]
+    fn 첫_추정은_측정이_아니다() {
+        // ★★**GCC 는 짐작(300kbps)에서 출발한다.** 그것을 측정으로 읽으면 `High` 수요
+        //   1.65Mbps 앞에서 곧바로 headroom 미달이 되어 ★**두 tick 만에 강등**되고,
+        //   되올라오느냐가 프로브 운에 걸린다(실측 20260913: 55초 내내 `l` 이었다).
+        let mut st = Policy::new();
+        let mut s = sig(0);
+        s.remb_bps = Some(crate::gcc::v::INITIAL_BPS as u64);
+        for t in 0..8 {
+            s.now_ms = t * 1_000;
+            assert_eq!(policy_tick(&mut st, &s), Decision::Hold, "t={t}s 에 내렸다");
+        }
+        assert_eq!(st.cap, Layer::High, "★첫 유예 안에서는 안 내려간다");
+        // ★**유예는 `remb` 만 침묵시킨다** — 진짜 붕괴는 그 안에서도 내려간다.
+        let mut bad = sig(1_000);
+        bad.loss_bad_streak = 2;
+        let mut st2 = Policy::new();
+        assert_eq!(policy_tick(&mut st2, &bad), Decision::Hold);
+        bad.now_ms = 2_000;
+        assert_eq!(policy_tick(&mut st2, &bad), Decision::Demote("loss"));
     }
 
     #[test]

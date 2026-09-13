@@ -128,14 +128,16 @@ async fn run(args: Args) -> Result<(), String> {
     let mut sup = Supervisor::new(&resolved.system.units);
     let first = sup.start_all(now_ms());
     // ★**못 열어도 뜬다** — 버스 없이도 한 node 는 돈다(그 사실을 로그가 말한다).
-    let bus = match oxhubd::bus::open(&resolved.system.zenoh, &resolved.node_id, &inst).await {
-        Ok(b) => {
+    let (bus, closed) = match oxhubd::bus::open(&resolved.system.zenoh, &resolved.node_id, &inst)
+        .await
+    {
+        Ok((b, c)) => {
             eprintln!("[bus] router 섰다 — node={} inst={inst}", resolved.node_id);
-            Some(b)
+            (Some(b), Some(c))
         }
         Err(e) => {
             eprintln!("[bus] ★못 열었다({e}) — 노드 축은 「모른다」로 둔다");
-            None
+            (None, None)
         }
     };
     let hub: Shared = Arc::new(Hub {
@@ -189,6 +191,9 @@ async fn run(args: Args) -> Result<(), String> {
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| e.to_string())?;
 
     spawn_gateway(hub.clone()).await;
+    if let Some(rx) = closed {
+        spawn_room_closed(hub.clone(), rx);
+    }
     for a in &first {
         apply(&hub, a).await;
     }
@@ -410,9 +415,21 @@ fn fail(code: oxsig::Code) -> (StatusCode, Json<oxsig::Failure>) {
 async fn ready(State(hub): State<Shared>) -> (StatusCode, Json<serde_json::Value>) {
     let sup = hub.sup.lock().await;
     let r = healthz::ready(&sup, true);
-    let code = if r.ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+    // ★★**고립은 준비 안 된 것이다**(정§15-7) — ★**LB 가 빼 줘야 한다.**
+    //   ★내 유닛이 멀쩡해도 그렇다: 남의 node 방으로는 아무것도 못 넘기고, 내가 쥔 방도
+    //   남이 못 본다. ★**여기서 200 을 내면 클라가 계속 몰려와 아무것도 안 되는 문으로 든다.**
+    let isolated = hub.bus.as_ref().is_some_and(|b| b.live.isolated());
+    let ok = r.ok && !isolated;
+    let code = if ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
     // ★어느 노드가 빠졌는지까지 낸다 — 503 만 주면 운영자가 다시 물어봐야 한다.
-    (code, Json(serde_json::json!({ "ready": r.ok, "down": r.down, "build": hub.resolved.build.line() })))
+    //   ★**「유닛이 죽었다」와 「내가 고립됐다」를 가른다** — 처방이 반대다.
+    (
+        code,
+        Json(serde_json::json!({
+            "ready": ok, "down": r.down, "isolated": isolated,
+            "build": hub.resolved.build.line(),
+        })),
+    )
 }
 
 async fn auth_token(
@@ -460,7 +477,17 @@ async fn admin_rooms(
 }
 
 /// 그 방을 쥔 유닛의 이름 — ★**배치는 순수 함수다**(정§15-1 HRW).
+/// ★★**배운 자리가 계산보다 앞선다**(정§15-2 — `room` 토큰이 §15-5 라우팅의 입력).
+///
+/// ★**「어디로 가야 하나」와 「어디에 있나」는 다른 물음**이다. HRW 는 앞을 답하고
+/// 토큰은 뒤를 답한다 — 둘이 갈리는 창(노드 증감 뒤 기존 방)에서 ★**계산을 믿으면
+/// 멀쩡히 살아 있는 방에 `3001` 이 난다.** 아직 못 배운 방은 계산이 답한다(그것이 곧 배치다).
 async fn sfu_of_room(hub: &Shared, room_id: &str) -> Option<String> {
+    if let Some(b) = &hub.bus
+        && let Some(n) = b.live.room_node(room_id)
+    {
+        return Some(n);
+    }
     let nodes = sfu_nodes(hub).await;
     oxhubd::route::place(&nodes, room_id, now_ms()).map(|n| n.node_id.clone())
 }
@@ -911,6 +938,11 @@ async fn bus_view(hub: &Shared) -> serde_json::Value {
         "listen": z.listen, "connect": z.connect,
         "peers": peers,
         "nodes": nodes,
+        // ★**배워서 아는 방**(정§15-2) — 내가 만든 방(`/admin/rooms`)과 다른 축이다.
+        "rooms_seen": bus.live.rooms().iter().flat_map(|(r, m)| {
+            m.iter().map(move |(n, i)| serde_json::json!({ "room_id": r, "node": n, "inst": i }))
+        }).collect::<Vec<_>>(),
+        "isolated": bus.live.isolated(),
         "pending": { "rooms_unplaced": unplaced, "rooms_no_view": no_view },
         "last_event": last,
     })
@@ -1411,11 +1443,8 @@ async fn sfu_nodes(hub: &Shared) -> Vec<oxhubd::route::Node> {
     let Some(bus) = &hub.bus else {
         return vec![oxhubd::route::Node { node_id: mine, live: true, gone_at: None }];
     };
-    bus.live
-        .snapshot()
-        .keys()
-        .map(|n| oxhubd::route::Node { node_id: n.clone(), live: true, gone_at: None })
-        .collect()
+    // ★**산 것 + grace 안에 사라진 것**(정§15-3) — 좁히면 방이 창마다 옮겨 다닌다.
+    bus.live.candidates(now_ms())
 }
 
 /// 그 node 를 맡은 **내 유닛**의 주소 — ★**남의 node 면 `None`** 이다(아직 넘기지 않는다).
@@ -1433,9 +1462,7 @@ fn local_unit_addr(hub: &Shared, node: &str) -> Option<String> {
 
 /// 그 방을 맡은 유닛의 gRPC 주소. ★**맵에 없으면 없는 것이다** — 기본 노드 폴백 금지(정§15-5).
 async fn addr_for_room(hub: &Shared, room_id: &str) -> Option<String> {
-    let nodes = sfu_nodes(hub).await;
-    let n = oxhubd::route::place(&nodes, room_id, now_ms())?;
-    local_unit_addr(hub, &n.node_id)
+    local_unit_addr(hub, &sfu_of_room(hub, room_id).await?)
 }
 
 type BClient = common::b::sfu_service_client::SfuServiceClient<tonic::transport::Channel>;
@@ -1479,12 +1506,14 @@ async fn rooms_call(
     room_id: &str,
     led: common::b::RoomLedger,
 ) -> Option<common::b::RoomView> {
-    let nodes = sfu_nodes(hub).await;
-    let node = oxhubd::route::place(&nodes, room_id, now_ms())?;
-    if node.node_id != hub.resolved.node_id {
+    // ★**여기도 자리를 다시 계산하지 않는다** — 부르는 쪽이 배운 자리로 몰아 놓은 것을
+    //   여기서 HRW 로 되돌리면 ★**그 묶음이 통째로 엉뚱한 node 에 선다**(실측 20260913:
+    //   고립된 hub 가 남의 방을 제 sfud 에 세워 `room/{R}/*` 에 node 가 둘이 됐다).
+    let node = sfu_of_room(hub, room_id).await?;
+    if node != hub.resolved.node_id {
         let bus = hub.bus.as_ref()?;
         let raw = bus
-            .ask(&node.node_id, oxhubd::bus::Q_ROOMS, prost::Message::encode_to_vec(&led))
+            .ask(&node, oxhubd::bus::Q_ROOMS, prost::Message::encode_to_vec(&led))
             .await?;
         return <common::b::RoomView as prost::Message>::decode(&raw[..]).ok();
     }
@@ -1510,20 +1539,21 @@ async fn absorb_view(hub: &Shared, v: common::b::RoomView) {
 
 /// 프레임 하나를 그 방의 sfud 에 넘기고 응답 wire 를 그대로 받아 온다.
 async fn to_sfu(hub: &Shared, room_id: &str, env: common::b::Envelope) -> Result<Vec<u8>, Code> {
-    let nodes = sfu_nodes(hub).await;
-    let node = oxhubd::route::place(&nodes, room_id, now_ms()).ok_or(Code::RoomNotFound)?;
+    // ★★**자리를 묻는 곳은 하나다**(`sfu_of_room`) — 배운 자리가 계산보다 앞선다(정§15-2).
+    //   ★여기서 계산을 다시 하면 node 가 사라진 창에 ★**그 방이 내 node 로 옮겨 앉는다.**
+    let node = sfu_of_room(hub, room_id).await.ok_or(Code::RoomNotFound)?;
     // ★**남의 node 면 그 node 의 관문에 넘긴다**(정§15-1 `q/node`) — 남의 sfud 에
     //   직결하지 않는다(관문 원칙). 내 node 면 그대로 로컬 gRPC 다.
-    if node.node_id != hub.resolved.node_id {
+    if node != hub.resolved.node_id {
         let bus = hub.bus.as_ref().ok_or(Code::SfuUnavailable)?;
         let body = prost::Message::encode_to_vec(&env);
         let got = bus
-            .ask(&node.node_id, oxhubd::bus::Q_HANDLE, body)
+            .ask(&node, oxhubd::bus::Q_HANDLE, body)
             .await
             .ok_or(Code::SfuUnavailable)?;
         return Ok(got);
     }
-    let addr = local_unit_addr(hub, &node.node_id).ok_or(Code::SfuUnavailable)?;
+    let addr = local_unit_addr(hub, &node).ok_or(Code::SfuUnavailable)?;
     let mut c = b_client(&addr).await.ok_or(Code::SfuUnavailable)?;
     // ★**타임아웃의 뜻은 "살아 있는데 느림"** 하나다 — 생존은 위에서 이미 갈렸다(정§15-5).
     let r = c.handle(env).await.map_err(|_| Code::SfuUnavailable)?;
@@ -1640,6 +1670,89 @@ async fn spawn_gateway(hub: Shared) {
             let _ = query.reply(k_bus.clone(), body).await;
         }
     });
+}
+
+/// ★★**방 소멸 합성**(정§15-4 예외 · §15-7) — ★**낼 주체가 이미 없다.**
+///
+/// 그 방도 그 방의 `seq` 발급자(sfud)도 함께 사라졌으므로 ★**남은 전원도 올릴 카운터도 없다.**
+/// 살아남은 hub 가 ★**자기 로컬 멤버에게만** 합성해 보내는 것이 전부다.
+///
+/// ★**재발행이 아니라 로컬 합성이라 중복이 없다** — 각 hub 는 제 멤버만 알고,
+/// 죽은 node 에 붙어 있던 클라는 소켓이 함께 죽어 애초에 대상이 아니다.
+/// ★**`version` 을 싣지 않는다**(§14-2) — 올릴 카운터가 이미 없다.
+fn spawn_room_closed(hub: Shared, mut rx: oxhubd::bus::Closed) {
+    /// ★**가라앉기를 기다리는 창** — node 토큰과 room 토큰 Delete 가 한 세션 끊김에서
+    /// 함께 나오는데 ★**순서가 정해져 있지 않다.** 이만큼 기다린 뒤에 *"그 node 가
+    /// 아직 살아 있나"* 를 물으면 답이 하나다. ★**길게 둘 이유는 없다** — 같은 사건이다.
+    const SETTLE_MS: u64 = 1_000;
+    tokio::spawn(async move {
+        while let Some(first) = rx.recv().await {
+            tokio::time::sleep(std::time::Duration::from_millis(SETTLE_MS)).await;
+            // ★**한 번에 몰아 본다** — node 하나가 죽으면 그 방 전부가 한꺼번에 온다.
+            let mut batch = vec![first];
+            while let Ok(more) = rx.try_recv() {
+                batch.push(more);
+            }
+            // ★★**고립이면 아무것도 안 낸다**(정§15-7) — 그 방들은 멀쩡히 살아 있고,
+            //   ★**내가 못 보는 것**이다. 여기서 죽었다고 말하면 클라가 멀쩡한 방을 버린다.
+            if hub.bus.as_ref().is_some_and(|b| b.live.isolated()) {
+                // ★**배운 자리도 그대로 둔다** — 지우면 배치 계산이 그 방을 내 node 로
+                //   옮겨 앉히고, 그 순간 ★**두 node 가 같은 방을 쥔다**(정§15-3 중복).
+                eprintln!("[bus] 고립 중이다 — 방 소멸로 읽지 않는다({}건)", batch.len());
+                continue;
+            }
+            for (room_id, node) in batch {
+                if let Some(b) = &hub.bus {
+                    b.live.drop_room(&room_id, &node);
+                }
+                // ★그 node 가 아직 버스 위에 있으면 ★**평범한 방 소멸**이다(TTL·`destroy`) —
+                //   그 경우 sfud 가 이미 제 입으로 알렸다. 여기서 또 내면 두 번 간다.
+                if hub.bus.as_ref().is_some_and(|b| b.live.has(&node)) {
+                    continue;
+                }
+                room_closed(&hub, &room_id).await;
+            }
+        }
+    });
+}
+
+/// 방 하나의 소멸을 로컬 멤버에게 알리고 대장에서 지운다.
+async fn room_closed(hub: &Shared, room_id: &str) {
+    let targets: Vec<String> = {
+        let m = hub.members.lock().await;
+        m.get(room_id).cloned().unwrap_or_default()
+    };
+    // ★★**알릴 사람이 없어도 방은 죽은 것이다**(정§15-7) — 대장을 안 지우면 화해가 그 방을
+    //   ★**산 node 로 도로 세운다.** 그러면 이름은 같은데 명단도 `seq` 도 다른 방이 서고,
+    //   아무도 그것이 다른 방인 줄 모른다(실측 20260913: grace 가 지나자 방이 이사했다).
+    eprintln!("[bus] ★방 소멸 {room_id} — 로컬 {}명", targets.len());
+    let body = serde_json::to_vec(&oxsig::body::notify::RoomEvent {
+        event_type: oxsig::body::notify::RoomEventType::Affiliation,
+        room_id: room_id.to_string(),
+        affiliation: Some(oxsig::Affiliation { sub_rooms: Vec::new(), pub_room: None }),
+        cause: Some(oxsig::body::data::AffiliationCause::RoomClosed),
+        reason: None,
+    })
+    .unwrap_or_default();
+    {
+        let socks = hub.sockets.lock().await;
+        for sid in &targets {
+            let Some((_, tx)) = socks.get(sid) else { continue };
+            let pid = hub.next_pid.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut out = Vec::with_capacity(oxsig::frame::HEADER_LEN + body.len());
+            oxsig::frame::encode(
+                &mut out,
+                // ★통지는 `Request` 다(연§3-2 — 먼저 말하는 쪽이다).
+                oxsig::frame::Header::new(oxsig::frame::Kind::Request, oxsig::Op::RoomEvent, pid),
+                &body,
+            );
+            let _ = tx.send(Out::Frame(out)).await;
+        }
+    }
+    // ★**죽은 방을 대장에 남기지 않는다** — 남기면 화해가 그 방을 도로 세운다.
+    hub.rooms.lock().await.remove(room_id);
+    hub.members.lock().await.remove(room_id);
+    ev_sync(hub).await;
 }
 
 /// 내 node 의 유닛에 붙은 gRPC 통로.
@@ -1770,14 +1883,14 @@ async fn reconcile_rooms(hub: &Shared) {
     let ids: Vec<String> = { hub.rooms.lock().await.iter().map(|r| r.id.clone()).collect() };
     // ★**node 로 몬다 — 주소가 아니다.** 주소로 몰면 ★**남의 node 방이 통째로 빠진다**
     //   (그 주소를 내가 모르므로) — 그러면 그 방은 ★**현황도 만료도 영영 안 온다**(실측 20260913).
-    let nodes = sfu_nodes(hub).await;
-    let now = now_ms();
     let mut by_node: BTreeMap<String, Vec<common::b::RoomRecord>> = BTreeMap::new();
     for id in &ids {
-        let Some(n) = oxhubd::route::place(&nodes, id, now) else { continue };
+        // ★★**배운 자리가 계산보다 앞선다**(정§15-2) — 계산으로 밀면 node 가 사라진 창에
+        //   그 방이 ★**다른 node 에 새로 서고**, 이름만 같은 두 방이 생긴다.
+        let Some(n) = sfu_of_room(hub, id).await else { continue };
         let l = hub.rooms.lock().await;
         if let Some(r) = l.get(id) {
-            by_node.entry(n.node_id.clone()).or_default().push(common::b::RoomRecord {
+            by_node.entry(n.clone()).or_default().push(common::b::RoomRecord {
                 room_id: r.id.clone(),
                 name: r.name.clone(),
                 capacity: r.capacity,
