@@ -157,16 +157,19 @@ async fn run(args: Args) -> Result<(), String> {
 
     // ★접속점은 `{base}` 아래다 — 앱이 클라에 주는 그 값이다(연§5-0).
     let base = hub.resolved.system.hub.base_path.trim_end_matches('/').to_string();
+    // ★★**CORS 는 클라 경로 셋에만 붙는다**(연§5-0) — `/auth/token` 은 앱 백엔드 몫이고
+    //   `/admin/*`·`/healthz` 는 운영이라 안 붙는다. 전역으로 걸면 운영 표면이 남의 페이지에서
+    //   열린다. ★`X-OxLens-Session` 이 안전목록 밖이라 **매 요청 앞에 preflight** 가 붙는다.
+    let rooms = Router::new()
+        .route("/rooms", get(list_rooms).post(create_room))
+        .route("/rooms/:room_id", get(room_detail))
+        .layer(cors(&hub.resolved.policy.hub.allowed_origins));
     let app = Router::new()
         // ★WS 업그레이드는 무인증으로 열린다 — 인증은 `BIND` 가 한다.
         //   토큰을 질의값에 실으면 액세스 로그·프록시·리퍼러에 그대로 남는다.
         .route(&format!("{base}/ws"), get(ws_upgrade))
         .route(&format!("{base}/auth/token"), axum::routing::post(auth_token))
-        .route(
-            &format!("{base}/rooms"),
-            get(list_rooms).post(create_room),
-        )
-        .route(&format!("{base}/rooms/:room_id"), get(room_detail))
+        .nest(&base, rooms)
         .route("/healthz/live", get(|| async { StatusCode::OK }))
         .route("/healthz/ready", get(ready))
         .route("/admin/rooms", get(admin_rooms))
@@ -377,6 +380,34 @@ async fn spawn_unit(hub: &Shared, id: &str) -> Result<(), String> {
     // ★`stdin` 을 `take()` 하지 않는다 — 쥐고 있는 것이 곧 생존 신호다.
     hub.children.lock().await.push((id.to_string(), child));
     Ok(())
+}
+
+/// 연§5-0 — 브라우저 클라의 origin. ★**빈 목록이면 헤더를 아예 안 낸다**(같은 origin 전제).
+///
+/// ★★**자격증명을 쓰지 않는다** — 인증이 `Authorization`·`X-OxLens-Session` 헤더라
+/// ambient 권한이 없고, 쿠키가 없으므로 `*` 로도 남의 페이지가 읽을 것이 없다.
+/// ★**성립 조건 — 인증이 헤더 기반인 동안만 참이다**(쿠키를 도입하면 이 줄이 먼저 깨진다).
+fn cors(origins: &[String]) -> tower_http::cors::CorsLayer {
+    use axum::http::{HeaderName, Method};
+    use tower_http::cors::{AllowOrigin, CorsLayer};
+    if origins.is_empty() {
+        // ★아무것도 안 허용한다 — *"헤더를 안 낸다"* 가 이 자리의 뜻이다.
+        return CorsLayer::new();
+    }
+    let allow = if origins.iter().any(|o| o == "*") {
+        AllowOrigin::any()
+    } else {
+        AllowOrigin::list(origins.iter().filter_map(|o| o.parse().ok()).collect::<Vec<_>>())
+    };
+    CorsLayer::new()
+        .allow_origin(allow)
+        .allow_methods([Method::GET, Method::POST])
+        // ★셋뿐이다 — 늘리면 그만큼 남의 페이지가 보낼 수 있는 것이 는다.
+        .allow_headers([
+            HeaderName::from_static("authorization"),
+            HeaderName::from_static("content-type"),
+            HeaderName::from_static("x-oxlens-session"),
+        ])
 }
 
 fn peer_of(addr: SocketAddr, headers: &HeaderMap) -> Peer {
@@ -1924,6 +1955,8 @@ fn routed(op: oxsig::Op) -> bool {
             | oxsig::Op::Ready
             | oxsig::Op::TrackSet
             | oxsig::Op::SubscribeLayer
+            // ★정§13 — 방 broadcast 중계도 방 축이다(명단을 쥔 쪽이 뿌린다).
+            | oxsig::Op::Message
     )
 }
 
@@ -1959,7 +1992,8 @@ fn room_key(
         | oxsig::Op::PublishTracks
         | oxsig::Op::Ready
         | oxsig::Op::TrackSet
-        | oxsig::Op::SubscribeLayer => pick("room_id"),
+        | oxsig::Op::SubscribeLayer
+        | oxsig::Op::Message => pick("room_id"),
         // ★한 요청이 두 방을 바꿀 수 있다 — 라우팅은 `pub_select` 가 먼저다(연§6-4).
         oxsig::Op::Affiliation => pick("pub_select").or_else(|| pick("pub_deselect")),
         _ => None,

@@ -42,6 +42,13 @@ pub struct Target {
     pub paused: bool,
     /// 재전송용 `(ssrc, pt)` — ★**발행자가 선언한 값을 쓴다**(정§11-1). 없으면 재전송을 안 한다.
     pub rtx: Option<(u32, u8)>,
+    /// ★★**구독자의 받기 mid 와 그 확장 번호** `(ext_id, mid)` — 연§4-2-1 ③.
+    ///
+    /// ★**발행자 확장 영역은 통째로 버려지므로**(§4-2-1 ②) 이 값을 ★**새로 써야** 한다.
+    /// ★안 쓰면 브라우저는 SSRC 로만 절을 고를 수 있고, ★**같은 PT 를 쓰는 받기 절이
+    /// 둘이 되는 순간 demuxer 기준이 겹쳐** 그 연결이 재협상에서 거부된다
+    /// (3층 `ONEPC-03` 실측 20260913 — opus 둘은 한 튜플이라 PT 가 같다, §4-2-1 ①).
+    pub mid: Option<(u8, String)>,
 }
 
 /// 바깥에서 루프에 거는 것. ★**루프의 자료를 직접 만지지 않는다.**
@@ -748,7 +755,16 @@ pub async fn serve(
                     }
                     // ★**스탬핑·장부·봉인이 한 길이다**(정§11-2) — 이 길을 지나지 않은 것은
                     //   측정에 안 잡힌다(프로브도 같은 길로 보내는 까닭이다).
-                    if send_to_sub(&mut scratch, &t.ufrag, &mut down, &mut srtp, &table, &socket, now)
+                    if send_to_sub(
+                        &mut scratch,
+                        &t.ufrag,
+                        t.mid.as_ref(),
+                        &mut down,
+                        &mut srtp,
+                        &table,
+                        &socket,
+                        now,
+                    )
                         .await
                     {
                         c.srtp_out += 1;
@@ -1203,7 +1219,8 @@ async fn probe_chunk(
                 rtx_pt,
                 crate::autolayer::v::PROBE_PAD_BYTES,
             );
-            if send_to_sub(&mut pkt, &sub, down, srtp, table, socket, now).await {
+            // ★프로브 패딩은 어느 받기 절의 것도 아니다 — mid 를 안 쓴다(쓰면 남의 절을 건드린다).
+            if send_to_sub(&mut pkt, &sub, None, down, srtp, table, socket, now).await {
                 c.probe_out += 1;
             }
         }
@@ -1292,9 +1309,11 @@ impl Downlink {
 /// (실측 20260912: 봇의 합성 축이 통째로 비었다).
 ///
 /// ★**크기는 스탬핑 뒤에 적는다** — 확장을 더한 길이가 실제로 나간 양이다.
+#[allow(clippy::too_many_arguments)]
 async fn send_to_sub(
     pkt: &mut Vec<u8>,
     sub: &str,
+    mid: Option<&(u8, String)>,
     down: &mut HashMap<String, Downlink>,
     srtp: &mut HashMap<String, super::srtp::SrtpPair>,
     table: &Arc<IceTable>,
@@ -1305,6 +1324,15 @@ async fn send_to_sub(
     let d = down.entry(sub.to_string()).or_default();
     let seq = d.ledger.next_seq();
     if let Some(v) = crate::rtpext::stamp(pkt, TWCC_EXT_ID, &seq.to_be_bytes()) {
+        pkt.clear();
+        pkt.extend_from_slice(&v);
+    }
+    // ★★**받기 mid 를 다시 쓴다**(연§4-2-1 ③) — 발행자 확장 영역은 ②에서 버려졌으므로
+    //   이 값이 없으면 브라우저는 SSRC 로만 절을 고른다. ★같은 PT 를 쓰는 받기 절이 둘이
+    //   되는 순간 demuxer 기준이 겹쳐 그 연결이 재협상에서 거부된다.
+    if let Some((id, value)) = mid
+        && let Some(v) = crate::rtpext::stamp(pkt, *id, value.as_bytes())
+    {
         pkt.clear();
         pkt.extend_from_slice(&v);
     }

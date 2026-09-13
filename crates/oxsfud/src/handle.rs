@@ -277,6 +277,8 @@ pub fn routes_for_room(node: &Node, room_id: &str) -> Vec<RouteSet> {
                         // ★**발행자가 선언한 값을 쓴다**(정§11-1) — 상수로 박으면 H264(103)
                         //   재전송을 통째로 못 본다. 짝이 안 맞으면 재전송을 안 한다.
                         rtx: p.rtx_ssrc.zip(a.rtx_pt),
+                        // ★연§4-2-1 ③ — 받기 절의 mid 를 egress 에 다시 쓴다.
+                        mid: Some((peer.ext.mid, a.mid.clone())),
                     })
                 })
                 .collect();
@@ -322,6 +324,7 @@ pub fn dispatch(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> 
         Op::Ready => ready(node, ing, header, body),
         Op::TrackSet => track_set(node, ing, header, body),
         Op::SubscribeLayer => subscribe_layer(node, ing, header, body),
+        Op::Message => message(node, ing, header, body),
         // ★미디어 축은 다음 걸음이다 — 조용히 성공하지 않는다.
         _ => Outcome { reply: fail(header, Code::UnknownOp), ..Default::default() },
     }
@@ -337,6 +340,19 @@ fn room_join(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Out
     // ★**Peer 가 단위다** — 같은 신원의 옛 Peer 는 그 서버의 **모든 방**에서 함께 걷힌다(정§4-2 ②).
     let e = node.peers.ensure(&ing.session_id, &ing.user_id, ing.pc_mode);
     let i = e.idx;
+    // ★★**`1pc` 번호표**(연§6-2) — 내 받기 절의 `sdes:mid` 번호가 여기 온다.
+    //   ★egress 에서 그 번호로 mid 를 다시 쓴다(§4-2-1 ③) — 번호가 다르면 브라우저가
+    //   ★**그 확장을 못 읽고** 같은 PT 의 받기 절 둘에서 demuxer 기준이 겹친다.
+    //   ★`2pc` 는 받기 절을 `server_config.extmap` 으로 짓는다 — 서버 선언값 그대로다.
+    if let Some(id) = req
+        .extmap
+        .as_ref()
+        .and_then(|t| t.iter().find(|x| x.uri == "urn:ietf:params:rtp-hdrext:sdes:mid"))
+        .map(|x| x.id)
+        && let Some(p) = node.peers.get_mut(&ing.session_id)
+    {
+        p.ext.mid = id;
+    }
     let mut notices = Vec::new();
     let mut shed_routes = Vec::new();
     let mut dropped = Vec::new();
@@ -504,6 +520,21 @@ fn room_leave(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Ou
         notices.push(left_notice(&req.room_id, &ing.user_id, version));
     }
 
+    // ★★**나간 사람의 발행도 같이 걷는다**(연§4-1-1 대응표 — 그 `individual` 스트림이 사라진다).
+    //   ★안 걷으면 명단에서는 빠지는데 ★**트랙이 유령으로 남는다** — 남은 사람 화면에
+    //   안 오는 트랙이 걸려 있고, 오디오 요소도 안 걷힌다(3층 `AUDIO-OUT-04` 실측 20260913).
+    //   ★`routes_for_room` 이 전달표를 비우는 것과 다른 축이다 — 그쪽은 미디어를 끊고
+    //   이쪽은 ★**구독자에게 없어졌다고 말한다.**
+    let gone: Vec<Publication> = node
+        .publications
+        .iter()
+        .filter(|p| p.session_id == ing.session_id && p.room_id == req.room_id)
+        .cloned()
+        .collect();
+    node.publications.retain(|p| !gone.iter().any(|g| g.track_id == p.track_id));
+    let (shed, shed_routes) = shed_publications(node, &gone);
+    notices.extend(shed);
+
     let Some(peer) = node.peers.get_mut(&ing.session_id) else {
         return Outcome { reply: fail(header, Code::SessionNotFound), notices, ..Default::default() };
     };
@@ -517,7 +548,8 @@ fn room_leave(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Ou
         peer.mids.give(Kind::Audio, &a.mid);
     }
     let res = RoomLeaveRes { room_id: req.room_id.clone(), affiliation: peer.affiliation() };
-    let routes = routes_for_room(node, &req.room_id);
+    let mut routes = routes_for_room(node, &req.room_id);
+    routes.extend(shed_routes);
     Outcome { reply: ok(header, &json(&res)), notices, routes, ..Default::default() }
 }
 
@@ -1133,6 +1165,41 @@ fn publish_tracks(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -
     }
 }
 
+/// 정§13 — ★**방 broadcast 중계.**
+///
+/// ★★**발신자를 뺀다** — 자기 것은 응답(`msg_id`)으로 안다. 에코하면 클라가 제 말을
+/// 두 번 그리고, 걸러 내려면 `pid` 견주기를 클라가 또 만들어야 한다.
+/// ★★**`user_id` 는 세션이 주입한다** — body 의 것을 믿으면 ★**아무나 남의 이름으로 낸다**
+/// (§15-5 envelope 규칙과 같은 이유다).
+/// ★**`seq` 를 안 올린다**(§14-1) — 방 공통 스냅샷이 안 바뀐다.
+fn message(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Outcome {
+    let Ok(req) = serde_json::from_slice::<oxsig::body::data::MessageSend>(body) else {
+        return Outcome { reply: fail(header, Code::InvalidPayload), ..Default::default() };
+    };
+    // ★**입장한 방만**(연§6-3 `3002`) — 안 들어간 방에 대고 말할 수 없다.
+    let joined = node
+        .peers
+        .get(&ing.session_id)
+        .is_some_and(|p| p.sub_rooms.iter().any(|r| r == &req.room_id));
+    if !joined {
+        return Outcome { reply: fail(header, Code::NotInRoom), ..Default::default() };
+    }
+    let msg_id = uuid::Uuid::new_v4().simple().to_string();
+    let recv = oxsig::body::data::MessageRecv {
+        room_id: req.room_id.clone(),
+        // ★세션이 주입한다 — 요청 body 에는 이 필드가 아예 없다.
+        user_id: ing.user_id.clone(),
+        content: req.content,
+    };
+    // ★발신자 제외 — 이 한 줄이 "자기 것은 응답으로 안다" 의 집행이다.
+    let notices = vec![notice(&req.room_id, vec![ing.user_id.clone()], Op::Message, &recv)];
+    Outcome {
+        reply: ok(header, &json(&oxsig::body::data::MessageRes { msg_id })),
+        notices,
+        ..Default::default()
+    }
+}
+
 /// ★★**전량 수용 또는 전량 거절** — 부분 수용이 없다(연§6-3).
 ///
 /// ★**검사를 먼저 다 하고 그다음에 담는다** — 담으면서 검사하면 뒤엣것이 틀렸을 때
@@ -1630,6 +1697,7 @@ pub fn floor_routes(node: &Node, room_id: &str) -> Vec<(String, u32, Vec<crate::
                             spatial_cap: None,
                             paused: false,
                             rtx: None,
+                            mid: Some((peer.ext.mid, a.mid.clone())),
                         })
                     })
                     .collect()
