@@ -13,6 +13,7 @@ use oxsig::body::media::{
 };
 use oxsig::body::notify::{
     ParticipantChange, ParticipantEvent, RoomEvent, RoomEventType, TrackAction, TrackEvent,
+    TrackState, TrackStateType,
 };
 use oxsig::body::room::{RoomJoinReq, RoomJoinRes, RoomLeaveReq, RoomLeaveRes, ServerConfig};
 use oxsig::body::session::PcMode;
@@ -1539,9 +1540,43 @@ fn track_set(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Out
         if p.duplex == Duplex::Half {
             return Outcome { reply: fail(header, Code::TrackOpUnsupported), ..Default::default() };
         }
-        // 음소거 축은 다음 걸음이다(`TRACK_STATE` 배달) — 지금은 값만 돌려준다.
-        let res = serde_json::json!({ "ssrc": p.ssrc, "muted": m });
-        return Outcome { reply: ok(header, &json(&res)), ..Default::default() };
+        // ★**같은 값이면 아무 일도 없다** — 통지를 또 내면 방 전원의 `seq` 가 헛되이 오른다.
+        if p.muted == m {
+            let res = serde_json::json!({ "ssrc": p.ssrc, "muted": m, "noop": true });
+            return Outcome { reply: ok(header, &json(&res)), ..Default::default() };
+        }
+        // ★★**스트림 상태로 갖는다**(정§8-2) — 통지로만 나르면 놓친 사람은 영영 안 맞는다.
+        //   스냅샷 셋(입장 응답·`RESUME`·`GET /rooms`)이 이 값을 싣는다.
+        let (room, track_id, ssrc, kind, user) =
+            (p.room_id.clone(), p.track_id.clone(), p.ssrc, p.kind, p.user_id.clone());
+        node.publications[i].muted = m;
+        let version = match node.rooms.get_mut(&room) {
+            Some(r) => {
+                // ★**방 공통 층이 바뀐다** — 그 방 전원의 보관본이 달라지므로 번호가 오른다.
+                r.bump_stream();
+                r.version(&node.epoch)
+            }
+            None => Version { epoch: node.epoch.clone(), seq: 0 },
+        };
+        // ★★**그 방 전원이다** — 그 트랙 구독자만이 아니고 본인 제외도 없다.
+        //   아직 구독하지 않은 사람도 그 값을 갖는다(연§4-1-1 방 공통 층).
+        let notices = vec![notice(
+            &room,
+            Vec::new(),
+            Op::TrackState,
+            &TrackState {
+                state_type: TrackStateType::Muted,
+                user_id: user,
+                track_id,
+                ssrc,
+                kind,
+                room_id: room.clone(),
+                version,
+                muted: m,
+            },
+        )];
+        let res = serde_json::json!({ "ssrc": ssrc, "muted": m });
+        return Outcome { reply: ok(header, &json(&res)), notices, ..Default::default() };
     }
     let want = req.duplex.expect("축 둘 중 하나는 있다");
     // ★★**시뮬캐스트 트랙은 무전 전환 불가**(연§6-3 · 정§8-1) — 두 재기록기가 같은
@@ -1927,5 +1962,132 @@ mod ssrc_collision_tests {
         let (mut n, _) = node_with(PcMode::One);
         let f = publish(&mut n, PcMode::One, 0xDEAD_BEEF);
         assert_ne!(f.code, Code::SsrcCollision.as_u16());
+    }
+}
+
+#[cfg(test)]
+mod muted_tests {
+    use super::*;
+    use crate::room::Member;
+
+    fn ing(sid: &str, uid: &str) -> Ingress {
+        Ingress {
+            now: 0,
+            session_id: sid.into(),
+            user_id: uid.into(),
+            participant_type: 0,
+            hidden: false,
+            metadata: None,
+            pc_mode: PcMode::Two,
+        }
+    }
+
+    fn call(n: &mut Node, who: &Ingress, op: Op, body: serde_json::Value) -> Outcome {
+        let h = Header::new(FrameKind::Request, op, 1);
+        dispatch(n, who, h, &serde_json::to_vec(&body).expect("직렬화"))
+    }
+
+    /// 발행자 하나 · 구독자 하나 · 발행 트랙 하나.
+    fn node_with_track() -> (Node, u32) {
+        let mut n = Node::new(
+            "e".into(),
+            Dtls::bake().expect("자가서명"),
+            "127.0.0.1".into(),
+            1,
+            0,
+        );
+        let ttl = crate::room::Ttl { unused_secs: None, departure_secs: None };
+        n.rooms.create("r1".into(), "r1".into(), 10, ttl, 0);
+        for (sid, uid) in [("s-1", "u1"), ("s-2", "u2")] {
+            let e = n.peers.ensure(sid, uid, PcMode::Two);
+            n.peers.at_mut(e.idx).sub_rooms.push("r1".into());
+            n.rooms
+                .get_mut("r1")
+                .expect("방")
+                .join(Member {
+                    session_id: sid.into(),
+                    user_id: uid.into(),
+                    hidden: false,
+                    participant_type: 0,
+                    role: 255,
+                    select: true,
+                    metadata: None,
+                })
+                .expect("입장");
+        }
+        let ssrc = 0xA000_0001;
+        call(
+            &mut n,
+            &ing("s-1", "u1"),
+            Op::PublishTracks,
+            serde_json::json!({
+                "action": "add", "room_id": "r1",
+                "tracks": [{ "kind": "audio", "mid": "0", "ssrc": ssrc, "pt": 111 }],
+            }),
+        );
+        (n, ssrc)
+    }
+
+    fn set_muted(n: &mut Node, ssrc: u32, m: bool) -> Outcome {
+        call(
+            n,
+            &ing("s-1", "u1"),
+            Op::TrackSet,
+            serde_json::json!({ "room_id": "r1", "ssrc": ssrc, "muted": m }),
+        )
+    }
+
+    #[test]
+    fn 음소거는_방_전원에게_간다() {
+        // ★★**그 트랙 구독자만이 아니고 본인 제외도 없다**(정§8-2) — 방 공통 층이라
+        //   아직 구독하지 않은 사람도 그 값을 갖는다.
+        let (mut n, ssrc) = node_with_track();
+        let before = n.rooms.get("r1").expect("방").version(&n.epoch).seq;
+        let out = set_muted(&mut n, ssrc, true);
+        assert_eq!(out.notices.len(), 1, "★한 장이 방 전원에게 간다");
+        let one = &out.notices[0];
+        assert_eq!(one.target, None, "★특정인에게 가는 것이 아니다");
+        assert!(one.exclude.is_empty(), "★본인도 받는다");
+        let after = n.rooms.get("r1").expect("방").version(&n.epoch).seq;
+        assert_eq!(after, before + 1, "★방 공통 층이 바뀌었으니 번호가 오른다");
+    }
+
+    #[test]
+    fn 음소거는_스트림_상태로_남는다() {
+        // ★통지로만 나르면 놓친 사람은 영영 안 맞는다 — 스냅샷이 이 값을 싣는다.
+        let (mut n, ssrc) = node_with_track();
+        set_muted(&mut n, ssrc, true);
+        let p = n.publications.iter().find(|p| p.ssrc == ssrc).expect("등록");
+        assert!(p.muted);
+        assert_eq!(p.entry().muted, Some(true), "★스냅샷 항목이 그 값을 싣는다");
+    }
+
+    #[test]
+    fn 같은_값이면_아무_일도_없다() {
+        // ★통지를 또 내면 방 전원의 `seq` 가 헛되이 오르고, 클라는 그것을 유실로 읽는다.
+        let (mut n, ssrc) = node_with_track();
+        set_muted(&mut n, ssrc, true);
+        let seq = n.rooms.get("r1").expect("방").version(&n.epoch).seq;
+        let out = set_muted(&mut n, ssrc, true);
+        assert!(out.notices.is_empty());
+        assert_eq!(n.rooms.get("r1").expect("방").version(&n.epoch).seq, seq);
+        let (_, b) = frame::decode(&out.reply).expect("프레임");
+        let v: serde_json::Value = serde_json::from_slice(b).expect("본문");
+        assert_eq!(v.get("noop").and_then(|x| x.as_bool()), Some(true));
+    }
+
+    #[test]
+    fn 축_둘을_같이_주면_거절이다() {
+        // ★`muted` 와 `duplex` 는 배타다(정§8-2) — 둘 다도, 둘 다 없음도 `1007`.
+        let (mut n, ssrc) = node_with_track();
+        for body in [
+            serde_json::json!({ "room_id": "r1", "ssrc": ssrc, "muted": true, "duplex": "half" }),
+            serde_json::json!({ "room_id": "r1", "ssrc": ssrc }),
+        ] {
+            let out = call(&mut n, &ing("s-1", "u1"), Op::TrackSet, body);
+            let (_, b) = frame::decode(&out.reply).expect("프레임");
+            let f: Failure = serde_json::from_slice(b).expect("본문");
+            assert_eq!(f.code, Code::FieldConflict.as_u16());
+        }
     }
 }
