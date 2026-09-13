@@ -486,16 +486,23 @@ async fn ops_call(
     what: &str,
     user_id: &str,
 ) -> Result<common::b::OpsReply, (StatusCode, Json<oxsig::Failure>)> {
+    let req = common::b::OpsRequest {
+        what: what.into(),
+        room_id: room_id.into(),
+        user_id: user_id.into(),
+    };
+    if let Some(node) = foreign_node(hub, room_id).await {
+        let bus = hub.bus.as_ref().ok_or_else(|| fail(oxsig::Code::SfuUnavailable))?;
+        let raw = bus
+            .ask(&node, oxhubd::bus::Q_OPS, prost::Message::encode_to_vec(&req))
+            .await
+            .ok_or_else(|| fail(oxsig::Code::SfuUnavailable))?;
+        return <common::b::OpsReply as prost::Message>::decode(&raw[..])
+            .map_err(|_| fail(oxsig::Code::SfuError));
+    }
     let addr = addr_for_room(hub, room_id).await.ok_or_else(|| fail(oxsig::Code::SfuUnavailable))?;
     let mut c = b_client(&addr).await.ok_or_else(|| fail(oxsig::Code::SfuUnavailable))?;
-    let r = c
-        .ops(common::b::OpsRequest {
-            what: what.into(),
-            room_id: room_id.into(),
-            user_id: user_id.into(),
-        })
-        .await
-        .map_err(|_| fail(oxsig::Code::SfuError))?;
+    let r = c.ops(req).await.map_err(|_| fail(oxsig::Code::SfuError))?;
     Ok(r.into_inner())
 }
 
@@ -604,11 +611,29 @@ async fn ops_destroy(
 
 /// 그 방의 ★**정본** 상세를 sfud 에서 가져온다(운영 §3-6).
 async fn room_snapshot_of(hub: &Shared, room_id: &str) -> Option<serde_json::Value> {
-    let addr = addr_for_room(hub, room_id).await?;
-    let mut c = b_client(&addr).await?;
-    let v = c.room_snapshot(common::b::RoomKey { room_id: room_id.to_string() }).await.ok()?;
-    let line = v.into_inner().rooms.into_iter().next()?;
+    let key = common::b::RoomKey { room_id: room_id.to_string() };
+    // ★**남의 node 면 그 관문을 거친다**(정§15-1) — 남의 sfud 에 직결하지 않는다.
+    let v = if let Some(node) = foreign_node(hub, room_id).await {
+        let bus = hub.bus.as_ref()?;
+        let raw = bus
+            .ask(&node, oxhubd::bus::Q_SNAPSHOT, prost::Message::encode_to_vec(&key))
+            .await?;
+        <common::b::RoomView as prost::Message>::decode(&raw[..]).ok()?
+    } else {
+        let addr = addr_for_room(hub, room_id).await?;
+        b_client(&addr).await?.room_snapshot(key).await.ok()?.into_inner()
+    };
+    let line = v.rooms.into_iter().next()?;
     serde_json::from_str(&line).ok()
+}
+
+/// 그 방이 ★**남의 node** 에 있으면 그 이름 — 내 것이면 `None`.
+///
+/// ★**「어디냐」와 「어떻게 닿냐」를 가른다** — 이 물음이 한 자리에 있어야 운영 경로마다
+/// 배치를 다시 계산하지 않는다(계산이 흩어지면 한 곳만 고쳐진다).
+async fn foreign_node(hub: &Shared, room_id: &str) -> Option<String> {
+    let n = sfu_of_room(hub, room_id).await?;
+    (n != hub.resolved.node_id).then_some(n)
 }
 
 /// 운영 §3-6 — ★**정본이다.** hub 사본으로 답하면 *"명단에 있는데 안 들린다"* 를 영영 못 가른다.
@@ -846,6 +871,18 @@ async fn bus_view(hub: &Shared) -> serde_json::Value {
             "listen": z.listen, "connect": z.connect,
         });
     };
+    // ★★**설정에 `connect` 가 있는 것과 붙은 것은 다른 물음이다**(운영 §3-8).
+    //   ★이것이 없으면 *"설정은 맞는데 안 붙은 상태"* 가 화면에서 정상으로 보인다.
+    //   ★`zid` 는 zenoh 의 신원이라 `node_id` 와 다른 축이다 — 합치지 않는다.
+    let mut peers: Vec<serde_json::Value> = Vec::new();
+    for (what, zids) in [
+        ("router", bus.session.info().routers_zid().await.collect::<Vec<_>>()),
+        ("peer", bus.session.info().peers_zid().await.collect::<Vec<_>>()),
+    ] {
+        for z in zids {
+            peers.push(serde_json::json!({ "zid": z.to_string(), "whatami": what }));
+        }
+    }
     let live = bus.live.snapshot();
     let nodes: Vec<serde_json::Value> = live
         .iter()
@@ -872,6 +909,7 @@ async fn bus_view(hub: &Shared) -> serde_json::Value {
         "node": bus.node_id, "inst": bus.inst, "open": true,
         "mode": z.mode, "namespace": z.namespace,
         "listen": z.listen, "connect": z.connect,
+        "peers": peers,
         "nodes": nodes,
         "pending": { "rooms_unplaced": unplaced, "rooms_no_view": no_view },
         "last_event": last,
@@ -1501,17 +1539,22 @@ async fn spawn_gateway(hub: Shared) {
     let key = bus.keys.q_node(&hub.resolved.node_id, oxhubd::bus::Q_HANDLE);
     let rooms_key = bus.keys.q_node(&hub.resolved.node_id, oxhubd::bus::Q_ROOMS);
     let bus_key = bus.keys.q_node(&hub.resolved.node_id, oxhubd::bus::Q_BUS);
-    let (Ok(q), Ok(qr), Ok(qb)) = (
+    let snap_key = bus.keys.q_node(&hub.resolved.node_id, oxhubd::bus::Q_SNAPSHOT);
+    let ops_key = bus.keys.q_node(&hub.resolved.node_id, oxhubd::bus::Q_OPS);
+    let (Ok(q), Ok(qr), Ok(qb), Ok(qs), Ok(qo)) = (
         bus.session.declare_queryable(&key).await,
         bus.session.declare_queryable(&rooms_key).await,
         bus.session.declare_queryable(&bus_key).await,
+        bus.session.declare_queryable(&snap_key).await,
+        bus.session.declare_queryable(&ops_key).await,
     ) else {
         eprintln!("[bus] ★관문을 못 열었다 — 남의 node 요청을 못 받는다");
         return;
     };
-    eprintln!("[bus] 관문 {key} · {rooms_key} · {bus_key}");
+    eprintln!("[bus] 관문 {key} · {rooms_key} · {bus_key} · {snap_key} · {ops_key}");
     let me = hub.clone();
     let (k_handle, k_rooms, k_bus) = (key.clone(), rooms_key.clone(), bus_key.clone());
+    let (k_snap, k_ops) = (snap_key.clone(), ops_key.clone());
     tokio::spawn(async move {
         while let Ok(query) = q.recv_async().await {
             let raw = query.payload().map(|p| p.to_bytes().to_vec()).unwrap_or_default();
@@ -1550,6 +1593,43 @@ async fn spawn_gateway(hub: Shared) {
             // ★**빈 `RoomView` 는 「방이 하나도 없다」로 읽힌다** — 「못 물어봤다」가 아니다.
             let Some(out) = out else { continue };
             let _ = query.reply(k_rooms.clone(), out).await;
+        }
+    });
+    // ★**운영 조회·조작도 같은 관문이다**(운영 §3-6·§4-3) — 남의 sfud 에 직결하지 않는다.
+    let snap_hub = hub.clone();
+    tokio::spawn(async move {
+        while let Ok(query) = qs.recv_async().await {
+            let raw = query.payload().map(|p| p.to_bytes().to_vec()).unwrap_or_default();
+            let Ok(k) = <common::b::RoomKey as prost::Message>::decode(&raw[..]) else { continue };
+            let out = match local_grpc(&snap_hub).await {
+                Some(mut c) => c
+                    .room_snapshot(k)
+                    .await
+                    .ok()
+                    .map(|r| prost::Message::encode_to_vec(&r.into_inner())),
+                None => None,
+            };
+            // ★**못 하면 답하지 않는다** — 빈 `RoomView` 는 「그런 방 없다」로 읽힌다.
+            let Some(out) = out else { continue };
+            let _ = query.reply(k_snap.clone(), out).await;
+        }
+    });
+    let ops_hub = hub.clone();
+    tokio::spawn(async move {
+        while let Ok(query) = qo.recv_async().await {
+            let raw = query.payload().map(|p| p.to_bytes().to_vec()).unwrap_or_default();
+            let Ok(req) = <common::b::OpsRequest as prost::Message>::decode(&raw[..]) else {
+                continue;
+            };
+            let out = match local_grpc(&ops_hub).await {
+                Some(mut c) => {
+                    c.ops(req).await.ok().map(|r| prost::Message::encode_to_vec(&r.into_inner()))
+                }
+                None => None,
+            };
+            // ★★**빈 `OpsReply` 는 `done=false`** 다 — 「안 됐다」와 「못 물어봤다」가 갈린다.
+            let Some(out) = out else { continue };
+            let _ = query.reply(k_ops.clone(), out).await;
         }
     });
     // ★**제 눈으로 본 것만 답한다** — 여기서 또 fan-out 하면 고리가 돈다(운영 §3-8).

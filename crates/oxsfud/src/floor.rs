@@ -153,6 +153,20 @@ impl Floor {
         self.queue.len()
     }
 
+    /// 운영 §3-6 이 보는 줄 — ★**정렬된 그대로**다(`sort_queue` 가 쥔 순서).
+    /// ★운영자가 보는 순서와 실제 다음 차례가 다르면 그 표는 거짓말이다.
+    pub fn queue_view(&self) -> Vec<(String, u8)> {
+        self.queue.iter().map(|w| (w.user_id.clone(), w.priority)).collect()
+    }
+
+    /// 지금 쥔 사람의 긴급도 — ★**없으면 `None`**(`Idle` 에 `0` 을 지어내지 않는다).
+    pub fn priority(&self) -> Option<u8> {
+        match &self.state {
+            State::Taken { priority, .. } => Some(*priority),
+            State::Idle => None,
+        }
+    }
+
     fn sort_queue(&mut self) {
         // ★우선순위 DESC → 넣은 순서 ASC. 같은 단 안에서는 먼저 온 사람이 먼저다.
         self.queue.sort_by(|a, b| {

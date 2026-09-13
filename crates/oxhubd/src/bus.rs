@@ -82,6 +82,10 @@ pub const Q_HANDLE: &str = "handle";
 pub const Q_ROOMS: &str = "rooms";
 /// 그 node 가 제 눈으로 본 버스 — ★**전 node fan-out 의 대상**이다(운영 §3-8 `?all=1`).
 pub const Q_BUS: &str = "bus";
+/// 방 상세 정본(운영 §3-6) — ★**hub 사본이 아니라 그 방을 쥔 sfud 가 답한다.**
+pub const Q_SNAPSHOT: &str = "snapshot";
+/// C 평면이 시키는 것(정§16-1-2·§16-1-3) — ★**확인값 판정은 부르는 쪽이 이미 했다.**
+pub const Q_OPS: &str = "ops";
 
 impl Bus {
     /// 남의 node 에 프레임 하나를 넘기고 답을 받는다. ★**없으면 `None`** — 지어내지 않는다.

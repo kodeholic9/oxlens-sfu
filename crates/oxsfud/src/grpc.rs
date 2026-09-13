@@ -322,9 +322,12 @@ impl SfuService for Sfu {
                 ..Default::default()
             }));
         };
+        // ★**목록 항목이 아니라 상세다**(운영 §3-6) — 목록 형으로 답하면 운영자가
+        //   `name`·정원·발언권·슬롯을 영영 못 본다(*"명단에 있는데 안 들린다"* 의 자리다).
+        let detail = detail_of(room, node.floors.get(&id), &node.epoch);
         Ok(Response::new(common::b::RoomView {
             epoch: node.epoch.clone(),
-            rooms: vec![view_of(room, &node.epoch)],
+            rooms: vec![detail],
             expired: Vec::new(),
         }))
     }
@@ -367,6 +370,42 @@ fn view_of(r: &Room, epoch: &str) -> String {
         "version": r.version(epoch),
     })
     .to_string()
+}
+
+/// 운영 §3-6 — ★**정본 상세.** hub 사본이 못 아는 것(슬롯·발언권·`seq`)이 알맹이다.
+fn detail_of(r: &Room, floor: Option<&crate::floor::Floor>, epoch: &str) -> String {
+    let mut v: serde_json::Value = serde_json::from_str(&view_of(r, epoch))
+        .unwrap_or_else(|_| serde_json::json!({}));
+    let Some(o) = v.as_object_mut() else { return v.to_string() };
+    o.insert("name".into(), serde_json::json!(r.name));
+    o.insert("capacity".into(), serde_json::json!(r.capacity));
+    // ★★**감추되 「있다」는 낸다**(운영 §3-6) — 안 그러면 `user_count` 와 실제 배달 대상이
+    //   어긋나 보이고 ★**운영자가 서버를 의심한다.** 누구인지는 `/admin/users` 가 낸다.
+    o.insert(
+        "hidden_count".into(),
+        serde_json::json!(r.registered().saturating_sub(r.user_count())),
+    );
+    // ★**슬롯은 방과 수명이 같다** — video 슬롯은 아직 없다(정§7-2 audio 1 + video 1 중 audio).
+    o.insert(
+        "slots".into(),
+        serde_json::json!({ "audio": format!("ptt-{}-audio", r.id), "video": null }),
+    );
+    // ★**발언권이 없는 방은 `null`** 이다 — `Idle` 을 지어내면 무전이 아닌 방이 무전처럼 보인다.
+    o.insert(
+        "floor".into(),
+        match floor {
+            None => serde_json::Value::Null,
+            Some(f) => serde_json::json!({
+                "state": match f.speaker() { Some(_) => "Taken", None => "Idle" },
+                "speaker": f.speaker(),
+                "priority": f.priority(),
+                "queue": f.queue_view().into_iter()
+                    .map(|(u, p)| serde_json::json!({ "user_id": u, "priority": p }))
+                    .collect::<Vec<_>>(),
+            }),
+        },
+    );
+    v.to_string()
 }
 
 fn now_ms() -> u64 {
