@@ -21,6 +21,10 @@ pub enum TcpIn {
 
 pub const IDENTIFY_TIMEOUT: Duration = Duration::from_secs(10);
 
+pub const KEEPALIVE: Duration = Duration::from_secs(20);
+
+const EMPTY_FRAME: [u8; 2] = [0x00, 0x00];
+
 const READ_CHUNK: usize = 4096;
 const OUTBOUND: usize = 128;
 
@@ -29,6 +33,7 @@ pub async fn serve(
     table: Arc<IceTable>,
     identify_timeout: Duration,
     up: mpsc::Sender<TcpIn>,
+    keepalive: Duration,
 ) {
     loop {
         let Ok((stream, from)) = listener.accept().await else {
@@ -37,7 +42,7 @@ pub async fn serve(
         let table = table.clone();
         let up = up.clone();
         tokio::spawn(async move {
-            peer(stream, from, table, identify_timeout, up).await;
+            peer(stream, from, table, identify_timeout, up, keepalive).await;
         });
     }
 }
@@ -48,16 +53,26 @@ async fn peer(
     table: Arc<IceTable>,
     identify_timeout: Duration,
     up: mpsc::Sender<TcpIn>,
+    keepalive: Duration,
 ) {
     let _ = stream.set_nodelay(true);
     let (mut rd, mut wr) = stream.into_split();
     let (tx, mut rx) = mpsc::channel::<Bytes>(OUTBOUND);
     let handle = TcpHandle(Arc::new(tx));
     let writer = tokio::spawn(async move {
-        while let Some(b) = rx.recv().await {
-            if wr.write_all(&b).await.is_err() {
+        let mut due = tokio::time::Instant::now() + keepalive;
+        loop {
+            let wrote = tokio::select! {
+                got = rx.recv() => match got {
+                    Some(b) => wr.write_all(&b).await,
+                    None => break,
+                },
+                _ = tokio::time::sleep_until(due) => wr.write_all(&EMPTY_FRAME).await,
+            };
+            if wrote.is_err() {
                 break;
             }
+            due = tokio::time::Instant::now() + keepalive;
         }
     });
 
@@ -140,6 +155,8 @@ mod tests {
         crate::transport::stun::binding_request(&[7u8; 12], &format!("{ufrag}:bot"), pwd, true)
     }
 
+    const QUIET: Duration = Duration::from_secs(300);
+
     async fn listening(t: Arc<IceTable>, timeout: Duration) -> SocketAddr {
         let (at, mut rx) = listening_up(t, timeout).await;
         tokio::spawn(async move { while rx.recv().await.is_some() {} });
@@ -150,11 +167,51 @@ mod tests {
         t: Arc<IceTable>,
         timeout: Duration,
     ) -> (SocketAddr, mpsc::Receiver<TcpIn>) {
+        listening_keep(t, timeout, QUIET).await
+    }
+
+    async fn listening_keep(
+        t: Arc<IceTable>,
+        timeout: Duration,
+        keepalive: Duration,
+    ) -> (SocketAddr, mpsc::Receiver<TcpIn>) {
         let l = TcpListener::bind("127.0.0.1:0").await.expect("바인드");
         let at = l.local_addr().expect("주소");
         let (tx, rx) = mpsc::channel(64);
-        tokio::spawn(async move { serve(l, t, timeout, tx).await });
+        tokio::spawn(async move { serve(l, t, timeout, tx, keepalive).await });
         (at, rx)
+    }
+
+    #[tokio::test]
+    async fn 조용해도_두_바이트를_보내_길을_살린다() {
+        let t = table();
+        let (at, mut up) = listening_keep(t, IDENTIFY_TIMEOUT, Duration::from_millis(80)).await;
+        tokio::spawn(async move { while up.recv().await.is_some() {} });
+        let mut s = TcpStream::connect(at).await.expect("붙는다");
+        s.write_all(&frame(&request("srvufrag", PWD)).expect("씌운다")).await.expect("보낸다");
+        let mut un = Unframer::new();
+        read_frame_with(&mut s, &mut un).await.expect("답");
+        let keep = read_frame_with(&mut s, &mut un).await.expect("★keepalive 가 온다");
+        assert!(keep.is_empty(), "★빈 프레임이다 — 두 바이트");
+    }
+
+    #[tokio::test]
+    async fn 보낸_것이_있으면_keepalive_를_미룬다() {
+        let t = table();
+        let (at, mut up) = listening_keep(t.clone(), IDENTIFY_TIMEOUT, Duration::from_millis(250)).await;
+        tokio::spawn(async move { while up.recv().await.is_some() {} });
+        let mut s = TcpStream::connect(at).await.expect("붙는다");
+        s.write_all(&frame(&request("srvufrag", PWD)).expect("씌운다")).await.expect("보낸다");
+        let mut un = Unframer::new();
+        read_frame_with(&mut s, &mut un).await.expect("답");
+        let e = t.get("srvufrag").expect("있다");
+        for _ in 0..4 {
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            let h = e.tcp().expect("핸들");
+            assert!(h.send(frame(b"busy").expect("씌운다")));
+            let got = read_frame_with(&mut s, &mut un).await.expect("온다");
+            assert_eq!(&got[..], b"busy", "★바쁜 동안에는 빈 프레임이 끼지 않는다");
+        }
     }
 
     async fn read_one_frame(s: &mut TcpStream) -> Option<Vec<u8>> {

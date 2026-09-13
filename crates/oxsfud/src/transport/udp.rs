@@ -297,7 +297,7 @@ fn pipe_for(
         return Some(p.clone());
     }
     let e = table.get(ufrag)?;
-    let (conn, tx) = DemuxConn::new(dispatch.clone(), e.route.clone());
+    let (conn, tx) = DemuxConn::new(dispatch.clone(), e.clone());
     let (dc_tx, dc_rx) = mpsc::channel(64);
     let task = spawn_dtls(conn, cert.clone(), ufrag.to_string(), cmd_tx.clone(), dc_rx, dc_in.clone());
     let p = Arc::new(Pipe {
@@ -605,7 +605,7 @@ pub async fn serve(
                                 Some(p) => p.clone(),
                                 None => {
                                     let Some(e) = table.get(&ufrag) else { continue };
-                                    let (conn, tx) = DemuxConn::new(dispatch.clone(), e.route.clone());
+                                    let (conn, tx) = DemuxConn::new(dispatch.clone(), e.clone());
                                     let (dc_tx, dc_rx) = mpsc::channel(64);
                                     let task = spawn_dtls(
                                         conn,

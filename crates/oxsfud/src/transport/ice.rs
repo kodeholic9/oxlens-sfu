@@ -53,6 +53,18 @@ pub struct RouteState {
 
 pub type Route = Arc<RwLock<RouteState>>;
 
+pub const UDP_SILENCE_FLOOR_MS: u64 = 5_000;
+pub const UDP_SILENCE_CEIL_MS: u64 = 30_000;
+
+const GAP_EWMA_SHIFT: u32 = 3;
+
+#[derive(Debug, Clone)]
+pub enum Path {
+    Udp(SocketAddr),
+    Tcp(TcpHandle),
+    Nowhere,
+}
+
 /// ufrag 한 벌이 가리키는 것.
 #[derive(Debug)]
 pub struct IceEntry {
@@ -65,12 +77,58 @@ pub struct IceEntry {
     /// ★**`0` 은 "판정 불가"이지 "오래됨"이 아니다** — 아직 한 번도 못 본 것이라
     /// 접속 직후 즉사를 막는다. WS 하트비트는 이 값을 갱신하지 않는다.
     last_seen: AtomicU64,
+    udp_gap_ewma_ms: AtomicU64,
 }
 
 impl IceEntry {
     pub fn touch(&self, now: u64) {
         // ★되감기를 막는다 — 늦게 도착한 옛 패킷이 시계를 되돌리면 죽은 것이 살아난다.
-        self.last_seen.fetch_max(now, Ordering::Relaxed);
+        let prev = self.last_seen.fetch_max(now, Ordering::Relaxed);
+        if prev == 0 || now <= prev {
+            return;
+        }
+        let gap = now - prev;
+        let old = self.udp_gap_ewma_ms.load(Ordering::Relaxed);
+        let next = if old == 0 {
+            gap
+        } else {
+            old - (old >> GAP_EWMA_SHIFT) + (gap >> GAP_EWMA_SHIFT)
+        };
+        self.udp_gap_ewma_ms.store(next, Ordering::Relaxed);
+    }
+
+    pub fn udp_gap_ewma(&self) -> u64 {
+        self.udp_gap_ewma_ms.load(Ordering::Relaxed)
+    }
+
+    pub fn udp_silence_threshold(&self) -> u64 {
+        self.udp_gap_ewma()
+            .saturating_mul(3)
+            .clamp(UDP_SILENCE_FLOOR_MS, UDP_SILENCE_CEIL_MS)
+    }
+
+    pub fn udp_fresh(&self, now: u64) -> bool {
+        let seen = self.last_seen();
+        seen > 0 && now.saturating_sub(seen) < self.udp_silence_threshold()
+    }
+
+    pub fn pick(&self, now: u64) -> Path {
+        let (udp, tcp) = {
+            let r = self.route.read().expect("route 자물쇠는 패닉을 건너지 않는다");
+            (r.udp, r.tcp.clone())
+        };
+        match (udp, tcp) {
+            (None, None) => Path::Nowhere,
+            (Some(a), None) => Path::Udp(a),
+            (None, Some(h)) => Path::Tcp(h),
+            (Some(a), Some(h)) => {
+                if self.udp_fresh(now) {
+                    Path::Udp(a)
+                } else {
+                    Path::Tcp(h)
+                }
+            }
+        }
     }
 
     pub fn last_seen(&self) -> u64 {
@@ -138,6 +196,7 @@ impl IceTable {
             route: Route::default(),
             // ★**관찰 전이다** — 0 으로 시작해야 reaper 가 판정을 건너뛴다(정§2-2).
             last_seen: AtomicU64::new(0),
+            udp_gap_ewma_ms: AtomicU64::new(0),
         });
         let mut next = HashMap::clone(&self.0.load());
         next.insert(ufrag.to_string(), e.clone());
@@ -286,6 +345,84 @@ mod tests {
         let r = on_binding(&t, &request("srvufrag", PWD), addr("9.9.9.9:7"), 300, Arrival::Udp);
         assert!(matches!(r, Binding::Respond { latched: true, .. }));
         assert_eq!(t.get("srvufrag").expect("있다").addr(), Some(addr("9.9.9.9:7")));
+    }
+
+    fn handle() -> (TcpHandle, tokio::sync::mpsc::Receiver<bytes::Bytes>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        (TcpHandle(Arc::new(tx)), rx)
+    }
+
+    #[test]
+    fn 갈_데가_없으면_아무_데도_안_간다() {
+        let t = table();
+        assert!(matches!(t.get("srvufrag").expect("있다").pick(1000), Path::Nowhere));
+    }
+
+    #[test]
+    fn tcp_가_없으면_묵은_udp_라도_udp_로_간다() {
+        let t = table();
+        on_binding(&t, &request("srvufrag", PWD), addr("1.2.3.4:5"), 100, Arrival::Udp);
+        let e = t.get("srvufrag").expect("있다");
+        assert!(matches!(e.pick(999_999), Path::Udp(_)), "★선택지가 없다");
+    }
+
+    #[test]
+    fn udp_가_최근이면_tcp_가_있어도_udp_다() {
+        let t = table();
+        on_binding(&t, &request("srvufrag", PWD), addr("1.2.3.4:5"), 10_000, Arrival::Udp);
+        let e = t.get("srvufrag").expect("있다");
+        e.attach_tcp(handle().0);
+        assert!(matches!(e.pick(11_000), Path::Udp(_)));
+    }
+
+    #[test]
+    fn udp_가_묵으면_tcp_로_넘어간다() {
+        let t = table();
+        on_binding(&t, &request("srvufrag", PWD), addr("1.2.3.4:5"), 10_000, Arrival::Udp);
+        let e = t.get("srvufrag").expect("있다");
+        e.attach_tcp(handle().0);
+        assert!(matches!(e.pick(10_000 + UDP_SILENCE_FLOOR_MS + 1), Path::Tcp(_)));
+    }
+
+    #[test]
+    fn udp_가_다시_오면_그_자리에서_되돌아온다() {
+        let t = table();
+        on_binding(&t, &request("srvufrag", PWD), addr("1.2.3.4:5"), 10_000, Arrival::Udp);
+        let e = t.get("srvufrag").expect("있다");
+        e.attach_tcp(handle().0);
+        let late = 10_000 + UDP_SILENCE_FLOOR_MS + 1;
+        assert!(matches!(e.pick(late), Path::Tcp(_)));
+        e.touch(late);
+        assert!(matches!(e.pick(late), Path::Udp(_)), "★별도 복귀 조건을 두지 않는다");
+    }
+
+    #[test]
+    fn 임계는_관측한_간격에서_자란다() {
+        let t = table();
+        let e = t.get("srvufrag").expect("있다");
+        assert_eq!(e.udp_silence_threshold(), UDP_SILENCE_FLOOR_MS, "★표본 전에는 하한이다");
+        let mut at = 1_000u64;
+        e.touch(at);
+        for _ in 0..40 {
+            at += 20_000;
+            e.touch(at);
+        }
+        assert!(e.udp_gap_ewma() > 15_000, "★절감 설정 클라의 간격을 배운다: {}", e.udp_gap_ewma());
+        assert_eq!(e.udp_silence_threshold(), UDP_SILENCE_CEIL_MS, "★그래도 상한에서 멈춘다");
+    }
+
+    #[test]
+    fn 촘촘한_클라는_하한_아래로_안_내려간다() {
+        let t = table();
+        let e = t.get("srvufrag").expect("있다");
+        let mut at = 1_000u64;
+        e.touch(at);
+        for _ in 0..40 {
+            at += 200;
+            e.touch(at);
+        }
+        assert!(e.udp_gap_ewma() < 1_000, "간격은 작게 배웠는데");
+        assert_eq!(e.udp_silence_threshold(), UDP_SILENCE_FLOOR_MS, "★하한이 받친다");
     }
 
     #[test]

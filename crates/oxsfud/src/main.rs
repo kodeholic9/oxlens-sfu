@@ -142,6 +142,7 @@ async fn main() -> std::process::ExitCode {
                 node.ice.clone(),
                 oxsfud::transport::tcp::IDENTIFY_TIMEOUT,
                 tcp_tx,
+                oxsfud::transport::tcp::KEEPALIVE,
             ));
         }
         Err(e) => eprintln!("[tcp] listen {udp} 를 못 열었다({e}) — udp 만으로 간다"),
