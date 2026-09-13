@@ -534,7 +534,7 @@ pub async fn serve(
         let now = now_ms();
         match classify(&buf[..n]) {
             Packet::Stun => {
-                match super::ice::on_binding(&table, &buf[..n], from, now) {
+                match super::ice::on_binding(&table, &buf[..n], from, now, super::ice::Arrival::Udp) {
                     Binding::Respond { wire, ufrag, session_id, latched } => {
                         c.stun_ok += 1;
                         let _ = dispatch.reply_to(from, &wire).await;

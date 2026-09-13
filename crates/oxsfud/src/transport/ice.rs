@@ -144,6 +144,12 @@ pub enum Binding {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arrival {
+    Udp,
+    Tcp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DropWhy {
     NotStun,
     NotBinding,
@@ -154,7 +160,13 @@ pub enum DropWhy {
 }
 
 /// ★★**순서가 곧 방어다**(정§12): ufrag 조회 → integrity → latch → 응답 → `last_seen`.
-pub fn on_binding(table: &IceTable, buf: &[u8], from: SocketAddr, now: u64) -> Binding {
+pub fn on_binding(
+    table: &IceTable,
+    buf: &[u8],
+    from: SocketAddr,
+    now: u64,
+    via: Arrival,
+) -> Binding {
     let Some(msg) = stun_parse(buf) else {
         return Binding::Drop(DropWhy::NotStun);
     };
@@ -171,13 +183,16 @@ pub fn on_binding(table: &IceTable, buf: &[u8], from: SocketAddr, now: u64) -> B
     if !msg.integrity_ok(&e.pwd) {
         return Binding::Drop(DropWhy::BadIntegrity);
     }
-    let latched = {
-        let mut cur = e.addr.write().expect("latch 자물쇠");
-        let moved = *cur != Some(from);
-        *cur = Some(from);
-        moved
+    let latched = match via {
+        Arrival::Udp => {
+            let mut cur = e.addr.write().expect("latch 자물쇠");
+            let moved = *cur != Some(from);
+            *cur = Some(from);
+            e.touch(now);
+            moved
+        }
+        Arrival::Tcp => false,
     };
-    e.touch(now);
     Binding::Respond {
         wire: crate::transport::stun::binding_response(&msg.transaction_id, from, &e.pwd),
         ufrag: ufrag.to_string(),
@@ -213,7 +228,7 @@ mod tests {
     #[test]
     fn 맞는_자격은_latch_를_옮기고_답한다() {
         let t = table();
-        let r = on_binding(&t, &request("srvufrag", PWD), addr("1.2.3.4:5"), 100);
+        let r = on_binding(&t, &request("srvufrag", PWD), addr("1.2.3.4:5"), 100, Arrival::Udp);
         let Binding::Respond { session_id, ufrag, latched, wire } = r else { panic!("답해야 한다") };
         assert_eq!((session_id.as_str(), ufrag.as_str(), latched), ("s-1", "srvufrag", true));
         assert!(!wire.is_empty());
@@ -221,21 +236,50 @@ mod tests {
         assert_eq!((e.addr(), e.last_seen()), (Some(addr("1.2.3.4:5")), 100));
 
         // ★같은 주소에서 또 오면 옮긴 것이 아니다 — 그래야 "옮겼다"가 신호로 쓰인다.
-        let r = on_binding(&t, &request("srvufrag", PWD), addr("1.2.3.4:5"), 200);
+        let r = on_binding(&t, &request("srvufrag", PWD), addr("1.2.3.4:5"), 200, Arrival::Udp);
         assert!(matches!(r, Binding::Respond { latched: false, .. }));
 
         // ★망이 바뀌면 새 주소가 그 자리에서 들어온다 — ICE 재시작이 없다(정§12).
-        let r = on_binding(&t, &request("srvufrag", PWD), addr("9.9.9.9:7"), 300);
+        let r = on_binding(&t, &request("srvufrag", PWD), addr("9.9.9.9:7"), 300, Arrival::Udp);
         assert!(matches!(r, Binding::Respond { latched: true, .. }));
         assert_eq!(t.get("srvufrag").expect("있다").addr(), Some(addr("9.9.9.9:7")));
     }
 
     #[test]
+    fn tcp_로_온_것은_udp_latch_를_안_옮긴다() {
+        let t = table();
+        on_binding(&t, &request("srvufrag", PWD), addr("1.2.3.4:5"), 100, Arrival::Udp);
+        let r = on_binding(&t, &request("srvufrag", PWD), addr("9.9.9.9:7"), 200, Arrival::Tcp);
+        assert!(matches!(r, Binding::Respond { latched: false, .. }), "★답은 한다");
+        let e = t.get("srvufrag").expect("있다");
+        assert_eq!(e.addr(), Some(addr("1.2.3.4:5")), "★udp 하향 주소가 그대로다");
+    }
+
+    #[test]
+    fn tcp_로_온_것은_last_seen_을_안_건드린다() {
+        let t = table();
+        on_binding(&t, &request("srvufrag", PWD), addr("1.2.3.4:5"), 100, Arrival::Udp);
+        on_binding(&t, &request("srvufrag", PWD), addr("9.9.9.9:7"), 900, Arrival::Tcp);
+        let e = t.get("srvufrag").expect("있다");
+        assert_eq!(e.last_seen(), 100, "★좀비 판정의 근거는 udp 관찰뿐이다");
+    }
+
+    #[test]
+    fn tcp_는_latch_전에도_답한다() {
+        let t = table();
+        let r = on_binding(&t, &request("srvufrag", PWD), addr("9.9.9.9:7"), 100, Arrival::Tcp);
+        assert!(matches!(r, Binding::Respond { latched: false, .. }));
+        let e = t.get("srvufrag").expect("있다");
+        assert_eq!(e.addr(), None, "★지어내지 않는다");
+        assert_eq!(e.last_seen(), 0, "★관찰 전이다");
+    }
+
+    #[test]
     fn 위조는_latch_를_못_옮긴다() {
         let t = table();
-        on_binding(&t, &request("srvufrag", PWD), addr("1.2.3.4:5"), 100);
+        on_binding(&t, &request("srvufrag", PWD), addr("1.2.3.4:5"), 100, Arrival::Udp);
         // ★**ufrag 는 맞는데 서명이 틀리다** — `server_config` 를 본 사람이면 ufrag 는 다 안다.
-        let r = on_binding(&t, &request("srvufrag", "wrong-password-000000"), addr("6.6.6.6:6"), 200);
+        let r = on_binding(&t, &request("srvufrag", "wrong-password-000000"), addr("6.6.6.6:6"), 200, Arrival::Udp);
         assert_eq!(r, Binding::Drop(DropWhy::BadIntegrity));
         let e = t.get("srvufrag").expect("있다");
         assert_eq!(e.addr(), Some(addr("1.2.3.4:5")), "★주소가 그대로다");
@@ -245,7 +289,7 @@ mod tests {
     #[test]
     fn 모르는_ufrag_는_조용히_버린다() {
         let t = table();
-        let r = on_binding(&t, &request("nope", PWD), addr("1.2.3.4:5"), 0);
+        let r = on_binding(&t, &request("nope", PWD), addr("1.2.3.4:5"), 0, Arrival::Udp);
         // ★답하면 그 자체가 신호다 — 어떤 ufrag 이 사는지 알려 준다.
         assert_eq!(r, Binding::Drop(DropWhy::UnknownUfrag));
     }
