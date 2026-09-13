@@ -100,11 +100,24 @@ async fn main() -> std::process::ExitCode {
             return std::process::ExitCode::from(2);
         }
     };
+    // ★**먼저 열어 보고 그 결과만 광고한다** — 못 연 포트를 후보로 내면 클라가 붙을 수
+    //   없는 곳으로 검사를 보낸다(RFC 6544 는 passive 후보가 실제로 듣고 있다고 전제한다).
+    let tcp_listener = match tokio::net::TcpListener::bind(("0.0.0.0", udp)).await {
+        Ok(l) => {
+            eprintln!("[tcp] listen 0.0.0.0:{udp}");
+            Some(l)
+        }
+        Err(e) => {
+            eprintln!("[tcp] listen {udp} 를 못 열었다({e}) — udp 만으로 간다");
+            None
+        }
+    };
     let node = oxsfud::handle::Node::new(
         epoch.clone(),
         dtls.clone(),
         ip.clone(),
         udp,
+        tcp_listener.as_ref().map(|_| udp),
         policy.media.max_bitrate_bps as u64,
     );
 
@@ -134,18 +147,14 @@ async fn main() -> std::process::ExitCode {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(64);
     let (dc_tx, dc_rx) = tokio::sync::mpsc::channel(256);
     let (tcp_tx, tcp_rx) = tokio::sync::mpsc::channel(256);
-    match tokio::net::TcpListener::bind(("0.0.0.0", udp)).await {
-        Ok(l) => {
-            eprintln!("[tcp] listen 0.0.0.0:{udp}");
-            tokio::spawn(oxsfud::transport::tcp::serve(
-                l,
-                node.ice.clone(),
-                oxsfud::transport::tcp::IDENTIFY_TIMEOUT,
-                tcp_tx,
-                oxsfud::transport::tcp::KEEPALIVE,
-            ));
-        }
-        Err(e) => eprintln!("[tcp] listen {udp} 를 못 열었다({e}) — udp 만으로 간다"),
+    if let Some(l) = tcp_listener {
+        tokio::spawn(oxsfud::transport::tcp::serve(
+            l,
+            node.ice.clone(),
+            oxsfud::transport::tcp::IDENTIFY_TIMEOUT,
+            tcp_tx,
+            oxsfud::transport::tcp::KEEPALIVE,
+        ));
     }
     tokio::spawn(oxsfud::transport::udp::serve(
         sock,

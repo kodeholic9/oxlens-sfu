@@ -42,10 +42,11 @@ impl IceCreds {
         }
     }
 
-    pub fn config(&self, ip: &str, port: u16) -> IceConfig {
+    pub fn config(&self, ip: &str, port: u16, tcp_port: Option<u16>) -> IceConfig {
         IceConfig {
             ip: ip.to_string(),
             port,
+            tcp_port,
             publish_ufrag: self.publish_ufrag.clone(),
             publish_pwd: self.publish_pwd.clone(),
             subscribe_ufrag: self.subscribe_ufrag.clone(),

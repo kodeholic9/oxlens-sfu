@@ -28,6 +28,9 @@ pub struct CodecCap {
 pub struct IceConfig {
     pub ip: String,
     pub port: u16,
+    /// ★**그 포트에서 TCP 도 듣고 있을 때만** 실린다(RFC 6544). 없으면 그 서버는 UDP 뿐이다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp_port: Option<u16>,
     /// ★**보내기 연결**의 자격.
     pub publish_ufrag: String,
     pub publish_pwd: String,
@@ -126,6 +129,37 @@ mod tests {
         let r: RoomJoinReq = serde_json::from_str(r#"{"room_id":"r1"}"#).expect("parse");
         assert_eq!(r.select, None);
         assert!(r.select.unwrap_or(true), "★wire 기본은 true 다(SDK 표면의 기본과 반대다)");
+    }
+
+    fn ice(tcp_port: Option<u16>) -> IceConfig {
+        IceConfig {
+            ip: "1.2.3.4".into(),
+            port: 7000,
+            tcp_port,
+            publish_ufrag: "pu".into(),
+            publish_pwd: "pp".into(),
+            subscribe_ufrag: "su".into(),
+            subscribe_pwd: "sp".into(),
+        }
+    }
+
+    #[test]
+    fn tcp_를_안_들으면_그_칸이_아예_없다() {
+        let json = serde_json::to_string(&ice(None)).expect("ser");
+        assert!(!json.contains("tcp_port"), "★없는 것을 있다고 하지 않는다: {json}");
+    }
+
+    #[test]
+    fn tcp_를_들으면_포트를_싣는다() {
+        let json = serde_json::to_string(&ice(Some(7000))).expect("ser");
+        assert!(json.contains("\"tcp_port\":7000"), "{json}");
+    }
+
+    #[test]
+    fn 옛_서버가_보낸_것도_읽는다() {
+        let old = r#"{"ip":"1.2.3.4","port":7000,"publish_ufrag":"pu","publish_pwd":"pp","subscribe_ufrag":"su","subscribe_pwd":"sp"}"#;
+        let got: IceConfig = serde_json::from_str(old).expect("★칸이 없어도 읽힌다");
+        assert_eq!(got.tcp_port, None);
     }
 
     #[test]
