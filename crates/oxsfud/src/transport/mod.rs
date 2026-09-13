@@ -13,6 +13,7 @@ pub mod ice;
 pub mod sctp;
 pub mod srtp;
 pub mod stun;
+pub mod tcp;
 pub mod udp;
 
 pub use dispatch::Dispatch;
