@@ -8,6 +8,7 @@ pub mod dc;
 pub mod demux;
 pub mod dispatch;
 pub mod dtls;
+pub mod framing;
 pub mod ice;
 pub mod sctp;
 pub mod srtp;
