@@ -27,6 +27,10 @@ use tokio::sync::Mutex;
 
 struct Hub {
     resolved: Resolved,
+    /// ★**이 node 의 버스**(정§15-0) — 못 열었으면 `None` 이고, 그때 노드 축은 「모른다」다.
+    ///   ★**「모른다」와 「없다」를 가른다** — 모르는 채로 `5001` 을 내면 혼자 도는 판에서
+    ///   방을 아예 못 만든다.
+    bus: Option<oxhubd::bus::Bus>,
     sup: Mutex<Supervisor>,
     sessions: Mutex<Sessions>,
     /// ★**살아 있는 자식들.** ★**여기 붙들고 있는 동안 부모 생존 채널이 열려 있다** —
@@ -104,13 +108,27 @@ async fn run(args: Args) -> Result<(), String> {
     let system = System::parse(&read(&args.system)?).map_err(|e| e.to_string())?;
     let policy = Policy::parse(&read(&args.policy)?).map_err(|e| e.to_string())?;
     let resolved = Resolved::new(&args, system, policy).map_err(|e| e.to_string())?;
+    // ★**기동마다 새 값**(정§14-1 `{inst}`) — 고정 별칭을 쓰면 재기동을 못 가린다.
+    let inst = uuid::Uuid::new_v4().simple().to_string();
 
     // ★배너가 먼저다 — 아래에서 무엇이 실패하든 무슨 값으로 떴는지는 남는다.
     eprintln!("{}", resolved.banner(&args));
 
     let mut sup = Supervisor::new(&resolved.system.units);
     let first = sup.start_all(now_ms());
+    // ★**못 열어도 뜬다** — 버스 없이도 한 node 는 돈다(그 사실을 로그가 말한다).
+    let bus = match oxhubd::bus::open(&resolved.system.zenoh, &resolved.node_id, &inst).await {
+        Ok(b) => {
+            eprintln!("[bus] router 섰다 — node={} inst={inst}", resolved.node_id);
+            Some(b)
+        }
+        Err(e) => {
+            eprintln!("[bus] ★못 열었다({e}) — 노드 축은 「모른다」로 둔다");
+            None
+        }
+    };
     let hub: Shared = Arc::new(Hub {
+        bus,
         resolved,
         sup: Mutex::new(sup),
         sessions: Mutex::new(Sessions::new()),
@@ -147,6 +165,7 @@ async fn run(args: Args) -> Result<(), String> {
         .route("/admin/supervisor/stop/:id", axum::routing::post(sup_stop))
         .route("/admin/supervisor/kill/:id", axum::routing::post(sup_kill))
         .route("/admin/supervisor/shutdown", axum::routing::post(sup_shutdown))
+        .route("/admin/bus", get(admin_bus))
         .route("/admin/drops", get(admin_drops))
         .route("/admin/sfus", get(admin_sfus))
         .route("/admin/sfus/:sfu_id/rooms", get(admin_sfu_rooms))
@@ -156,6 +175,7 @@ async fn run(args: Args) -> Result<(), String> {
     let addr: SocketAddr = hub.resolved.listen.parse().map_err(|e| format!("listen: {e}"))?;
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| e.to_string())?;
 
+    spawn_gateway(hub.clone()).await;
     for a in &first {
         apply(&hub, a).await;
     }
@@ -735,13 +755,69 @@ async fn admin_sfus(
                 "unit_state": format!("{:?}", u.state),
                 // ★유닛 축 — dial 이 아니다.
                 "live": u.state.is_live(),
-                // ★노드 축은 B 평면이 채운다(덩어리 4) — 지어내지 않는다.
-                "node_live": serde_json::Value::Null,
+                // ★★**노드 축은 유닛 축과 다른 물음이다**(정§16-1) — 그 node 의 토큰이
+                //   버스 위에 섰나를 본다. ★버스를 못 열었으면 `null` 이다(「모른다」).
+                //   ★**그 유닛이 사는 node** 가 버스 위에 있나를 본다 — 유닛 이름이 아니다.
+                "node_live": match &hub.bus {
+                    Some(b) => serde_json::json!(b.live.has(&hub.resolved.node_id)),
+                    None => serde_json::Value::Null,
+                },
                 "epoch": u.epoch,
             })
         })
         .collect();
     Ok(Json(serde_json::json!({ "sfus": sfus, "supervising": !sup.units.is_empty() })))
+}
+
+/// 운영 §3-8 — ★★**버스는 「붙었나」가 아니라 「같은 것을 보고 있나」가 알맹이다.**
+///
+/// ★**`pending` 이 이 표의 알맹이다** — *"방이 아직 안 보인다"* 가 ★**수렴 중인지 멎은
+/// 것인지**를 가른다. 그것 없이는 운영자가 기다릴지 고칠지를 못 정한다.
+async fn admin_bus(
+    State(hub): State<Shared>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<oxsig::Failure>)> {
+    authz::admin(&hub.resolved.system, now_ms() / 1000, &peer_of(addr, &headers)).map_err(fail)?;
+    let z = &hub.resolved.system.zenoh;
+    let Some(bus) = &hub.bus else {
+        // ★**「모른다」와 「없다」를 가른다** — 못 연 것이지 비어 있는 것이 아니다.
+        return Ok(Json(serde_json::json!({
+            "node": hub.resolved.node_id, "open": false,
+            "mode": z.mode, "namespace": z.namespace,
+            "listen": z.listen, "connect": z.connect,
+        })));
+    };
+    let live = bus.live.snapshot();
+    let nodes: Vec<serde_json::Value> = live
+        .iter()
+        .map(|(n, i)| serde_json::json!({ "node": n, "inst": i, "self": *n == bus.node_id }))
+        .collect();
+    // ★**아직 합의 안 된 것** — 배치가 안 잡힌 방 · 배치는 아는데 현황을 못 받은 방.
+    let ids: Vec<String> = { hub.rooms.lock().await.iter().map(|r| r.id.clone()).collect() };
+    let (mut unplaced, mut no_view) = (Vec::new(), Vec::new());
+    for id in &ids {
+        match sfu_of_room(&hub, id).await {
+            None => unplaced.push(id.clone()),
+            Some(_) => {
+                let has = { hub.rooms.lock().await.view(id).is_some_and(|v| v.get("version").is_some()) };
+                if !has {
+                    no_view.push(id.clone());
+                }
+            }
+        }
+    }
+    let last = bus.live.last_event().map(|(at, kind, key)| {
+        serde_json::json!({ "at_ms": at, "kind": kind, "key": key })
+    });
+    Ok(Json(serde_json::json!({
+        "node": bus.node_id, "inst": bus.inst, "open": true,
+        "mode": z.mode, "namespace": z.namespace,
+        "listen": z.listen, "connect": z.connect,
+        "nodes": nodes,
+        "pending": { "rooms_unplaced": unplaced, "rooms_no_view": no_view },
+        "last_event": last,
+    })))
 }
 
 /// 운영 §3-5 — ★**유닛마다 따로 낸다.** 합치면 어느 유닛인지 잃는다.
@@ -1220,34 +1296,41 @@ async fn send_leave(
 
 /// 배치 후보. ★**`node` 토큰이 아직 없어 유닛 축으로 선다** — 정§16-1 이 가른 두 축 중
 /// 노드 축(zenoh)은 다음 덩어리다. 그때까지 *"이 hub 가 띄운 유닛이 `Running` 인가"* 로 읽는다.
+/// 배치 후보 — ★★**버스 위의 node 전량이다**(정§15-3 배치 키 = `node_id`).
+///
+/// ★**내 유닛 목록이 아니다** — 그것으로 배치하면 ★**hub 마다 다른 답**이 나와
+/// *"한 방은 한 sfud"* 가 hub 마다 흔들린다(참가자가 서로를 못 본다).
+/// ★버스가 없으면 나 혼자다 — 그 판에서도 배치는 서야 한다(혼자 도는 개발기).
 async fn sfu_nodes(hub: &Shared) -> Vec<oxhubd::route::Node> {
-    let sup = hub.sup.lock().await;
+    let mine = hub.resolved.node_id.clone();
+    let Some(bus) = &hub.bus else {
+        return vec![oxhubd::route::Node { node_id: mine, live: true, gone_at: None }];
+    };
+    bus.live
+        .snapshot()
+        .keys()
+        .map(|n| oxhubd::route::Node { node_id: n.clone(), live: true, gone_at: None })
+        .collect()
+}
+
+/// 그 node 를 맡은 **내 유닛**의 주소 — ★**남의 node 면 `None`** 이다(아직 넘기지 않는다).
+fn local_unit_addr(hub: &Shared, node: &str) -> Option<String> {
+    if node != hub.resolved.node_id {
+        return None;
+    }
     hub.resolved
         .system
         .units
         .iter()
-        .filter(|u| u.role == "sfu" && u.enabled && !u.addr.is_empty())
-        .map(|u| oxhubd::route::Node {
-            node_id: u.id.clone(),
-            live: sup
-                .units
-                .iter()
-                .any(|x| x.id == u.id && x.state == oxhubd::supervisor::UnitState::Running),
-            gone_at: None,
-        })
-        .collect()
+        .find(|u| u.role == "sfu" && u.enabled && !u.addr.is_empty())
+        .map(|u| u.addr.clone())
 }
 
 /// 그 방을 맡은 유닛의 gRPC 주소. ★**맵에 없으면 없는 것이다** — 기본 노드 폴백 금지(정§15-5).
 async fn addr_for_room(hub: &Shared, room_id: &str) -> Option<String> {
     let nodes = sfu_nodes(hub).await;
     let n = oxhubd::route::place(&nodes, room_id, now_ms())?;
-    hub.resolved
-        .system
-        .units
-        .iter()
-        .find(|u| u.id == n.node_id)
-        .map(|u| u.addr.clone())
+    local_unit_addr(hub, &n.node_id)
 }
 
 type BClient = common::b::sfu_service_client::SfuServiceClient<tonic::transport::Channel>;
@@ -1274,18 +1357,34 @@ async fn sync_room(hub: &Shared, id: &str) -> bool {
             departure_ttl_secs: r.departure_ttl_secs,
         })
     };
-    let (Some(rec), Some(addr)) = (rec, addr_for_room(hub, id).await) else {
-        return false;
-    };
-    let Some(mut c) = b_client(&addr).await else { return false };
+    let Some(rec) = rec else { return false };
     let led = common::b::RoomLedger {
         node_id: hub.resolved.node_id.clone(),
         put: vec![rec],
         drop: Vec::new(),
     };
-    let Ok(v) = c.rooms(led).await else { return false };
-    absorb_view(hub, v.into_inner()).await;
+    let Some(view) = rooms_call(hub, id, led).await else { return false };
+    absorb_view(hub, view).await;
     true
+}
+
+/// 그 방을 맡은 node 에 대장을 민다 — ★**남의 node 면 그 관문을 거친다**(정§15-1).
+async fn rooms_call(
+    hub: &Shared,
+    room_id: &str,
+    led: common::b::RoomLedger,
+) -> Option<common::b::RoomView> {
+    let nodes = sfu_nodes(hub).await;
+    let node = oxhubd::route::place(&nodes, room_id, now_ms())?;
+    if node.node_id != hub.resolved.node_id {
+        let bus = hub.bus.as_ref()?;
+        let raw = bus
+            .ask(&node.node_id, oxhubd::bus::Q_ROOMS, prost::Message::encode_to_vec(&led))
+            .await?;
+        return <common::b::RoomView as prost::Message>::decode(&raw[..]).ok();
+    }
+    let mut c = local_grpc(hub).await?;
+    c.rooms(led).await.ok().map(|r| r.into_inner())
 }
 
 /// sfud 가 준 현황을 대장에 덧씌운다. ★**만료는 sfud 가 판정한다** — hub 는 지우기만 한다.
@@ -1306,11 +1405,79 @@ async fn absorb_view(hub: &Shared, v: common::b::RoomView) {
 
 /// 프레임 하나를 그 방의 sfud 에 넘기고 응답 wire 를 그대로 받아 온다.
 async fn to_sfu(hub: &Shared, room_id: &str, env: common::b::Envelope) -> Result<Vec<u8>, Code> {
-    let addr = addr_for_room(hub, room_id).await.ok_or(Code::SfuUnavailable)?;
+    let nodes = sfu_nodes(hub).await;
+    let node = oxhubd::route::place(&nodes, room_id, now_ms()).ok_or(Code::RoomNotFound)?;
+    // ★**남의 node 면 그 node 의 관문에 넘긴다**(정§15-1 `q/node`) — 남의 sfud 에
+    //   직결하지 않는다(관문 원칙). 내 node 면 그대로 로컬 gRPC 다.
+    if node.node_id != hub.resolved.node_id {
+        let bus = hub.bus.as_ref().ok_or(Code::SfuUnavailable)?;
+        let body = prost::Message::encode_to_vec(&env);
+        let got = bus
+            .ask(&node.node_id, oxhubd::bus::Q_HANDLE, body)
+            .await
+            .ok_or(Code::SfuUnavailable)?;
+        return Ok(got);
+    }
+    let addr = local_unit_addr(hub, &node.node_id).ok_or(Code::SfuUnavailable)?;
     let mut c = b_client(&addr).await.ok_or(Code::SfuUnavailable)?;
     // ★**타임아웃의 뜻은 "살아 있는데 느림"** 하나다 — 생존은 위에서 이미 갈렸다(정§15-5).
     let r = c.handle(env).await.map_err(|_| Code::SfuUnavailable)?;
     Ok(r.into_inner().wire)
+}
+
+/// 남의 node 가 넘긴 프레임을 받아 ★**내 유닛으로** 보내고 답을 되돌린다.
+///
+/// ★**이것이 관문이다** — 이 자리가 없으면 타 node 가 남의 sfud 에 직결해야 하고,
+/// 그 순간 형상이 peer 가 된다(정§15-0 — 세션이 N(N−1)/2 로 늘고 관문이 무너진다).
+async fn spawn_gateway(hub: Shared) {
+    let Some(bus) = hub.bus.as_ref() else { return };
+    let key = bus.keys.q_node(&hub.resolved.node_id, oxhubd::bus::Q_HANDLE);
+    let rooms_key = bus.keys.q_node(&hub.resolved.node_id, oxhubd::bus::Q_ROOMS);
+    let (Ok(q), Ok(qr)) =
+        (bus.session.declare_queryable(&key).await, bus.session.declare_queryable(&rooms_key).await)
+    else {
+        eprintln!("[bus] ★관문을 못 열었다 — 남의 node 요청을 못 받는다");
+        return;
+    };
+    eprintln!("[bus] 관문 {key} · {rooms_key}");
+    let me = hub.clone();
+    tokio::spawn(async move {
+        while let Ok(query) = q.recv_async().await {
+            let raw = query.payload().map(|p| p.to_bytes().to_vec()).unwrap_or_default();
+            let Ok(env) = <common::b::Envelope as prost::Message>::decode(&raw[..]) else {
+                continue;
+            };
+            // ★**내 유닛으로만** 보낸다 — 여기서 또 남에게 넘기면 고리가 돈다.
+            let out = match local_grpc(&me).await {
+                Some(mut c) => c.handle(env).await.map(|r| r.into_inner().wire).unwrap_or_default(),
+                None => Vec::new(),
+            };
+            let _ = query.reply(query.key_expr().clone(), out).await;
+        }
+    });
+    tokio::spawn(async move {
+        while let Ok(query) = qr.recv_async().await {
+            let raw = query.payload().map(|p| p.to_bytes().to_vec()).unwrap_or_default();
+            let Ok(led) = <common::b::RoomLedger as prost::Message>::decode(&raw[..]) else {
+                continue;
+            };
+            let out = match local_grpc(&hub).await {
+                Some(mut c) => c
+                    .rooms(led)
+                    .await
+                    .map(|r| prost::Message::encode_to_vec(&r.into_inner()))
+                    .unwrap_or_default(),
+                None => Vec::new(),
+            };
+            let _ = query.reply(query.key_expr().clone(), out).await;
+        }
+    });
+}
+
+/// 내 node 의 유닛에 붙은 gRPC 통로.
+async fn local_grpc(hub: &Shared) -> Option<BClient> {
+    let addr = local_unit_addr(hub, &hub.resolved.node_id)?;
+    b_client(&addr).await
 }
 
 /// sfud 통지 스트림을 받아 ★**내 로컬 멤버에게만** 흘린다(정§15-4).

@@ -12,6 +12,7 @@ pub mod b {
 }
 
 pub mod args;
+pub mod bus;
 pub mod build;
 pub mod policy;
 pub mod system;

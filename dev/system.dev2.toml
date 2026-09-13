@@ -1,13 +1,12 @@
-# 개발 실증용 — ★**node A**(hub 19745 + sfud 50061·50062).
+# 개발 실증용 — ★**node B**(hub 19746 + sfud 50063). `system.dev.toml` 의 짝이다.
 #
 # ★★**hub 하나 = node 하나다**(정§15-0) — hub 가 zenoh router 를 임베드하므로,
 #   node 를 둘 만들려면 hub 를 둘 띄운다. node 간 축(배치 합의·통지 횡단·세션 귀속·
 #   노드 소멸)은 ★**이 파일과 `system.dev2.toml` 둘이 함께 서야** 성립한다.
-# ★★**배치 키는 `node_id` 다**(정§15-3) — 그래서 개발 형상은 ★**node 당 sfud 하나**로 두고
-#   유닛 이름을 node 이름과 같게 맞춘다. 한 node 안 sfud 여럿은 실형상이지만 그 축은
-#   배치와 무관해서, 섞으면 빨강의 귀속이 흐려진다(먼저 node 축을 세운다).
+# ★한 node 안에 sfud 가 여럿인 것은 실형상이다 — 그래서 여기는 둘로 둔다.
+#   그래야 「한 node 안 cross-sfu」와 「node 간」이 한 판에서 갈린다.
 [hub]
-listen = "127.0.0.1:19745"
+listen = "127.0.0.1:19746"
 base_path = "/media"
 
 [hub.auth]
@@ -34,17 +33,17 @@ ops_allowed = false
 # ★유닛은 hub 가 띄운다(정§16-1) — 하네스가 sfud 를 직접 띄우지 않는다.
 #   그래야 부모 생존 채널이 서고(정§15-6), 기동·정지 순서가 한 곳에서 정해진다.
 [[unit]]
-id = "node-a"
+id = "node-b"
 kind = "process"
 order = 1
 role = "sfu"
-addr = "127.0.0.1:50061"
-cmd = ["./target/debug/oxsfud", "--grpc-listen", "127.0.0.1:50061", "--udp-port", "20000", "--policy", "policy.toml"]
+addr = "127.0.0.1:50063"
+cmd = ["./target/debug/oxsfud", "--grpc-listen", "127.0.0.1:50063", "--udp-port", "20002", "--policy", "policy.toml"]
 
 [zenoh]
 mode = "router"
-listen = ["tcp/127.0.0.1:7447"]
-connect = ["tcp/127.0.0.1:7448"]
+listen = ["tcp/127.0.0.1:7448"]
+connect = ["tcp/127.0.0.1:7447"]
 multicast_scouting = false
 qos_enabled = true
 lowlatency = false
