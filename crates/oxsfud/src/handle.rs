@@ -50,6 +50,9 @@ pub struct Ingress {
 /// ★**빈 목록이 곧 끊기다** — 지우는 별도 명령을 두지 않는다(한 어휘로 민다).
 pub type RouteSet = (String, u32, Vec<crate::transport::udp::Target>);
 
+/// 한 조작이 낸 것 전부 — ★**통지·배관·말은 한 묶음**이다(갈라 내면 한쪽이 늦는다).
+pub type Emitted = (Vec<Notice>, Vec<RouteSet>, Vec<DcOut>);
+
 /// 나갈 통지 하나. ★**`exclude` 는 받는 hub 가 적용한다**(정§15-4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Notice {
@@ -774,7 +777,7 @@ pub fn set_permission(
     room_id: &str,
     user_id: &str,
     want: oxsig::Permission,
-) -> Result<(Vec<Notice>, Vec<RouteSet>), Code> {
+) -> Result<Emitted, Code> {
     let Some(room) = node.rooms.get_mut(room_id) else { return Err(Code::RoomNotFound) };
     if room.permission_of(user_id).is_none() {
         return Err(Code::NotInRoom);
@@ -782,7 +785,7 @@ pub fn set_permission(
     let hidden = room.hidden_of(user_id).unwrap_or(false);
     // ① 멱등 · ② 적용 — 방이 판정하고 표까지 같이 바꾼다.
     let Some(applied) = room.set_permission(user_id, want) else {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Vec::new()));
     };
     let version = room.version(&node.epoch);
 
@@ -802,6 +805,22 @@ pub fn set_permission(
     node.publications.retain(|p| !gone.iter().any(|g| g.track_id == p.track_id));
     let (mut notices, routes) = shed_publications(node, &gone);
 
+    // ③ⓑ ★★**발언권도 즉시 회수한다** — 이 방이 그 사람의 `pub_room` 일 때만이다
+    //   (발화 자격은 `pub_room` 의 비트를 본다, §9-6 관문 ④).
+    //   ★**큐 대기자를 안 빼면** 비트가 내려간 뒤에도 차례가 오면 `GRANTED` 가 나간다 —
+    //   즉시·소급이 큐에서 깨진다.
+    let mut dc = Vec::new();
+    let speaks_here = node
+        .peers
+        .iter()
+        .any(|x| x.user_id == user_id && x.pub_room.as_deref() == Some(room_id));
+    if speaks_here && !floor_ok(node, user_id, applied)
+        && let Some(f) = node.floors.get_mut(room_id)
+    {
+        let outs = f.on_permission_lost(user_id, 0);
+        dc = emit_floor(node, room_id, outs);
+    }
+
     // ④ 통지 — ★**그 방 전원에게.** 트랙 제거 통지는 제 경로로 따로 나갔다(위).
     if !hidden {
         notices.push(notice(
@@ -817,7 +836,21 @@ pub fn set_permission(
             },
         ));
     }
-    Ok((notices, routes))
+    Ok((notices, routes, dc))
+}
+
+/// 그 비트로 아직 말할 수 있나 — ★**`floor_request` 와 그가 든 반이중 kind 를 같이 본다**
+/// (정§9-6 관문 ④ · §6-4 ③ⓑ). 둘 중 하나만 보면 마이크 비트를 내려도 말이 나간다.
+fn floor_ok(node: &Node, user_id: &str, p: oxsig::Permission) -> bool {
+    if !p.floor_request {
+        return false;
+    }
+    // ★그가 든 반이중 트랙의 kind 비트가 하나라도 내려갔으면 말할 수 없다.
+    //   ★트랙이 없으면 애초에 화자가 될 수 없어 참이다(관문 ②가 막는다).
+    node.publications
+        .iter()
+        .filter(|x| x.user_id == user_id && x.duplex == Duplex::Half)
+        .all(|x| bit_for(&p, x.kind, x.source).0)
 }
 
 /// 연§4-4-1 사상표 — ★**한 자리에만 둔다.** 두 곳에 두면 발행 관문과 회수가 어긋난다.
@@ -1484,6 +1517,14 @@ pub fn on_floor(node: &mut Node, ufrag: &str, payload: &[u8], now: u64) -> Floor
     }
 
     let max_burst = node.max_burst_ms;
+    // ★★**관문 ④ — `pub_room` 의 비트를 본다**(정§9-6 · §6-4). ★**우선순위를 읽기 전이다.**
+    //   ★`floor_request` 와 그가 든 반이중 kind 를 같이 본다 — 둘 중 하나만 보면
+    //   마이크 비트를 내려도 말이 나간다.
+    let allowed = node
+        .rooms
+        .get(&room_id)
+        .and_then(|r| r.permission_of(&user_id))
+        .is_some_and(|p| floor_ok(node, &user_id, p));
     let floor = node.floors.entry(room_id.clone()).or_insert_with(|| Floor::new(max_burst));
     let outs = match msg.msg_type {
         oxsig::mbcp::REQUEST => floor.on_request(
@@ -1495,8 +1536,7 @@ pub fn on_floor(node: &mut Node, ufrag: &str, payload: &[u8], now: u64) -> Floor
                 want_ms: msg.get_u16(oxsig::mbcp::F_DURATION).map(|s| u64::from(s) * 1_000),
                 in_pub_room,
                 has_half_track,
-                // 권한 비트는 방이 기억한다(연§4-4-1) — 아직 기본이 전부다.
-                allowed: true,
+                allowed,
                 others_present: node
                     .rooms
                     .get(&room_id)
@@ -2339,7 +2379,7 @@ mod permission_tests {
         let mut n = node_with(false);
         publish(&mut n, "u1", "s-1", 0xA1);
         assert_eq!(n.publications.len(), 1, "먼저 올린다");
-        let (notices, _) = set_permission(&mut n, "r1", "u1", no_audio()).expect("걸린다");
+        let (notices, _, _) = set_permission(&mut n, "r1", "u1", no_audio()).expect("걸린다");
         assert!(n.publications.is_empty(), "★이미 올라온 것을 걷는다");
         // 트랙 제거 통지와 권한 통지가 ★각자의 경로로 따로 나간다.
         assert!(notices.len() >= 2, "{}", notices.len());
@@ -2351,7 +2391,7 @@ mod permission_tests {
         let mut n = node_with(false);
         set_permission(&mut n, "r1", "u1", no_audio()).expect("걸린다");
         let seq = n.rooms.get("r1").expect("방").version(&n.epoch).seq;
-        let (notices, _) = set_permission(&mut n, "r1", "u1", no_audio()).expect("두 번째");
+        let (notices, _, _) = set_permission(&mut n, "r1", "u1", no_audio()).expect("두 번째");
         assert!(notices.is_empty());
         assert_eq!(n.rooms.get("r1").expect("방").version(&n.epoch).seq, seq);
     }
@@ -2405,11 +2445,63 @@ mod permission_tests {
         // ★감추기로 한 축이 한 프레임으로 무너진다 — 명단에 없는 `user_id` 가 전원에게 간다.
         let mut n = node_with(true);
         let seq = n.rooms.get("r1").expect("방").version(&n.epoch).seq;
-        let (notices, _) = set_permission(&mut n, "r1", "u1", no_audio()).expect("걸린다");
+        let (notices, _, _) = set_permission(&mut n, "r1", "u1", no_audio()).expect("걸린다");
         assert!(notices.is_empty());
         assert_eq!(n.rooms.get("r1").expect("방").version(&n.epoch).seq, seq);
         // ★②③ 은 그대로다 — 비트는 내려갔다.
         assert_eq!(n.rooms.get("r1").expect("방").permission_of("u1"), Some(no_audio()));
+    }
+
+    fn no_floor() -> Permission {
+        Permission { floor_request: false, ..Default::default() }
+    }
+
+    /// 반이중(무전) 트랙을 올리고 그 방을 발언방으로 잡는다.
+    fn half_speaker(n: &mut Node) {
+        let body = serde_json::json!({
+            "action": "add", "room_id": "r1",
+            "tracks": [{ "kind": "audio", "mid": "0", "ssrc": 0xA1, "pt": 111, "duplex": "half" }],
+        });
+        let h = Header::new(FrameKind::Request, Op::PublishTracks, 1);
+        dispatch(n, &ing("s-1", "u1", false), h, &serde_json::to_vec(&body).expect("직렬화"));
+        let i = n.peers.ensure("s-1", "u1", PcMode::Two).idx;
+        n.peers.at_mut(i).pub_room = Some("r1".into());
+    }
+
+    #[test]
+    fn 말하는_중에_비트가_내려가면_회수한다() {
+        // ★**즉시·소급이다** — 비트를 내렸는데 이미 올라온 소리가 그대로 나가면
+        //   밖에서는 막았다고 답을 받은 뒤다.
+        let mut n = node_with(false);
+        half_speaker(&mut n);
+        let f = n.floors.entry("r1".into()).or_insert_with(|| crate::floor::Floor::new(30_000));
+        f.on_request(
+            &crate::floor::Request {
+                user_id: "u1".into(),
+                priority: 0,
+                want_ms: None,
+                in_pub_room: true,
+                has_half_track: true,
+                allowed: true,
+                others_present: true,
+            },
+            0,
+        );
+        assert_eq!(n.floors.get("r1").expect("방").speaker(), Some("u1"));
+        let (_, _, dc) = set_permission(&mut n, "r1", "u1", no_floor()).expect("걸린다");
+        assert!(n.floors.get("r1").expect("방").speaker().is_none(), "★말하던 것을 회수한다");
+        assert!(!dc.is_empty(), "★회수는 말로도 나간다(REVOKE)");
+    }
+
+    #[test]
+    fn 반이중_kind_비트만_내려도_말을_못_한다() {
+        // ★`floor_request` 와 그가 든 kind 를 같이 본다 — 둘 중 하나만 보면
+        //   마이크 비트를 내려도 말이 나간다.
+        let mut n = node_with(false);
+        half_speaker(&mut n);
+        assert!(floor_ok(&n, "u1", Permission::default()));
+        assert!(!floor_ok(&n, "u1", no_audio()), "★audio 비트가 내려갔다");
+        assert!(!floor_ok(&n, "u1", no_floor()));
     }
 
     #[test]
