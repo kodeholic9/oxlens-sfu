@@ -30,13 +30,36 @@ pub enum IceRole {
 /// 새 주소에서 온 Binding 이 integrity 를 통과하면 그 자리에서 갈아 끼운다.
 pub type Latch = Arc<RwLock<Option<SocketAddr>>>;
 
+#[derive(Clone)]
+pub struct TcpHandle(pub Arc<tokio::sync::mpsc::Sender<bytes::Bytes>>);
+
+impl TcpHandle {
+    pub fn send(&self, framed: bytes::Bytes) -> bool {
+        self.0.try_send(framed).is_ok()
+    }
+}
+
+impl std::fmt::Debug for TcpHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TcpHandle")
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct RouteState {
+    pub udp: Option<SocketAddr>,
+    pub tcp: Option<TcpHandle>,
+}
+
+pub type Route = Arc<RwLock<RouteState>>;
+
 /// ufrag 한 벌이 가리키는 것.
 #[derive(Debug)]
 pub struct IceEntry {
     pub pwd: String,
     pub session_id: String,
     pub role: IceRole,
-    pub addr: Latch,
+    pub route: Route,
     /// 마지막으로 그 자격에서 **UDP 가** 온 시각(ms). ★**좀비 판정의 유일한 근거다**(정§2-2).
     ///
     /// ★**`0` 은 "판정 불가"이지 "오래됨"이 아니다** — 아직 한 번도 못 본 것이라
@@ -56,7 +79,27 @@ impl IceEntry {
 
     /// 그 자격이 지금 가리키는 주소. ★**latch 전에는 `None`** 이다 — 지어내지 않는다.
     pub fn addr(&self) -> Option<SocketAddr> {
-        *self.addr.read().expect("latch 자물쇠는 패닉을 건너지 않는다")
+        self.route.read().expect("route 자물쇠는 패닉을 건너지 않는다").udp
+    }
+
+    pub fn tcp(&self) -> Option<TcpHandle> {
+        self.route.read().expect("route 자물쇠는 패닉을 건너지 않는다").tcp.clone()
+    }
+
+    pub fn attach_tcp(&self, handle: TcpHandle) {
+        self.route.write().expect("route 자물쇠").tcp = Some(handle);
+    }
+
+    pub fn detach_tcp_if(&self, mine: &TcpHandle) {
+        let mut r = self.route.write().expect("route 자물쇠");
+        if r.tcp.as_ref().is_some_and(|h| Arc::ptr_eq(&h.0, &mine.0)) {
+            r.tcp = None;
+        }
+    }
+
+    pub fn reachable(&self) -> bool {
+        let r = self.route.read().expect("route 자물쇠는 패닉을 건너지 않는다");
+        r.udp.is_some() || r.tcp.is_some()
     }
 }
 
@@ -75,7 +118,7 @@ impl IceTable {
     }
 
     pub fn routable(&self, ufrag: &str) -> Option<Arc<IceEntry>> {
-        self.get(ufrag).filter(|e| e.addr().is_some())
+        self.get(ufrag).filter(|e| e.reachable())
     }
 
     pub fn len(&self) -> usize {
@@ -92,7 +135,7 @@ impl IceTable {
             pwd: pwd.to_string(),
             session_id: session_id.to_string(),
             role,
-            addr: Arc::new(RwLock::new(None)),
+            route: Route::default(),
             // ★**관찰 전이다** — 0 으로 시작해야 reaper 가 판정을 건너뛴다(정§2-2).
             last_seen: AtomicU64::new(0),
         });
@@ -185,9 +228,9 @@ pub fn on_binding(
     }
     let latched = match via {
         Arrival::Udp => {
-            let mut cur = e.addr.write().expect("latch 자물쇠");
-            let moved = *cur != Some(from);
-            *cur = Some(from);
+            let mut cur = e.route.write().expect("route 자물쇠");
+            let moved = cur.udp != Some(from);
+            cur.udp = Some(from);
             e.touch(now);
             moved
         }

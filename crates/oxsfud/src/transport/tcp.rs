@@ -2,17 +2,20 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
 
 use super::demux::{classify, Packet};
 use super::framing::{frame, Unframer};
-use super::ice::{on_binding, Arrival, Binding, IceTable};
+use super::ice::{on_binding, Arrival, Binding, IceTable, TcpHandle};
 use super::udp::now_ms;
 
 pub const IDENTIFY_TIMEOUT: Duration = Duration::from_secs(10);
 
 const READ_CHUNK: usize = 4096;
+const OUTBOUND: usize = 128;
 
 pub async fn serve(listener: TcpListener, table: Arc<IceTable>, identify_timeout: Duration) {
     loop {
@@ -27,29 +30,41 @@ pub async fn serve(listener: TcpListener, table: Arc<IceTable>, identify_timeout
 }
 
 async fn peer(
-    mut stream: TcpStream,
+    stream: TcpStream,
     from: SocketAddr,
     table: Arc<IceTable>,
     identify_timeout: Duration,
 ) {
     let _ = stream.set_nodelay(true);
+    let (mut rd, mut wr) = stream.into_split();
+    let (tx, mut rx) = mpsc::channel::<Bytes>(OUTBOUND);
+    let handle = TcpHandle(Arc::new(tx));
+    let writer = tokio::spawn(async move {
+        while let Some(b) = rx.recv().await {
+            if wr.write_all(&b).await.is_err() {
+                break;
+            }
+        }
+    });
+
     let mut un = Unframer::new();
     let mut buf = vec![0u8; READ_CHUNK];
     let mut known: Option<String> = None;
 
     loop {
         let read = match known {
-            Some(_) => stream.read(&mut buf).await,
-            None => match tokio::time::timeout(identify_timeout, stream.read(&mut buf)).await {
+            Some(_) => rd.read(&mut buf).await,
+            None => match tokio::time::timeout(identify_timeout, rd.read(&mut buf)).await {
                 Ok(r) => r,
-                Err(_) => return,
+                Err(_) => break,
             },
         };
-        let Ok(n) = read else { return };
+        let Ok(n) = read else { break };
         if n == 0 {
-            return;
+            break;
         }
         un.push(&buf[..n]);
+        let mut broken = false;
         while let Some(f) = un.next_frame() {
             if classify(&f) != Packet::Stun {
                 continue;
@@ -59,13 +74,30 @@ async fn peer(
             else {
                 continue;
             };
+            if known.is_none()
+                && let Some(e) = table.get(&ufrag)
+            {
+                e.attach_tcp(handle.clone());
+            }
             known = Some(ufrag);
             let Some(out) = frame(&wire) else { continue };
-            if stream.write_all(&out).await.is_err() {
-                return;
+            if !handle.send(out) {
+                broken = true;
+                break;
             }
         }
+        if broken {
+            break;
+        }
     }
+
+    if let Some(ufrag) = known
+        && let Some(e) = table.get(&ufrag)
+    {
+        e.detach_tcp_if(&handle);
+    }
+    drop(handle);
+    let _ = writer.await;
 }
 
 #[cfg(test)]
@@ -94,6 +126,13 @@ mod tests {
 
     async fn read_one_frame(s: &mut TcpStream) -> Option<Vec<u8>> {
         let mut un = Unframer::new();
+        read_frame_with(s, &mut un).await
+    }
+
+    async fn read_frame_with(s: &mut TcpStream, un: &mut Unframer) -> Option<Vec<u8>> {
+        if let Some(f) = un.next_frame() {
+            return Some(f.to_vec());
+        }
         let mut buf = [0u8; 1024];
         for _ in 0..8 {
             let n = tokio::time::timeout(Duration::from_millis(500), s.read(&mut buf))
@@ -128,8 +167,9 @@ mod tests {
         let mut both = one.to_vec();
         both.extend_from_slice(&one);
         s.write_all(&both).await.expect("보낸다");
-        assert!(read_one_frame(&mut s).await.is_some(), "첫 답");
-        assert!(read_one_frame(&mut s).await.is_some(), "둘째 답");
+        let mut un = Unframer::new();
+        assert!(read_frame_with(&mut s, &mut un).await.is_some(), "첫 답");
+        assert!(read_frame_with(&mut s, &mut un).await.is_some(), "★둘째 답 — 한 세그먼트로 합쳐져도");
     }
 
     #[tokio::test]
@@ -170,6 +210,48 @@ mod tests {
         let mut buf = [0u8; 16];
         let still = tokio::time::timeout(Duration::from_millis(600), s.read(&mut buf)).await;
         assert!(still.is_err(), "★상한이 지나도 살아 있다");
+    }
+
+    #[tokio::test]
+    async fn 신원을_밝히면_그_연결이_하향_경로가_된다() {
+        let t = table();
+        let at = listening(t.clone(), IDENTIFY_TIMEOUT).await;
+        let mut s = TcpStream::connect(at).await.expect("붙는다");
+        let e = t.get("srvufrag").expect("있다");
+        assert!(e.tcp().is_none(), "★붙기 전에는 없다");
+
+        s.write_all(&frame(&request("srvufrag", PWD)).expect("씌운다")).await.expect("보낸다");
+        let mut un = Unframer::new();
+        read_frame_with(&mut s, &mut un).await.expect("답이 온다");
+
+        let handle = e.tcp().expect("★핸들이 걸렸다");
+        assert_eq!(e.addr(), None, "★udp 는 여전히 없다");
+        assert!(e.reachable(), "★그래도 보낼 수 있다");
+
+        assert!(handle.send(frame(b"downlink").expect("씌운다")), "서버가 그 길로 보낸다");
+        let got = read_frame_with(&mut s, &mut un).await.expect("클라가 받는다");
+        assert_eq!(&got[..], b"downlink");
+    }
+
+    #[tokio::test]
+    async fn 연결이_끊기면_하향_경로를_거둔다() {
+        let t = table();
+        let at = listening(t.clone(), IDENTIFY_TIMEOUT).await;
+        let mut s = TcpStream::connect(at).await.expect("붙는다");
+        s.write_all(&frame(&request("srvufrag", PWD)).expect("씌운다")).await.expect("보낸다");
+        read_one_frame(&mut s).await.expect("답이 온다");
+        let e = t.get("srvufrag").expect("있다");
+        assert!(e.tcp().is_some());
+
+        drop(s);
+        for _ in 0..40 {
+            if e.tcp().is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(e.tcp().is_none(), "★끊기면 거둔다 — 죽은 길로 보내지 않는다");
+        assert!(!e.reachable(), "★보낼 데가 없다");
     }
 
     #[tokio::test]

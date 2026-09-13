@@ -17,4 +17,4 @@ pub mod tcp;
 pub mod udp;
 
 pub use dispatch::Dispatch;
-pub use ice::{IceRole, IceTable, Latch};
+pub use ice::{IceRole, IceTable, Route, TcpHandle};
