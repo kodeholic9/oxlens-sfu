@@ -6,6 +6,7 @@
 pub mod conn;
 pub mod dc;
 pub mod demux;
+pub mod dispatch;
 pub mod dtls;
 pub mod ice;
 pub mod sctp;
@@ -13,4 +14,5 @@ pub mod srtp;
 pub mod stun;
 pub mod udp;
 
+pub use dispatch::Dispatch;
 pub use ice::{IceRole, IceTable, Latch};

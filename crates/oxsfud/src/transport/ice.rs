@@ -74,6 +74,10 @@ impl IceTable {
         self.0.load().get(ufrag).cloned()
     }
 
+    pub fn routable(&self, ufrag: &str) -> Option<Arc<IceEntry>> {
+        self.get(ufrag).filter(|e| e.addr().is_some())
+    }
+
     pub fn len(&self) -> usize {
         self.0.load().len()
     }
