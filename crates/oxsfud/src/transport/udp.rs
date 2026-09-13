@@ -89,6 +89,11 @@ pub struct DcIn {
 /// ★핫패스는 이 자료를 안 만진다 — 타이머가 제 사본을 지어 갈아 끼운다.
 pub type EgressView = arc_swap::ArcSwap<HashMap<(String, u32), u64>>;
 
+/// 데이터 평면이 1초마다 갈아 끼우는 ★**계수 사본** — 운영 조회가 읽는다(운영 §3-5).
+///
+/// ★**핫패스는 이 자료를 안 만진다** — 세는 자리는 루프 지역 변수이고, 타이머가 사본을 짓는다.
+pub type CountersView = arc_swap::ArcSwap<Counters>;
+
 /// 데이터그램 상한 — ★**한 장이 이보다 크면 우리 것이 아니다.**
 const MTU: usize = 2048;
 
@@ -174,6 +179,31 @@ pub struct Counters {
 }
 
 impl Counters {
+    /// ★**버린 사유만** 낸다(운영 §3-5) — 흐른 수까지 섞으면 *"무엇이 버려졌나"* 가 묻힌다.
+    ///
+    /// ★**사유마다 제 이름을 갖는다** — 합치면 *"어디서 없어졌나"* 를 영영 못 짚는다.
+    pub fn drops(&self) -> serde_json::Value {
+        serde_json::json!({
+            "stun_dropped": self.stun_dropped,
+            "stun_forged": self.forged,
+            "srtp_bad": self.srtp_bad,
+            "no_latch": self.no_latch,
+            "no_key": self.no_key,
+            "sim_unknown": self.sim_unknown,
+            "sim_not_chosen": self.sim_dropped,
+            "sim_pending_expired": self.sim_pending_expired,
+            "nack_no_cache": self.nack_no_cache,
+            "nack_no_rtx": self.nack_no_rtx,
+            "nack_no_route": self.nack_no_route,
+            "nack_budget": self.nack_budget,
+            "nack_miss": self.nack_miss,
+            "nack_build": self.nack_build,
+            "pli_orphan": self.pli_orphan,
+            "rtcp_ignored": self.rtcp_ignored,
+            "unknown": self.unknown,
+        })
+    }
+
     fn line(&self) -> String {
         format!(
             "stun {}/{}(위조 {}) · dtls {} · srtp in {}(버림 {}) out {} · rtcp in {} out {} · 단 모름 {} 안 보냄 {} 전환 {} 만료 {} · 자동 ↑{} ↓{} 프로브 {} twcc {} remb {} pli {}(고아 {}) · latch 전 {} 열쇠 전 {} · nack {}(캐시없음 {} rtx없음 {} 길없음 {} 예산 {} 못찾음 {} 못지음 {}) rtx {} · 모름 {}",
@@ -239,6 +269,7 @@ pub async fn serve(
     mut cmds: mpsc::Receiver<Cmd>,
     dc_in: mpsc::Sender<DcIn>,
     view: Arc<EgressView>,
+    counts: Arc<CountersView>,
     // ★**그 배포의 상한**(정§11-2 REMB) — 우리가 발행자에게 말하는 천장이다.
     max_bitrate_bps: u64,
 ) {
@@ -352,6 +383,8 @@ pub async fn serve(
                 view.store(Arc::new(
                     egress.iter().map(|(k, (p, _))| (k.clone(), *p as u64)).collect(),
                 ));
+                // ★**계수도 같이 건넨다**(운영 §3-5) — 세기만 하고 안 보이면 안 센 것과 같다.
+                counts.store(Arc::new(c));
                 // ★**판정도 1초 한 번이다**(정§10-3 tick 1,000ms) — 타이머를 또 두지 않는다.
                 downlink_tick(
                     now, &mut down, &routes, &sim_of, &layer_of, &mut sim_out, &mut pli_at,
@@ -1365,5 +1398,42 @@ mod tests {
         b.forged += 1;
         assert_ne!(a, b);
         assert!(b.line().contains("위조 1"), "{}", b.line());
+    }
+
+    #[test]
+    fn 버림_표에_사유가_빠지면_안_된다() {
+        // ★★**세는 자리와 내는 자리가 어긋나면 「0인 것」과 「안 내는 것」이 같아 보인다.**
+        //   관문을 늘려 놓고 표에 안 실은 자리가 실제로 있었다(예산 계수 — 실측 20260912).
+        let c = Counters {
+            nack_budget: 7,
+            nack_build: 3,
+            pli_orphan: 5,
+            sim_pending_expired: 2,
+            ..Default::default()
+        };
+        let d = c.drops();
+        for (k, want) in
+            [("nack_budget", 7), ("nack_build", 3), ("pli_orphan", 5), ("sim_pending_expired", 2)]
+        {
+            assert_eq!(d.get(k).and_then(|v| v.as_u64()), Some(want), "{k} 가 표에 없다");
+        }
+    }
+
+    #[test]
+    fn 버림_표는_흐른_수를_안_섞는다() {
+        // ★섞으면 *"무엇이 버려졌나"* 가 묻힌다 — 이 표의 이름이 곧 계약이다.
+        let c = Counters {
+            srtp_in: 10_000,
+            srtp_out: 9_000,
+            rtcp_out: 100,
+            probe_out: 50,
+            ..Default::default()
+        };
+        let d = c.drops();
+        for k in ["srtp_in", "srtp_out", "rtcp_out", "probe_out", "twcc_fb_out"] {
+            assert!(d.get(k).is_none(), "{k} 는 버린 것이 아니다");
+        }
+        // 버린 것이 하나도 없으면 값은 전부 0이다 — ★표 자체는 선다(빈 표를 내지 않는다).
+        assert!(d.as_object().expect("객체").values().all(|v| v.as_u64() == Some(0)));
     }
 }

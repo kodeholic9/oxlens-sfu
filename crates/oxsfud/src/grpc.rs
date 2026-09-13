@@ -316,6 +316,18 @@ impl SfuService for Sfu {
         }))
     }
 
+    /// 운영 §3-5 — ★**세기만 하고 안 보이면 안 센 것과 같다.** 그 자리를 여는 손잡이다.
+    async fn drops(
+        &self,
+        _req: Request<common::b::RoomKey>,
+    ) -> Result<Response<common::b::DropReply>, Status> {
+        let node = self.node.lock().await;
+        Ok(Response::new(common::b::DropReply {
+            sfu_id: node.epoch.clone(),
+            counts: node.counts.load().drops().to_string(),
+        }))
+    }
+
     type SubscribeStream = tokio_stream::wrappers::ReceiverStream<Result<Envelope, Status>>;
 
     /// ★**sfud 가 직접 낸다** — hub 가 재발행하지 않는다(정§15-4).

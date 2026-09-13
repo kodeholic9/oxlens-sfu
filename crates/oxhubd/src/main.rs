@@ -147,7 +147,9 @@ async fn run(args: Args) -> Result<(), String> {
         .route("/admin/supervisor/stop/:id", axum::routing::post(sup_stop))
         .route("/admin/supervisor/kill/:id", axum::routing::post(sup_kill))
         .route("/admin/supervisor/shutdown", axum::routing::post(sup_shutdown))
+        .route("/admin/drops", get(admin_drops))
         .route("/admin/sfus", get(admin_sfus))
+        .route("/admin/sfus/:sfu_id/rooms", get(admin_sfu_rooms))
         .route("/admin/snapshot", get(admin_snapshot))
         .with_state(hub.clone());
 
@@ -740,6 +742,80 @@ async fn admin_sfus(
         })
         .collect();
     Ok(Json(serde_json::json!({ "sfus": sfus, "supervising": !sup.units.is_empty() })))
+}
+
+/// 운영 §3-5 — ★**유닛마다 따로 낸다.** 합치면 어느 유닛인지 잃는다.
+///
+/// ★**못 닿은 노드는 `error` 를 적는다**(§2) — 빈 칸으로 두면 *"버린 게 없다"* 로 읽힌다.
+async fn admin_drops(
+    State(hub): State<Shared>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<oxsig::Failure>)> {
+    authz::admin(&hub.resolved.system, now_ms() / 1000, &peer_of(addr, &headers)).map_err(fail)?;
+    let units: Vec<(String, String)> = hub
+        .resolved
+        .system
+        .units
+        .iter()
+        .filter(|u| u.role == "sfu" && !u.addr.is_empty())
+        .map(|u| (u.id.clone(), u.addr.clone()))
+        .collect();
+    let mut rows = Vec::with_capacity(units.len());
+    for (id, addr) in units {
+        let got = match b_client(&addr).await {
+            Some(mut c) => c.drops(common::b::RoomKey::default()).await.ok(),
+            None => None,
+        };
+        match got {
+            Some(v) => {
+                let v = v.into_inner();
+                let mut row = serde_json::json!({ "sfu_id": id, "epoch": v.sfu_id });
+                if let (Some(m), Ok(serde_json::Value::Object(c))) =
+                    (row.as_object_mut(), serde_json::from_str::<serde_json::Value>(&v.counts))
+                {
+                    for (k, n) in c {
+                        m.insert(k, n);
+                    }
+                }
+                rows.push(row);
+            }
+            // ★**「못 물어봤다」와 「0」을 가른다** — 그 구분이 이 표의 값이다.
+            None => rows.push(serde_json::json!({ "sfu_id": id, "error": 5001 })),
+        }
+    }
+    Ok(Json(serde_json::json!({ "units": rows })))
+}
+
+/// 운영 §3-7 — ★**노드를 내리기 전에 무엇이 딸려 죽는지 보는 자리**다.
+async fn admin_sfu_rooms(
+    State(hub): State<Shared>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    axum::extract::Path(sfu_id): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<oxsig::Failure>)> {
+    authz::admin(&hub.resolved.system, now_ms() / 1000, &peer_of(addr, &headers)).map_err(fail)?;
+    reconcile_rooms(&hub).await;
+    let ids: Vec<String> = { hub.rooms.lock().await.iter().map(|r| r.id.clone()).collect() };
+    let mut rows = Vec::new();
+    for id in &ids {
+        if sfu_of_room(&hub, id).await.as_deref() != Some(sfu_id.as_str()) {
+            continue;
+        }
+        let view = { hub.rooms.lock().await.view(id) };
+        let members = view
+            .as_ref()
+            .and_then(|v| v.get("participants"))
+            .and_then(|v| v.as_array())
+            .map(|a| a.len());
+        let mut row = serde_json::json!({ "room_id": id });
+        // ★현황을 아직 못 받았으면 그 필드가 없다 — `0` 으로 메우지 않는다.
+        if let (Some(m), Some(n)) = (row.as_object_mut(), members) {
+            m.insert("members".into(), serde_json::json!(n));
+        }
+        rows.push(row);
+    }
+    Ok(Json(serde_json::json!({ "sfu_id": sfu_id, "total": rows.len(), "rooms": rows })))
 }
 
 async fn admin_snapshot(

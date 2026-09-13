@@ -105,6 +105,8 @@ pub struct Node {
     health: std::collections::BTreeMap<String, crate::reaper::Health>,
     /// ★**데이터 평면이 건네 주는 「내보낸 수」**(정§14-3) — 정체 판정의 유일한 재료다.
     pub egress: Arc<crate::transport::udp::EgressView>,
+    /// ★**데이터 평면이 건네 주는 계수 사본**(운영 §3-5) — 버림 사유 조회가 읽는다.
+    pub counts: Arc<crate::transport::udp::CountersView>,
     /// 구독 스트림마다의 정체 앵커 — `(받는 자격, egress ssrc)` → `(그때 계수, 그때 시각)`.
     stall_anchor: std::collections::BTreeMap<(String, u32), (u64, u64)>,
     /// ★**같은 (사람, 방) 재통보 쿨다운**(정§14-3 `T-stall`) — 폭풍을 막는다.
@@ -127,6 +129,7 @@ impl Node {
             ice: Arc::new(IceTable::new()),
             health: std::collections::BTreeMap::new(),
             egress: Arc::new(crate::transport::udp::EgressView::default()),
+            counts: Arc::new(crate::transport::udp::CountersView::default()),
             stall_anchor: std::collections::BTreeMap::new(),
             stall_sent: std::collections::BTreeMap::new(),
         }

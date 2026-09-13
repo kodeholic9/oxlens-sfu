@@ -24,6 +24,14 @@ service SfuService {
   rpc Ops(OpsRequest) returns (OpsReply);
   // 운영 조회 — 그 방의 **정본** 상세(정§3-6: hub 사본이 아니다).
   rpc RoomSnapshot(RoomKey) returns (RoomView);
+  // ★**사유별 버림 계수**(운영 §3-5) — 유닛마다 따로 낸다(합치면 어느 유닛인지 잃는다).
+  rpc Drops(RoomKey) returns (DropReply);
+}
+
+message DropReply {
+  string sfu_id = 1;
+  // 사유 → 수. JSON 객체 한 줄(사유가 늘어도 proto 를 안 고친다).
+  string counts = 2;
 }
 
 message RoomKey {
