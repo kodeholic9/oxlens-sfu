@@ -188,6 +188,14 @@ fn fail(header: Header, code: Code) -> Vec<u8> {
     out
 }
 
+/// 사유에 ★**상세를 실어** 거절한다 — 거절만 하면 클라가 찍어 보며 배운다.
+fn fail_with(header: Header, code: Code, details: serde_json::Value) -> Vec<u8> {
+    let b = serde_json::to_vec(&Failure::new(code).with_details(details)).unwrap_or_default();
+    let mut out = Vec::with_capacity(frame::HEADER_LEN + b.len());
+    frame::encode(&mut out, Header { kind: FrameKind::Fail, ..header }, &b);
+    out
+}
+
 fn json(v: &impl serde::Serialize) -> Vec<u8> {
     serde_json::to_vec(v).unwrap_or_default()
 }
@@ -938,6 +946,29 @@ fn publish_tracks(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -
 ///
 /// ★**검사를 먼저 다 하고 그다음에 담는다** — 담으면서 검사하면 뒤엣것이 틀렸을 때
 /// 앞엣것이 이미 들어가 있다(되돌리는 코드가 또 필요해지고, 그 코드가 빠진다).
+/// 그 Peer 에게 ★**서버가 발급한 받기 SSRC 전부** — 슬롯과 가상(vssrc)이다.
+///
+/// ★**발행자 제 것은 안 센다** — 자기 스트림은 제 것이라 겹칠 수가 없다.
+fn recv_ssrcs(node: &Node, session_id: &str) -> std::collections::BTreeSet<u32> {
+    let mut out = std::collections::BTreeSet::new();
+    let Some(peer) = node.peers.get(session_id) else { return out };
+    for r in &peer.sub_rooms {
+        if let Some(room) = node.rooms.get(r) {
+            out.insert(room.slot_audio_ssrc);
+        }
+    }
+    for p in node.publications.iter().filter(|p| p.session_id != session_id) {
+        // 그 사람이 받을 자리를 잡아 둔 것만 — 배정이 없으면 받는 것이 아니다.
+        if peer.assigns.contains_key(&p.track_id) {
+            out.insert(p.vssrc.unwrap_or(p.ssrc));
+            if let Some(r) = p.rtx_ssrc {
+                out.insert(r);
+            }
+        }
+    }
+    out
+}
+
 fn publish_add(node: &mut Node, ing: &Ingress, header: Header, req: &PublishTracksReq) -> Outcome {
     let none = Vec::new();
     if req.tracks.is_empty() {
@@ -946,6 +977,23 @@ fn publish_add(node: &mut Node, ing: &Ingress, header: Header, req: &PublishTrac
     let active = node.publications.iter().filter(|p| p.user_id == ing.user_id).count();
     if req.tracks.len() > PER_REQUEST_MAX || active + req.tracks.len() > PER_USER_MAX {
         return Outcome { reply: fail(header, Code::TrackLimit), notices: none, ..Default::default() };
+    }
+    // ★★**`1pc` 은 한 BUNDLE 이라 SSRC 공간이 하나다**(연§9-10) — 발행 SSRC 가
+    //   ★**그 Peer 에게 발급한 받기 SSRC** 와 겹치면 받는 쪽이 제 것과 남의 것을 못 가른다.
+    //   ★`2pc` 는 연결이 갈려 있어 검사하지 않는다(정§6-2 3-2).
+    if ing.pc_mode == PcMode::One {
+        let mine = recv_ssrcs(node, &ing.session_id);
+        if let Some(hit) = req
+            .tracks
+            .iter()
+            .flat_map(|t| [Some(t.ssrc), t.rtx_ssrc])
+            .flatten()
+            .find(|s| *s != 0 && mine.contains(s))
+        {
+            // ★**어느 값이 걸렸는지 같이 준다** — 클라는 새 트랜시버로 재발행한다(연§6-3).
+            let out = fail_with(header, Code::SsrcCollision, serde_json::json!({ "ssrc": hit }));
+            return Outcome { reply: out, notices: none, ..Default::default() };
+        }
     }
     for t in &req.tracks {
         // ★`pt`·`ssrc`·`mid` 미신고는 `1003` — audio 도 예외가 아니다(폴백은 무음을 조용히 만든다).
@@ -963,11 +1011,11 @@ fn publish_add(node: &mut Node, ing: &Ingress, header: Header, req: &PublishTrac
                 .is_some_and(|c| SUPPORTED_VIDEO.iter().any(|s| s.eq_ignore_ascii_case(c)));
             if !ok {
                 // ★**무엇이 되는지 같이 준다** — 거절만 하면 클라가 찍어 보며 배운다.
-                let f = Failure::new(Code::CodecRequired)
-                    .with_details(serde_json::json!({ "supported": SUPPORTED_VIDEO }));
-                let b = serde_json::to_vec(&f).unwrap_or_default();
-                let mut out = Vec::with_capacity(frame::HEADER_LEN + b.len());
-                frame::encode(&mut out, Header { kind: FrameKind::Fail, ..header }, &b);
+                let out = fail_with(
+                    header,
+                    Code::CodecRequired,
+                    serde_json::json!({ "supported": SUPPORTED_VIDEO }),
+                );
                 return Outcome { reply: out, notices: none, ..Default::default() };
             }
         }
@@ -1797,5 +1845,87 @@ mod stall_tests {
         let one = got.first().expect("하나");
         assert_eq!(one.target.as_deref(), Some("u-sub"), "★unicast 다");
         assert_eq!(one.room_id, ROOM);
+    }
+}
+
+#[cfg(test)]
+mod ssrc_collision_tests {
+    use super::*;
+    use crate::room::Member;
+
+    fn node_with(mode: PcMode) -> (Node, String) {
+        let mut n = Node::new(
+            "e".into(),
+            Dtls::bake().expect("자가서명"),
+            "127.0.0.1".into(),
+            1,
+            0,
+        );
+        let ttl = crate::room::Ttl { unused_secs: None, departure_secs: None };
+        n.rooms.create("r1".into(), "r1".into(), 10, ttl, 0);
+        let e = n.peers.ensure("s-1", "u1", mode);
+        n.peers.at_mut(e.idx).sub_rooms.push("r1".into());
+        n.rooms
+            .get_mut("r1")
+            .expect("방")
+            .join(Member {
+                session_id: "s-1".into(),
+                user_id: "u1".into(),
+                hidden: false,
+                participant_type: 0,
+                role: 255,
+                select: true,
+                metadata: None,
+            })
+            .expect("입장");
+        let slot = n.rooms.get("r1").expect("방").slot_audio_ssrc;
+        (n, format!("{slot}"))
+    }
+
+    fn publish(n: &mut Node, mode: PcMode, ssrc: u32) -> oxsig::Failure {
+        let ing = Ingress {
+            now: 0,
+            session_id: "s-1".into(),
+            user_id: "u1".into(),
+            participant_type: 0,
+            hidden: false,
+            metadata: None,
+            pc_mode: mode,
+        };
+        let body = serde_json::json!({
+            "action": "add",
+            "room_id": "r1",
+            "tracks": [{ "kind": "audio", "mid": "0", "ssrc": ssrc, "pt": 111 }],
+        });
+        let h = Header::new(FrameKind::Request, Op::PublishTracks, 1);
+        let out = dispatch(n, &ing, h, &serde_json::to_vec(&body).expect("직렬화"));
+        let (_, b) = frame::decode(&out.reply).expect("프레임");
+        serde_json::from_slice(b).unwrap_or_else(|_| Failure::new(Code::UnknownOp))
+    }
+
+    #[test]
+    fn onepc_는_받기_ssrc_와_겹치면_거절한다() {
+        // ★한 BUNDLE 은 SSRC 공간 하나다 — 겹치면 받는 쪽이 제 것과 남의 것을 못 가른다.
+        let (mut n, slot) = node_with(PcMode::One);
+        let slot: u32 = slot.parse().expect("수");
+        let f = publish(&mut n, PcMode::One, slot);
+        assert_eq!(f.code, Code::SsrcCollision.as_u16());
+        // ★**어느 값이 걸렸는지 같이 준다** — 클라는 그것을 보고 새 트랜시버로 재발행한다.
+        assert_eq!(f.details.and_then(|d| d.get("ssrc").and_then(|v| v.as_u64())), Some(slot as u64));
+    }
+
+    #[test]
+    fn twopc_는_검사하지_않는다() {
+        // ★연결이 갈려 있어 공간이 둘이다 — 같은 값이어도 겹치는 것이 아니다.
+        let (mut n, slot) = node_with(PcMode::Two);
+        let f = publish(&mut n, PcMode::Two, slot.parse().expect("수"));
+        assert_ne!(f.code, Code::SsrcCollision.as_u16(), "★2pc 를 막으면 정상 발행이 죽는다");
+    }
+
+    #[test]
+    fn 안_겹치면_지나간다() {
+        let (mut n, _) = node_with(PcMode::One);
+        let f = publish(&mut n, PcMode::One, 0xDEAD_BEEF);
+        assert_ne!(f.code, Code::SsrcCollision.as_u16());
     }
 }
