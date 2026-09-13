@@ -95,6 +95,17 @@ fn fingerprint_of(der: &[u8]) -> String {
     format!("sha-256 {}", hex.join(":"))
 }
 
+/// ★**서버가 선언하는 번호 — 발행자 신고가 없을 때의 폴백**이다(연§6-3).
+///
+/// ★**표와 여기가 갈리면 조용히 안 읽힌다** — 그래서 아래 시험이 둘을 견준다.
+pub mod ext {
+    /// `sdes:mid` — ★**스트림을 지목한다**(어느 카메라·화면공유냐).
+    pub const MID: u8 = 1;
+    /// `sdes:rtp-stream-id` — ★**단을 지목한다**(`h`/`l`).
+    pub const RID: u8 = 10;
+    pub const TWCC: u8 = 6;
+}
+
 /// 서버가 선언하는 확장 번호(연§6-2 표). ★**여섯 고정**이다.
 pub fn extmap() -> Vec<ExtmapEntry> {
     [
@@ -157,5 +168,14 @@ mod tests {
     #[test]
     fn 확장_번호는_여섯_고정이다() {
         assert_eq!(extmap().iter().map(|e| e.id).collect::<Vec<_>>(), vec![1, 4, 5, 6, 10, 11]);
+        // ★**폴백 상수가 선언 표와 같아야 한다** — 갈리면 신고 없는 클라의 패킷이
+        //   ★**조용히 안 읽힌다**(빨강이 아니라 무증상이다).
+        let by_uri = |u: &str| extmap().into_iter().find(|e| e.uri == u).map(|e| e.id);
+        assert_eq!(by_uri("urn:ietf:params:rtp-hdrext:sdes:mid"), Some(ext::MID));
+        assert_eq!(by_uri("urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id"), Some(ext::RID));
+        assert_eq!(
+            by_uri("http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01"),
+            Some(ext::TWCC)
+        );
     }
 }

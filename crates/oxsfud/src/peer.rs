@@ -85,6 +85,25 @@ pub struct Peer {
     ///
     /// ★**부분 갱신이다** — 생략한 축은 안 바꾼다. 그래서 값이 아니라 **표**를 들고 있는다.
     pub layers: BTreeMap<String, LayerCap>,
+    /// ★**이 발행자가 협상해 온 확장 번호**(연§6-3) — 신고가 없으면 서버 선언값이다.
+    ///
+    /// ★**전송로마다 다를 수 있다** — 상수로 박아 두면 다른 번호로 협상한 클라의 패킷을
+    /// ★**조용히 못 읽는다**(빨강이 아니라 무증상이다).
+    pub ext: ExtIds,
+}
+
+/// 읽을 확장의 번호 둘. ★**둘이 답하는 물음이 다르다**(`rtpext` 머리말) —
+/// `mid` 는 **어느 스트림이냐**, `rid` 는 **어느 단이냐**.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExtIds {
+    pub mid: u8,
+    pub rid: u8,
+}
+
+impl Default for ExtIds {
+    fn default() -> Self {
+        Self { mid: crate::identity::ext::MID, rid: crate::identity::ext::RID }
+    }
 }
 
 /// 한 트랙에 건 상한. ★**`paused` 는 레이어 값이 아니다** — 다른 축이다(연§6-3).
@@ -112,6 +131,7 @@ impl Peer {
             ready_at: None,
             camera_at: None,
             layers: BTreeMap::new(),
+            ext: ExtIds::default(),
         }
     }
 

@@ -6,8 +6,18 @@
 //! ★★**등록 항목은 `rid` 를 안 싣는다**(연§6-3) — 논리 스트림 하나이고, 서버는 ★**RTP 의
 //! rid 확장으로 단을 배운다.** 그래서 이 읽개가 없으면 시뮬캐스트가 통째로 성립하지 않는다.
 //!
-//! ★**실측 전제**: 브라우저는 rid 를 **매 패킷** 싣고 mid 는 첫 몇 장에만 싣는다 — 그래서
-//! 분류는 ★**rid 단독 경로**가 정본이다(mid 로 가르는 길에 기대면 그 뒤 패킷을 못 가른다).
+//! ★**실측 전제**: 브라우저는 rid 를 **매 패킷** 싣고 mid 는 첫 몇 장에만 싣는다.
+//!
+//! ★★**그래서 둘이 답하는 물음이 다르다** — 이 구분을 놓쳐 ★**한 전송로에 시뮬캐스트
+//! 스트림 하나**라는 제약이 구판부터 이월돼 있었다(20260913 규명).
+//!
+//! | 축 | 무엇을 묻나 | 무엇으로 답하나 | 언제 |
+//! |---|---|---|---|
+//! | **단** | 이 패킷이 `h` 냐 `l` 이냐 | ★`rid` — 매 패킷 | 패킷마다 |
+//! | **스트림** | 이 ssrc 가 카메라냐 화면공유냐 | ★`mid` — 등록 신고값과 같은 축 | ★**그 ssrc 를 처음 본 한 번** |
+//!
+//! ★**mid 가 첫 몇 장에만 실리는 것이 스트림 축에는 문제가 안 된다** — 결합은 한 번이면
+//! 끝이고, 그 한 장을 놓치면 ★**지어내지 않고 버린 뒤 다음 패킷에 다시 묻는다.**
 
 /// 한 바이트 형 확장의 표식(RFC 8285 §4.2).
 const ONE_BYTE: u16 = 0xBEDE;
@@ -84,6 +94,14 @@ pub fn get(pkt: &[u8], id: u8) -> Option<&[u8]> {
 
 /// `rid` 값(RFC 8852) — 문자열이다.
 pub fn rid(pkt: &[u8], id: u8) -> Option<&str> {
+    std::str::from_utf8(get(pkt, id)?).ok()
+}
+
+/// `mid` 값(RFC 8843 §15) — ★**등록 신고값과 같은 축**이라 스트림을 지목한다.
+///
+/// ★**한 전송로에 시뮬캐스트 스트림이 둘 이상일 때 갈 곳을 정하는 유일한 재료**다
+/// (`rid` 는 `h`/`l` 이라 어느 스트림인지 말해 주지 않는다).
+pub fn mid(pkt: &[u8], id: u8) -> Option<&str> {
     std::str::from_utf8(get(pkt, id)?).ok()
 }
 
@@ -167,6 +185,31 @@ mod tests {
     #[test]
     fn 모르는_rid_이름은_단이_아니다() {
         assert_eq!(spatial_of("m"), None, "★지어낸 인덱스로 단을 고르면 엉뚱한 화질이 간다");
+    }
+
+    #[test]
+    fn mid_는_스트림을_지목한다() {
+        // ★★`rid` 는 `h`/`l` 이라 **어느 스트림인지** 못 말한다 — 한 전송로에 시뮬캐스트
+        //   둘이면 그 물음의 답이 `mid` 뿐이다(20260913: 구판부터 이월된 제약의 뿌리).
+        let p = with_one_byte(1, b"2");
+        assert_eq!(mid(&p, 1), Some("2"));
+        // ★번호가 다르면 없는 것이다 — 남의 값을 스트림 이름으로 쓰지 않는다.
+        assert_eq!(mid(&p, 3), None);
+    }
+
+    #[test]
+    fn 단과_스트림은_한_패킷에서_같이_읽힌다() {
+        // ★실제 형상 — 브라우저는 새 ssrc 의 첫 장에 mid 와 rid 를 같이 싣는다.
+        let mut p = vec![0x90, 96, 0, 1, 0, 0, 0, 0, 0, 0, 0, 7];
+        p.extend_from_slice(&ONE_BYTE.to_be_bytes());
+        let body: Vec<u8> = vec![(1 << 4), b'2', (10 << 4), b'h'];
+        let words = body.len().div_ceil(4);
+        p.extend_from_slice(&(words as u16).to_be_bytes());
+        p.extend_from_slice(&body);
+        p.resize(p.len() + (words * 4 - body.len()), 0);
+        p.extend_from_slice(b"payload");
+        assert_eq!(mid(&p, 1), Some("2"));
+        assert_eq!(rid(&p, 10).and_then(spatial_of), Some(1));
     }
 }
 
@@ -273,4 +316,5 @@ mod stamp_tests {
         // ★칸이 두 개로 늘지 않는다 — 늘면 읽는 쪽이 어느 것을 볼지 갈린다.
         assert_eq!(twice.len(), once.len());
     }
+
 }

@@ -70,7 +70,15 @@ pub enum Cmd {
     ///
     /// ★**코덱도 같이 온다** — 단 전환이 서는 자리가 키프레임이고(정§10-2), 그 판정기는
     /// ★**코덱을 알아야 고른다**(모른 채 둘 다 돌리면 엉뚱한 쪽이 답한다, `keyframe` 모듈).
-    SetSimulcast { ufrag: String, vssrc: u32, codec: Option<crate::keyframe::Codec> },
+    /// ★★**`mid` 가 같이 온다** — 한 전송로에 시뮬캐스트 스트림이 둘 이상일 수 있고
+    /// (카메라 + 화면공유, 정§6-2), `rid` 는 `h`/`l` 이라 ★**어느 스트림인지 안 말한다.**
+    SetSimulcast {
+        ufrag: String,
+        mid: String,
+        vssrc: u32,
+        codec: Option<crate::keyframe::Codec>,
+        ext: crate::peer::ExtIds,
+    },
 }
 
 /// DC 로 들어온 것 — ★**판정은 제어 평면이 한다**(여기는 나르기만).
@@ -248,8 +256,6 @@ const REPORT_MS: u64 = 30_000;
 /// ★발행자에게 RR 을 내는 주기(정§11-2) — ★**소비자는 타이머 하나다.**
 const RR_MS: u64 = 1_000;
 
-/// 서버가 선언하는 rid 확장 번호(`identity::extmap`) — 발행자 신고가 없으면 이 값이다.
-const RID_EXT_ID: u8 = 10;
 /// 서버가 선언하는 transport-cc 번호 — ★**구독자는 이 번호로 받는 m-line 을 짓는다.**
 const TWCC_EXT_ID: u8 = 6;
 
@@ -288,7 +294,24 @@ pub async fn serve(
     let mut stats: HashMap<(String, u32), crate::rtcp::RecvStats> = HashMap::new();
     // ★시뮬캐스트 — `발행 자격 → vssrc` 는 제어 평면이 알려 주고,
     //   `들어온 ssrc → (vssrc, 단)` 은 rid 로 ★**배운다**(정§10-1).
-    let mut sim_of: HashMap<String, u32> = HashMap::new();
+    //   ★★**이 둘은 역할이 다르다 — 찾는 표와 등록표다.**
+    //
+    //   | 표 | 무엇 | 키 | 언제 보나 |
+    //   |---|---|---|---|
+    //   | `layer_of` | ★**찾는 표** — 실 ssrc → `(vssrc, 단)` | ★**ssrc** | ★매 패킷 |
+    //   | `vssrc_by_mid` | ★**등록표** — 제어 평면이 신고한 스트림 자리 | mid | ★그 ssrc 를 **처음 볼 때 한 번** |
+    //
+    //   ★**등록표를 ssrc 로 키잡을 수 없다** — 시뮬캐스트는 `ssrc: 0` 으로 신고하는 것이
+    //   규격이라(연§6-3, SDP 에 `a=ssrc` 가 없다) ★**등록 시점에 단별 ssrc 를 모른다.**
+    //   그래서 배워야 하고, 배울 때 물어볼 상대가 이 표다.
+    //
+    //   ★**키가 `mid` 인 까닭** — 한 사람이 카메라와 화면공유를 둘 다 시뮬캐스트로 올릴 수
+    //   있고(정§6-2 `source` 닫힌 집합), `rid` 는 `h`/`l` 이라 ★**어느 스트림인지 못 말한다.**
+    //   전송로만 키로 두면 ★**뒤엣것이 앞엣것을 덮어 앞 스트림이 통째로 사라진다**
+    //   — 구판부터 이월된 제약이었다(20260913 규명).
+    let mut vssrc_by_mid: HashMap<(String, String), u32> = HashMap::new();
+    //   ★그 전송로가 협상해 온 확장 번호 — 상수로 박으면 다른 번호의 클라를 못 읽는다.
+    let mut ext_of: HashMap<String, crate::peer::ExtIds> = HashMap::new();
     let mut layer_of: HashMap<(String, u32), (u32, u8)> = HashMap::new();
     // ★**구독자마다 지금 내보내는 단** — 키가 `(받는 자격, vssrc)` 다.
     //   상한은 사람마다 다르므로 스트림 하나에 값 하나를 두면 남의 상한이 내 화질을 깎는다.
@@ -387,7 +410,7 @@ pub async fn serve(
                 counts.store(Arc::new(c));
                 // ★**판정도 1초 한 번이다**(정§10-3 tick 1,000ms) — 타이머를 또 두지 않는다.
                 downlink_tick(
-                    now, &mut down, &routes, &sim_of, &layer_of, &mut sim_out, &mut pli_at,
+                    now, &mut down, &routes, &vssrc_by_mid, &layer_of, &mut sim_out, &mut pli_at,
                     &mut srtp, &table, &socket, &mut c,
                 )
                 .await;
@@ -448,7 +471,8 @@ pub async fn serve(
                             egress.retain(|(f, _), _| f != u);
                             routes.retain(|(f, _), _| f != u);
                             layer_of.retain(|(f, _), _| f != u);
-                            sim_of.remove(u);
+                            vssrc_by_mid.retain(|(f, _), _| f != u);
+                            ext_of.remove(u);
                             sim_out.retain(|(f, _), _| f != u);
                             codec_of.remove(u);
                             pli_at.retain(|(f, _), _| f != u);
@@ -473,14 +497,17 @@ pub async fn serve(
                             let _ = p.dc.try_send(wire);
                         }
                     }
-                    Cmd::SetSimulcast { ufrag, vssrc, codec } => {
+                    Cmd::SetSimulcast { ufrag, mid, vssrc, codec, ext } => {
                         if let Some(cd) = codec {
                             codec_of.insert(ufrag.clone(), cd);
                         }
+                        ext_of.insert(ufrag.clone(), ext);
                         // ★★**재발행이면 배운 것을 버린다.** 브라우저는 같은 단 SSRC 를 다시
                         //   쓸 수 있는데, 옛 `vssrc` 로 배워 둔 지도가 남아 있으면 새 패킷이
                         //   ★**이미 지워진 길로 가서 조용히 사라진다**(실측 20260912).
-                        if let Some(old) = sim_of.insert(ufrag.clone(), vssrc)
+                        //   ★**그 자리를 `(전송로, mid)` 로 짚는다** — 전송로만 보고 지우면
+                        //   ★**같은 사람의 다른 스트림**(화면공유)까지 함께 지워진다.
+                        if let Some(old) = vssrc_by_mid.insert((ufrag.clone(), mid.clone()), vssrc)
                             && old != vssrc
                         {
                             layer_of.retain(|(f, _), (v, _)| f != &ufrag || *v != old);
@@ -613,22 +640,34 @@ pub async fn serve(
                         .on_rtp(seq, ts, now);
                 }
                 // ★**시뮬캐스트는 들어온 ssrc 가 곧 스트림이 아니다** — 단마다 다르다.
-                //   rid 로 배워서 vssrc 로 합치고, 지금 고른 단만 내보낸다.
+                //   ★**찾는 것은 `layer_of`(ssrc 키)이고**, 거기 없을 때만 등록표에 묻는다.
                 let mut out_ssrc = ssrc;
                 let mut sim_spatial: Option<u8> = None;
                 // ★★**이미 아는 ssrc 는 그 스트림 것이다** — 같은 발행자가 audio 와 시뮬캐스트
                 //   video 를 같이 올리므로, 자격만 보고 시뮬캐스트 갈래로 보내면 ★**audio 가
                 //   rid 가 없다는 이유로 통째로 버려진다**(실측 20260912: 468 중 1 만 도착).
                 //   갈래를 가르는 것은 자격이 아니라 ★**그 ssrc 를 아는가**다.
-                if !routes.contains_key(&(ufrag.clone(), ssrc))
-                    && let Some(&vssrc) = sim_of.get(&ufrag)
-                {
+                let has_sim = vssrc_by_mid.keys().any(|(f, _)| f == &ufrag);
+                if !routes.contains_key(&(ufrag.clone(), ssrc)) && has_sim {
+                    let ext = ext_of.get(&ufrag).copied().unwrap_or_default();
                     let known = layer_of.get(&(ufrag.clone(), ssrc)).copied();
                     let (v, spatial) = match known {
                         Some(v) => v,
                         None => {
-                            // ★rid 가 없으면 단을 모른다 — 지어내지 않고 버린다.
-                            let Some(spatial) = crate::rtpext::rid(&plain, RID_EXT_ID)
+                            // ★★**두 물음을 따로 묻는다**(`rtpext` 머리말) —
+                            //   ★`mid` = **어느 스트림이냐**(카메라냐 화면공유냐),
+                            //   ★`rid` = **어느 단이냐**(`h`/`l`).
+                            //   ★둘 중 하나라도 없으면 ★**지어내지 않고 버린다** — 결합은
+                            //   그 ssrc 를 처음 본 한 번이면 끝이고, 이 장을 놓쳐도
+                            //   ★**다음 장이 다시 묻는다**(브라우저는 새 ssrc 의 첫 장들에 싣는다).
+                            let Some(vssrc) = crate::rtpext::mid(&plain, ext.mid)
+                                .and_then(|m| vssrc_by_mid.get(&(ufrag.clone(), m.to_string())))
+                                .copied()
+                            else {
+                                c.sim_unknown += 1;
+                                continue;
+                            };
+                            let Some(spatial) = crate::rtpext::rid(&plain, ext.rid)
                                 .and_then(crate::rtpext::spatial_of)
                             else {
                                 c.sim_unknown += 1;
@@ -995,7 +1034,7 @@ async fn downlink_tick(
     now: u64,
     down: &mut HashMap<String, Downlink>,
     routes: &HashMap<(String, u32), Vec<Target>>,
-    sim_of: &HashMap<String, u32>,
+    vssrc_by_mid: &HashMap<(String, String), u32>,
     layer_of: &HashMap<(String, u32), (u32, u8)>,
     sim_out: &mut HashMap<(String, u32), Forward>,
     pli_at: &mut HashMap<(String, u32), u64>,
@@ -1009,7 +1048,9 @@ async fn downlink_tick(
     // 그 구독자가 받는 ★시뮬캐스트 스트림만 모은다 — 아닌 사람은 비용이 이 훑기뿐이다.
     let mut per_sub: HashMap<String, Vec<SimSub>> = HashMap::new();
     for ((pub_u, ssrc), targets) in routes {
-        if sim_of.get(pub_u) != Some(ssrc) {
+        // ★**그 전송로의 시뮬캐스트 스트림 전부를 본다** — 하나만 보면 같은 사람의
+        //   화면공유가 자동 레이어 판정에서 통째로 빠진다.
+        if !vssrc_by_mid.iter().any(|((f, _), v)| f == pub_u && v == ssrc) {
             continue;
         }
         for t in targets {

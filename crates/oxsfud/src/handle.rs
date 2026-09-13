@@ -85,8 +85,26 @@ pub struct Outcome {
     pub notices: Vec<Notice>,
     /// ★**전달표 갱신** — 제어 평면이 계산해 데이터 평면에 밀어 넣는다(핫패스 규율 H2).
     pub routes: Vec<RouteSet>,
-    /// 시뮬캐스트 등록 `(발행 자격, vssrc)`.
-    pub sims: Vec<(String, u32, String)>,
+    /// 시뮬캐스트 등록 — ★**스트림마다 한 줄**이다.
+    pub sims: Vec<SimReg>,
+}
+
+/// 시뮬캐스트 스트림 하나를 데이터 평면에 알리는 값.
+///
+/// ★★**`mid` 가 이 형의 알맹이다.** 한 전송로에 시뮬캐스트 스트림이 둘 이상일 수 있고
+/// (카메라 + 화면공유 — 정§6-2 `source` 닫힌 집합), `rid` 는 `h`/`l` 이라 ★**어느 스트림인지
+/// 말해 주지 않는다.** 이 값이 없으면 뒤엣것이 앞엣것을 덮어 ★**앞 스트림이 통째로
+/// 사라진다**(구판부터 이월된 제약 — 20260913 규명).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimReg {
+    /// 발행 자격(전송로).
+    pub ufrag: String,
+    /// ★**등록 신고값 그대로** — RTP 의 `mid` 확장과 같은 축이다.
+    pub mid: String,
+    pub vssrc: u32,
+    pub codec: String,
+    /// 그 전송로가 협상해 온 확장 번호.
+    pub ext: crate::peer::ExtIds,
 }
 
 /// 이 유닛이 쥔 것 전부.
@@ -274,15 +292,22 @@ pub fn routes_for_room(node: &Node, room_id: &str) -> Vec<RouteSet> {
 ///
 /// ★**등록 항목이 `rid` 를 안 싣기 때문에**(연§6-3) 데이터 평면이 RTP 로 배워야 하고,
 /// 배울 대상을 알려 주는 것이 이 한 줄이다.
-pub fn simulcast_regs(node: &Node, session_id: &str) -> Vec<(String, u32, String)> {
+pub fn simulcast_regs(node: &Node, session_id: &str) -> Vec<SimReg> {
     let Some(peer) = node.peers.get(session_id) else { return Vec::new() };
     let ufrag = peer.ice.publish_ufrag.clone();
+    let ext = peer.ext;
     node.publications
         .iter()
         .filter(|p| p.session_id == session_id)
         // ★**코덱을 같이 싣는다** — 단 전환의 경계가 키프레임이고, 판정기는 코덱이 고른다.
         .filter_map(|p| {
-            p.vssrc.map(|v| (ufrag.clone(), v, p.codec.clone().unwrap_or_default()))
+            p.vssrc.map(|v| SimReg {
+                ufrag: ufrag.clone(),
+                mid: p.mid.clone(),
+                vssrc: v,
+                codec: p.codec.clone().unwrap_or_default(),
+                ext,
+            })
         })
         .collect()
 }
@@ -1246,6 +1271,16 @@ fn publish_add(node: &mut Node, ing: &Ingress, header: Header, req: &PublishTrac
         made.push(PublishedTrack { mid: t.mid.clone(), track_id });
     }
 
+    // ★★**협상해 온 번호를 여기서 받아 둔다**(연§6-3) — 신고가 없으면 서버 선언값이다.
+    //   ★상수로 박아 두면 다른 번호로 협상한 클라의 패킷을 ★**조용히 못 읽는다.**
+    if let Some(peer) = node.peers.get_mut(&ing.session_id) {
+        if let Some(v) = req.rid_extmap_id {
+            peer.ext.rid = v;
+        }
+        if let Some(v) = req.mid_extmap_id {
+            peer.ext.mid = v;
+        }
+    }
     let notices = announce(node, &made, &req.room_id, &ing.user_id, TrackAction::Add);
     let routes = routes_for_room(node, &req.room_id);
     let sims = simulcast_regs(node, &ing.session_id);
