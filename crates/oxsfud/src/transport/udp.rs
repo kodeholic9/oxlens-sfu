@@ -20,6 +20,13 @@ use tokio::sync::mpsc;
 use super::conn::DemuxConn;
 use super::demux::{classify, Packet};
 use super::dispatch::Dispatch;
+use super::tcp::TcpIn;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Proto {
+    Udp,
+    Tcp,
+}
 use super::ice::{Binding, DropWhy, IceTable};
 use super::dtls;
 
@@ -143,6 +150,8 @@ impl Drop for Pipe {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Counters {
     pub stun_ok: u64,
+    pub tcp_up: u64,
+    pub tcp_oversize: u64,
     pub stun_dropped: u64,
     pub forged: u64,
     pub dtls_in: u64,
@@ -275,6 +284,34 @@ const SERVER_SSRC: u32 = 0x0000_0001;
 
 /// 포트를 열고 루프를 돈다. ★**되돌아오지 않는다** — 태스크로 띄운다.
 #[allow(clippy::too_many_arguments)]
+fn pipe_for(
+    ufrag: &str,
+    by_ufrag: &mut HashMap<String, Arc<Pipe>>,
+    table: &Arc<IceTable>,
+    dispatch: &Dispatch,
+    cert: &dtls::Certificate,
+    cmd_tx: &mpsc::Sender<Cmd>,
+    dc_in: &mpsc::Sender<DcIn>,
+) -> Option<Arc<Pipe>> {
+    if let Some(p) = by_ufrag.get(ufrag) {
+        return Some(p.clone());
+    }
+    let e = table.get(ufrag)?;
+    let (conn, tx) = DemuxConn::new(dispatch.clone(), e.route.clone());
+    let (dc_tx, dc_rx) = mpsc::channel(64);
+    let task = spawn_dtls(conn, cert.clone(), ufrag.to_string(), cmd_tx.clone(), dc_rx, dc_in.clone());
+    let p = Arc::new(Pipe {
+        session_id: e.session_id.clone(),
+        ufrag: ufrag.to_string(),
+        tx,
+        dc: dc_tx,
+        task,
+    });
+    by_ufrag.insert(ufrag.to_string(), p.clone());
+    Some(p)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn serve(
     socket: Arc<UdpSocket>,
     table: Arc<IceTable>,
@@ -286,12 +323,13 @@ pub async fn serve(
     counts: Arc<CountersView>,
     // ★**그 배포의 상한**(정§11-2 REMB) — 우리가 발행자에게 말하는 천장이다.
     max_bitrate_bps: u64,
+    mut tcp_up: mpsc::Receiver<TcpIn>,
 ) {
     // ★**그릇을 하나 잡아 재사용한다** — 데이터그램마다 새로 잡지 않는다(H3).
     let mut buf = vec![0u8; MTU];
     let dispatch = Dispatch::new(socket.clone());
     let mut by_ufrag: HashMap<String, Arc<Pipe>> = HashMap::new();
-    let mut by_addr: HashMap<SocketAddr, Arc<Pipe>> = HashMap::new();
+    let mut by_addr: HashMap<(Proto, SocketAddr), Arc<Pipe>> = HashMap::new();
     // ★이 둘도 이 태스크 혼자 쓴다 — 자물쇠가 없다.
     let mut srtp: HashMap<String, super::srtp::SrtpPair> = HashMap::new();
     // ★키는 `(발행 자격, ssrc)` 다 — 위 `SetRoute` 의 이유와 같다.
@@ -358,12 +396,36 @@ pub async fn serve(
     fb.tick().await;
 
     loop {
-        let (n, from) = tokio::select! {
+        let (n, from, proto) = tokio::select! {
             r = socket.recv_from(&mut buf) => match r {
-                Ok(v) => v,
+                Ok((n, from)) => (n, from, Proto::Udp),
                 Err(e) => {
                     eprintln!("[udp] recv: {e}");
                     continue;
+                }
+            },
+            Some(ev) = tcp_up.recv() => match ev {
+                TcpIn::Identified { ufrag, from } => {
+                    let Some(pipe) = pipe_for(
+                        &ufrag, &mut by_ufrag, &table, &dispatch, &cert, &cmd_tx, &dc_in,
+                    ) else {
+                        continue;
+                    };
+                    by_addr.insert((Proto::Tcp, from), pipe);
+                    c.tcp_up += 1;
+                    continue;
+                }
+                TcpIn::Closed { from } => {
+                    by_addr.remove(&(Proto::Tcp, from));
+                    continue;
+                }
+                TcpIn::Frame { from, bytes } => {
+                    if bytes.len() > buf.len() {
+                        c.tcp_oversize += 1;
+                        continue;
+                    }
+                    buf[..bytes.len()].copy_from_slice(&bytes);
+                    (bytes.len(), from, Proto::Tcp)
                 }
             },
             _ = rr.tick() => {
@@ -565,8 +627,10 @@ pub async fn serve(
                                 }
                             };
                             // ★**옛 주소를 지우고 새 주소를 건다** — 세션은 그대로다(ufrag 가 키다).
-                            by_addr.retain(|_, p| !Arc::ptr_eq(p, &pipe));
-                            by_addr.insert(from, pipe);
+                            by_addr.retain(|(proto, _), p| {
+                                *proto == Proto::Tcp || !Arc::ptr_eq(p, &pipe)
+                            });
+                            by_addr.insert((Proto::Udp, from), pipe);
                         }
                     }
                     Binding::Drop(why) => {
@@ -581,7 +645,7 @@ pub async fn serve(
             Packet::Dtls => {
                 c.dtls_in += 1;
                 // ★**latch 를 지난 주소만 DTLS 를 탄다** — 그 전 것은 아무것도 아니다.
-                if let Some(p) = by_addr.get(&from) {
+                if let Some(p) = by_addr.get(&(proto, from)) {
                     let _ = p.tx.try_send(Bytes::copy_from_slice(&buf[..n]));
                 }
             }
@@ -589,7 +653,7 @@ pub async fn serve(
                 // ★**latch 를 지난 주소만 미디어를 탄다** — 그 전 것은 아무것도 아니다.
                 //   ★**세고 버린다** — 여기가 계수 없는 drop 이면 *"어디서 없어졌나"* 를
                 //   영영 못 짚는다(조용한 drop 금지).
-                let Some(p) = by_addr.get(&from) else {
+                let Some(p) = by_addr.get(&(proto, from)) else {
                     c.no_latch += 1;
                     continue;
                 };

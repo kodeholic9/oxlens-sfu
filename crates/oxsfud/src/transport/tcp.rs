@@ -12,19 +12,32 @@ use super::framing::{frame, Unframer};
 use super::ice::{on_binding, Arrival, Binding, IceTable, TcpHandle};
 use super::udp::now_ms;
 
+#[derive(Debug)]
+pub enum TcpIn {
+    Identified { ufrag: String, from: SocketAddr },
+    Frame { from: SocketAddr, bytes: Bytes },
+    Closed { from: SocketAddr },
+}
+
 pub const IDENTIFY_TIMEOUT: Duration = Duration::from_secs(10);
 
 const READ_CHUNK: usize = 4096;
 const OUTBOUND: usize = 128;
 
-pub async fn serve(listener: TcpListener, table: Arc<IceTable>, identify_timeout: Duration) {
+pub async fn serve(
+    listener: TcpListener,
+    table: Arc<IceTable>,
+    identify_timeout: Duration,
+    up: mpsc::Sender<TcpIn>,
+) {
     loop {
         let Ok((stream, from)) = listener.accept().await else {
             continue;
         };
         let table = table.clone();
+        let up = up.clone();
         tokio::spawn(async move {
-            peer(stream, from, table, identify_timeout).await;
+            peer(stream, from, table, identify_timeout, up).await;
         });
     }
 }
@@ -34,6 +47,7 @@ async fn peer(
     from: SocketAddr,
     table: Arc<IceTable>,
     identify_timeout: Duration,
+    up: mpsc::Sender<TcpIn>,
 ) {
     let _ = stream.set_nodelay(true);
     let (mut rd, mut wr) = stream.into_split();
@@ -67,6 +81,10 @@ async fn peer(
         let mut broken = false;
         while let Some(f) = un.next_frame() {
             if classify(&f) != Packet::Stun {
+                if known.is_some() && up.send(TcpIn::Frame { from, bytes: f }).await.is_err() {
+                    broken = true;
+                    break;
+                }
                 continue;
             }
             let Binding::Respond { wire, ufrag, .. } =
@@ -78,6 +96,10 @@ async fn peer(
                 && let Some(e) = table.get(&ufrag)
             {
                 e.attach_tcp(handle.clone());
+                if up.send(TcpIn::Identified { ufrag: ufrag.clone(), from }).await.is_err() {
+                    broken = true;
+                    break;
+                }
             }
             known = Some(ufrag);
             let Some(out) = frame(&wire) else { continue };
@@ -91,10 +113,11 @@ async fn peer(
         }
     }
 
-    if let Some(ufrag) = known
-        && let Some(e) = table.get(&ufrag)
-    {
-        e.detach_tcp_if(&handle);
+    if let Some(ufrag) = known {
+        if let Some(e) = table.get(&ufrag) {
+            e.detach_tcp_if(&handle);
+        }
+        let _ = up.send(TcpIn::Closed { from }).await;
     }
     drop(handle);
     let _ = writer.await;
@@ -118,10 +141,20 @@ mod tests {
     }
 
     async fn listening(t: Arc<IceTable>, timeout: Duration) -> SocketAddr {
+        let (at, mut rx) = listening_up(t, timeout).await;
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        at
+    }
+
+    async fn listening_up(
+        t: Arc<IceTable>,
+        timeout: Duration,
+    ) -> (SocketAddr, mpsc::Receiver<TcpIn>) {
         let l = TcpListener::bind("127.0.0.1:0").await.expect("바인드");
         let at = l.local_addr().expect("주소");
-        tokio::spawn(async move { serve(l, t, timeout).await });
-        at
+        let (tx, rx) = mpsc::channel(64);
+        tokio::spawn(async move { serve(l, t, timeout, tx).await });
+        (at, rx)
     }
 
     async fn read_one_frame(s: &mut TcpStream) -> Option<Vec<u8>> {
@@ -252,6 +285,46 @@ mod tests {
         }
         assert!(e.tcp().is_none(), "★끊기면 거둔다 — 죽은 길로 보내지 않는다");
         assert!(!e.reachable(), "★보낼 데가 없다");
+    }
+
+    #[tokio::test]
+    async fn 신원_뒤의_비_stun_프레임은_위로_올라간다() {
+        let t = table();
+        let (at, mut up) = listening_up(t, IDENTIFY_TIMEOUT).await;
+        let mut s = TcpStream::connect(at).await.expect("붙는다");
+        s.write_all(&frame(&request("srvufrag", PWD)).expect("씌운다")).await.expect("보낸다");
+        match up.recv().await.expect("통지") {
+            TcpIn::Identified { ufrag, .. } => assert_eq!(ufrag, "srvufrag"),
+            other => panic!("★먼저 신원이다: {other:?}"),
+        }
+        let dtls = [0x16u8, 0xFE, 0xFD, 0x00];
+        s.write_all(&frame(&dtls).expect("씌운다")).await.expect("보낸다");
+        match up.recv().await.expect("프레임") {
+            TcpIn::Frame { bytes, .. } => assert_eq!(&bytes[..], &dtls),
+            other => panic!("★프레임이어야 한다: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn 신원_전의_비_stun_프레임은_안_올린다() {
+        let t = table();
+        let (at, mut up) = listening_up(t, Duration::from_millis(300)).await;
+        let mut s = TcpStream::connect(at).await.expect("붙는다");
+        s.write_all(&frame(&[0x16u8, 0xFE, 0xFD, 0x00]).expect("씌운다")).await.expect("보낸다");
+        let got = tokio::time::timeout(Duration::from_millis(200), up.recv()).await;
+        assert!(got.is_err(), "★자격을 밝히기 전 것은 아무것도 아니다");
+    }
+
+    #[tokio::test]
+    async fn 끊기면_위에도_알린다() {
+        let t = table();
+        let (at, mut up) = listening_up(t, IDENTIFY_TIMEOUT).await;
+        let mut s = TcpStream::connect(at).await.expect("붙는다");
+        s.write_all(&frame(&request("srvufrag", PWD)).expect("씌운다")).await.expect("보낸다");
+        assert!(matches!(up.recv().await, Some(TcpIn::Identified { .. })));
+        drop(s);
+        let ev = tokio::time::timeout(Duration::from_secs(2), up.recv()).await.expect("온다");
+        assert!(matches!(ev, Some(TcpIn::Closed { .. })), "★수신 장부도 거둬야 한다");
     }
 
     #[tokio::test]

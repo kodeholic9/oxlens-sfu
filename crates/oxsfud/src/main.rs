@@ -133,6 +133,19 @@ async fn main() -> std::process::ExitCode {
     };
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(64);
     let (dc_tx, dc_rx) = tokio::sync::mpsc::channel(256);
+    let (tcp_tx, tcp_rx) = tokio::sync::mpsc::channel(256);
+    match tokio::net::TcpListener::bind(("0.0.0.0", udp)).await {
+        Ok(l) => {
+            eprintln!("[tcp] listen 0.0.0.0:{udp}");
+            tokio::spawn(oxsfud::transport::tcp::serve(
+                l,
+                node.ice.clone(),
+                oxsfud::transport::tcp::IDENTIFY_TIMEOUT,
+                tcp_tx,
+            ));
+        }
+        Err(e) => eprintln!("[tcp] listen {udp} 를 못 열었다({e}) — udp 만으로 간다"),
+    }
     tokio::spawn(oxsfud::transport::udp::serve(
         sock,
         node.ice.clone(),
@@ -143,6 +156,7 @@ async fn main() -> std::process::ExitCode {
         node.egress.clone(),
         node.counts.clone(),
         policy.media.max_bitrate_bps as u64,
+        tcp_rx,
     ));
     // ★★**버스는 전제다**(정§15-0) — 통지가 나가는 유일한 길이라(§15-4) 못 열면 이 유닛은
     //   ★**미디어는 흐르는데 아무도 명단을 못 받는** 상태가 된다. 그래서 여기서 선다.
