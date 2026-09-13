@@ -569,6 +569,13 @@ pub async fn serve(
                         c.srtp_bad += 1;
                         continue;
                     };
+                    // ★★**RTCP 도 UDP 관찰이다**(정§2-2 — *"UDP 관찰 기준"* 이지 RTP 가 아니다).
+                    //   ★**순수 수신자는 RTP 를 안 보낸다** — RR·NACK·TWCC 피드백이 그 사람이
+                    //   살아 있다는 유일한 신호인데, 그것을 안 세면 ★**산 사람을 거둔다.**
+                    //   ★**인증을 통과한 것만** 센다 — 위조가 좀비를 살리면 안 된다.
+                    if let Some(e) = table.get(&ufrag) {
+                        e.touch(now);
+                    }
                     on_rtcp(&plain, &ufrag, &mut stats, &mut egress, &mut cache, &routes, &rewriters, &mut down, &sim_out, &layer_of, &mut pli_at, &table, &mut srtp, &socket, &mut c).await;
                     continue;
                 }
