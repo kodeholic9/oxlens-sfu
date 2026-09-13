@@ -6,7 +6,7 @@
 //! ★★**수명·`3004` 판정은 등록 기준이고 `user_count` 는 보이는 수다 — 기준이 다른 것이 계약이다.**
 //! 투명 봇만 남은 방은 `user_count` 가 `0` 이지만 ★**살아 있다**(녹화 중인 방을 폭파하지 않는다).
 
-use oxsig::{Code, MemberInfo, Version};
+use oxsig::{Code, MemberInfo, Permission, Version};
 
 /// TTL 둘. ★`None` = 영구. ★`empty` 라는 낱말은 쓰지 않는다(업계가 반대 뜻으로 쓴다).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +32,8 @@ pub struct Member {
     pub select: bool,
     /// 토큰이 준 것. 불투명하다.
     pub metadata: Option<serde_json::Value>,
+    /// ★**그 방에서 무엇을 할 수 있나**(정§6-4) — 씨앗은 토큰이고 갱신은 방 단위다.
+    pub permission: Permission,
 }
 
 impl Member {
@@ -42,8 +44,8 @@ impl Member {
             select: self.select,
             participant_type: self.participant_type,
             metadata: self.metadata.clone(),
-            // 권한 축은 방이 기억한다(연§4-4-1) — 씨앗은 토큰이고, 아직 갱신 경로가 없다.
-            permission: None,
+            // ★**기본과 다를 때만 싣는다** — 정원 1,000 의 명단이 통째로 나가지 않게.
+            permission: (self.permission != Permission::default()).then_some(self.permission),
         }
     }
 }
@@ -67,6 +69,12 @@ pub struct Room {
     /// ★**무전 audio 슬롯의 가상 SSRC** — 방과 수명이 같다(정§6-2 갈래별 후속).
     /// 화자가 바뀌어도 이 값은 그대로라 ★**재협상이 없다**(N:1).
     pub slot_audio_ssrc: u32,
+    /// ★★**권한 오버라이드 표 — 멤버십보다 오래 산다**(정§6-4 · §4-1).
+    ///
+    /// ★**나갔다 들어와도, 새 토큰으로 다시 붙어도 결정자의 결정이 산다** — 갱신값을
+    /// 세션에 두거나 멤버십과 함께 버리면 ★**방을 나갔다 들어오는 것만으로 풀린다.**
+    /// ★표는 방과 수명이 같다(방이 사라지면 함께 사라진다).
+    overrides: std::collections::BTreeMap<String, Permission>,
 }
 
 /// ★`0` 을 피한다 — RTP 에서 `0` 은 값이 아니라 *"안 정해졌다"* 로 읽히는 자리가 많다.
@@ -100,6 +108,7 @@ impl Room {
             ever_joined: false,
             seq: 0,
             slot_audio_ssrc: fresh_ssrc(),
+            overrides: std::collections::BTreeMap::new(),
         }
     }
 
@@ -140,13 +149,18 @@ impl Room {
     ///
     /// ★**순서가 계약이다** — 같은 신원의 옛 자리를 **먼저** 뺀 뒤 정원을 센다(정§4-2 ②:
     /// *"이후 판정은 축출 뒤 값으로"*). 안 그러면 정원이 찬 방에서 take-over 가 `4001` 로 죽는다.
-    pub fn join(&mut self, m: Member) -> Result<(), Code> {
+    pub fn join(&mut self, mut m: Member) -> Result<(), Code> {
         let retaken = self.members.iter().any(|x| x.user_id == m.user_id);
         if retaken {
             self.members.retain(|x| x.user_id != m.user_id);
         }
         if !m.hidden && self.user_count() as u32 >= self.capacity {
             return Err(Code::RoomFull);
+        }
+        // ★★**표에 있으면 토큰값 대신 그것으로 초기화한다**(정§4-2 · §6-4) —
+        //   그래서 나갔다 들어와도, 새 토큰으로 다시 붙어도 결정자의 결정이 산다.
+        if let Some(&p) = self.overrides.get(&m.user_id) {
+            m.permission = p;
         }
         let visible = !m.hidden;
         self.members.push(m);
@@ -155,6 +169,41 @@ impl Room {
         // ★재입장은 명단의 줄 수를 안 바꾸지만 ★**내용이 바뀐다**(role·select) — 올린다.
         self.bump(visible);
         Ok(())
+    }
+
+    /// 권한 비트를 바꾼다(정§6-4 ①②) — ★**판정만 한다.** 회수·통지는 부르는 쪽이다.
+    ///
+    /// ★`None` = 아무 일도 안 했다(멱등, 또는 명단에 없는 사람).
+    /// ★**넷 다 기본이면 표에서 지운다** — 기본과 같은 값은 보관하지 않는다.
+    pub fn set_permission(&mut self, user_id: &str, want: Permission) -> Option<Permission> {
+        let m = self.members.iter_mut().find(|m| m.user_id == user_id)?;
+        // ① ★**지금 값과 같으면 아무것도 하지 않는다** — 통지도 `seq` 도 없다.
+        if m.permission == want {
+            return None;
+        }
+        let hidden = m.hidden;
+        // ② ★**비트를 먼저 바꾼다** — 통지가 앞서면 클라의 자동 발행이 아직 안 내려간 비트를 통과한다.
+        m.permission = want;
+        if want == Permission::default() {
+            self.overrides.remove(user_id);
+        } else {
+            self.overrides.insert(user_id.to_string(), want);
+        }
+        // ★**투명 참가자는 `seq` 도 안 올린다**(정§6-4 ④) — 감추기로 한 축이 한 프레임으로 무너진다.
+        if !hidden {
+            self.seq += 1;
+        }
+        Some(want)
+    }
+
+    /// 그 사람이 이 방에서 무엇을 할 수 있나 — ★**명단에 없으면 `None`.**
+    pub fn permission_of(&self, user_id: &str) -> Option<Permission> {
+        self.members.iter().find(|m| m.user_id == user_id).map(|m| m.permission)
+    }
+
+    /// 그 사람이 이 방에서 투명한가 — 통지 판정에 쓴다.
+    pub fn hidden_of(&self, user_id: &str) -> Option<bool> {
+        self.members.iter().find(|m| m.user_id == user_id).map(|m| m.hidden)
     }
 
     pub fn leave(&mut self, user_id: &str) -> bool {
@@ -292,6 +341,7 @@ mod tests {
             role: 255,
             select: true,
             metadata: None,
+            permission: Permission::default(),
         }
     }
 

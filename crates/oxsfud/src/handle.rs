@@ -41,6 +41,8 @@ pub struct Ingress {
     pub hidden: bool,
     pub metadata: Option<serde_json::Value>,
     pub pc_mode: PcMode,
+    /// ★**토큰이 준 씨앗**(정§3-4) — 방에 오버라이드가 있으면 입장이 그것으로 덮는다(§4-2).
+    pub permission: oxsig::Permission,
 }
 
 /// 한 발행 스트림이 갈 곳 전부 — `(발행 자격, egress ssrc, 받을 사람들)`.
@@ -351,6 +353,8 @@ fn room_join(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Out
         role,
         select,
         metadata: ing.metadata.clone(),
+        // ★씨앗은 토큰이다 — 방에 오버라이드가 있으면 `join` 이 그것으로 덮는다(정§4-2).
+        permission: ing.permission,
     }) {
         return Outcome { reply: fail(header, code), notices, ..Default::default() };
     }
@@ -710,6 +714,86 @@ pub fn stall_tick(node: &mut Node, now: u64) -> Vec<Notice> {
     out
 }
 
+/// 권한 비트를 건다(정§6-4) — ★**결정은 서버 밖이고 집행이 여기다.**
+///
+/// ★**순서가 계약이다 — ②적용이 먼저, ④통지가 나중.** 통지가 앞서면 클라의 자동 발행이
+/// ★**아직 안 내려간 비트를 통과한다.**
+///
+/// ★**투명 참가자면 `seq` 도 통지도 없다** — 남에게도 본인에게도. 본인은 `2006` 으로 안다.
+/// 명단에 없는 사람이면 `3002`(없는 방이면 `3001`) — ★**미리 정하는 것은 토큰의 몫**이다.
+pub fn set_permission(
+    node: &mut Node,
+    room_id: &str,
+    user_id: &str,
+    want: oxsig::Permission,
+) -> Result<(Vec<Notice>, Vec<RouteSet>), Code> {
+    let Some(room) = node.rooms.get_mut(room_id) else { return Err(Code::RoomNotFound) };
+    if room.permission_of(user_id).is_none() {
+        return Err(Code::NotInRoom);
+    }
+    let hidden = room.hidden_of(user_id).unwrap_or(false);
+    // ① 멱등 · ② 적용 — 방이 판정하고 표까지 같이 바꾼다.
+    let Some(applied) = room.set_permission(user_id, want) else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+    let version = room.version(&node.epoch);
+
+    // ③ ★★**회수는 즉시·소급이다** — 내려간 발행 비트에 대응하는 ★**이 방에 등록된
+    //   전이중 트랙**을 지운다. 반이중 트랙은 방에 안 묶여 지우지 않는다(발화 관문이 막는다).
+    let gone: Vec<Publication> = node
+        .publications
+        .iter()
+        .filter(|p| {
+            p.user_id == user_id
+                && p.room_id == room_id
+                && p.duplex == Duplex::Full
+                && !allows_publish(&applied, p)
+        })
+        .cloned()
+        .collect();
+    node.publications.retain(|p| !gone.iter().any(|g| g.track_id == p.track_id));
+    let (mut notices, routes) = shed_publications(node, &gone);
+
+    // ④ 통지 — ★**그 방 전원에게.** 트랙 제거 통지는 제 경로로 따로 나갔다(위).
+    if !hidden {
+        notices.push(notice(
+            room_id,
+            Vec::new(),
+            Op::ParticipantState,
+            &oxsig::body::notify::ParticipantState {
+                state_type: oxsig::body::notify::ParticipantStateType::Permission,
+                user_id: user_id.to_string(),
+                room_id: room_id.to_string(),
+                version,
+                permission: applied,
+            },
+        ));
+    }
+    Ok((notices, routes))
+}
+
+/// 연§4-4-1 사상표 — ★**한 자리에만 둔다.** 두 곳에 두면 발행 관문과 회수가 어긋난다.
+///
+/// ★`screen` 은 `source` 가 가른다 — 같은 video 라도 화면 공유는 다른 비트다.
+fn bit_for(p: &oxsig::Permission, kind: Kind, source: Option<Source>) -> (bool, &'static str) {
+    match (kind, source) {
+        (Kind::Audio, _) => (p.publish_audio, "publish_audio"),
+        (Kind::Video, Some(Source::Screen)) => (p.publish_screen, "publish_screen"),
+        (Kind::Video, _) => (p.publish_video, "publish_video"),
+    }
+}
+
+/// 그 비트로 이 발행이 서는가.
+fn allows_publish(p: &oxsig::Permission, pubn: &Publication) -> bool {
+    bit_for(p, pubn.kind, pubn.source).0
+}
+
+/// 막힌 비트 이름 — 서면 `None`.
+fn denied_bit(p: &oxsig::Permission, t: &oxsig::body::media::PublishTrack) -> Option<&'static str> {
+    let (ok, name) = bit_for(p, t.kind, t.source);
+    (!ok).then_some(name)
+}
+
 /// 운영이 그 방에서 한 사람을 퇴장시킨다(정§16-1-3 `reap`).
 ///
 /// ★**`cut` 과 달리 대상이 방이다** — ★**세션은 안 끊는다.** 방에서 빠질 뿐이고,
@@ -978,6 +1062,26 @@ fn publish_add(node: &mut Node, ing: &Ingress, header: Header, req: &PublishTrac
     let active = node.publications.iter().filter(|p| p.user_id == ing.user_id).count();
     if req.tracks.len() > PER_REQUEST_MAX || active + req.tracks.len() > PER_USER_MAX {
         return Outcome { reply: fail(header, Code::TrackLimit), notices: none, ..Default::default() };
+    }
+    // ★★**자격을 먼저 본다**(정§6-3) — 코덱보다 앞이다. `false` 인 항목이 하나라도 있으면
+    //   ★**전체를 거절한다**(§6-2 원자성). 보는 비트는 요청의 `room_id` 방 것이다
+    //   — 반이중도 기준 방으로 보고, 발화 방의 자격은 §9-6 관문 ④가 다시 본다.
+    {
+        let mine = node
+            .rooms
+            .get(&req.room_id)
+            .and_then(|r| r.permission_of(&ing.user_id))
+            .unwrap_or_default();
+        let denied: Vec<&'static str> =
+            req.tracks.iter().filter_map(|t| denied_bit(&mine, t)).collect();
+        if !denied.is_empty() {
+            // ★**막힌 비트 이름을 같이 준다** — 무엇이 막혔는지 모르면 클라가 찍어 본다.
+            let mut names: Vec<&str> = denied;
+            names.dedup();
+            let out =
+                fail_with(header, Code::NotAuthorized, serde_json::json!({ "denied": names }));
+            return Outcome { reply: out, notices: none, ..Default::default() };
+        }
     }
     // ★★**`1pc` 은 한 BUNDLE 이라 SSRC 공간이 하나다**(연§9-10) — 발행 SSRC 가
     //   ★**그 Peer 에게 발급한 받기 SSRC** 와 겹치면 받는 쪽이 제 것과 남의 것을 못 가른다.
@@ -1745,6 +1849,7 @@ mod stall_tests {
                 role: 255,
                 select: true,
                 metadata: None,
+                permission: Default::default(),
             })
             .expect("입장");
         }
@@ -1911,6 +2016,7 @@ mod ssrc_collision_tests {
                 role: 255,
                 select: true,
                 metadata: None,
+                permission: Default::default(),
             })
             .expect("입장");
         let slot = n.rooms.get("r1").expect("방").slot_audio_ssrc;
@@ -1926,6 +2032,7 @@ mod ssrc_collision_tests {
             hidden: false,
             metadata: None,
             pc_mode: mode,
+            permission: Default::default(),
         };
         let body = serde_json::json!({
             "action": "add",
@@ -1979,6 +2086,7 @@ mod muted_tests {
             hidden: false,
             metadata: None,
             pc_mode: PcMode::Two,
+            permission: Default::default(),
         }
     }
 
@@ -2012,6 +2120,7 @@ mod muted_tests {
                     role: 255,
                     select: true,
                     metadata: None,
+                    permission: Default::default(),
                 })
                 .expect("입장");
         }
@@ -2089,5 +2198,169 @@ mod muted_tests {
             let f: Failure = serde_json::from_slice(b).expect("본문");
             assert_eq!(f.code, Code::FieldConflict.as_u16());
         }
+    }
+}
+
+#[cfg(test)]
+mod permission_tests {
+    use super::*;
+    use crate::room::Member;
+    use oxsig::Permission;
+
+    fn no_audio() -> Permission {
+        Permission { publish_audio: false, ..Default::default() }
+    }
+
+    fn ing(sid: &str, uid: &str, hidden: bool) -> Ingress {
+        Ingress {
+            now: 0,
+            session_id: sid.into(),
+            user_id: uid.into(),
+            participant_type: 0,
+            hidden,
+            metadata: None,
+            pc_mode: PcMode::Two,
+            permission: Permission::default(),
+        }
+    }
+
+    fn node_with(hidden: bool) -> Node {
+        let mut n = Node::new(
+            "e".into(),
+            Dtls::bake().expect("자가서명"),
+            "127.0.0.1".into(),
+            1,
+            0,
+        );
+        let ttl = crate::room::Ttl { unused_secs: None, departure_secs: None };
+        n.rooms.create("r1".into(), "r1".into(), 10, ttl, 0);
+        for (sid, uid, h) in [("s-1", "u1", hidden), ("s-2", "u2", false)] {
+            let e = n.peers.ensure(sid, uid, PcMode::Two);
+            n.peers.at_mut(e.idx).sub_rooms.push("r1".into());
+            n.rooms
+                .get_mut("r1")
+                .expect("방")
+                .join(Member {
+                    session_id: sid.into(),
+                    user_id: uid.into(),
+                    hidden: h,
+                    participant_type: 0,
+                    role: 255,
+                    select: true,
+                    metadata: None,
+                    permission: Permission::default(),
+                })
+                .expect("입장");
+        }
+        n
+    }
+
+    fn publish(n: &mut Node, uid: &str, sid: &str, ssrc: u32) -> oxsig::Failure {
+        let body = serde_json::json!({
+            "action": "add", "room_id": "r1",
+            "tracks": [{ "kind": "audio", "mid": "0", "ssrc": ssrc, "pt": 111 }],
+        });
+        let h = Header::new(FrameKind::Request, Op::PublishTracks, 1);
+        let out = dispatch(n, &ing(sid, uid, false), h, &serde_json::to_vec(&body).expect("직렬화"));
+        let (_, b) = frame::decode(&out.reply).expect("프레임");
+        serde_json::from_slice(b).unwrap_or_else(|_| Failure::new(Code::UnknownOp))
+    }
+
+    #[test]
+    fn 자격을_코덱보다_먼저_본다() {
+        let mut n = node_with(false);
+        set_permission(&mut n, "r1", "u1", no_audio()).expect("걸린다");
+        let f = publish(&mut n, "u1", "s-1", 0xA1);
+        assert_eq!(f.code, Code::NotAuthorized.as_u16());
+        // ★**막힌 비트 이름을 같이 준다** — 무엇이 막혔는지 모르면 클라가 찍어 본다.
+        let denied = f.details.and_then(|d| d.get("denied").cloned()).expect("상세");
+        assert_eq!(denied, serde_json::json!(["publish_audio"]));
+    }
+
+    #[test]
+    fn 회수는_즉시_소급이다() {
+        // ★**비트를 내렸는데 이미 올라온 소리가 그대로 나가면** 밖에서는 막았다고 답을 받은 뒤다.
+        let mut n = node_with(false);
+        publish(&mut n, "u1", "s-1", 0xA1);
+        assert_eq!(n.publications.len(), 1, "먼저 올린다");
+        let (notices, _) = set_permission(&mut n, "r1", "u1", no_audio()).expect("걸린다");
+        assert!(n.publications.is_empty(), "★이미 올라온 것을 걷는다");
+        // 트랙 제거 통지와 권한 통지가 ★각자의 경로로 따로 나간다.
+        assert!(notices.len() >= 2, "{}", notices.len());
+    }
+
+    #[test]
+    fn 멱등이다() {
+        // ★같은 값을 다시 넣는 호출마다 `seq` 가 오르면 클라 전원이 의미 없는 재동기를 돈다.
+        let mut n = node_with(false);
+        set_permission(&mut n, "r1", "u1", no_audio()).expect("걸린다");
+        let seq = n.rooms.get("r1").expect("방").version(&n.epoch).seq;
+        let (notices, _) = set_permission(&mut n, "r1", "u1", no_audio()).expect("두 번째");
+        assert!(notices.is_empty());
+        assert_eq!(n.rooms.get("r1").expect("방").version(&n.epoch).seq, seq);
+    }
+
+    #[test]
+    fn 나갔다_들어와도_결정이_산다() {
+        // ★★갱신값을 멤버십과 함께 버리면 ★**방을 나갔다 들어오는 것만으로 풀린다.**
+        let mut n = node_with(false);
+        set_permission(&mut n, "r1", "u1", no_audio()).expect("걸린다");
+        let room = n.rooms.get_mut("r1").expect("방");
+        assert!(room.leave("u1"));
+        room.join(Member {
+            session_id: "s-9".into(),
+            user_id: "u1".into(),
+            hidden: false,
+            participant_type: 0,
+            role: 255,
+            select: true,
+            metadata: None,
+            // ★새 토큰이 기본값을 들고 와도 표가 이긴다.
+            permission: Permission::default(),
+        })
+        .expect("재입장");
+        assert_eq!(n.rooms.get("r1").expect("방").permission_of("u1"), Some(no_audio()));
+    }
+
+    #[test]
+    fn 기본값으로_되돌리면_표에서_지운다() {
+        let mut n = node_with(false);
+        set_permission(&mut n, "r1", "u1", no_audio()).expect("걸린다");
+        set_permission(&mut n, "r1", "u1", Permission::default()).expect("되돌린다");
+        let room = n.rooms.get_mut("r1").expect("방");
+        assert!(room.leave("u1"));
+        room.join(Member {
+            session_id: "s-9".into(),
+            user_id: "u1".into(),
+            hidden: false,
+            participant_type: 0,
+            role: 255,
+            select: true,
+            metadata: None,
+            permission: no_audio(),
+        })
+        .expect("재입장");
+        // ★표가 비었으니 토큰값이 그대로 산다.
+        assert_eq!(n.rooms.get("r1").expect("방").permission_of("u1"), Some(no_audio()));
+    }
+
+    #[test]
+    fn 투명_참가자는_통지도_seq_도_없다() {
+        // ★감추기로 한 축이 한 프레임으로 무너진다 — 명단에 없는 `user_id` 가 전원에게 간다.
+        let mut n = node_with(true);
+        let seq = n.rooms.get("r1").expect("방").version(&n.epoch).seq;
+        let (notices, _) = set_permission(&mut n, "r1", "u1", no_audio()).expect("걸린다");
+        assert!(notices.is_empty());
+        assert_eq!(n.rooms.get("r1").expect("방").version(&n.epoch).seq, seq);
+        // ★②③ 은 그대로다 — 비트는 내려갔다.
+        assert_eq!(n.rooms.get("r1").expect("방").permission_of("u1"), Some(no_audio()));
+    }
+
+    #[test]
+    fn 명단에_없으면_안_받는다() {
+        // ★미리 정하는 것은 토큰 claim 의 몫이다 — 표는 "이 방에 있었던 사람" 으로만 자란다.
+        let mut n = node_with(false);
+        assert_eq!(set_permission(&mut n, "r1", "없는이", no_audio()), Err(Code::NotInRoom));
+        assert_eq!(set_permission(&mut n, "없는방", "u1", no_audio()), Err(Code::RoomNotFound));
     }
 }

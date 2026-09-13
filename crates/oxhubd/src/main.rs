@@ -1531,6 +1531,8 @@ async fn route_frame(
         },
         participant_type: sess.participant_type as u32,
         hidden: sess.hidden,
+        // ★**토큰이 준 씨앗을 넘긴다**(정§3-4) — body 를 믿지 않는 것과 같은 이유다.
+        permission: serde_json::to_string(&sess.permission).unwrap_or_default(),
         ..Default::default()
     };
     let out = match to_sfu(hub, &room_id, common::b::Envelope { wire, ..env }).await {

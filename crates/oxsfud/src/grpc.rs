@@ -178,6 +178,8 @@ impl SfuService for Sfu {
                 "1pc" => oxsig::body::session::PcMode::One,
                 _ => oxsig::body::session::PcMode::Two,
             },
+            // ★**빈 값은 기본이다** — 못 실은 것과 "넷 다 허용"이 같은 뜻인 자리다.
+            permission: serde_json::from_str(&env.permission).unwrap_or_default(),
         };
         let out = {
             let mut node = self.node.lock().await;
