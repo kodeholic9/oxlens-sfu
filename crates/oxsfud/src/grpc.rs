@@ -7,10 +7,10 @@
 //! ★**둘을 합치면** *"띄웠다"* 와 *"붙었다"* 가 한 값이 되어 급사를 못 본다.
 
 use common::b::sfu_service_server::{SfuService, SfuServiceServer};
-use common::b::{Envelope, HelloReply, HelloRequest, RoomLedger, RoomView, SubscribeRequest};
+use common::b::{Envelope, HelloReply, HelloRequest, RoomLedger, RoomView};
 use std::sync::Arc;
 
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex};
 use tonic::{Request, Response, Status};
 
 use crate::handle::{self, Ingress, Node};
@@ -27,21 +27,21 @@ pub struct Identity {
 pub struct Sfu {
     id: Identity,
     node: Mutex<Node>,
-    /// 통지 방송. ★**hub 마다 하나씩 받아 간다** — 한 node 에 hub 는 하나이지만
-    /// 재접속 창에 둘이 겹칠 수 있어 방송으로 둔다.
-    tx: broadcast::Sender<Envelope>,
+    /// ★★**통지가 나가는 유일한 길**(정§15-4) — 로컬 hub 에게도 이 길로 간다.
+    ///   ★같은 node 라고 직접 건네면 ★**같은 통지가 두 번 가는 창**이 생긴다.
+    bus: Arc<crate::bus::Bus>,
     /// 전송 루프에 거는 손 — ★**회수는 통로를 닫는 것**이다(정§12).
     udp: mpsc::Sender<crate::transport::udp::Cmd>,
 }
 
-/// ★**밀린 통지의 상한** — 넘으면 그 구독자만 갭을 본다(`seq` 로 드러나고 §14-3 이 메운다).
-/// ★**막지 않는다**(정§15-4 `Drop`) — 이벤트 하나를 지키려고 스트림을 죽이지 않는다.
-const NOTICE_LAG: usize = 1024;
-
 impl Sfu {
-    pub fn new(id: Identity, node: Node, udp: mpsc::Sender<crate::transport::udp::Cmd>) -> Self {
-        let (tx, _) = broadcast::channel(NOTICE_LAG);
-        Self { id, node: Mutex::new(node), tx, udp }
+    pub fn new(
+        id: Identity,
+        node: Node,
+        udp: mpsc::Sender<crate::transport::udp::Cmd>,
+        bus: Arc<crate::bus::Bus>,
+    ) -> Self {
+        Self { id, node: Mutex::new(node), bus, udp }
     }
 
     pub fn into_server(self: Arc<Self>) -> SfuServiceServer<Self> {
@@ -135,9 +135,17 @@ impl Sfu {
         }
     }
 
-    /// 통지 한 장을 스트림으로. ★**보낼 곳이 없으면 버린다** — 막지 않는다(정§15-4 `Drop`).
+    /// 통지 한 장을 버스에. ★**가름은 `target` 하나다**(정§15-4) —
+    /// 있으면 `ev/user/{U}`, 없으면 `ev/room/{R}`.
+    ///
+    /// ★**`exclude` 는 봉투에 실어 보낸다** — 적용은 받는 hub 가 한다.
+    /// 보내는 쪽에서 적용하면 hub 마다 제외 대상이 달라 ★**본인에게 자기 통지가 돌아온다.**
     fn emit(&self, n: handle::Notice) {
-        let _ = self.tx.send(Envelope {
+        let key = match n.target.as_deref() {
+            Some(u) if !u.is_empty() => self.bus.keys.ev_user(u),
+            _ => self.bus.keys.ev_room(&n.room_id),
+        };
+        let env = Envelope {
             room_id: n.room_id,
             exclude: n.exclude,
             target: n.target.unwrap_or_default(),
@@ -145,7 +153,8 @@ impl Sfu {
             evict_session: n.evict_session.unwrap_or_default(),
             wire: n.wire,
             ..Default::default()
-        });
+        };
+        self.bus.put(key, prost::Message::encode_to_vec(&env));
     }
 }
 
@@ -332,35 +341,6 @@ impl SfuService for Sfu {
         }))
     }
 
-    type SubscribeStream = tokio_stream::wrappers::ReceiverStream<Result<Envelope, Status>>;
-
-    /// ★**sfud 가 직접 낸다** — hub 가 재발행하지 않는다(정§15-4).
-    async fn subscribe(
-        &self,
-        req: Request<SubscribeRequest>,
-    ) -> Result<Response<Self::SubscribeStream>, Status> {
-        let who = req.into_inner().hub_id;
-        eprintln!("[b] subscribe ← hub {who}");
-        let mut rx = self.tx.subscribe();
-        let (tx, out) = tokio::sync::mpsc::channel(NOTICE_LAG);
-        tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(e) => {
-                        if tx.send(Ok(e)).await.is_err() {
-                            break;
-                        }
-                    }
-                    // ★밀려서 버려졌다 — ★**스트림은 살려 둔다.** 갭은 `seq` 가 드러낸다.
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        eprintln!("[b] 통지 {n} 건 밀려 버렸다 — seq 갭으로 드러난다");
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
-        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(out)))
-    }
 }
 
 /// 연§5-4 목록 항목 형 — ★**hub 가 대장에 덧씌운다.**

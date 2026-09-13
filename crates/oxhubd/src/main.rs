@@ -55,6 +55,17 @@ struct Hub {
     members: Mutex<std::collections::BTreeMap<String, Vec<String>>>,
     /// 통지 `pid` 발급기 — ★**hub 것이다**(흐름 창이 hub 의 것이므로, 연§3-2).
     next_pid: std::sync::atomic::AtomicU32,
+    /// ★**관심 선언 장부**(정§15-4) — `ev/room/{R}` · `ev/user/{U}` 구독을 여기서 쥔다.
+    ///
+    /// ★**참조계수다** — 첫 로컬 멤버 입장에 선언하고 마지막 퇴장에 해제한다.
+    /// ★**전 방을 무늬 하나로 듣지 않는다** — 그러면 남의 방 통지가 전 node 에 다 간다.
+    /// 값은 그 구독을 쥔 태스크다 — ★**끊는 것이 곧 해제**다(구독자가 떨어진다).
+    ev: Mutex<std::collections::BTreeMap<String, tokio::task::JoinHandle<()>>>,
+    /// ★★**진행 중인 입장** — 선언은 JOIN 보다 먼저인데(정§15-4) 멤버 장부에 오르는 것은
+    /// JOIN 이 성공한 **뒤**다. 그 사이 남의 퇴장이 `ev_sync` 를 돌리면 ★**갓 선 관심이
+    /// 「쓰는 데 없다」로 걷힌다** — 그러면 그 입장의 통지가 통째로 사라진다(실측 20260913:
+    /// `notify_seq_contiguous` 4 → 6). 그래서 창 동안 못 걷게 못을 박는다.
+    ev_pin: Mutex<std::collections::BTreeMap<String, usize>>,
 }
 
 /// 펌프에 건네는 것. ★**`Close` 가 있어야 남이 내 소켓을 닫을 수 있다** — 소켓의
@@ -138,6 +149,8 @@ async fn run(args: Args) -> Result<(), String> {
         next_conn: std::sync::atomic::AtomicU64::new(1),
         members: Mutex::new(Default::default()),
         next_pid: std::sync::atomic::AtomicU32::new(1),
+        ev: Mutex::new(Default::default()),
+        ev_pin: Mutex::new(Default::default()),
     });
 
     // ★접속점은 `{base}` 아래다 — 앱이 클라에 주는 그 값이다(연§5-0).
@@ -210,8 +223,8 @@ async fn run(args: Args) -> Result<(), String> {
                         let mut s = ticker.sup.lock().await;
                         s.on_ready(&id, epoch);
                     }
-                    // ★붙은 그 자리에서 통지 스트림을 연다 — ★**관심 선언이 먼저**(정§15-4).
-                    spawn_notice_pump(ticker.clone(), addr.clone()).await;
+                    // ★통지는 버스로 온다(정§15-4) — 유닛에 여는 스트림이 없다.
+                    let _ = addr;
                 }
             }
 
@@ -340,6 +353,17 @@ async fn spawn_unit(hub: &Shared, id: &str) -> Result<(), String> {
         .arg("--id")
         .arg(&unit.id)
         .stdin(std::process::Stdio::piped());
+    // ★★**유닛은 제 node 의 hub 에 붙는다**(정§15-0) — 좌표를 설정에 두 벌 적지 않는다.
+    //   ★여기서 넘기므로 시스템 파일의 `cmd` 에 버스 인자가 없어도 형상이 성립한다.
+    let z = &hub.resolved.system.zenoh;
+    match z.listen.first() {
+        Some(ep) => {
+            cmd.arg("--zenoh-connect").arg(ep).arg("--zenoh-namespace").arg(&z.namespace);
+        }
+        // ★**조용히 넘어가지 않는다** — 버스 없는 sfud 는 통지가 아무 데도 안 가고(정§15-4),
+        //   그 형상은 *"미디어는 흐르는데 명단이 빈"* 상태다. 유닛이 스스로 선다.
+        None => return Err("zenoh.listen 이 비었다 — 유닛이 붙을 자리가 없다(정§15-0)".into()),
+    }
     if let Some(dir) = &hub.resolved.log_dir {
         // ★로그 디렉터리는 hub 가 자식에게 넘긴다 — 자식이 자기 파일을 연다(파이프가 아니다).
         cmd.arg("--log-dir").arg(dir);
@@ -510,6 +534,7 @@ async fn ops_cut(
         { hub.members.lock().await.values_mut().for_each(|v| v.retain(|s| s != sid)); }
         cut.push(serde_json::json!({ "session_id": sid, "code": 2009 }));
     }
+    ev_sync(&hub).await;
     Ok(Json(serde_json::json!({ "user_id": user_id, "total": cut.len(), "cut": cut })))
 }
 
@@ -569,6 +594,7 @@ async fn ops_destroy(
     let got = ops_call(&hub, &room_id, "destroy", "").await?;
     hub.rooms.lock().await.remove(&room_id);
     hub.members.lock().await.remove(&room_id);
+    ev_sync(&hub).await;
     Ok(Json(serde_json::json!({
         "room_id": room_id,
         "destroyed": got.done,
@@ -777,16 +803,48 @@ async fn admin_bus(
     State(hub): State<Shared>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<oxsig::Failure>)> {
     authz::admin(&hub.resolved.system, now_ms() / 1000, &peer_of(addr, &headers)).map_err(fail)?;
+    let mine = bus_view(&hub).await;
+    if q.get("all").map(String::as_str) != Some("1") {
+        return Ok(Json(mine));
+    }
+    // ★**전 node 를 나란히 놓는다** — 견주는 일은 도구가 한다(서버가 판정하면 그 판정을
+    //   또 믿어야 한다). ★못 닿은 node 는 `error` 로 적는다(빈 칸은 「문제 없음」으로 읽힌다).
+    let mut rows = vec![serde_json::json!({ "node": hub.resolved.node_id, "bus": mine })];
+    if let Some(b) = &hub.bus {
+        let want: Vec<String> = b.live.snapshot().keys().cloned().collect();
+        let got = b.ask_all(oxhubd::bus::Q_BUS).await;
+        for (node, raw) in &got {
+            if node == &hub.resolved.node_id {
+                continue;
+            }
+            match serde_json::from_slice::<serde_json::Value>(raw) {
+                Ok(v) => rows.push(serde_json::json!({ "node": node, "bus": v })),
+                Err(_) => rows.push(serde_json::json!({ "node": node, "error": 5002 })),
+            }
+        }
+        for n in want {
+            let seen = rows.iter().any(|r| r.get("node").and_then(|x| x.as_str()) == Some(&n));
+            if !seen {
+                rows.push(serde_json::json!({ "node": n, "error": 5001 }));
+            }
+        }
+    }
+    Ok(Json(serde_json::json!({ "asked": hub.resolved.node_id, "nodes": rows })))
+}
+
+/// 이 node 가 제 눈으로 본 버스(운영 §3-8 본문).
+async fn bus_view(hub: &Shared) -> serde_json::Value {
     let z = &hub.resolved.system.zenoh;
     let Some(bus) = &hub.bus else {
         // ★**「모른다」와 「없다」를 가른다** — 못 연 것이지 비어 있는 것이 아니다.
-        return Ok(Json(serde_json::json!({
+        return serde_json::json!({
             "node": hub.resolved.node_id, "open": false,
             "mode": z.mode, "namespace": z.namespace,
             "listen": z.listen, "connect": z.connect,
-        })));
+        });
     };
     let live = bus.live.snapshot();
     let nodes: Vec<serde_json::Value> = live
@@ -797,7 +855,7 @@ async fn admin_bus(
     let ids: Vec<String> = { hub.rooms.lock().await.iter().map(|r| r.id.clone()).collect() };
     let (mut unplaced, mut no_view) = (Vec::new(), Vec::new());
     for id in &ids {
-        match sfu_of_room(&hub, id).await {
+        match sfu_of_room(hub, id).await {
             None => unplaced.push(id.clone()),
             Some(_) => {
                 let has = { hub.rooms.lock().await.view(id).is_some_and(|v| v.get("version").is_some()) };
@@ -810,14 +868,14 @@ async fn admin_bus(
     let last = bus.live.last_event().map(|(at, kind, key)| {
         serde_json::json!({ "at_ms": at, "kind": kind, "key": key })
     });
-    Ok(Json(serde_json::json!({
+    serde_json::json!({
         "node": bus.node_id, "inst": bus.inst, "open": true,
         "mode": z.mode, "namespace": z.namespace,
         "listen": z.listen, "connect": z.connect,
         "nodes": nodes,
         "pending": { "rooms_unplaced": unplaced, "rooms_no_view": no_view },
         "last_event": last,
-    })))
+    })
 }
 
 /// 운영 §3-5 — ★**유닛마다 따로 낸다.** 합치면 어느 유닛인지 잃는다.
@@ -1238,8 +1296,16 @@ async fn serve_ws(hub: Shared, socket: axum::extract::ws::WebSocket) {
         }
         // 붙었으면 이 소켓을 장부에 올린다 — 다음 축출의 대상이 된다.
         if let Conn::Bound { session_id } = &conn {
-            let mut socks = hub.sockets.lock().await;
-            socks.insert(session_id.clone(), (conn_gen, tx.clone()));
+            {
+                let mut socks = hub.sockets.lock().await;
+                socks.insert(session_id.clone(), (conn_gen, tx.clone()));
+            }
+            // ★★**`BIND` ack 보다 먼저 선언한다**(정§15-4) — 수명이 세션이라 모바일 WS
+            //   흔들림에 선언이 널뛰지 않는다. ★답을 먼저 주면 그 사이 unicast 가 버려진다.
+            let who = { hub.sessions.lock().await.get(session_id).map(|x| x.user_id.clone()) };
+            if let (Some(u), Some(b)) = (who, hub.bus.as_ref()) {
+                ev_watch(&hub, b.keys.ev_user(&u)).await;
+            }
         }
         match reply {
             Reply::Ok { header, body } | Reply::Fail { header, body } => {
@@ -1263,6 +1329,7 @@ async fn serve_ws(hub: Shared, socket: axum::extract::ws::WebSocket) {
             v.retain(|s| s != session_id);
         }
         drop(m);
+        ev_sync(&hub).await;
         let mut socks = hub.sockets.lock().await;
         // ★★**내가 아직 그 세션의 소켓일 때만 거둔다.** 축출된 옛 연결도 `Bound` 인 채로
         //   여기까지 온다 — 세대를 안 보면 그것이 **새 주인의 자리를 지우고 산 세션을
@@ -1433,14 +1500,18 @@ async fn spawn_gateway(hub: Shared) {
     let Some(bus) = hub.bus.as_ref() else { return };
     let key = bus.keys.q_node(&hub.resolved.node_id, oxhubd::bus::Q_HANDLE);
     let rooms_key = bus.keys.q_node(&hub.resolved.node_id, oxhubd::bus::Q_ROOMS);
-    let (Ok(q), Ok(qr)) =
-        (bus.session.declare_queryable(&key).await, bus.session.declare_queryable(&rooms_key).await)
-    else {
+    let bus_key = bus.keys.q_node(&hub.resolved.node_id, oxhubd::bus::Q_BUS);
+    let (Ok(q), Ok(qr), Ok(qb)) = (
+        bus.session.declare_queryable(&key).await,
+        bus.session.declare_queryable(&rooms_key).await,
+        bus.session.declare_queryable(&bus_key).await,
+    ) else {
         eprintln!("[bus] ★관문을 못 열었다 — 남의 node 요청을 못 받는다");
         return;
     };
-    eprintln!("[bus] 관문 {key} · {rooms_key}");
+    eprintln!("[bus] 관문 {key} · {rooms_key} · {bus_key}");
     let me = hub.clone();
+    let (k_handle, k_rooms, k_bus) = (key.clone(), rooms_key.clone(), bus_key.clone());
     tokio::spawn(async move {
         while let Ok(query) = q.recv_async().await {
             let raw = query.payload().map(|p| p.to_bytes().to_vec()).unwrap_or_default();
@@ -1449,27 +1520,44 @@ async fn spawn_gateway(hub: Shared) {
             };
             // ★**내 유닛으로만** 보낸다 — 여기서 또 남에게 넘기면 고리가 돈다.
             let out = match local_grpc(&me).await {
-                Some(mut c) => c.handle(env).await.map(|r| r.into_inner().wire).unwrap_or_default(),
-                None => Vec::new(),
+                Some(mut c) => c.handle(env).await.ok().map(|r| r.into_inner().wire),
+                None => None,
             };
-            let _ = query.reply(query.key_expr().clone(), out).await;
+            // ★★**못 하면 답하지 않는다.** 빈 답을 내면 부르는 쪽이 ★**성공으로 읽는다** —
+            //   실측 20260913: 유닛을 내린 node 에 `POST /rooms` 가 201 을 냈다(`5001` 이어야 한다).
+            //   답이 없으면 `ask` 가 `None` 을 내고 그것이 곧 `5001` 이다(정§15-5).
+            let Some(out) = out else { continue };
+            // ★★**답은 내 키로 낸다** — 질의 키를 되돌리면 fan-out(`q/node/*/…`)에서
+            //   ★**전부 `*` 로 돌아와 누가 답했는지 사라진다**(실측 20260913).
+            let _ = query.reply(k_handle.clone(), out).await;
         }
     });
+    let rooms_hub = hub.clone();
     tokio::spawn(async move {
         while let Ok(query) = qr.recv_async().await {
             let raw = query.payload().map(|p| p.to_bytes().to_vec()).unwrap_or_default();
             let Ok(led) = <common::b::RoomLedger as prost::Message>::decode(&raw[..]) else {
                 continue;
             };
-            let out = match local_grpc(&hub).await {
+            let out = match local_grpc(&rooms_hub).await {
                 Some(mut c) => c
                     .rooms(led)
                     .await
-                    .map(|r| prost::Message::encode_to_vec(&r.into_inner()))
-                    .unwrap_or_default(),
-                None => Vec::new(),
+                    .ok()
+                    .map(|r| prost::Message::encode_to_vec(&r.into_inner())),
+                None => None,
             };
-            let _ = query.reply(query.key_expr().clone(), out).await;
+            // ★**빈 `RoomView` 는 「방이 하나도 없다」로 읽힌다** — 「못 물어봤다」가 아니다.
+            let Some(out) = out else { continue };
+            let _ = query.reply(k_rooms.clone(), out).await;
+        }
+    });
+    // ★**제 눈으로 본 것만 답한다** — 여기서 또 fan-out 하면 고리가 돈다(운영 §3-8).
+    let seen = hub.clone();
+    tokio::spawn(async move {
+        while let Ok(query) = qb.recv_async().await {
+            let body = serde_json::to_vec(&bus_view(&seen).await).unwrap_or_default();
+            let _ = query.reply(k_bus.clone(), body).await;
         }
     });
 }
@@ -1480,20 +1568,79 @@ async fn local_grpc(hub: &Shared) -> Option<BClient> {
     b_client(&addr).await
 }
 
-/// sfud 통지 스트림을 받아 ★**내 로컬 멤버에게만** 흘린다(정§15-4).
-async fn spawn_notice_pump(hub: Shared, addr: String) {
-    tokio::spawn(async move {
-        let Some(mut c) = b_client(&addr).await else { return };
-        let req = common::b::SubscribeRequest { hub_id: hub.resolved.node_id.clone() };
-        let Ok(stream) = c.subscribe(req).await else { return };
-        let mut stream = stream.into_inner();
-        loop {
-            use tokio_stream::StreamExt;
-            let Some(Ok(env)) = stream.next().await else { break };
-            deliver(&hub, &env).await;
+/// ★**관심 하나를 선언한다**(정§15-4) — 이미 있으면 아무것도 안 한다(멱등).
+///
+/// ★★**선언이 JOIN 보다 먼저다.** 뒤집히면 그 창의 통지가 갈 곳이 없어 버려지고
+/// ★**RTP 는 흐르는데 명단이 비어 있다.** 안전망은 `ROOM_JOIN` 응답이 완결 스냅샷이라는
+/// 것 하나뿐이다(정§4-2·§7-1) — 그 하나에 기대지 않으려고 순서를 지킨다.
+async fn ev_watch(hub: &Shared, key: String) {
+    let Some(bus) = &hub.bus else { return };
+    {
+        if hub.ev.lock().await.contains_key(&key) {
+            return;
         }
-        eprintln!("[b] 통지 스트림 끊김 ← {addr}");
+    }
+    let Ok(sub) = bus.session.declare_subscriber(key.clone()).await else {
+        eprintln!("[bus] ★관심 선언 실패 {key} — 이 갈래의 통지를 못 받는다");
+        return;
+    };
+    let me = hub.clone();
+    let task = tokio::spawn(async move {
+        while let Ok(sample) = sub.recv_async().await {
+            let raw = sample.payload().to_bytes();
+            let Ok(env) = <common::b::Envelope as prost::Message>::decode(&raw[..]) else {
+                continue;
+            };
+            deliver(&me, &env).await;
+        }
     });
+    hub.ev.lock().await.insert(key, task);
+}
+
+/// ★**관심 하나를 거둔다** — 끊는 것이 곧 해제다(구독자가 떨어진다).
+async fn ev_drop(hub: &Shared, key: &str) {
+    if let Some(t) = hub.ev.lock().await.remove(key) {
+        t.abort();
+    }
+}
+
+/// 쓸 곳이 없어진 관심을 거둔다. ★**멱등이라 부르는 자리를 안 센다** — 자리마다 증감을
+/// 두면 한 곳만 빠져도 ★**죽은 방의 통지를 영영 듣거나**, 반대로 산 방의 관심이 꺼진다.
+///
+/// ★**선언은 여기서 안 한다** — 선언에는 순서가 걸려 있어(JOIN 보다 먼저) 그 자리에서만 한다.
+/// 입장 창에 못을 박고 뺀다. ★**0 이 되면 자리를 지운다** — 남기면 장부가 끝없이 는다.
+async fn ev_pin(hub: &Shared, room: &str, delta: i32) {
+    let mut p = hub.ev_pin.lock().await;
+    let c = p.entry(room.to_string()).or_insert(0);
+    *c = c.saturating_add_signed(delta as isize);
+    if *c == 0 {
+        p.remove(room);
+    }
+}
+
+async fn ev_sync(hub: &Shared) {
+    let Some(bus) = &hub.bus else { return };
+    let mut live: std::collections::BTreeSet<String> = {
+        let m = hub.members.lock().await;
+        m.iter().filter(|(_, v)| !v.is_empty()).map(|(k, _)| bus.keys.ev_room(k)).collect()
+    };
+    // ★진행 중인 입장은 아직 멤버가 아니다 — 그래도 산 것이다.
+    {
+        let p = hub.ev_pin.lock().await;
+        live.extend(p.keys().map(|r| bus.keys.ev_room(r)));
+    }
+    // ★사람 축의 수명은 **세션**이다 — 방에서 나가도 붙어 있는 동안은 듣는다.
+    {
+        let se = hub.sessions.lock().await;
+        live.extend(se.users().iter().map(|u| bus.keys.ev_user(u)));
+    }
+    let stale: Vec<String> = {
+        let e = hub.ev.lock().await;
+        e.keys().filter(|k| !live.contains(*k)).cloned().collect()
+    };
+    for k in stale {
+        ev_drop(hub, &k).await;
+    }
 }
 
 /// 통지 한 장을 그 방의 로컬 멤버에게. ★**`exclude` 는 받는 쪽이 적용한다**(정§15-4).
@@ -1541,12 +1688,16 @@ async fn deliver(hub: &Shared, env: &common::b::Envelope) {
 async fn reconcile_rooms(hub: &Shared) {
     use std::collections::BTreeMap;
     let ids: Vec<String> = { hub.rooms.lock().await.iter().map(|r| r.id.clone()).collect() };
-    let mut by_addr: BTreeMap<String, Vec<common::b::RoomRecord>> = BTreeMap::new();
+    // ★**node 로 몬다 — 주소가 아니다.** 주소로 몰면 ★**남의 node 방이 통째로 빠진다**
+    //   (그 주소를 내가 모르므로) — 그러면 그 방은 ★**현황도 만료도 영영 안 온다**(실측 20260913).
+    let nodes = sfu_nodes(hub).await;
+    let now = now_ms();
+    let mut by_node: BTreeMap<String, Vec<common::b::RoomRecord>> = BTreeMap::new();
     for id in &ids {
-        let Some(addr) = addr_for_room(hub, id).await else { continue };
+        let Some(n) = oxhubd::route::place(&nodes, id, now) else { continue };
         let l = hub.rooms.lock().await;
         if let Some(r) = l.get(id) {
-            by_addr.entry(addr).or_default().push(common::b::RoomRecord {
+            by_node.entry(n.node_id.clone()).or_default().push(common::b::RoomRecord {
                 room_id: r.id.clone(),
                 name: r.name.clone(),
                 capacity: r.capacity,
@@ -1555,15 +1706,16 @@ async fn reconcile_rooms(hub: &Shared) {
             });
         }
     }
-    for (addr, put) in by_addr {
-        let Some(mut c) = b_client(&addr).await else { continue };
+    for (_node, put) in by_node {
+        // ★**대표 하나로 짚는다** — 같은 node 로 몬 것들이라 어느 것으로 짚어도 같은 자리다.
+        let Some(anchor) = put.first().map(|r| r.room_id.clone()) else { continue };
         let led = common::b::RoomLedger {
             node_id: hub.resolved.node_id.clone(),
             put,
             drop: Vec::new(),
         };
-        if let Ok(v) = c.rooms(led).await {
-            absorb_view(hub, v.into_inner()).await;
+        if let Some(v) = rooms_call(hub, &anchor, led).await {
+            absorb_view(hub, v).await;
         }
     }
 }
@@ -1702,9 +1854,25 @@ async fn route_frame(
         permission: serde_json::to_string(&sess.permission).unwrap_or_default(),
         ..Default::default()
     };
+    // ★★**관심 선언이 JOIN 보다 먼저다**(정§15-4) — 뒤집히면 그 창의 통지가 갈 곳이 없다.
+    //   ★**못을 박고 선언한다** — 답이 올 때까지 이 방은 멤버가 0이라 그냥 두면 걷힌다.
+    let pinned = header.op == oxsig::Op::RoomJoin && hub.bus.is_some();
+    if pinned {
+        ev_pin(hub, &room_id, 1).await;
+        let key = hub.bus.as_ref().map(|b| b.keys.ev_room(&room_id));
+        if let Some(k) = key {
+            ev_watch(hub, k).await;
+        }
+    }
     let out = match to_sfu(hub, &room_id, common::b::Envelope { wire, ..env }).await {
         Ok(v) => v,
-        Err(c) => return fail_wire(header, c),
+        Err(c) => {
+            if pinned {
+                ev_pin(hub, &room_id, -1).await;
+                ev_sync(hub).await;
+            }
+            return fail_wire(header, c);
+        }
     };
     // ★**로컬 멤버 장부는 성공한 것만 따라간다** — 실패를 따라가면 흘릴 곳이 어긋난다.
     if let Ok((h, _)) = frame::decode(&out)
@@ -1713,7 +1881,7 @@ async fn route_frame(
         let mut m = hub.members.lock().await;
         match header.op {
             oxsig::Op::RoomJoin => {
-                let v = m.entry(room_id).or_default();
+                let v = m.entry(room_id.clone()).or_default();
                 if !v.iter().any(|s| s == session_id) {
                     v.push(session_id.to_string());
                 }
@@ -1725,6 +1893,12 @@ async fn route_frame(
             }
             _ => {}
         }
+        drop(m);
+        ev_sync(hub).await;
+    }
+    if pinned {
+        ev_pin(hub, &room_id, -1).await;
+        ev_sync(hub).await;
     }
     out
 }

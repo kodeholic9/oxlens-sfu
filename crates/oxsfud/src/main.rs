@@ -16,7 +16,8 @@ async fn main() -> std::process::ExitCode {
     let argv: Vec<String> = argv.into_iter().filter(|a| a != "--no-lifeline").collect();
 
     // ★이 바이너리만 아는 인자 — 정§18-1 CLI 칸(포트·public-ip)의 sfud 몫.
-    const MINE: &[&str] = &["--grpc-listen", "--udp-port", "--public-ip"];
+    const MINE: &[&str] =
+        &["--grpc-listen", "--udp-port", "--public-ip", "--zenoh-connect", "--zenoh-namespace"];
     let args = match Args::parse_allowing(&argv, MINE) {
         Ok(a) => a,
         Err(e) => {
@@ -143,6 +144,25 @@ async fn main() -> std::process::ExitCode {
         node.counts.clone(),
         policy.media.max_bitrate_bps as u64,
     ));
+    // ★★**버스는 전제다**(정§15-0) — 통지가 나가는 유일한 길이라(§15-4) 못 열면 이 유닛은
+    //   ★**미디어는 흐르는데 아무도 명단을 못 받는** 상태가 된다. 그래서 여기서 선다.
+    //   ★붙는 곳은 제 node 의 hub 다 — hub 가 router 를 든다(§15-0).
+    let Some(z_connect) = args.extra.get("--zenoh-connect").cloned() else {
+        eprintln!("args: --zenoh-connect 가 없다 — 버스 없이는 통지가 아무 데도 안 간다(정§15-4)");
+        return std::process::ExitCode::from(2);
+    };
+    let z_ns = args.extra.get("--zenoh-namespace").cloned().unwrap_or_else(|| "ox".into());
+    let bus = match oxsfud::bus::open(&z_connect, &z_ns).await {
+        Ok(v) => {
+            eprintln!("[bus] client → {z_connect} ns={z_ns}");
+            std::sync::Arc::new(v)
+        }
+        Err(e) => {
+            eprintln!("[bus] ★못 열었다: {e}");
+            return std::process::ExitCode::from(1);
+        }
+    };
+
     let svc = std::sync::Arc::new(oxsfud::grpc::Sfu::new(
         oxsfud::grpc::Identity {
             epoch,
@@ -150,6 +170,7 @@ async fn main() -> std::process::ExitCode {
         },
         node,
         cmd_tx,
+        bus,
     ));
     svc.spawn_reaper();
     svc.spawn_floor(dc_rx);

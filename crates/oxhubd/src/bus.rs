@@ -80,6 +80,8 @@ pub struct Bus {
 pub const Q_HANDLE: &str = "handle";
 /// 방 대장 밀기·현황 받기 — 같은 관문의 다른 갈래다.
 pub const Q_ROOMS: &str = "rooms";
+/// 그 node 가 제 눈으로 본 버스 — ★**전 node fan-out 의 대상**이다(운영 §3-8 `?all=1`).
+pub const Q_BUS: &str = "bus";
 
 impl Bus {
     /// 남의 node 에 프레임 하나를 넘기고 답을 받는다. ★**없으면 `None`** — 지어내지 않는다.
@@ -92,10 +94,36 @@ impl Bus {
             .map(|k| self.session.get(k).payload(body))?
             .await
             .ok()?;
-        // ★**첫 답 하나다** — 한 node 가 답한다(전 node fan-out 은 다른 키다).
+        // ★**첫 답 하나다** — 한 node 가 답한다(전 node fan-out 은 아래가 따로 본다).
         let r = replies.recv_async().await.ok()?;
         let sample = r.result().ok()?;
         Some(sample.payload().to_bytes().to_vec())
+    }
+
+    /// ★**전 node 에 묻고 오는 대로 모은다**(정§15-1 `q/node/*`).
+    ///
+    /// ★**도구가 아니라 여기가 모은다** — 도구가 하려면 엔드포인트 목록을 들어야 하고,
+    /// 그 목록은 ★**node 를 늘릴 때마다 낡는다**(운영 §3-8).
+    /// ★**못 닿은 node 는 목록에 안 온다** — 부르는 쪽이 「기대한 node」와 견줘 빈자리를 찾는다.
+    pub async fn ask_all(&self, rest: &str) -> Vec<(String, Vec<u8>)> {
+        let Ok(key) = self.keys.q_all(rest).parse::<zenoh::key_expr::KeyExpr>() else {
+            return Vec::new();
+        };
+        let Ok(replies) = self.session.get(key).await else { return Vec::new() };
+        let mut out = Vec::new();
+        while let Ok(r) = replies.recv_async().await {
+            let Ok(sample) = r.result() else { continue };
+            // 답한 키가 곧 누구인지다 — `…/q/node/{node}/{rest}`.
+            let k = sample.key_expr().as_str();
+            let node = k
+                .split("/q/node/")
+                .nth(1)
+                .and_then(|t| t.split('/').next())
+                .unwrap_or("")
+                .to_string();
+            out.push((node, sample.payload().to_bytes().to_vec()));
+        }
+        out
     }
 }
 

@@ -104,6 +104,11 @@ impl Sessions {
             .collect()
     }
 
+    /// 지금 붙어 있는 사람들 — ★**죽은 소켓은 빼고** 센다(관심 선언의 대상이다, 정§15-4).
+    pub fn users(&self) -> std::collections::BTreeSet<String> {
+        self.items.iter().filter(|s| s.dead_at.is_none()).map(|s| s.user_id.clone()).collect()
+    }
+
     pub fn sessions_of(&self, user_id: &str) -> Vec<String> {
         self.items.iter().filter(|s| s.user_id == user_id).map(|s| s.id.clone()).collect()
     }

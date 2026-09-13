@@ -1,0 +1,49 @@
+# ★**생성물이다 — 손으로 고치지 않는다**(`dev/gen_nodes.py 3`).
+#
+# ★★**node 하나 = hub 하나 + sfu 하나**(정§15-0). 배치 키는 `node_id` 이고(정§15-3)
+#   유닛 이름을 그 값과 같게 맞춘다 — 그래야 「방 → node」가 곧 「방 → 그 node 의 sfu」다.
+# ★**배치는 `room_id` 만으로 정해진다**(HRW 순수 함수) — 그래서 방 이름을 고르면
+#   ★**어느 node 로 갈지 미리 안다.** 시험이 결정적이 되는 자리가 이것이다.
+[hub]
+listen = "127.0.0.1:19747"
+base_path = "/media"
+
+[hub.auth]
+jwt_secret = "change-me-in-production"
+
+[[hub.auth.api_keys]]
+key = "ox_k_demo"
+secret = "ox_s_demo"
+name = "demo"
+# 정§3-4·§16-1-1 — 이 계정이 서명할 수 있는 것. 투명·운영은 켜는 것이 명시적 결정이다.
+participant_types = [0, 1, 2]
+hidden_allowed = true
+ops_allowed = true
+
+# 계정마다 낼 수 있는 것이 다르다(정§3-4) — 제한 계정이 있어야 `2005` 갈래가 실증된다.
+[[hub.auth.api_keys]]
+key = "ox_k_limited"
+secret = "ox_s_limited"
+name = "limited"
+participant_types = [0]
+hidden_allowed = false
+ops_allowed = false
+
+# ★유닛은 hub 가 띄운다(정§16-1) — 하네스가 sfud 를 직접 띄우지 않는다.
+[[unit]]
+id = "node-c"
+kind = "process"
+order = 1
+role = "sfu"
+addr = "127.0.0.1:50063"
+cmd = ["./target/debug/oxsfud", "--grpc-listen", "127.0.0.1:50063", "--udp-port", "20002", "--policy", "policy.toml"]
+
+# ★**이 node 의 버스**(정§15-0) — hub 는 router, 성립 조건 둘은 명시로 적는다.
+[zenoh]
+mode = "router"
+listen = ["tcp/127.0.0.1:7449"]
+connect = ["tcp/127.0.0.1:7447", "tcp/127.0.0.1:7448"]
+multicast_scouting = false
+qos_enabled = true
+lowlatency = false
+namespace = "oxdev"
