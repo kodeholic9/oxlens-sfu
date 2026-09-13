@@ -198,6 +198,8 @@ impl SfuService for Sfu {
                 .await;
         }
         self.push_routes(out.routes).await;
+        // ★**말과 배관은 한 묶음**이다 — 발언권이 딸려 움직인 요청(`AFFILIATION`)이 여기 온다.
+        self.push_dc(out.dc).await;
         // ★**태스크 종료까지가 회수다**(정§12) — 축출은 reaper 가 못 보는 경로라 여기서 끊는다.
         for sid in out.drop_sessions {
             let _ = self.udp.send(crate::transport::udp::Cmd::DropSession(sid)).await;

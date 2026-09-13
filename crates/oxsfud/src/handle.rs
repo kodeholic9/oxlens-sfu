@@ -70,6 +70,8 @@ pub struct Notice {
 /// 한 프레임을 처리한 결과.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Outcome {
+    /// 발언권이 딸려 움직였으면 그 말도 같이 나간다 — ★**말과 배관은 한 묶음**이다.
+    pub dc: Vec<DcOut>,
     /// ★**그 세션의 통로를 끊어라** — 축출처럼 reaper 가 못 보는 경로의 회수다.
     ///
     /// ★축출은 자격을 그 자리에서 내리므로 그 세션은 ★**reaper 의 목록에 아예 안 남는다** —
@@ -503,6 +505,34 @@ fn affiliation(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> O
     let Some(peer) = node.peers.get_mut(&ing.session_id) else {
         return Outcome { reply: fail(header, Code::SessionNotFound), ..Default::default() };
     };
+    let was = peer.pub_room.clone();
+    // ★★**전이중 트랙이 옛 `pub_room` 에 등록된 채면 요청 전체를 `3007`**(정§5-2) —
+    //   전이중 배관은 등록 방에 묶여 있어 `pub_room` 만 옮기면 ★**옛 방에 트랙이 살아
+    //   있는데 RTP 가 없는** 부조화가 된다. 클라는 `remove` → 새 방 `add` 뒤 다시 한다.
+    //   ★**반이중은 슬롯이 방 소유라 해당 없음**이다.
+    let moving = req.pub_deselect.is_some()
+        || req.pub_select.as_deref().is_some_and(|r| Some(r) != was.as_deref());
+    if moving && let Some(old) = was.as_deref() {
+        let bound: Vec<String> = node
+            .publications
+            .iter()
+            .filter(|p| {
+                p.session_id == ing.session_id && p.room_id == old && p.duplex == Duplex::Full
+            })
+            .map(|p| p.track_id.clone())
+            .collect();
+        if !bound.is_empty() {
+            let out = fail_with(
+                header,
+                Code::TrackBoundToRoom,
+                serde_json::json!({ "track_ids": bound }),
+            );
+            return Outcome { reply: out, ..Default::default() };
+        }
+    }
+    let Some(peer) = node.peers.get_mut(&ing.session_id) else {
+        return Outcome { reply: fail(header, Code::SessionNotFound), ..Default::default() };
+    };
     // ★**적용 순서는 `pub_deselect` → `pub_select`** 다 — 같은 요청에 둘 다 와도(연§6-4).
     if let Some(r) = &req.pub_deselect
         && peer.pub_room.as_deref() == Some(r.as_str())
@@ -516,14 +546,32 @@ fn affiliation(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> O
         }
         peer.pub_room = Some(r.clone());
     }
+    let now_room = peer.pub_room.clone();
+    let user = ing.user_id.clone();
     let res = AffiliationRes {
         affiliation: peer.affiliation(),
         // ★**응답의 `cause` 는 `user` 하나다** — 강제 변경은 `ROOM_EVENT` 가 나른다.
         cause: AffiliationCause::User,
         change_id: req.change_id.clone(),
     };
+    // ★★**옛 방의 발언권은 묵시 반환이다**(정§5-2) — *"쥔 채로 방을 옮기지 않는다"* 의
+    //   서버측 집행이 이것이다. 큐 대기도 뺀다(대기는 `pub_room` 에서만 — 통지 없음).
+    let mut dc = Vec::new();
+    if let Some(old) = was.as_deref()
+        && now_room.as_deref() != Some(old)
+        && let Some(f) = node.floors.get_mut(old)
+    {
+        let outs = f.on_gone(&user, 0);
+        dc.extend(emit_floor(node, old, outs));
+    }
+    // ★★**배관을 같이 민다** — `pub_room` 이 fan-out 의 방 결정이므로(정§5-2) 값만
+    //   바꾸고 표를 안 밀면 ★**옛 방으로 계속 흐르고 새 방은 조용하다.**
+    let mut routes = Vec::new();
+    for r in [was.as_deref(), now_room.as_deref()].into_iter().flatten() {
+        routes.extend(floor_routes(node, r));
+    }
     // ★`version` 을 싣지 않는다 — 소속은 내 세션 것이라 방 공통 스냅샷에 없다(연§4-6-3).
-    Outcome { reply: ok(header, &json(&res)), ..Default::default() }
+    Outcome { reply: ok(header, &json(&res)), routes, dc, ..Default::default() }
 }
 
 /// ★**퇴장 정리 — 순서가 계약이다**(정§17-2). `ROOM_LEAVE`·축출·좀비 회수 셋이 이리로 모인다.
@@ -1479,7 +1527,15 @@ pub fn floor_routes(node: &Node, room_id: &str) -> Vec<(String, u32, Vec<crate::
     let members = room.session_ids();
     node.publications
         .iter()
-        .filter(|p| p.room_id == room_id && p.duplex == Duplex::Half && p.kind == Kind::Audio)
+        // ★★**발화 방은 `pub_room` 이 정한다 — 등록 방이 아니다**(정§5-2 fan-out).
+        //   *"같은 서버 안 발언 방 전환은 트랙 재등록 없이 이 값 교체 하나로 끝난다"* 가
+        //   그 문장이다. 등록 방으로 거르면 ★**발언방을 옮긴 순간 소리가 끊긴다**
+        //   (실측 20260913 — `ptt_scope_relay` 의 roomB 구간이 통째로 무음이었다).
+        //   ★**반이중 슬롯은 방 소유**라 트랙이 방에 안 묶인다(전이중은 묶여서 `3007` 이다).
+        .filter(|p| p.duplex == Duplex::Half && p.kind == Kind::Audio)
+        .filter(|p| {
+            node.peers.get(&p.session_id).and_then(|x| x.pub_room.as_deref()) == Some(room_id)
+        })
         .map(|p| {
             let talking = speaker.as_deref() == Some(p.user_id.as_str());
             let targets = if talking {
