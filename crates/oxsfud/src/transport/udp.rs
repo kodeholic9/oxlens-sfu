@@ -671,7 +671,10 @@ pub async fn serve(
                     //   살아 있다는 유일한 신호인데, 그것을 안 세면 ★**산 사람을 거둔다.**
                     //   ★**인증을 통과한 것만** 센다 — 위조가 좀비를 살리면 안 된다.
                     if let Some(e) = table.get(&ufrag) {
-                        e.touch(now);
+                        match proto {
+                            Proto::Udp => e.touch(now),
+                            Proto::Tcp => e.touch_any(now),
+                        }
                     }
                     on_rtcp(&plain, &ufrag, &mut stats, &mut egress, &mut cache, &routes, &rewriters, &mut down, &sim_out, &layer_of, &mut pli_at, &table, &mut srtp, &dispatch, &mut c).await;
                     continue;
@@ -688,8 +691,12 @@ pub async fn serve(
                 };
                 let Some(ssrc) = super::srtp::ssrc_of(&plain) else { continue };
                 // ★그 자격이 살아 있다는 뜻이다 — 좀비 판정의 두 갱신원 중 하나(정§2-2).
+                //   ★★**경로는 가린다** — TCP 로 온 것은 생존의 근거일 뿐 UDP 가 살았다는 뜻이 아니다.
                 if let Some(e) = table.get(&ufrag) {
-                    e.touch(now);
+                    match proto {
+                        Proto::Udp => e.touch(now),
+                        Proto::Tcp => e.touch_any(now),
+                    }
                 }
                 // ★**발행자가 매긴 번호를 그대로 적는다**(정§11-2) — 돌려줄 때도 그 번호다.
                 //   ★egress 와 정반대다: 그쪽은 우리가 매기고, 여기는 받아 적는다.
