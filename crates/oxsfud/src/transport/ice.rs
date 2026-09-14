@@ -72,16 +72,24 @@ pub struct IceEntry {
     pub session_id: String,
     pub role: IceRole,
     pub route: Route,
-    /// 마지막으로 그 자격에서 **UDP 가** 온 시각(ms). ★**좀비 판정의 유일한 근거다**(정§2-2).
+    /// 마지막으로 그 자격에서 **UDP 가** 온 시각(ms). ★**경로 판정의 근거다** — `pick` 이 본다.
+    ///
+    /// ★★**생존 판정은 `any_seen` 이 따로 든다**(20260915) — 한 필드에 규율 둘을 얹었더니
+    /// TCP 로 살아 있는 Peer 를 UDP 기준으로 회수했다(20260913h §8-15 실측).
     ///
     /// ★**`0` 은 "판정 불가"이지 "오래됨"이 아니다** — 아직 한 번도 못 본 것이라
     /// 접속 직후 즉사를 막는다. WS 하트비트는 이 값을 갱신하지 않는다.
     last_seen: AtomicU64,
+    /// 마지막으로 그 자격에서 ★**어느 경로로든** 온 시각(ms). ★**좀비 판정의 유일한 근거다**(정§2-2).
+    ///
+    /// ★**TCP 로 와도 그 Peer 는 살아 있다** — 경로가 무엇이냐와 사람이 살아 있느냐는 다른 물음이다.
+    any_seen: AtomicU64,
     udp_gap_ewma_ms: AtomicU64,
 }
 
 impl IceEntry {
     pub fn touch(&self, now: u64) {
+        self.touch_any(now);
         // ★되감기를 막는다 — 늦게 도착한 옛 패킷이 시계를 되돌리면 죽은 것이 살아난다.
         let prev = self.last_seen.fetch_max(now, Ordering::Relaxed);
         if prev == 0 || now <= prev {
@@ -133,6 +141,14 @@ impl IceEntry {
 
     pub fn last_seen(&self) -> u64 {
         self.last_seen.load(Ordering::Relaxed)
+    }
+
+    pub fn touch_any(&self, now: u64) {
+        self.any_seen.fetch_max(now, Ordering::Relaxed);
+    }
+
+    pub fn any_seen(&self) -> u64 {
+        self.any_seen.load(Ordering::Relaxed)
     }
 
     /// 그 자격이 지금 가리키는 주소. ★**latch 전에는 `None`** 이다 — 지어내지 않는다.
@@ -196,6 +212,7 @@ impl IceTable {
             route: Route::default(),
             // ★**관찰 전이다** — 0 으로 시작해야 reaper 가 판정을 건너뛴다(정§2-2).
             last_seen: AtomicU64::new(0),
+            any_seen: AtomicU64::new(0),
             udp_gap_ewma_ms: AtomicU64::new(0),
         });
         let mut next = HashMap::clone(&self.0.load());
@@ -216,14 +233,14 @@ impl IceTable {
         gone
     }
 
-    /// 세션마다 ★**가장 최근의 UDP 관찰**. 자격 두 벌 중 하나만 흘러도 그 Peer 는 살아 있다
+    /// 세션마다 ★**가장 최근의 관찰(경로 무관)**. 자격 두 벌 중 하나만 흘러도 그 Peer 는 살아 있다
     /// (`2pc` 는 받기만 흐르는 구간이 정상 형상이다).
     ///
     /// ★**전부 `0`(관찰 전)이면 `0`** 을 낸다 — 부르는 쪽이 판정을 건너뛴다.
     pub fn last_seen_by_session(&self) -> Vec<(String, u64)> {
         let mut out: Vec<(String, u64)> = Vec::new();
         for e in self.0.load().values() {
-            let t = e.last_seen();
+            let t = e.any_seen();
             match out.iter_mut().find(|(s, _)| s == &e.session_id) {
                 Some((_, cur)) => *cur = (*cur).max(t),
                 None => out.push((e.session_id.clone(), t)),
@@ -293,7 +310,10 @@ pub fn on_binding(
             e.touch(now);
             moved
         }
-        Arrival::Tcp => false,
+        Arrival::Tcp => {
+            e.touch_any(now);
+            false
+        }
     };
     Binding::Respond {
         wire: crate::transport::stun::binding_response(&msg.transaction_id, from, &e.pwd),
@@ -433,6 +453,29 @@ mod tests {
         assert!(matches!(r, Binding::Respond { latched: false, .. }), "★답은 한다");
         let e = t.get("srvufrag").expect("있다");
         assert_eq!(e.addr(), Some(addr("1.2.3.4:5")), "★udp 하향 주소가 그대로다");
+    }
+
+    #[test]
+    fn tcp_로_와도_그_peer_는_살아_있다() {
+        let t = table();
+        on_binding(&t, &request("srvufrag", PWD), addr("1.2.3.4:5"), 100, Arrival::Udp);
+        on_binding(&t, &request("srvufrag", PWD), addr("9.9.9.9:7"), 9_000, Arrival::Tcp);
+        let e = t.get("srvufrag").expect("있다");
+        assert_eq!(e.last_seen(), 100, "★경로 판정은 udp 만 센다");
+        assert_eq!(e.any_seen(), 9_000, "★★생존 판정은 tcp 도 센다");
+    }
+
+    #[test]
+    fn 회수_판정은_경로를_안_가린다() {
+        let t = table();
+        on_binding(&t, &request("srvufrag", PWD), addr("1.2.3.4:5"), 100, Arrival::Udp);
+        on_binding(&t, &request("srvufrag", PWD), addr("9.9.9.9:7"), 50_000, Arrival::Tcp);
+        let seen = t.last_seen_by_session();
+        let (_, at) = seen.iter().find(|(s, _)| s == "s-1").expect("그 세션");
+        assert_eq!(
+            *at, 50_000,
+            "★★TCP 로 살아 있는 Peer 를 udp 기준으로 거두면 안 된다(20260913h §8-15)"
+        );
     }
 
     #[test]
