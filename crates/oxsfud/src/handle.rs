@@ -115,6 +115,7 @@ pub struct Node {
     pub dtls: Dtls,
     pub ip: String,
     pub port: u16,
+    pub tcp_port: Option<u16>,
     pub max_bitrate_bps: u64,
     pub rooms: Rooms,
     pub peers: Peers,
@@ -140,12 +141,20 @@ pub struct Node {
 }
 
 impl Node {
-    pub fn new(epoch: String, dtls: Dtls, ip: String, port: u16, max_bitrate_bps: u64) -> Self {
+    pub fn new(
+        epoch: String,
+        dtls: Dtls,
+        ip: String,
+        port: u16,
+        tcp_port: Option<u16>,
+        max_bitrate_bps: u64,
+    ) -> Self {
         Self {
             epoch,
             dtls,
             ip,
             port,
+            tcp_port,
             max_bitrate_bps,
             rooms: Rooms::new(),
             peers: Peers::new(),
@@ -191,7 +200,7 @@ impl Node {
             sfu_id: self.epoch.clone(),
             // ★세션 확정값을 ★**에코**한다 — 조용히 다른 모드로 돌리는 경로가 없다.
             pc_mode: p.pc_mode,
-            ice: p.ice.config(&self.ip, self.port),
+            ice: p.ice.config(&self.ip, self.port, self.tcp_port),
             dtls: self.dtls.config(),
             codecs: identity::codecs(),
             codecs_sub: None,
@@ -2018,6 +2027,7 @@ mod stall_tests {
             Dtls::bake().expect("자가서명"),
             "127.0.0.1".into(),
             1,
+            None,
             0,
         );
         let ttl = crate::room::Ttl { unused_secs: None, departure_secs: None };
@@ -2198,6 +2208,7 @@ mod ssrc_collision_tests {
             Dtls::bake().expect("자가서명"),
             "127.0.0.1".into(),
             1,
+            None,
             0,
         );
         let ttl = crate::room::Ttl { unused_secs: None, departure_secs: None };
@@ -2301,6 +2312,7 @@ mod muted_tests {
             Dtls::bake().expect("자가서명"),
             "127.0.0.1".into(),
             1,
+            None,
             0,
         );
         let ttl = crate::room::Ttl { unused_secs: None, departure_secs: None };
@@ -2429,6 +2441,7 @@ mod permission_tests {
             Dtls::bake().expect("자가서명"),
             "127.0.0.1".into(),
             1,
+            None,
             0,
         );
         let ttl = crate::room::Ttl { unused_secs: None, departure_secs: None };

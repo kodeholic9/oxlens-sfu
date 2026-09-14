@@ -15,15 +15,16 @@
 
 use std::any::Any;
 use std::net::SocketAddr;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use tokio::net::UdpSocket;
+use std::sync::Arc;
+
 use tokio::sync::{mpsc, Mutex};
 use webrtc_util::conn::Conn;
 
-use super::ice::Latch;
+use super::dispatch::Dispatch;
+use super::ice::IceEntry;
 
 /// ★**밀린 DTLS 조각의 상한** — 핸드셰이크는 몇 장이면 끝난다. 넘치면 그 세션이 못 서고,
 /// 그것은 조용한 성공보다 낫다.
@@ -31,21 +32,21 @@ const INBOUND: usize = 128;
 
 /// 한 자격(연결 하나)의 DTLS 통로.
 pub struct DemuxConn {
-    socket: Arc<UdpSocket>,
+    dispatch: Dispatch,
     /// ★**읽을 때마다 본다** — 붙들어 두지 않는다.
-    addr: Latch,
+    entry: Arc<IceEntry>,
     rx: Mutex<mpsc::Receiver<Bytes>>,
 }
 
 impl DemuxConn {
     /// 통로와 그 입구를 낸다. 입구는 UDP 수신 루프가 쥔다.
-    pub fn new(socket: Arc<UdpSocket>, addr: Latch) -> (Self, mpsc::Sender<Bytes>) {
+    pub fn new(dispatch: Dispatch, entry: Arc<IceEntry>) -> (Self, mpsc::Sender<Bytes>) {
         let (tx, rx) = mpsc::channel(INBOUND);
-        (Self { socket, addr, rx: Mutex::new(rx) }, tx)
+        (Self { dispatch, entry, rx: Mutex::new(rx) }, tx)
     }
 
     fn peer(&self) -> Option<SocketAddr> {
-        *self.addr.read().expect("latch 자물쇠는 패닉을 건너지 않는다")
+        self.entry.addr()
     }
 }
 
@@ -80,8 +81,10 @@ impl Conn for DemuxConn {
 
     async fn send(&self, buf: &[u8]) -> webrtc_util::Result<usize> {
         // ★**그때그때 읽는다** — 망이 바뀌면 다음 장부터 새 주소로 간다.
-        let addr = self.peer().ok_or_else(|| webrtc_util::Error::Other("latch 전이다".into()))?;
-        self.socket.send_to(buf, addr).await.map_err(|e| webrtc_util::Error::Other(e.to_string()))
+        self.dispatch
+            .send_picked(&self.entry, buf)
+            .await
+            .map_err(|e| webrtc_util::Error::Other(e.to_string()))
     }
 
     async fn send_to(&self, buf: &[u8], _target: SocketAddr) -> webrtc_util::Result<usize> {
@@ -90,7 +93,7 @@ impl Conn for DemuxConn {
     }
 
     fn local_addr(&self) -> webrtc_util::Result<SocketAddr> {
-        self.socket.local_addr().map_err(|e| webrtc_util::Error::Other(e.to_string()))
+        self.dispatch.local_addr().map_err(|e| webrtc_util::Error::Other(e.to_string()))
     }
 
     fn remote_addr(&self) -> Option<SocketAddr> {

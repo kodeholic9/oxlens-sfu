@@ -19,6 +19,14 @@ use tokio::sync::mpsc;
 
 use super::conn::DemuxConn;
 use super::demux::{classify, Packet};
+use super::dispatch::Dispatch;
+use super::tcp::TcpIn;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Proto {
+    Udp,
+    Tcp,
+}
 use super::ice::{Binding, DropWhy, IceTable};
 use super::dtls;
 
@@ -142,6 +150,8 @@ impl Drop for Pipe {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Counters {
     pub stun_ok: u64,
+    pub tcp_up: u64,
+    pub tcp_oversize: u64,
     pub stun_dropped: u64,
     pub forged: u64,
     pub dtls_in: u64,
@@ -274,6 +284,34 @@ const SERVER_SSRC: u32 = 0x0000_0001;
 
 /// 포트를 열고 루프를 돈다. ★**되돌아오지 않는다** — 태스크로 띄운다.
 #[allow(clippy::too_many_arguments)]
+fn pipe_for(
+    ufrag: &str,
+    by_ufrag: &mut HashMap<String, Arc<Pipe>>,
+    table: &Arc<IceTable>,
+    dispatch: &Dispatch,
+    cert: &dtls::Certificate,
+    cmd_tx: &mpsc::Sender<Cmd>,
+    dc_in: &mpsc::Sender<DcIn>,
+) -> Option<Arc<Pipe>> {
+    if let Some(p) = by_ufrag.get(ufrag) {
+        return Some(p.clone());
+    }
+    let e = table.get(ufrag)?;
+    let (conn, tx) = DemuxConn::new(dispatch.clone(), e.clone());
+    let (dc_tx, dc_rx) = mpsc::channel(64);
+    let task = spawn_dtls(conn, cert.clone(), ufrag.to_string(), cmd_tx.clone(), dc_rx, dc_in.clone());
+    let p = Arc::new(Pipe {
+        session_id: e.session_id.clone(),
+        ufrag: ufrag.to_string(),
+        tx,
+        dc: dc_tx,
+        task,
+    });
+    by_ufrag.insert(ufrag.to_string(), p.clone());
+    Some(p)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn serve(
     socket: Arc<UdpSocket>,
     table: Arc<IceTable>,
@@ -285,11 +323,13 @@ pub async fn serve(
     counts: Arc<CountersView>,
     // ★**그 배포의 상한**(정§11-2 REMB) — 우리가 발행자에게 말하는 천장이다.
     max_bitrate_bps: u64,
+    mut tcp_up: mpsc::Receiver<TcpIn>,
 ) {
     // ★**그릇을 하나 잡아 재사용한다** — 데이터그램마다 새로 잡지 않는다(H3).
     let mut buf = vec![0u8; MTU];
+    let dispatch = Dispatch::new(socket.clone());
     let mut by_ufrag: HashMap<String, Arc<Pipe>> = HashMap::new();
-    let mut by_addr: HashMap<SocketAddr, Arc<Pipe>> = HashMap::new();
+    let mut by_addr: HashMap<(Proto, SocketAddr), Arc<Pipe>> = HashMap::new();
     // ★이 둘도 이 태스크 혼자 쓴다 — 자물쇠가 없다.
     let mut srtp: HashMap<String, super::srtp::SrtpPair> = HashMap::new();
     // ★키는 `(발행 자격, ssrc)` 다 — 위 `SetRoute` 의 이유와 같다.
@@ -356,12 +396,36 @@ pub async fn serve(
     fb.tick().await;
 
     loop {
-        let (n, from) = tokio::select! {
+        let (n, from, proto) = tokio::select! {
             r = socket.recv_from(&mut buf) => match r {
-                Ok(v) => v,
+                Ok((n, from)) => (n, from, Proto::Udp),
                 Err(e) => {
                     eprintln!("[udp] recv: {e}");
                     continue;
+                }
+            },
+            Some(ev) = tcp_up.recv() => match ev {
+                TcpIn::Identified { ufrag, from } => {
+                    let Some(pipe) = pipe_for(
+                        &ufrag, &mut by_ufrag, &table, &dispatch, &cert, &cmd_tx, &dc_in,
+                    ) else {
+                        continue;
+                    };
+                    by_addr.insert((Proto::Tcp, from), pipe);
+                    c.tcp_up += 1;
+                    continue;
+                }
+                TcpIn::Closed { from } => {
+                    by_addr.remove(&(Proto::Tcp, from));
+                    continue;
+                }
+                TcpIn::Frame { from, bytes } => {
+                    if bytes.len() > buf.len() {
+                        c.tcp_oversize += 1;
+                        continue;
+                    }
+                    buf[..bytes.len()].copy_from_slice(&bytes);
+                    (bytes.len(), from, Proto::Tcp)
                 }
             },
             _ = rr.tick() => {
@@ -369,14 +433,13 @@ pub async fn serve(
                 //   릴레이한 것이 아니다(릴레이하면 발행자가 남의 품질로 비트레이트를 깎는다).
                 let now = now_ms();
                 for (ufrag, blocks) in rr_blocks(&mut stats, now) {
-                    let (Some(ctx), Some(dst)) =
-                        (srtp.get_mut(&ufrag), table.get(&ufrag).and_then(|e| e.addr()))
+                    let (Some(ctx), Some(to)) = (srtp.get_mut(&ufrag), table.routable(&ufrag))
                     else {
                         continue;
                     };
                     let plain = crate::rtcp::build_rr(SERVER_SSRC, &blocks);
                     if let Some(sealed) = ctx.seal_rtcp(&plain) {
-                        let _ = socket.send_to(&sealed, dst).await;
+                        let _ = dispatch.send(&to, &sealed).await;
                         c.rtcp_out += 1;
                     }
                 }
@@ -397,14 +460,13 @@ pub async fn serve(
                         .map(|d| d.gcc.estimate_bps())
                         .min();
                     let bps = est.map(|e| e.min(max_bitrate_bps)).unwrap_or(max_bitrate_bps);
-                    let (Some(ctx), Some(dst)) =
-                        (srtp.get_mut(&ufrag), table.get(&ufrag).and_then(|e| e.addr()))
+                    let (Some(ctx), Some(to)) = (srtp.get_mut(&ufrag), table.routable(&ufrag))
                     else {
                         continue;
                     };
                     let plain = crate::rtcp::build_remb(SERVER_SSRC, bps, &mine);
                     if let Some(sealed) = ctx.seal_rtcp(&plain) {
-                        let _ = socket.send_to(&sealed, dst).await;
+                        let _ = dispatch.send(&to, &sealed).await;
                         c.rtcp_out += 1;
                         c.remb_out += 1;
                     }
@@ -418,13 +480,13 @@ pub async fn serve(
                 // ★**판정도 1초 한 번이다**(정§10-3 tick 1,000ms) — 타이머를 또 두지 않는다.
                 downlink_tick(
                     now, &mut down, &routes, &vssrc_by_mid, &layer_of, &mut sim_out, &mut pli_at,
-                    &mut srtp, &table, &socket, &mut c,
+                    &mut srtp, &table, &dispatch, &mut c,
                 )
                 .await;
                 continue;
             },
             _ = chunk.tick() => {
-                probe_chunk(&mut down, &mut srtp, &table, &socket, &mut c).await;
+                probe_chunk(&mut down, &mut srtp, &table, &dispatch, &mut c).await;
                 continue;
             },
             _ = fb.tick() => {
@@ -438,14 +500,13 @@ pub async fn serve(
                         .find(|(f, _)| f == ufrag)
                         .map(|(_, s)| *s)
                         .unwrap_or(0);
-                    let (Some(ctx), Some(dst)) =
-                        (srtp.get_mut(ufrag), table.get(ufrag).and_then(|e| e.addr()))
+                    let (Some(ctx), Some(to)) = (srtp.get_mut(ufrag), table.routable(ufrag))
                     else {
                         continue;
                     };
                     while let Some(plain) = led.build(SERVER_SSRC, media) {
                         let Some(sealed) = ctx.seal_rtcp(&plain) else { break };
-                        let _ = socket.send_to(&sealed, dst).await;
+                        let _ = dispatch.send(&to, &sealed).await;
                         c.rtcp_out += 1;
                         c.twcc_fb_out += 1;
                     }
@@ -535,16 +596,16 @@ pub async fn serve(
         let now = now_ms();
         match classify(&buf[..n]) {
             Packet::Stun => {
-                match super::ice::on_binding(&table, &buf[..n], from, now) {
+                match super::ice::on_binding(&table, &buf[..n], from, now, super::ice::Arrival::Udp) {
                     Binding::Respond { wire, ufrag, session_id, latched } => {
                         c.stun_ok += 1;
-                        let _ = socket.send_to(&wire, from).await;
+                        let _ = dispatch.reply_to(from, &wire).await;
                         if latched {
                             let pipe = match by_ufrag.get(&ufrag) {
                                 Some(p) => p.clone(),
                                 None => {
                                     let Some(e) = table.get(&ufrag) else { continue };
-                                    let (conn, tx) = DemuxConn::new(socket.clone(), e.addr.clone());
+                                    let (conn, tx) = DemuxConn::new(dispatch.clone(), e.clone());
                                     let (dc_tx, dc_rx) = mpsc::channel(64);
                                     let task = spawn_dtls(
                                         conn,
@@ -566,8 +627,10 @@ pub async fn serve(
                                 }
                             };
                             // ★**옛 주소를 지우고 새 주소를 건다** — 세션은 그대로다(ufrag 가 키다).
-                            by_addr.retain(|_, p| !Arc::ptr_eq(p, &pipe));
-                            by_addr.insert(from, pipe);
+                            by_addr.retain(|(proto, _), p| {
+                                *proto == Proto::Tcp || !Arc::ptr_eq(p, &pipe)
+                            });
+                            by_addr.insert((Proto::Udp, from), pipe);
                         }
                     }
                     Binding::Drop(why) => {
@@ -582,7 +645,7 @@ pub async fn serve(
             Packet::Dtls => {
                 c.dtls_in += 1;
                 // ★**latch 를 지난 주소만 DTLS 를 탄다** — 그 전 것은 아무것도 아니다.
-                if let Some(p) = by_addr.get(&from) {
+                if let Some(p) = by_addr.get(&(proto, from)) {
                     let _ = p.tx.try_send(Bytes::copy_from_slice(&buf[..n]));
                 }
             }
@@ -590,7 +653,7 @@ pub async fn serve(
                 // ★**latch 를 지난 주소만 미디어를 탄다** — 그 전 것은 아무것도 아니다.
                 //   ★**세고 버린다** — 여기가 계수 없는 drop 이면 *"어디서 없어졌나"* 를
                 //   영영 못 짚는다(조용한 drop 금지).
-                let Some(p) = by_addr.get(&from) else {
+                let Some(p) = by_addr.get(&(proto, from)) else {
                     c.no_latch += 1;
                     continue;
                 };
@@ -610,7 +673,7 @@ pub async fn serve(
                     if let Some(e) = table.get(&ufrag) {
                         e.touch(now);
                     }
-                    on_rtcp(&plain, &ufrag, &mut stats, &mut egress, &mut cache, &routes, &rewriters, &mut down, &sim_out, &layer_of, &mut pli_at, &table, &mut srtp, &socket, &mut c).await;
+                    on_rtcp(&plain, &ufrag, &mut stats, &mut egress, &mut cache, &routes, &rewriters, &mut down, &sim_out, &layer_of, &mut pli_at, &table, &mut srtp, &dispatch, &mut c).await;
                     continue;
                 }
                 c.srtp_in += 1;
@@ -726,7 +789,7 @@ pub async fn serve(
                             continue;
                         }
                     }
-                    if table.get(&t.ufrag).and_then(|e| e.addr()).is_none() {
+                    if table.routable(&t.ufrag).is_none() {
                         continue;
                     }
                     // ★**제자리 재기록 · 길이 불변** — 본문은 건드리지 않는다(H1).
@@ -762,7 +825,7 @@ pub async fn serve(
                         &mut down,
                         &mut srtp,
                         &table,
-                        &socket,
+                        &dispatch,
                         now,
                     )
                         .await
@@ -838,7 +901,7 @@ fn spawn_dtls(
     })
 }
 
-fn now_ms() -> u64 {
+pub(super) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -877,7 +940,7 @@ async fn on_rtcp(
     pli_at: &mut HashMap<(String, u32), u64>,
     table: &Arc<IceTable>,
     srtp: &mut HashMap<String, super::srtp::SrtpPair>,
-    socket: &Arc<UdpSocket>,
+    dispatch: &Dispatch,
     c: &mut Counters,
 ) {
     use crate::rtcp;
@@ -892,8 +955,7 @@ async fn on_rtcp(
                 // ★**자체 생성 금지 — 번역 릴레이다**(정§11-2). 구독자마다 값이 다르다.
                 let Some(targets) = routes.get(&(ufrag.to_string(), ssrc)) else { continue };
                 for t in targets {
-                    let (Some(dst), Some(out)) =
-                        (table.get(&t.ufrag).and_then(|e| e.addr()), srtp.get_mut(&t.ufrag))
+                    let (Some(to), Some(out)) = (table.routable(&t.ufrag), srtp.get_mut(&t.ufrag))
                     else {
                         continue;
                     };
@@ -913,7 +975,7 @@ async fn on_rtcp(
                     if let Some(translated) = rtcp::translate_sr(pkt, &patch)
                         && let Some(sealed) = out.seal_rtcp(&translated)
                     {
-                        let _ = socket.send_to(&sealed, dst).await;
+                        let _ = dispatch.send(&to, &sealed).await;
                         c.rtcp_out += 1;
                     }
                 }
@@ -935,8 +997,7 @@ async fn on_rtcp(
                     c.nack_no_rtx += 1;
                     continue;
                 };
-                let (Some(dst), Some(out)) =
-                    (table.get(ufrag).and_then(|e| e.addr()), srtp.get_mut(ufrag))
+                let (Some(to), Some(out)) = (table.routable(ufrag), srtp.get_mut(ufrag))
                 else {
                     c.nack_no_route += 1;
                     continue;
@@ -960,7 +1021,7 @@ async fn on_rtcp(
                         c.nack_build += 1;
                         continue;
                     };
-                    let _ = socket.send_to(&sealed, dst).await;
+                    let _ = dispatch.send(&to, &sealed).await;
                     c.rtx_out += 1;
                 }
             }
@@ -1017,15 +1078,14 @@ async fn on_rtcp(
                 {
                     continue;
                 }
-                let (Some(dst), Some(ctx)) =
-                    (table.get(pub_ufrag).and_then(|e| e.addr()), srtp.get_mut(pub_ufrag))
+                let (Some(to), Some(ctx)) = (table.routable(pub_ufrag), srtp.get_mut(pub_ufrag))
                 else {
                     c.pli_orphan += 1;
                     continue;
                 };
                 let plain = rtcp::build_pli(SERVER_SSRC, ssrc);
                 if let Some(sealed) = ctx.seal_rtcp(&plain) {
-                    let _ = socket.send_to(&sealed, dst).await;
+                    let _ = dispatch.send(&to, &sealed).await;
                     pli_at.insert(key2, now);
                     c.rtcp_out += 1;
                     c.pli_relay += 1;
@@ -1056,7 +1116,7 @@ async fn downlink_tick(
     pli_at: &mut HashMap<(String, u32), u64>,
     srtp: &mut HashMap<String, super::srtp::SrtpPair>,
     table: &Arc<IceTable>,
-    socket: &Arc<UdpSocket>,
+    dispatch: &Dispatch,
     c: &mut Counters,
 ) {
     use crate::autolayer::{self as al, Decision};
@@ -1163,7 +1223,7 @@ async fn downlink_tick(
             }
             f.target = Some((want, now));
             let ask = Ask { pub_ufrag: &st.pub_ufrag, vssrc: st.vssrc, spatial: want, now };
-            ask_keyframe(ask, layer_of, pli_at, srtp, table, socket, c).await;
+            ask_keyframe(ask, layer_of, pli_at, srtp, table, dispatch, c).await;
         }
     }
 }
@@ -1173,7 +1233,7 @@ async fn probe_chunk(
     down: &mut HashMap<String, Downlink>,
     srtp: &mut HashMap<String, super::srtp::SrtpPair>,
     table: &Arc<IceTable>,
-    socket: &Arc<UdpSocket>,
+    dispatch: &Dispatch,
     c: &mut Counters,
 ) {
     let subs: Vec<String> =
@@ -1220,7 +1280,7 @@ async fn probe_chunk(
                 crate::autolayer::v::PROBE_PAD_BYTES,
             );
             // ★프로브 패딩은 어느 받기 절의 것도 아니다 — mid 를 안 쓴다(쓰면 남의 절을 건드린다).
-            if send_to_sub(&mut pkt, &sub, None, down, srtp, table, socket, now).await {
+            if send_to_sub(&mut pkt, &sub, None, down, srtp, table, dispatch, now).await {
                 c.probe_out += 1;
             }
         }
@@ -1317,10 +1377,10 @@ async fn send_to_sub(
     down: &mut HashMap<String, Downlink>,
     srtp: &mut HashMap<String, super::srtp::SrtpPair>,
     table: &Arc<IceTable>,
-    socket: &Arc<UdpSocket>,
+    dispatch: &Dispatch,
     now: u64,
 ) -> bool {
-    let Some(dst) = table.get(sub).and_then(|e| e.addr()) else { return false };
+    let Some(to) = table.routable(sub) else { return false };
     let d = down.entry(sub.to_string()).or_default();
     let seq = d.ledger.next_seq();
     if let Some(v) = crate::rtpext::stamp(pkt, TWCC_EXT_ID, &seq.to_be_bytes()) {
@@ -1341,7 +1401,7 @@ async fn send_to_sub(
     d.gcc.on_sent(now as f64, size);
     let Some(out) = srtp.get_mut(sub) else { return false };
     let Some(sealed) = out.seal(pkt) else { return false };
-    socket.send_to(&sealed, dst).await.is_ok()
+    dispatch.send(&to, &sealed).await
 }
 
 /// 그 단의 실제 ssrc 에 키프레임을 청한다.
@@ -1354,7 +1414,7 @@ async fn ask_keyframe(
     pli_at: &mut HashMap<(String, u32), u64>,
     srtp: &mut HashMap<String, super::srtp::SrtpPair>,
     table: &Arc<IceTable>,
-    socket: &Arc<UdpSocket>,
+    dispatch: &Dispatch,
     c: &mut Counters,
 ) {
     // ★**배운 지도를 되짚는다** — 등록이 rid 를 안 싣기 때문에 이 사상은 RTP 로만 온다.
@@ -1379,14 +1439,13 @@ async fn ask_keyframe(
     {
         return;
     }
-    let (Some(dst), Some(ctx)) =
-        (table.get(pub_ufrag).and_then(|e| e.addr()), srtp.get_mut(pub_ufrag))
+    let (Some(to), Some(ctx)) = (table.routable(pub_ufrag), srtp.get_mut(pub_ufrag))
     else {
         return;
     };
     let plain = crate::rtcp::build_pli(SERVER_SSRC, ssrc);
     if let Some(sealed) = ctx.seal_rtcp(&plain) {
-        let _ = socket.send_to(&sealed, dst).await;
+        let _ = dispatch.send(&to, &sealed).await;
         pli_at.insert(key, now);
         c.rtcp_out += 1;
     }
