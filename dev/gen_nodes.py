@@ -13,6 +13,10 @@ node 를 늘리는 일이 흔한데 파일을 손으로 복사하면 ★**포트
     sfu gRPC   50061 + i
     sfu UDP    20000 + i
     zenoh      7447  + i
+
+★**sfud 는 `--public-ip auto`** — 기본 인터페이스 주소를 ICE 후보로 광고한다. 같은 서버에 이 Mac 의
+브라우저(3층)와 로컬망 실단말(수동 시험, `context/202609/20260929a`)이 함께 붙는다. IP 가 바뀌어도
+파일은 그대로다(기동 때 sfud 가 정한다).
 """
 import sys
 from pathlib import Path
@@ -71,7 +75,7 @@ kind = "process"
 order = 1
 role = "sfu"
 addr = "127.0.0.1:{50061 + i}"
-cmd = ["./target/debug/oxsfud", "--grpc-listen", "127.0.0.1:{50061 + i}", "--udp-port", "{20000 + i}", "--policy", "policy.toml"]
+cmd = ["./target/debug/oxsfud", "--grpc-listen", "127.0.0.1:{50061 + i}", "--udp-port", "{20000 + i}", "--policy", "policy.toml", "--public-ip", "auto"]
 
 # ★**이 node 의 버스**(정§15-0) — hub 는 router, 성립 조건 둘은 명시로 적는다.
 [zenoh]

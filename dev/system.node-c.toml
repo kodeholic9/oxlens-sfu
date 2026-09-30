@@ -36,7 +36,7 @@ kind = "process"
 order = 1
 role = "sfu"
 addr = "127.0.0.1:50063"
-cmd = ["./target/debug/oxsfud", "--grpc-listen", "127.0.0.1:50063", "--udp-port", "20002", "--policy", "policy.toml"]
+cmd = ["./target/debug/oxsfud", "--grpc-listen", "127.0.0.1:50063", "--udp-port", "20002", "--policy", "policy.toml", "--public-ip", "auto"]
 
 # ★**이 node 의 버스**(정§15-0) — hub 는 router, 성립 조건 둘은 명시로 적는다.
 [zenoh]
