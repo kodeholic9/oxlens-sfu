@@ -87,8 +87,6 @@ async fn main() -> std::process::ExitCode {
             return std::process::ExitCode::from(1);
         }
     };
-    // ★`--public-ip` 가 없으면 루프백이다. ★`auto` 면 이 기계의 기본 인터페이스 주소다(정§18-1) —
-    //   개발 형상이 이 값을 써서 같은 서버에 Mac 브라우저(3층)와 로컬망 실단말이 함께 붙는다.
     let ip = resolve_public_ip(args.extra.get("--public-ip").map(String::as_str));
     let udp: u16 = match args.extra.get("--udp-port").map(|s| s.parse()) {
         Some(Ok(v)) => v,
@@ -212,7 +210,6 @@ async fn main() -> std::process::ExitCode {
 }
 
 
-/// `--public-ip` 해석(정§18-1). 없으면 루프백 · `auto` 면 기본 인터페이스 주소 · 그 밖은 그 값.
 fn resolve_public_ip(arg: Option<&str>) -> String {
     match arg {
         None => "127.0.0.1".into(),
@@ -222,7 +219,6 @@ fn resolve_public_ip(arg: Option<&str>) -> String {
                 ip
             }
             None => {
-                // ★망이 없으면 루프백으로 선다 — 같은 기계의 브라우저는 여전히 붙는다. 조용히 갈리지 않게 말한다.
                 eprintln!("[ip] --public-ip auto — 기본 인터페이스를 못 찾았다. 127.0.0.1 로 간다");
                 "127.0.0.1".into()
             }
@@ -231,7 +227,6 @@ fn resolve_public_ip(arg: Option<&str>) -> String {
     }
 }
 
-/// 밖으로 나가는 UDP 소켓이 고르는 출발 주소 — `connect` 는 경로만 정하고 ★패킷은 안 나간다.
 fn default_iface_ip() -> Option<String> {
     let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     s.connect("8.8.8.8:53").ok()?;
@@ -251,7 +246,6 @@ mod tests {
 
     #[test]
     fn auto_는_주소가_되거나_루프백으로_선다() {
-        // 망 유무에 따라 값이 갈린다 — ★둘 중 하나이고 `auto` 문자열이 그대로 새지 않는다.
         let ip = resolve_public_ip(Some("auto"));
         assert!(ip.parse::<std::net::IpAddr>().is_ok(), "{ip}");
     }
