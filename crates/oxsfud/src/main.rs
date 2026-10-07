@@ -163,6 +163,7 @@ async fn main() -> std::process::ExitCode {
         cmd_rx,
         dc_tx,
         node.egress.clone(),
+        node.ingress.clone(),
         node.counts.clone(),
         policy.media.max_bitrate_bps as u64,
         tcp_rx,

@@ -77,6 +77,7 @@ impl Sfu {
                         me.emit(n);
                     }
                     me.push_routes(r.routes).await;
+                    me.push_dc(r.dc).await;
                     // ★**태스크 종료까지가 회수다**(정§17-2 ④ · 실사고 20260814).
                     let _ = me.udp.send(crate::transport::udp::Cmd::DropSession(r.session_id)).await;
                 }
@@ -289,6 +290,7 @@ impl SfuService for Sfu {
         req: Request<common::b::OpsRequest>,
     ) -> Result<Response<common::b::OpsReply>, Status> {
         let r = req.into_inner();
+        let mut cut_dc = Vec::new();
         let (notices, routes, reply, drop_session) = {
             let mut node = self.node.lock().await;
             match r.what.as_str() {
@@ -300,13 +302,16 @@ impl SfuService for Sfu {
                         .iter()
                         .find(|p| p.user_id == r.user_id)
                         .map(|p| p.session_id.clone());
-                    match sid.and_then(|s| handle::reap(&mut node, &s, false).map(|x| (s, x))) {
-                        Some((sid, out)) => (
-                            out.notices,
-                            out.routes,
-                            common::b::OpsReply { done: true, ..Default::default() },
-                            Some(sid),
-                        ),
+                    match sid.and_then(|s| handle::reap(&mut node, &s, false, now_ms()).map(|x| (s, x))) {
+                        Some((sid, out)) => {
+                            cut_dc = out.dc;
+                            (
+                                out.notices,
+                                out.routes,
+                                common::b::OpsReply { done: true, ..Default::default() },
+                                Some(sid),
+                            )
+                        }
                         None => (vec![], vec![], common::b::OpsReply::default(), None),
                     }
                 }
@@ -339,6 +344,7 @@ impl SfuService for Sfu {
             self.emit(n);
         }
         self.push_routes(routes).await;
+        self.push_dc(cut_dc).await;
         // ★**통로까지가 회수다**(정§12) — `cut` 만 세션을 끊는다.
         if let Some(sid) = drop_session {
             let _ = self.udp.send(crate::transport::udp::Cmd::DropSession(sid)).await;
@@ -436,8 +442,12 @@ fn detail_of(r: &Room, floor: Option<&crate::floor::Floor>, epoch: &str) -> Stri
         match floor {
             None => serde_json::Value::Null,
             Some(f) => serde_json::json!({
-                "state": match f.speaker() { Some(_) => "Taken", None => "Idle" },
-                "speaker": f.speaker(),
+                "state": match f.general() {
+                    crate::floor::General::Idle => "Idle",
+                    crate::floor::General::Taken => "Taken",
+                    crate::floor::General::PendingRevoke => "PendingRevoke",
+                },
+                "speaker": f.holder(),
                 "priority": f.priority(),
                 "queue": f.queue_view().into_iter()
                     .map(|(u, p)| serde_json::json!({ "user_id": u, "priority": p }))

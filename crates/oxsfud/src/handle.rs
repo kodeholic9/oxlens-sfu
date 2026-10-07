@@ -134,6 +134,8 @@ pub struct Node {
     pub egress: Arc<crate::transport::udp::EgressView>,
     /// ★**데이터 평면이 건네 주는 계수 사본**(운영 §3-5) — 버림 사유 조회가 읽는다.
     pub counts: Arc<crate::transport::udp::CountersView>,
+    pub ingress: Arc<crate::transport::udp::IngressView>,
+    rtp_seen: std::collections::BTreeMap<u32, u64>,
     /// 구독 스트림마다의 정체 앵커 — `(받는 자격, egress ssrc)` → `(그때 계수, 그때 시각)`.
     stall_anchor: std::collections::BTreeMap<(String, u32), (u64, u64)>,
     /// ★**같은 (사람, 방) 재통보 쿨다운**(정§14-3 `T-stall`) — 폭풍을 막는다.
@@ -165,6 +167,8 @@ impl Node {
             health: std::collections::BTreeMap::new(),
             egress: Arc::new(crate::transport::udp::EgressView::default()),
             counts: Arc::new(crate::transport::udp::CountersView::default()),
+            ingress: Arc::new(crate::transport::udp::IngressView::default()),
+            rtp_seen: std::collections::BTreeMap::new(),
             stall_anchor: std::collections::BTreeMap::new(),
             stall_sent: std::collections::BTreeMap::new(),
         }
@@ -557,9 +561,18 @@ fn room_leave(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Ou
         peer.mids.give(Kind::Audio, &a.mid);
     }
     let res = RoomLeaveRes { room_id: req.room_id.clone(), affiliation: peer.affiliation() };
+    let members = floor_members(node, &req.room_id);
+    let dc = match node.floors.get_mut(&req.room_id) {
+        Some(f) => {
+            let outs = f.leave(&ing.user_id, &members, ing.now);
+            emit_floor(node, &req.room_id, outs)
+        }
+        None => Vec::new(),
+    };
     let mut routes = routes_for_room(node, &req.room_id);
     routes.extend(shed_routes);
-    Outcome { reply: ok(header, &json(&res)), notices, routes, ..Default::default() }
+    routes.extend(floor_routes(node, &req.room_id));
+    Outcome { reply: ok(header, &json(&res)), notices, routes, dc, ..Default::default() }
 }
 
 fn affiliation(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Outcome {
@@ -628,10 +641,12 @@ fn affiliation(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> O
     let mut dc = Vec::new();
     if let Some(old) = was.as_deref()
         && now_room.as_deref() != Some(old)
-        && let Some(f) = node.floors.get_mut(old)
     {
-        let outs = f.on_gone(&user, 0);
-        dc.extend(emit_floor(node, old, outs));
+        let members = floor_members(node, old);
+        if let Some(f) = node.floors.get_mut(old) {
+            let outs = f.away(&user, &members, ing.now);
+            dc.extend(emit_floor(node, old, outs));
+        }
     }
     // ★★**배관을 같이 민다** — `pub_room` 이 fan-out 의 방 결정이므로(정§5-2) 값만
     //   바꾸고 표를 안 밀면 ★**옛 방으로 계속 흐르고 새 방은 조용하다.**
@@ -664,9 +679,10 @@ pub struct Reaped {
     pub user_id: String,
     pub notices: Vec<Notice>,
     pub routes: Vec<RouteSet>,
+    pub dc: Vec<DcOut>,
 }
 
-pub fn reap(node: &mut Node, session_id: &str, zombie: bool) -> Option<Reaped> {
+pub fn reap(node: &mut Node, session_id: &str, zombie: bool, now: u64) -> Option<Reaped> {
     let (user_id, hidden) = {
         let p = node.peers.get_mut(session_id)?;
         // 투명 여부는 방 명단이 안다 — Peer 는 신원만 쥔다.
@@ -717,10 +733,17 @@ pub fn reap(node: &mut Node, session_id: &str, zombie: bool) -> Option<Reaped> {
         .map(|p| (pub_ufrag(node, session_id), p.vssrc.unwrap_or(p.ssrc), Vec::new()))
         .collect();
     node.publications.retain(|p| p.session_id != session_id);
+    let mut dc = Vec::new();
     for r in &rooms {
+        let members = floor_members(node, r);
+        if let Some(f) = node.floors.get_mut(r) {
+            let outs = f.leave(&user_id, &members, now);
+            dc.extend(emit_floor(node, r, outs));
+        }
         routes.extend(routes_for_room(node, r));
+        routes.extend(floor_routes(node, r));
     }
-    Some(Reaped { session_id: session_id.to_string(), user_id, notices, routes })
+    Some(Reaped { session_id: session_id.to_string(), user_id, notices, routes, dc })
 }
 
 /// 정체 판정의 수치(정§14-3).
@@ -843,6 +866,7 @@ pub fn set_permission(
     room_id: &str,
     user_id: &str,
     want: oxsig::Permission,
+    now: u64,
 ) -> Result<Emitted, Code> {
     let Some(room) = node.rooms.get_mut(room_id) else { return Err(Code::RoomNotFound) };
     if room.permission_of(user_id).is_none() {
@@ -883,7 +907,7 @@ pub fn set_permission(
     if speaks_here && !floor_ok(node, user_id, applied)
         && let Some(f) = node.floors.get_mut(room_id)
     {
-        let outs = f.on_permission_lost(user_id, 0);
+        let outs = f.permission_lost(user_id, now);
         dc = emit_floor(node, room_id, outs);
     }
 
@@ -1076,7 +1100,7 @@ pub fn reaper_tick(node: &mut Node, now: u64) -> Vec<Reaped> {
     let mut out = Vec::new();
     for sid in dead {
         node.health.remove(&sid);
-        if let Some(r) = reap(node, &sid, true) {
+        if let Some(r) = reap(node, &sid, true, now) {
             eprintln!("[reap] {} 회수 — 방 {}", r.session_id, r.notices.len());
             out.push(r);
         }
@@ -1548,7 +1572,14 @@ fn ready(node: &mut Node, ing: &Ingress, header: Header, body: &[u8]) -> Outcome
         //   남에게 통지도 내지 않는다(정§7-4 · 연§6-3 16차 결재).
         ReadyType::Camera => peer.camera_at = peer.camera_at.or(Some(ing.now)),
     }
-    Outcome { reply: ok(header, b"{}"), ..Default::default() }
+    let mut dc = Vec::new();
+    if matches!(req.ready_type, ReadyType::Tracks) {
+        let max_burst = node.max_burst_ms;
+        let outs =
+            node.floors.entry(req.room_id.clone()).or_insert_with(|| Floor::new(max_burst)).ready(&ing.user_id);
+        dc = emit_floor(node, &req.room_id, outs);
+    }
+    Outcome { reply: ok(header, b"{}"), dc, ..Default::default() }
 }
 
 // ─── 발언권(연§11) ─────────────────────────────────────────────────────────
@@ -1575,95 +1606,49 @@ pub fn on_floor(node: &mut Node, ufrag: &str, payload: &[u8], now: u64) -> Floor
     let Some(entry) = node.ice.get(ufrag) else { return FloorOut::default() };
     let session_id = entry.session_id.clone();
     let Some(msg) = oxsig::mbcp::decode(payload) else { return FloorOut::default() };
-    // ★★**ACK 에는 답하지 않는다 — 어떤 갈래에서도**(정§9-6). 답하면 그 답이 다시 ACK 을
-    //   부르고 둘이 서로를 낳는다(실측 요청 한 번에 33,971통). ★**관문보다 먼저** 본다.
-    if msg.msg_type == oxsig::mbcp::ACK || msg.ack_req {
+    let rx = if msg.msg_type == oxsig::mbcp::ACK || msg.ack_req {
+        floor::Rx::Ack
+    } else {
+        match msg.msg_type {
+            oxsig::mbcp::REQUEST => {
+                floor::Rx::Request { priority: msg.get_u8(oxsig::mbcp::F_PRIORITY).unwrap_or(0) }
+            }
+            oxsig::mbcp::RELEASE => floor::Rx::Release,
+            oxsig::mbcp::QUEUE_POS_REQUEST => floor::Rx::QueuePos,
+            _ => return FloorOut::default(),
+        }
+    };
+    if rx == floor::Rx::Ack {
         return FloorOut::default();
     }
-    // ★관문 ① — `0x1D` 가 없으면 ★**계수 후 무응답**이다(돌려줄 방이 없다).
     let Some(room_id) = msg.room().map(str::to_string) else { return FloorOut::default() };
     let Some(peer) = node.peers.get(&session_id) else { return FloorOut::default() };
     let user_id = peer.user_id.clone();
-    let in_pub_room = peer.pub_room.as_deref() == Some(room_id.as_str());
-    let in_room = peer.sub_rooms.iter().any(|r| r == &room_id);
-    let has_half_track = node
-        .publications
-        .iter()
-        .any(|p| p.session_id == session_id && p.duplex == Duplex::Half);
-
-    // ★★**관문 넷은 요청 갈래에만 건다**(정§9-6) — 순서가 계약이다.
-    if msg.msg_type == oxsig::mbcp::REQUEST {
-        use oxsig::mbcp::reject;
-        // ① 미입장 — ★**조용히 첫 방을 고르지 않는다.**
-        // ★사유가 원문에 없으면 `255` + ★**사유 문구**(`0x1B`)로 나른다 — 숫자만 보내면
-        //   클라가 *"기타"* 말고는 아무것도 모른다(정§9-6 — 우리 쪽 오류의 표기법).
-        let why = if !in_room {
-            Some((reject::OTHER, Some("not_in_room")))
-        } else if !has_half_track {
-            // ② ★**무시가 아니다** — 무시하면 클라가 `T101`×3 을 헛되이 태우고 사유를 못 본다.
-            Some((reject::RECEIVE_ONLY, None))
-        } else if !in_pub_room {
-            // ③ 발언권 요청·대기는 `pub_room` 에서만(연§11-5).
-            Some((reject::NOT_PUB_ROOM, None))
-        } else {
-            // ④ 권한 비트는 방이 기억한다(연§4-4-1) — ★**우선순위를 읽기 전이다.**
-            None
-        };
-        if let Some((cause, text)) = why {
-            let mut m = oxsig::mbcp::Msg::new(oxsig::mbcp::DENY)
-                .with_str(oxsig::mbcp::F_ROOM, &room_id)
-                .with_u8(oxsig::mbcp::F_CAUSE, cause)
-                .ack();
-            if let Some(t) = text {
-                m = m.with_str(oxsig::mbcp::F_CAUSE_TEXT, t);
-            }
-            let mut dc = Vec::new();
-            if let Some(body) = m.encode()
-                && let Some(frame) = crate::transport::dc::build(crate::transport::dc::SVC_FLOOR, &body)
-            {
-                dc.push(DcOut { ufrag: entry_pub_ufrag(node, &session_id), wire: frame });
-            }
-            return FloorOut { dc, routes: Vec::new() };
-        }
-    }
-
-    let max_burst = node.max_burst_ms;
-    // ★★**관문 ④ — `pub_room` 의 비트를 본다**(정§9-6 · §6-4). ★**우선순위를 읽기 전이다.**
-    //   ★`floor_request` 와 그가 든 반이중 kind 를 같이 본다 — 둘 중 하나만 보면
-    //   마이크 비트를 내려도 말이 나간다.
-    let allowed = node
-        .rooms
-        .get(&room_id)
-        .and_then(|r| r.permission_of(&user_id))
-        .is_some_and(|p| floor_ok(node, &user_id, p));
-    let floor = node.floors.entry(room_id.clone()).or_insert_with(|| Floor::new(max_burst));
-    let outs = match msg.msg_type {
-        oxsig::mbcp::REQUEST => floor.on_request(
-            &floor::Request {
-                user_id: user_id.clone(),
-                // ★**요청이 실은 값이 전부다** — 서버가 깎지 않는다(연§11-3).
-                priority: msg.get_u8(oxsig::mbcp::F_PRIORITY).unwrap_or(0),
-                // ★**안 실었으면 `None`** — *"0초"* 가 아니다(0 이면 허가 즉시 만료다).
-                want_ms: msg.get_u16(oxsig::mbcp::F_DURATION).map(|s| u64::from(s) * 1_000),
-                in_pub_room,
-                has_half_track,
-                allowed,
-                others_present: node
-                    .rooms
-                    .get(&room_id)
-                    .is_some_and(|r| r.participants().len() > 1),
-            },
-            now,
-        ),
-        oxsig::mbcp::RELEASE => floor.on_release(&user_id, now),
-        oxsig::mbcp::QUEUE_POS_REQUEST => floor.on_queue_pos(&user_id),
-        // ★**ACK 에 답하지 않는다**(정§9-6 · 22차) — 답하면 ACK 의 ACK 가 생긴다.
-        oxsig::mbcp::ACK => Vec::new(),
-        // 그 밖은 서버가 내는 것이라 받을 일이 없다 — 조용히 버린다.
-        _ => Vec::new(),
+    let ctx = floor::Ctx {
+        in_room: peer.sub_rooms.iter().any(|r| r == &room_id),
+        has_half: node
+            .publications
+            .iter()
+            .any(|p| p.session_id == session_id && p.duplex == Duplex::Half),
+        in_pub_room: peer.pub_room.as_deref() == Some(room_id.as_str()),
+        permitted: node
+            .rooms
+            .get(&room_id)
+            .and_then(|r| r.permission_of(&user_id))
+            .is_some_and(|p| floor_ok(node, &user_id, p)),
     };
-    // ★**말과 배관을 같이 낸다** — 가르면 허가는 갔는데 소리가 안 나는 창이 생긴다.
+    let members = floor_members(node, &room_id);
+    let max_burst = node.max_burst_ms;
+    let outs = node
+        .floors
+        .entry(room_id.clone())
+        .or_insert_with(|| Floor::new(max_burst))
+        .rx(&user_id, rx, ctx, &members, now);
     FloorOut { dc: emit_floor(node, &room_id, outs), routes: floor_routes(node, &room_id) }
+}
+
+fn floor_members(node: &Node, room_id: &str) -> Vec<String> {
+    node.rooms.get(room_id).map(|r| r.participants().into_iter().map(|m| m.user_id).collect()).unwrap_or_default()
 }
 
 /// 지금 말하는 사람의 반이중 발행이 갈 곳. ★**게이트가 곧 배관이다**(정§7-3 prefan).
@@ -1671,7 +1656,7 @@ pub fn on_floor(node: &mut Node, ufrag: &str, payload: &[u8], now: u64) -> Floor
 /// ★★**허가가 없으면 목록이 빈다** — 그것이 *"허가 전 발화가 안 나간다"* 의 실체다.
 /// 검사로 막는 것이 아니라 ★**보낼 곳이 없는 것**이라, 검사를 빠뜨릴 자리가 없다.
 pub fn floor_routes(node: &Node, room_id: &str) -> Vec<(String, u32, Vec<crate::transport::udp::Target>)> {
-    let speaker = node.floors.get(room_id).and_then(|f| f.speaker()).map(str::to_string);
+    let speaker = node.floors.get(room_id).and_then(|f| f.holder()).map(str::to_string);
     let Some(room) = node.rooms.get(room_id) else { return Vec::new() };
     let slot_ssrc = room.slot_audio_ssrc;
     let slot_track = format!("ptt-{room_id}-audio");
@@ -1718,11 +1703,6 @@ pub fn floor_routes(node: &Node, room_id: &str) -> Vec<(String, u32, Vec<crate::
         .collect()
 }
 
-/// 그 세션의 발행 자격 — DC 는 ★**보내기용 연결**에 붙는다(연§3-3).
-fn entry_pub_ufrag(node: &Node, session_id: &str) -> String {
-    pub_ufrag(node, session_id)
-}
-
 /// 그 세션의 **발행** 자격 — 전달표의 키 절반이다.
 fn pub_ufrag(node: &Node, session_id: &str) -> String {
     node.peers.get(session_id).map(|p| p.ice.publish_ufrag.clone()).unwrap_or_default()
@@ -1731,11 +1711,35 @@ fn pub_ufrag(node: &Node, session_id: &str) -> String {
 /// 발언권 tick — ★**주기는 하나다**(정§9 `2초`). `T1`·`T2` 가 여기서 돈다.
 pub fn floor_tick(node: &mut Node, now: u64) -> FloorOut {
     let rooms: Vec<String> = node.floors.keys().cloned().collect();
+    let ingress = node.ingress.load_full();
     let mut out = FloorOut::default();
     for r in rooms {
+        let members = floor_members(node, &r);
+        let seen: Vec<(u32, String, u64)> = node
+            .publications
+            .iter()
+            .filter(|p| p.duplex == Duplex::Half && p.kind == Kind::Audio)
+            .filter(|p| node.peers.get(&p.session_id).and_then(|x| x.pub_room.as_deref()) == Some(r.as_str()))
+            .filter_map(|p| {
+                let got = ingress.get(&(pub_ufrag(node, &p.session_id), p.ssrc)).copied()?;
+                Some((p.ssrc, p.user_id.clone(), got))
+            })
+            .collect();
+        let mut talking = Vec::new();
+        for (ssrc, user, got) in seen {
+            if node.rtp_seen.insert(ssrc, got).is_some_and(|was| was != got) {
+                talking.push(user);
+            }
+        }
         let Some(f) = node.floors.get_mut(&r) else { continue };
-        let outs = f.tick(now);
-        if !outs.is_empty() {
+        let before = f.holder().map(str::to_string);
+        let mut outs = Vec::new();
+        for u in &talking {
+            outs.extend(f.rtp(u, now));
+        }
+        outs.extend(f.tick(&members, now));
+        let moved = f.holder().map(str::to_string) != before;
+        if !outs.is_empty() || moved {
             out.dc.extend(emit_floor(node, &r, outs));
             out.routes.extend(floor_routes(node, &r));
         }
@@ -1748,73 +1752,50 @@ fn emit_floor(node: &Node, room_id: &str, outs: Vec<floor::Out>) -> Vec<DcOut> {
     use oxsig::mbcp::{self, Msg};
     let mut wire = Vec::new();
     for o in outs {
-        let (to, m) = match o {
-            floor::Out::Granted { user_id, priority, remaining_ms } => (
-                Some(user_id),
-                // ★서버가 내는 `GRANTED`·`DENY` 는 `A` 비트를 세운다(연§11-2).
-                Msg::new(mbcp::GRANTED)
-                    .with_str(mbcp::F_ROOM, room_id)
-                    .with_u8(mbcp::F_PRIORITY, priority)
-                    .with_u16(mbcp::F_DURATION, (remaining_ms / 1_000) as u16)
-                    .ack(),
-            ),
-            floor::Out::Deny { user_id, cause } => (
-                Some(user_id),
-                Msg::new(mbcp::DENY)
-                    .with_str(mbcp::F_ROOM, room_id)
-                    .with_u8(mbcp::F_CAUSE, cause)
-                    .ack(),
-            ),
-            floor::Out::Revoke { user_id, cause } => (
-                Some(user_id),
-                Msg::new(mbcp::REVOKE).with_str(mbcp::F_ROOM, room_id).with_u8(mbcp::F_CAUSE, cause),
-            ),
-            floor::Out::QueueInfo { user_id, position, size, priority } => (
-                Some(user_id),
-                Msg::new(mbcp::QUEUE_INFO)
-                    .with_str(mbcp::F_ROOM, room_id)
-                    // ★**두 바이트인데 u16 이 아니다**(연§11-3) — byte0 순번 · byte1 허가된 우선순위.
-                    .with(mbcp::F_QUEUE_INFO, vec![position, priority])
-                    // ★대기 인원은 u8 이다.
-                    .with_u8(mbcp::F_QUEUE_SIZE, size),
-            ),
-            floor::Out::Taken { speaker, seq } => (
-                None,
-                Msg::new(mbcp::TAKEN)
-                    .with_str(mbcp::F_ROOM, room_id)
-                    .with_str(mbcp::F_GRANTED_PARTY, &speaker)
-                    .with_u16(mbcp::F_SEQ, seq),
-            ),
-            floor::Out::Idle { seq, prev } => {
-                let mut m =
-                    Msg::new(mbcp::IDLE).with_str(mbcp::F_ROOM, room_id).with_u16(mbcp::F_SEQ, seq);
-                // ★**있을 때만 싣는다** — 처음부터 조용한 방에는 직전 화자가 없다.
-                if let Some(p) = prev {
-                    m = m.with_str(mbcp::F_PREV_SPEAKER, &p);
+        let m = match o.wire {
+            floor::Wire::Granted { priority, duration_s } => Msg::new(mbcp::GRANTED)
+                .with_str(mbcp::F_ROOM, room_id)
+                .with_u8(mbcp::F_PRIORITY, priority)
+                .with_u16(mbcp::F_DURATION, duration_s)
+                .ack(),
+            floor::Wire::Deny { cause, text } => {
+                let m = Msg::new(mbcp::DENY).with_str(mbcp::F_ROOM, room_id).with_u8(mbcp::F_CAUSE, cause);
+                match text {
+                    Some(t) => m.with_str(mbcp::F_CAUSE_TEXT, t).ack(),
+                    None => m.ack(),
                 }
-                (None, m)
+            }
+            floor::Wire::Revoke { cause } => {
+                Msg::new(mbcp::REVOKE).with_str(mbcp::F_ROOM, room_id).with_u8(mbcp::F_CAUSE, cause)
+            }
+            floor::Wire::QueueInfo { position, priority } => Msg::new(mbcp::QUEUE_INFO)
+                .with_str(mbcp::F_ROOM, room_id)
+                .with(mbcp::F_QUEUE_INFO, vec![position, priority]),
+            floor::Wire::Taken { speaker, seq } => Msg::new(mbcp::TAKEN)
+                .with_str(mbcp::F_ROOM, room_id)
+                .with_str(mbcp::F_GRANTED_PARTY, &speaker)
+                .with_u16(mbcp::F_SEQ, seq),
+            floor::Wire::Idle { prev, seq } => {
+                let m = Msg::new(mbcp::IDLE).with_str(mbcp::F_ROOM, room_id).with_u16(mbcp::F_SEQ, seq);
+                match prev {
+                    Some(p) => m.with_str(mbcp::F_PREV_SPEAKER, &p),
+                    None => m,
+                }
             }
         };
         let Some(body) = m.encode() else { continue };
         let Some(frame) = crate::transport::dc::build(crate::transport::dc::SVC_FLOOR, &body) else {
             continue;
         };
-        // ★`TAKEN`·`IDLE` 은 그 방 전원인데 ★**화자는 제외한다**(자기 것은 `GRANTED` 로 안다).
-        let skip = match &m.msg_type {
-            &mbcp::TAKEN => m.get_str(mbcp::F_GRANTED_PARTY).map(str::to_string),
-            _ => None,
-        };
-        for sid in node.rooms.get(room_id).map(|r| r.session_ids()).unwrap_or_default() {
-            let Some(peer) = node.peers.get(&sid) else { continue };
-            if let Some(t) = &to
-                && &peer.user_id != t
-            {
-                continue;
-            }
-            if skip.as_deref() == Some(peer.user_id.as_str()) {
-                continue;
-            }
-            // ★**DC 는 보내기용 연결에 붙는다**(연§3-3) — 받기 자격이 아니다.
+        let mut peers: Vec<&crate::peer::Peer> = node
+            .peers
+            .iter()
+            .filter(|p| p.user_id == o.to && p.sub_rooms.iter().any(|r| r == room_id))
+            .collect();
+        if peers.is_empty() {
+            peers = node.peers.iter().filter(|p| p.user_id == o.to).collect();
+        }
+        for peer in peers {
             wire.push(DcOut { ufrag: peer.ice.publish_ufrag.clone(), wire: frame.clone() });
         }
     }
@@ -2481,7 +2462,7 @@ mod permission_tests {
     #[test]
     fn 자격을_코덱보다_먼저_본다() {
         let mut n = node_with(false);
-        set_permission(&mut n, "r1", "u1", no_audio()).expect("걸린다");
+        set_permission(&mut n, "r1", "u1", no_audio(), 0).expect("걸린다");
         let f = publish(&mut n, "u1", "s-1", 0xA1);
         assert_eq!(f.code, Code::NotAuthorized.as_u16());
         // ★**막힌 비트 이름을 같이 준다** — 무엇이 막혔는지 모르면 클라가 찍어 본다.
@@ -2495,7 +2476,7 @@ mod permission_tests {
         let mut n = node_with(false);
         publish(&mut n, "u1", "s-1", 0xA1);
         assert_eq!(n.publications.len(), 1, "먼저 올린다");
-        let (notices, _, _) = set_permission(&mut n, "r1", "u1", no_audio()).expect("걸린다");
+        let (notices, _, _) = set_permission(&mut n, "r1", "u1", no_audio(), 0).expect("걸린다");
         assert!(n.publications.is_empty(), "★이미 올라온 것을 걷는다");
         // 트랙 제거 통지와 권한 통지가 ★각자의 경로로 따로 나간다.
         assert!(notices.len() >= 2, "{}", notices.len());
@@ -2505,9 +2486,9 @@ mod permission_tests {
     fn 멱등이다() {
         // ★같은 값을 다시 넣는 호출마다 `seq` 가 오르면 클라 전원이 의미 없는 재동기를 돈다.
         let mut n = node_with(false);
-        set_permission(&mut n, "r1", "u1", no_audio()).expect("걸린다");
+        set_permission(&mut n, "r1", "u1", no_audio(), 0).expect("걸린다");
         let seq = n.rooms.get("r1").expect("방").version(&n.epoch).seq;
-        let (notices, _, _) = set_permission(&mut n, "r1", "u1", no_audio()).expect("두 번째");
+        let (notices, _, _) = set_permission(&mut n, "r1", "u1", no_audio(), 0).expect("두 번째");
         assert!(notices.is_empty());
         assert_eq!(n.rooms.get("r1").expect("방").version(&n.epoch).seq, seq);
     }
@@ -2516,7 +2497,7 @@ mod permission_tests {
     fn 나갔다_들어와도_결정이_산다() {
         // ★★갱신값을 멤버십과 함께 버리면 ★**방을 나갔다 들어오는 것만으로 풀린다.**
         let mut n = node_with(false);
-        set_permission(&mut n, "r1", "u1", no_audio()).expect("걸린다");
+        set_permission(&mut n, "r1", "u1", no_audio(), 0).expect("걸린다");
         let room = n.rooms.get_mut("r1").expect("방");
         assert!(room.leave("u1"));
         room.join(Member {
@@ -2537,8 +2518,8 @@ mod permission_tests {
     #[test]
     fn 기본값으로_되돌리면_표에서_지운다() {
         let mut n = node_with(false);
-        set_permission(&mut n, "r1", "u1", no_audio()).expect("걸린다");
-        set_permission(&mut n, "r1", "u1", Permission::default()).expect("되돌린다");
+        set_permission(&mut n, "r1", "u1", no_audio(), 0).expect("걸린다");
+        set_permission(&mut n, "r1", "u1", Permission::default(), 0).expect("되돌린다");
         let room = n.rooms.get_mut("r1").expect("방");
         assert!(room.leave("u1"));
         room.join(Member {
@@ -2561,7 +2542,7 @@ mod permission_tests {
         // ★감추기로 한 축이 한 프레임으로 무너진다 — 명단에 없는 `user_id` 가 전원에게 간다.
         let mut n = node_with(true);
         let seq = n.rooms.get("r1").expect("방").version(&n.epoch).seq;
-        let (notices, _, _) = set_permission(&mut n, "r1", "u1", no_audio()).expect("걸린다");
+        let (notices, _, _) = set_permission(&mut n, "r1", "u1", no_audio(), 0).expect("걸린다");
         assert!(notices.is_empty());
         assert_eq!(n.rooms.get("r1").expect("방").version(&n.epoch).seq, seq);
         // ★②③ 은 그대로다 — 비트는 내려갔다.
@@ -2591,20 +2572,10 @@ mod permission_tests {
         let mut n = node_with(false);
         half_speaker(&mut n);
         let f = n.floors.entry("r1".into()).or_insert_with(|| crate::floor::Floor::new(30_000));
-        f.on_request(
-            &crate::floor::Request {
-                user_id: "u1".into(),
-                priority: 0,
-                want_ms: None,
-                in_pub_room: true,
-                has_half_track: true,
-                allowed: true,
-                others_present: true,
-            },
-            0,
-        );
+        let on = crate::floor::Ctx { in_room: true, has_half: true, in_pub_room: true, permitted: true };
+        f.rx("u1", crate::floor::Rx::Request { priority: 0 }, on, &["u1".to_string(), "u2".to_string()], 0);
         assert_eq!(n.floors.get("r1").expect("방").speaker(), Some("u1"));
-        let (_, _, dc) = set_permission(&mut n, "r1", "u1", no_floor()).expect("걸린다");
+        let (_, _, dc) = set_permission(&mut n, "r1", "u1", no_floor(), 0).expect("걸린다");
         assert!(n.floors.get("r1").expect("방").speaker().is_none(), "★말하던 것을 회수한다");
         assert!(!dc.is_empty(), "★회수는 말로도 나간다(REVOKE)");
     }
@@ -2624,7 +2595,7 @@ mod permission_tests {
     fn 명단에_없으면_안_받는다() {
         // ★미리 정하는 것은 토큰 claim 의 몫이다 — 표는 "이 방에 있었던 사람" 으로만 자란다.
         let mut n = node_with(false);
-        assert_eq!(set_permission(&mut n, "r1", "없는이", no_audio()), Err(Code::NotInRoom));
-        assert_eq!(set_permission(&mut n, "없는방", "u1", no_audio()), Err(Code::RoomNotFound));
+        assert_eq!(set_permission(&mut n, "r1", "없는이", no_audio(), 0), Err(Code::NotInRoom));
+        assert_eq!(set_permission(&mut n, "없는방", "u1", no_audio(), 0), Err(Code::RoomNotFound));
     }
 }

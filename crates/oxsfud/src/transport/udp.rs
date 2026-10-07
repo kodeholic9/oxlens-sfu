@@ -117,6 +117,8 @@ pub type EgressView = arc_swap::ArcSwap<HashMap<(String, u32), u64>>;
 /// ★**핫패스는 이 자료를 안 만진다** — 세는 자리는 루프 지역 변수이고, 타이머가 사본을 짓는다.
 pub type CountersView = arc_swap::ArcSwap<Counters>;
 
+pub type IngressView = arc_swap::ArcSwap<HashMap<(String, u32), u64>>;
+
 /// 데이터그램 상한 — ★**한 장이 이보다 크면 우리 것이 아니다.**
 const MTU: usize = 2048;
 
@@ -320,6 +322,7 @@ pub async fn serve(
     mut cmds: mpsc::Receiver<Cmd>,
     dc_in: mpsc::Sender<DcIn>,
     view: Arc<EgressView>,
+    ingress: Arc<IngressView>,
     counts: Arc<CountersView>,
     // ★**그 배포의 상한**(정§11-2 REMB) — 우리가 발행자에게 말하는 천장이다.
     max_bitrate_bps: u64,
@@ -475,6 +478,7 @@ pub async fn serve(
                 view.store(Arc::new(
                     egress.iter().map(|(k, (p, _))| (k.clone(), *p as u64)).collect(),
                 ));
+                ingress.store(Arc::new(stats.iter().map(|(k, s)| (k.clone(), u64::from(s.received()))).collect()));
                 // ★**계수도 같이 건넨다**(운영 §3-5) — 세기만 하고 안 보이면 안 센 것과 같다.
                 counts.store(Arc::new(c));
                 // ★**판정도 1초 한 번이다**(정§10-3 tick 1,000ms) — 타이머를 또 두지 않는다.

@@ -1,151 +1,187 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.1 · 정§9-1 · §9-2 · §9-3 · §9-6 · 연§8-4 · §11-3 · §11-4 · model: claude-opus-5
+// spec: floor 원천 · 3GPP TS 24.380 §6.3.4 · §6.3.5 · 연§8-4 · §11 · model: claude-opus-5-5
 
-//! 발언권 — ★★**전이표가 곧 시험이다.**
+//! 발언권 서버 — 판정 로직(6.3.4)과 참가자마다의 상태기(6.3.5)를 원문 짜임새 그대로 둔다.
 //!
-//! ★**판정만 한다** — 시계도 소켓도 주인이 쥔다. `PendingRevoke`·`T3`·`T4` 는 미채택이라
-//! 상태는 ★**둘뿐**이고, 회수는 ★**같은 임계 구역에서 `Idle` → 승계까지** 간다.
+//! 판정 로직이 받는 것은 셋이다 — Idle 의 요청 · 화자의 재요청 · 참가자가 넘긴 선점 요청.
+//! 대기·재통보·만석·순번·반환 확인은 참가자 절이 한다. 절이 없는 칸은 버리고 머문다.
+//! 시계와 소켓은 주인이 쥔다 — 여기는 사람마다 보낼 것만 돌려준다.
 
 use std::collections::BTreeMap;
 
-/// 거절·회수 사유(연§11-3). ★**번호가 곧 처방**이다.
-pub mod cause {
-    /// 방에 나뿐.
-    pub const ALONE: u8 = 3;
-    /// 청취 전용 — 반이중 발행 트랙이 없다.
-    pub const RECEIVE_ONLY: u8 = 5;
-    /// 상한 초과로 회수했다(`T2`). ★이 사유만 `T9` 를 건다.
-    pub const MAX_DURATION: u8 = 2;
-    /// 선점당했다.
-    pub const PREEMPTED: u8 = 4;
-    /// ★**권한 비트가 내려갔다** — 재요청이 무의미하다.
-    pub const NO_PERMISSION: u8 = 102;
-    /// 그 방이 내 `pub_room` 이 아니다.
-    pub const NOT_PUB_ROOM: u8 = 101;
-    /// `Retry-after` 가 안 끝났다.
-    pub const RETRY_AFTER: u8 = 4;
-}
+use oxsig::mbcp::{reject, revoke};
 
-/// 연§8-4 값. ★**정본은 그 문서 하나**이고 여기는 쓰는 자리다.
 pub mod timers {
-    /// RTP 가 끊긴 것으로 보는 시간.
     pub const T1_MS: u64 = 4_000;
-    /// 발화 상한(정책 손잡이 `floor.t2_stop_talking_secs`).
     pub const T2_MS: u64 = 30_000;
-    /// `IDLE` 재전송 주기·횟수.
+    pub const T3_MS: u64 = 3_000;
     pub const T7_MS: u64 = 1_000;
     pub const C7: u8 = 10;
-    /// `REVOKE` 재전송 — ★**한 번뿐**이다.
     pub const T8_MS: u64 = 1_000;
-    pub const C8: u8 = 1;
-    /// 큐 승계 `GRANTED` 재전송.
+    pub const C8: u8 = 3;
     pub const T20_MS: u64 = 1_000;
     pub const C20: u8 = 3;
-    /// 사유 `2` 회수자만 걸리는 재요청 금지.
     pub const T9_MS: u64 = 3_000;
-    /// 판정 해상도 — ★상한 초과를 최대 이만큼 늦게 안다.
-    pub const TICK_MS: u64 = 2_000;
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum State {
-    Idle,
-    Taken {
-        speaker: String,
-        priority: u8,
-        /// ★**`T2` 의 시작은 허가가 아니라 첫 RTP 다.**
-        first_rtp_at: Option<u64>,
-        last_rtp_at: u64,
-        max_burst_ms: u64,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Waiting {
-    user_id: String,
-    priority: u8,
-    enqueued_at: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Revoked {
-    cause: u8,
-    deadline: u64,
-    resent: bool,
-}
-
-/// 서버가 내보낼 것. ★**값이다** — 콜백을 주입하지 않는다.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Out {
-    /// 당사자 unicast.
-    Granted { user_id: String, priority: u8, remaining_ms: u64 },
-    Deny { user_id: String, cause: u8 },
-    Revoke { user_id: String, cause: u8 },
-    /// ★`priority` 는 ★**지금 허가된 사람의 우선순위**다(연§11-3 TLV `3` byte1) —
-    /// 대기자가 *"내가 끼어들 수 있나"* 를 스스로 판단하는 재료다.
-    QueueInfo { user_id: String, position: u8, size: u8, priority: u8 },
-    /// 그 방 청취자 broadcast — ★**화자는 제외한다.**
-    Taken { speaker: String, seq: u16 },
-    /// ★`prev` 는 ★**직전에 말한 사람**이다(연§11-3 `0x1A`) — 화면이 *"방금 누가 말했나"* 를
-    /// 지울지 남길지 그것으로 정한다. ★**처음부터 조용한 방이면 없다**(지어내지 않는다).
-    Idle { seq: u16, prev: Option<String> },
-}
-
-/// 요청이 들고 온 것.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Request {
-    pub user_id: String,
-    /// ★**요청이 실은 값이 전부다** — 서버가 깎지 않는다.
-    pub priority: u8,
-    /// 요청한 발화 시간 — ★**안 실었으면 `None`** 이고, 그것은 *"서버 상한만큼"* 이다.
-    ///
-    /// ★★**`0` 을 부재의 표식으로 쓰지 않는다** — `0` 은 *"0초만 말하겠다"* 라는 값이고,
-    /// 그렇게 두면 시간을 안 실은 요청이 ★**허가 즉시 만료되는 발언권**을 받는다(무음).
-    pub want_ms: Option<u64>,
-    /// 그 방이 이 사람의 `pub_room` 인가.
-    pub in_pub_room: bool,
-    /// 반이중 발행 트랙이 있나.
-    pub has_half_track: bool,
-    /// `floor_request` 비트(와 그 kind 의 발행 비트).
-    pub allowed: bool,
-    /// 방에 나 말고 누가 있나.
-    pub others_present: bool,
+    pub const TICK_MS: u64 = 250;
 }
 
 pub const QUEUE_MAX: usize = 10;
+pub const NOT_IN_QUEUE: u8 = 254;
+pub const NOT_IN_ROOM: &str = "not_in_room";
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum General {
+    Idle,
+    Taken,
+    PendingRevoke,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Participant {
+    NotPermittedIdle,
+    NotPermittedTaken,
+    Permitted,
+    PendingRevoke,
+    NotPermittedSends,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rx {
+    Request { priority: u8 },
+    Release,
+    QueuePos,
+    Ack,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Ctx {
+    pub in_room: bool,
+    pub has_half: bool,
+    pub in_pub_room: bool,
+    pub permitted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Wire {
+    Granted { priority: u8, duration_s: u16 },
+    Deny { cause: u8, text: Option<&'static str> },
+    Revoke { cause: u8 },
+    QueueInfo { position: u8, priority: u8 },
+    Taken { speaker: String, seq: u16 },
+    Idle { prev: Option<String>, seq: u16 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Out {
+    pub to: String,
+    pub wire: Wire,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Waiter {
+    user: String,
+    priority: u8,
+    pre: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Part {
+    state: Participant,
+    released: bool,
+    g_taken: bool,
+    c8: u8,
+    t8_at: u64,
+    cause: u8,
+}
+
+#[derive(Debug, Clone)]
+enum Arb {
+    Granted { priority: u8, duration_s: u16 },
+    Taken(String),
+    Idle,
+    Revoke(u8),
+    QueueInfo { position: u8, priority: u8 },
+    Deny(u8),
+}
+
+#[derive(Debug, Clone)]
 pub struct Floor {
-    pub state: State,
-    queue: Vec<Waiting>,
-    /// ★방마다. `IDLE`·`TAKEN` 을 보낼 때마다 1 증가한다 — ★**재전송도 센다.**
+    t2_ms: u64,
+    g: General,
+    speaker: Option<String>,
+    sprio: u8,
+    revoking: Option<String>,
+    rprio: u8,
+    queue: Vec<Waiter>,
+    succ: bool,
+    rtp_seen: bool,
+    first_rtp_at: Option<u64>,
+    last_rtp_at: u64,
+    c20: u8,
+    t20_at: u64,
+    t3_at: u64,
+    c7: u8,
+    t7_at: u64,
+    idle_bcast: bool,
+    prev: Option<String>,
+    parts: BTreeMap<String, Part>,
+    retry: BTreeMap<String, u64>,
     seq: u16,
-    retry_after: BTreeMap<String, u64>,
-    revoked: BTreeMap<String, Revoked>,
-    max_burst_ms: u64,
+    out: Vec<Out>,
 }
 
 impl Floor {
-    pub fn new(max_burst_ms: u64) -> Self {
+    pub fn new(t2_ms: u64) -> Self {
         Self {
-            state: State::Idle,
+            t2_ms,
+            g: General::Idle,
+            speaker: None,
+            sprio: 0,
+            revoking: None,
+            rprio: 0,
             queue: Vec::new(),
+            succ: false,
+            rtp_seen: false,
+            first_rtp_at: None,
+            last_rtp_at: 0,
+            c20: 0,
+            t20_at: 0,
+            t3_at: 0,
+            c7: 0,
+            t7_at: 0,
+            idle_bcast: false,
+            prev: None,
+            parts: BTreeMap::new(),
+            retry: BTreeMap::new(),
             seq: 0,
-            retry_after: BTreeMap::new(),
-            revoked: BTreeMap::new(),
-            max_burst_ms,
+            out: Vec::new(),
         }
     }
 
-    fn bump(&mut self) -> u16 {
-        self.seq = self.seq.wrapping_add(1);
-        self.seq
+    pub fn general(&self) -> General {
+        self.g
     }
 
     pub fn speaker(&self) -> Option<&str> {
-        match &self.state {
-            State::Taken { speaker, .. } => Some(speaker.as_str()),
-            State::Idle => None,
+        match self.g {
+            General::Taken => self.speaker.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn holder(&self) -> Option<&str> {
+        match self.g {
+            General::Taken => self.speaker.as_deref(),
+            General::PendingRevoke => self.revoking.as_deref(),
+            General::Idle => None,
+        }
+    }
+
+    pub fn priority(&self) -> Option<u8> {
+        match self.g {
+            General::Taken => Some(self.sprio),
+            General::PendingRevoke => Some(self.rprio),
+            General::Idle => None,
         }
     }
 
@@ -153,266 +189,454 @@ impl Floor {
         self.queue.len()
     }
 
-    /// 운영 §3-6 이 보는 줄 — ★**정렬된 그대로**다(`sort_queue` 가 쥔 순서).
-    /// ★운영자가 보는 순서와 실제 다음 차례가 다르면 그 표는 거짓말이다.
     pub fn queue_view(&self) -> Vec<(String, u8)> {
-        self.queue.iter().map(|w| (w.user_id.clone(), w.priority)).collect()
+        self.queue.iter().map(|w| (w.user.clone(), w.priority)).collect()
     }
 
-    /// 지금 쥔 사람의 긴급도 — ★**없으면 `None`**(`Idle` 에 `0` 을 지어내지 않는다).
-    pub fn priority(&self) -> Option<u8> {
-        match &self.state {
-            State::Taken { priority, .. } => Some(*priority),
-            State::Idle => None,
+    pub fn participant(&self, user: &str) -> Participant {
+        self.parts.get(user).map(|p| p.state).unwrap_or(self.default_part())
+    }
+
+    pub fn rx(&mut self, user: &str, rx: Rx, ctx: Ctx, members: &[String], now: u64) -> Vec<Out> {
+        match rx {
+            Rx::Ack => {}
+            Rx::Request { .. } if !ctx.in_room => {
+                self.send(user, Wire::Deny { cause: reject::OTHER, text: Some(NOT_IN_ROOM) });
+            }
+            _ if !ctx.in_room => {}
+            Rx::Request { .. } if !ctx.has_half => {
+                self.send(user, Wire::Deny { cause: reject::RECEIVE_ONLY, text: None });
+            }
+            Rx::Request { .. } if !ctx.in_pub_room => {
+                self.send(user, Wire::Deny { cause: reject::NOT_PUB_ROOM, text: None });
+            }
+            Rx::Request { .. } if !ctx.permitted => {
+                self.send(user, Wire::Deny { cause: reject::NO_PERMISSION, text: None });
+            }
+            _ => self.part_c(user, rx, members, now),
         }
+        std::mem::take(&mut self.out)
     }
 
-    fn sort_queue(&mut self) {
-        // ★우선순위 DESC → 넣은 순서 ASC. 같은 단 안에서는 먼저 온 사람이 먼저다.
-        self.queue.sort_by(|a, b| {
-            b.priority.cmp(&a.priority).then_with(|| a.enqueued_at.cmp(&b.enqueued_at))
-        });
-    }
-
-    fn queue_notices(&self) -> Vec<Out> {
-        // ★**한 바이트에 담긴다**(연§11-3) — 큐 상한이 10 이라 넘칠 자리가 없다.
-        let size = self.queue.len().min(u8::MAX as usize) as u8;
-        let granted = match &self.state {
-            State::Taken { priority, .. } => *priority,
-            _ => 0,
-        };
-        self.queue
-            .iter()
-            .enumerate()
-            .map(|(i, w)| Out::QueueInfo {
-                user_id: w.user_id.clone(),
-                // ★순번은 1부터다.
-                position: (i + 1).min(u8::MAX as usize) as u8,
-                size,
-                priority: granted,
-            })
-            .collect()
-    }
-
-    fn grant(&mut self, user_id: String, priority: u8, want_ms: Option<u64>, now: u64) -> Vec<Out> {
-        // ★**상한과 견준다** — 부재는 상한 그것이다(서버가 깎는 자리는 여기 하나).
-        let burst = want_ms.unwrap_or(self.max_burst_ms).min(self.max_burst_ms);
-        self.state = State::Taken {
-            speaker: user_id.clone(),
-            priority,
-            first_rtp_at: None,
-            last_rtp_at: now,
-            max_burst_ms: burst,
-        };
-        let seq = self.bump();
-        vec![
-            Out::Granted { user_id: user_id.clone(), priority, remaining_ms: burst },
-            // ★화자 제외 broadcast — 안 빼면 자기 목소리가 되돌아온 것처럼 보인다.
-            Out::Taken { speaker: user_id, seq },
-        ]
-    }
-
-    /// `Idle` 로 가면서 ★**큐가 있으면 `IDLE` 을 보내지 않고 곧바로 승계**한다.
-    ///
-    /// 보내면 화면이 *"아무도 안 말함"* 으로 깜빡였다가 다음 화자로 바뀐다.
-    fn idle_or_succeed(&mut self, now: u64) -> Vec<Out> {
-        self.sort_queue();
-        if self.queue.is_empty() {
-            // ★**비우기 전에 읽는다** — 지운 뒤에 물으면 직전 화자를 영영 모른다.
-            let prev = self.speaker().map(str::to_string);
-            self.state = State::Idle;
-            let seq = self.bump();
-            return vec![Out::Idle { seq, prev }];
+    pub fn rtp(&mut self, user: &str, now: u64) -> Vec<Out> {
+        match self.participant(user) {
+            Participant::NotPermittedIdle => {
+                if self.parts.get(user).is_some_and(|p| p.released) {
+                    self.revoke3(user, now);
+                }
+            }
+            Participant::NotPermittedTaken => self.revoke3(user, now),
+            Participant::Permitted | Participant::PendingRevoke => self.arb_rtp(user, now),
+            Participant::NotPermittedSends => {}
         }
-        let w = self.queue.remove(0);
-        // ★대기에서 올라오는 사람은 ★**상한만큼** 받는다 — 대기표가 처음 요청의 시간을
-        //   들고 있지 않다(들게 하면 오래 기다린 요청의 값이 낡는다).
-        let mut out = self.grant(w.user_id, w.priority, None, now);
-        out.extend(self.queue_notices());
+        std::mem::take(&mut self.out)
+    }
+
+    pub fn ready(&mut self, user: &str) -> Vec<Out> {
+        if self.holder() != Some(user) {
+            match self.holder().map(str::to_string) {
+                Some(h) => self.send(user, Wire::Taken { speaker: h, seq: 0 }),
+                None => self.send(user, Wire::Idle { prev: self.prev.clone(), seq: 0 }),
+            }
+        }
+        std::mem::take(&mut self.out)
+    }
+
+    pub fn permission_lost(&mut self, user: &str, now: u64) -> Vec<Out> {
+        if self.g == General::Taken && self.speaker.as_deref() == Some(user) {
+            self.prevoke_enter(user, revoke::NO_PERMISSION, now);
+        } else if self.in_queue(user) {
+            self.dequeue(user);
+            self.part_a(user, Arb::Deny(reject::NO_PERMISSION), now);
+        }
+        std::mem::take(&mut self.out)
+    }
+
+    pub fn away(&mut self, user: &str, members: &[String], now: u64) -> Vec<Out> {
+        if self.g == General::Taken && self.speaker.as_deref() == Some(user) {
+            self.prev = Some(user.to_string());
+            self.idle_enter(members, now);
+        } else if self.in_queue(user) {
+            self.dequeue(user);
+        }
+        std::mem::take(&mut self.out)
+    }
+
+    pub fn leave(&mut self, user: &str, members: &[String], now: u64) -> Vec<Out> {
+        let out = self.away(user, members, now);
+        self.parts.remove(user);
+        self.retry.remove(user);
         out
     }
 
-    /// `FLOOR_REQUEST`.
-    pub fn on_request(&mut self, req: &Request, now: u64) -> Vec<Out> {
-        let deny = |c: u8| vec![Out::Deny { user_id: req.user_id.clone(), cause: c }];
-        // ★관문 순서가 계약이다 — 자격이 먼저고 상태는 그 뒤다.
-        if !req.allowed {
-            // ★긴급도 같다 — 우회 경로가 없다.
-            return deny(cause::NO_PERMISSION);
-        }
-        if !req.in_pub_room {
-            return deny(cause::NOT_PUB_ROOM);
-        }
-        if !req.has_half_track {
-            return deny(cause::RECEIVE_ONLY);
-        }
-        if !req.others_present {
-            return deny(cause::ALONE);
-        }
-        if self.retry_after.get(&req.user_id).is_some_and(|t| now < *t) {
-            return deny(cause::RETRY_AFTER);
-        }
-        match self.state.clone() {
-            State::Idle => self.grant(req.user_id.clone(), req.priority, req.want_ms, now),
-            State::Taken { speaker, priority, first_rtp_at, max_burst_ms, .. }
-                if speaker == req.user_id =>
-            {
-                // ★같은 사람의 재요청 — ★**시간엔 `T2` 남은 값**을 싣고 RTP 시각은 갱신하지 않는다.
-                let used = first_rtp_at.map(|t| now.saturating_sub(t)).unwrap_or(0);
-                vec![Out::Granted {
-                    user_id: req.user_id.clone(),
-                    priority,
-                    remaining_ms: max_burst_ms.saturating_sub(used),
-                }]
-            }
-            State::Taken { speaker, priority, .. } if req.priority > priority => {
-                // ★★**선점은 한 걸음이다** — 회수·허가·통지가 한 임계 구역에서 난다.
-                //   선점자는 ★**큐를 거치지 않는다**(`QUEUE_INFO` 가 가면 안 된다).
-                let mut out = vec![Out::Revoke { user_id: speaker.clone(), cause: cause::PREEMPTED }];
-                self.revoked.insert(
-                    speaker,
-                    Revoked { cause: cause::PREEMPTED, deadline: now + timers::T8_MS, resent: false },
-                );
-                out.extend(self.grant(req.user_id.clone(), req.priority, req.want_ms, now));
-                out
-            }
-            State::Taken { .. } => {
-                if self.queue.iter().any(|w| w.user_id == req.user_id) {
-                    // ★이미 있으면 현 순번만 다시 알린다 — 중복 등록하지 않는다.
-                    self.sort_queue();
-                    return self
-                        .queue_notices()
-                        .into_iter()
-                        .filter(|o| matches!(o, Out::QueueInfo { user_id, .. } if user_id == &req.user_id))
-                        .collect();
-                }
-                if self.queue.len() >= QUEUE_MAX {
-                    return deny(7);
-                }
-                self.queue.push(Waiting {
-                    user_id: req.user_id.clone(),
-                    priority: req.priority,
-                    enqueued_at: now,
-                });
-                self.sort_queue();
-                self.queue_notices()
-            }
-        }
-    }
-
-    /// `FLOOR_RELEASE`. ★**멱등이다** — 화자가 아니면 대기 취소이고, 그도 아니면 무시다.
-    pub fn on_release(&mut self, user_id: &str, now: u64) -> Vec<Out> {
-        // ★회수된 사람의 `RELEASE` 는 `T8` 을 멈춘다(상태는 안 바뀐다 — 이미 넘어갔다).
-        self.revoked.remove(user_id);
-        match &self.state {
-            State::Taken { speaker, .. } if speaker == user_id => self.idle_or_succeed(now),
-            _ => {
-                let had = self.queue.iter().any(|w| w.user_id == user_id);
-                self.queue.retain(|w| w.user_id != user_id);
-                if had { self.queue_notices() } else { Vec::new() }
-            }
-        }
-    }
-
-    /// `QUEUE_POS_REQUEST`. ★**큐에 없으면 계수 후 무응답** — 없는 자리를 지어 답하지 않는다.
-    pub fn on_queue_pos(&mut self, user_id: &str) -> Vec<Out> {
-        self.sort_queue();
-        self.queue_notices()
-            .into_iter()
-            .filter(|o| matches!(o, Out::QueueInfo { user_id: u, .. } if u == user_id))
-            .collect()
-    }
-
-    /// ★**prefan 게이트를 통과한 RTP 만 센다** — 막힌 RTP 는 발화가 아니다.
-    pub fn on_rtp(&mut self, user_id: &str, now: u64) {
-        if let State::Taken { speaker, first_rtp_at, last_rtp_at, .. } = &mut self.state
-            && speaker == user_id
-        {
-            if first_rtp_at.is_none() {
-                *first_rtp_at = Some(now);
-            }
-            *last_rtp_at = now;
-        }
-    }
-
-    /// 권한 비트가 내려갔다(정§6-4 ③). ★**즉시·소급**이다.
-    pub fn on_permission_lost(&mut self, user_id: &str, now: u64) -> Vec<Out> {
-        match &self.state {
-            State::Taken { speaker, .. } if speaker == user_id => {
-                // ★화자는 `REVOKE(3)` — ★`T9` 는 걸지 않는다(사유 `2` 만 건다).
-                let mut out =
-                    vec![Out::Revoke { user_id: user_id.to_string(), cause: 3 }];
-                self.revoked.insert(
-                    user_id.to_string(),
-                    Revoked { cause: 3, deadline: now + timers::T8_MS, resent: false },
-                );
-                out.extend(self.idle_or_succeed(now));
-                out
-            }
-            _ if self.queue.iter().any(|w| w.user_id == user_id) => {
-                // ★대기자는 큐에서 빠지고 `DENY(102)` 를 받는다 — 무통지면 `T104` 소진으로만 안다.
-                self.queue.retain(|w| w.user_id != user_id);
-                let mut out = vec![Out::Deny {
-                    user_id: user_id.to_string(),
-                    cause: cause::NO_PERMISSION,
-                }];
-                out.extend(self.queue_notices());
-                out
-            }
-            // ★그 밖은 아무것도 안 한다 — 다음 요청이 `102` 다.
-            _ => Vec::new(),
-        }
-    }
-
-    /// 퇴장·`pub_deselect` — ★**화자든 대기자든 빠진다.**
-    pub fn on_gone(&mut self, user_id: &str, now: u64) -> Vec<Out> {
-        self.revoked.remove(user_id);
-        self.on_release(user_id, now)
-    }
-
-    /// 시계. ★**판정 해상도는 2초**라 상한 초과를 최대 그만큼 늦게 안다.
-    pub fn tick(&mut self, now: u64) -> Vec<Out> {
-        let mut out = Vec::new();
-        // `T8` — ★**한 번만 더** 보낸다(`C8`=1). 죽은 DC 에 영원히 재송하지 않는다.
+    pub fn tick(&mut self, members: &[String], now: u64) -> Vec<Out> {
+        self.retry.retain(|_, until| *until > now);
         let due: Vec<String> = self
-            .revoked
+            .parts
             .iter()
-            .filter(|(_, r)| !r.resent && now >= r.deadline)
+            .filter(|(_, p)| {
+                matches!(p.state, Participant::PendingRevoke | Participant::NotPermittedSends)
+                    && p.c8 < timers::C8
+                    && now >= p.t8_at
+            })
             .map(|(u, _)| u.clone())
             .collect();
         for u in due {
-            if let Some(r) = self.revoked.remove(&u) {
-                out.push(Out::Revoke { user_id: u, cause: r.cause });
-            }
+            let cause = match self.parts.get_mut(&u) {
+                Some(p) => {
+                    p.c8 += 1;
+                    p.t8_at = now + timers::T8_MS;
+                    p.cause
+                }
+                None => continue,
+            };
+            self.send(&u, Wire::Revoke { cause });
         }
-        match self.state.clone() {
-            State::Taken { speaker, first_rtp_at, last_rtp_at, max_burst_ms, .. } => {
-                if let Some(start) = first_rtp_at
-                    && now.saturating_sub(start) > max_burst_ms
-                {
-                    // ★`T2` — 상한 초과. ★**이 사유만 `T9` 를 건다.**
-                    out.push(Out::Revoke {
-                        user_id: speaker.clone(),
-                        cause: cause::MAX_DURATION,
-                    });
-                    self.revoked.insert(
-                        speaker.clone(),
-                        Revoked {
-                            cause: cause::MAX_DURATION,
-                            deadline: now + timers::T8_MS,
-                            resent: false,
-                        },
-                    );
-                    self.retry_after.insert(speaker, now + timers::T9_MS);
-                    out.extend(self.idle_or_succeed(now));
-                } else if now.saturating_sub(last_rtp_at) > timers::T1_MS {
-                    // ★`T1` — 그 허가가 끝난 것으로 본다. ★**회수 통지가 없다**(`RELEASE` 와 같다).
-                    out.extend(self.idle_or_succeed(now));
+        match self.g {
+            General::Taken => {
+                let speaker = self.speaker.clone().unwrap_or_default();
+                if self.first_rtp_at.is_some_and(|f| now.saturating_sub(f) > self.t2_ms) {
+                    self.retry.insert(speaker.clone(), now + timers::T9_MS);
+                    self.prevoke_enter(&speaker, revoke::BURST_TOO_LONG, now);
+                } else if now.saturating_sub(self.last_rtp_at) > timers::T1_MS {
+                    self.prev = Some(speaker);
+                    self.idle_enter(members, now);
+                } else if self.succ && !self.rtp_seen && self.c20 <= timers::C20 && now >= self.t20_at {
+                    if self.c20 < timers::C20 {
+                        self.part_a(&speaker, self.granted(), now);
+                    }
+                    self.c20 += 1;
+                    self.t20_at = now + timers::T20_MS;
                 }
             }
-            State::Idle => {}
+            General::PendingRevoke => {
+                if now >= self.t3_at || now.saturating_sub(self.last_rtp_at) > timers::T1_MS {
+                    self.prev = self.revoking.clone();
+                    self.idle_enter(members, now);
+                }
+            }
+            General::Idle => {
+                if self.idle_bcast && self.c7 < timers::C7 && now >= self.t7_at {
+                    self.c7 += 1;
+                    self.t7_at = now + timers::T7_MS;
+                    self.fan(Arb::Idle, None, members, now);
+                }
+            }
         }
-        out
+        std::mem::take(&mut self.out)
+    }
+
+    fn default_part(&self) -> Participant {
+        match self.g {
+            General::Idle => Participant::NotPermittedIdle,
+            _ => Participant::NotPermittedTaken,
+        }
+    }
+
+    fn part_mut(&mut self, user: &str) -> &mut Part {
+        let state = self.default_part();
+        self.parts.entry(user.to_string()).or_insert(Part {
+            state,
+            released: false,
+            g_taken: state == Participant::NotPermittedTaken,
+            c8: 0,
+            t8_at: 0,
+            cause: 0,
+        })
+    }
+
+    fn enter(&mut self, user: &str, state: Participant, now: u64) {
+        let p = self.part_mut(user);
+        p.state = state;
+        match state {
+            Participant::NotPermittedIdle => p.g_taken = false,
+            Participant::NotPermittedTaken => p.g_taken = true,
+            Participant::Permitted => p.released = false,
+            Participant::PendingRevoke | Participant::NotPermittedSends => {
+                p.c8 = 1;
+                p.t8_at = now + timers::T8_MS;
+            }
+        }
+    }
+
+    fn send(&mut self, user: &str, wire: Wire) {
+        let wire = match wire {
+            Wire::Taken { speaker, .. } => {
+                self.seq = self.seq.wrapping_add(1);
+                Wire::Taken { speaker, seq: self.seq }
+            }
+            Wire::Idle { prev, .. } => {
+                self.seq = self.seq.wrapping_add(1);
+                Wire::Idle { prev, seq: self.seq }
+            }
+            w => w,
+        };
+        self.out.push(Out { to: user.to_string(), wire });
+    }
+
+    fn part_a(&mut self, user: &str, ev: Arb, now: u64) {
+        match ev {
+            Arb::QueueInfo { position, priority } => {
+                return self.send(user, Wire::QueueInfo { position, priority });
+            }
+            Arb::Deny(cause) => return self.send(user, Wire::Deny { cause, text: None }),
+            _ => {}
+        }
+        match (self.participant(user), ev) {
+            (Participant::NotPermittedIdle, Arb::Granted { priority, duration_s })
+            | (Participant::NotPermittedTaken, Arb::Granted { priority, duration_s }) => {
+                self.enter(user, Participant::Permitted, now);
+                self.send(user, Wire::Granted { priority, duration_s });
+            }
+            (Participant::NotPermittedIdle, Arb::Taken(s)) => {
+                self.enter(user, Participant::NotPermittedTaken, now);
+                self.send(user, Wire::Taken { speaker: s, seq: 0 });
+            }
+            (Participant::NotPermittedIdle, Arb::Idle) => {
+                self.send(user, Wire::Idle { prev: self.prev.clone(), seq: 0 });
+            }
+            (Participant::NotPermittedTaken, Arb::Taken(s)) => {
+                self.send(user, Wire::Taken { speaker: s, seq: 0 });
+            }
+            (Participant::NotPermittedTaken, Arb::Idle) | (Participant::PendingRevoke, Arb::Idle) => {
+                self.enter(user, Participant::NotPermittedIdle, now);
+                self.send(user, Wire::Idle { prev: self.prev.clone(), seq: 0 });
+            }
+            (Participant::Permitted, Arb::Granted { priority, duration_s }) => {
+                self.send(user, Wire::Granted { priority, duration_s });
+            }
+            (Participant::Permitted, Arb::Idle) => {
+                self.enter(user, Participant::NotPermittedIdle, now);
+            }
+            (Participant::Permitted, Arb::Taken(s)) | (Participant::PendingRevoke, Arb::Taken(s)) => {
+                self.enter(user, Participant::NotPermittedTaken, now);
+                self.send(user, Wire::Taken { speaker: s, seq: 0 });
+            }
+            (Participant::Permitted, Arb::Revoke(cause)) => {
+                self.enter(user, Participant::PendingRevoke, now);
+                self.part_mut(user).cause = cause;
+                self.send(user, Wire::Revoke { cause });
+            }
+            (Participant::NotPermittedSends, Arb::Idle) => self.part_mut(user).g_taken = false,
+            (Participant::NotPermittedSends, Arb::Taken(_)) => self.part_mut(user).g_taken = true,
+            _ => {}
+        }
+    }
+
+    fn fan(&mut self, ev: Arb, skip: Option<&str>, members: &[String], now: u64) {
+        for m in members {
+            if Some(m.as_str()) != skip {
+                self.part_a(m, ev.clone(), now);
+            }
+        }
+    }
+
+    fn granted(&self) -> Arb {
+        Arb::Granted { priority: self.sprio, duration_s: (self.t2_ms / 1_000) as u16 }
+    }
+
+    fn in_queue(&self, user: &str) -> bool {
+        self.queue.iter().any(|w| w.user == user)
+    }
+
+    fn position(&self, user: &str) -> u8 {
+        self.queue.iter().position(|w| w.user == user).map(|i| (i + 1).min(253) as u8).unwrap_or(NOT_IN_QUEUE)
+    }
+
+    fn queued_priority(&self, user: &str) -> u8 {
+        self.queue.iter().find(|w| w.user == user).map(|w| w.priority).unwrap_or(0)
+    }
+
+    fn dequeue(&mut self, user: &str) {
+        self.queue.retain(|w| w.user != user);
+    }
+
+    fn pre_queued(&self) -> bool {
+        self.queue.iter().any(|w| w.pre)
+    }
+
+    fn insert(&mut self, w: Waiter) {
+        let at = self
+            .queue
+            .iter()
+            .position(|q| (w.pre && !q.pre) || (w.pre == q.pre && w.priority > q.priority))
+            .unwrap_or(self.queue.len());
+        self.queue.insert(at, w);
+    }
+
+    fn holder_priority(&self) -> u8 {
+        if self.g == General::Taken { self.sprio } else { self.rprio }
+    }
+
+    fn enter_taken(&mut self, members: &[String], now: u64) {
+        let sp = self.speaker.clone().unwrap_or_default();
+        self.idle_bcast = false;
+        self.last_rtp_at = now;
+        if self.succ {
+            self.c20 = 1;
+            self.t20_at = now + timers::T20_MS;
+        }
+        self.part_a(&sp, self.granted(), now);
+        self.fan(Arb::Taken(sp.clone()), Some(&sp), members, now);
+    }
+
+    fn idle_enter(&mut self, members: &[String], now: u64) {
+        if self.queue.is_empty() {
+            self.g = General::Idle;
+            self.speaker = None;
+            self.revoking = None;
+            self.first_rtp_at = None;
+            self.idle_bcast = true;
+            self.c7 = 1;
+            self.t7_at = now + timers::T7_MS;
+            self.fan(Arb::Idle, None, members, now);
+        } else {
+            let w = self.queue.remove(0);
+            self.g = General::Taken;
+            self.speaker = Some(w.user);
+            self.sprio = w.priority;
+            self.revoking = None;
+            self.succ = true;
+            self.rtp_seen = false;
+            self.first_rtp_at = None;
+            self.enter_taken(members, now);
+        }
+    }
+
+    fn prevoke_enter(&mut self, user: &str, cause: u8, now: u64) {
+        self.g = General::PendingRevoke;
+        self.revoking = Some(user.to_string());
+        self.rprio = self.sprio;
+        self.speaker = None;
+        self.t3_at = now + timers::T3_MS;
+        self.part_a(user, Arb::Revoke(cause), now);
+    }
+
+    fn arb_req_idle(&mut self, user: &str, priority: u8, members: &[String], now: u64) {
+        if self.g != General::Idle {
+            return;
+        }
+        if members.len() <= 1 {
+            self.part_a(user, Arb::Deny(reject::ONLY_ONE_PARTICIPANT), now);
+        } else if self.retry.contains_key(user) {
+            self.part_a(user, Arb::Deny(reject::RETRY_AFTER_NOT_EXPIRED), now);
+        } else {
+            self.g = General::Taken;
+            self.speaker = Some(user.to_string());
+            self.sprio = priority;
+            self.succ = false;
+            self.rtp_seen = false;
+            self.first_rtp_at = None;
+            self.c20 = 0;
+            self.enter_taken(members, now);
+        }
+    }
+
+    fn arb_req_permitted(&mut self, user: &str, now: u64) {
+        if self.g == General::Taken && self.speaker.as_deref() == Some(user) {
+            let duration_s = match self.first_rtp_at {
+                Some(f) => (self.t2_ms.saturating_sub(now.saturating_sub(f)) / 1_000) as u16,
+                None => (self.t2_ms / 1_000) as u16,
+            };
+            self.part_a(user, Arb::Granted { priority: self.sprio, duration_s }, now);
+        }
+    }
+
+    fn arb_preempt(&mut self, user: &str, priority: u8, now: u64) {
+        if self.g != General::Taken {
+            return;
+        }
+        let old = self.speaker.clone().unwrap_or_default();
+        self.queue.insert(0, Waiter { user: user.to_string(), priority, pre: true });
+        self.prevoke_enter(&old, revoke::PREEMPTED, now);
+        self.part_a(user, Arb::QueueInfo { position: 1, priority }, now);
+    }
+
+    fn arb_rel(&mut self, user: &str, members: &[String], now: u64) {
+        let ours = match self.g {
+            General::Taken => self.speaker.as_deref() == Some(user),
+            General::PendingRevoke => self.revoking.as_deref() == Some(user),
+            General::Idle => false,
+        };
+        if ours {
+            self.prev = Some(user.to_string());
+            self.idle_enter(members, now);
+        }
+    }
+
+    fn arb_rtp(&mut self, user: &str, now: u64) {
+        match self.g {
+            General::Taken if self.speaker.as_deref() == Some(user) => {
+                self.rtp_seen = true;
+                self.first_rtp_at.get_or_insert(now);
+                self.last_rtp_at = now;
+            }
+            General::PendingRevoke if self.revoking.as_deref() == Some(user) => self.last_rtp_at = now,
+            _ => {}
+        }
+    }
+
+    fn taken_req(&mut self, user: &str, priority: u8, now: u64) {
+        if self.retry.contains_key(user) {
+            self.send(user, Wire::Deny { cause: reject::RETRY_AFTER_NOT_EXPIRED, text: None });
+        } else if self.in_queue(user) {
+            let (position, priority) = (self.position(user), self.queued_priority(user));
+            self.send(user, Wire::QueueInfo { position, priority });
+        } else if priority > self.holder_priority() && !self.pre_queued() {
+            self.arb_preempt(user, priority, now);
+        } else if priority > self.holder_priority() {
+        } else if self.queue.len() >= QUEUE_MAX {
+            self.send(user, Wire::Deny { cause: reject::QUEUE_FULL, text: None });
+        } else {
+            self.insert(Waiter { user: user.to_string(), priority, pre: false });
+            let position = self.position(user);
+            self.send(user, Wire::QueueInfo { position, priority });
+        }
+    }
+
+    fn revoke3(&mut self, user: &str, now: u64) {
+        self.enter(user, Participant::NotPermittedSends, now);
+        self.part_mut(user).cause = revoke::NO_PERMISSION;
+        self.send(user, Wire::Revoke { cause: revoke::NO_PERMISSION });
+    }
+
+    fn part_c(&mut self, user: &str, rx: Rx, members: &[String], now: u64) {
+        match (self.participant(user), rx) {
+            (Participant::NotPermittedIdle, Rx::Request { priority }) => {
+                self.arb_req_idle(user, priority, members, now)
+            }
+            (Participant::NotPermittedIdle, Rx::Release) => {
+                self.dequeue(user);
+                self.send(user, Wire::Idle { prev: self.prev.clone(), seq: 0 });
+            }
+            (Participant::NotPermittedTaken, Rx::Request { priority }) => self.taken_req(user, priority, now),
+            (Participant::NotPermittedTaken, Rx::Release) => {
+                self.dequeue(user);
+                let h = self.holder().unwrap_or_default().to_string();
+                self.send(user, Wire::Taken { speaker: h, seq: 0 });
+            }
+            (Participant::NotPermittedTaken, Rx::QueuePos) => {
+                let (position, priority) = (self.position(user), self.queued_priority(user));
+                self.send(user, Wire::QueueInfo { position, priority });
+            }
+            (Participant::Permitted, Rx::Release) => {
+                self.part_mut(user).released = true;
+                self.arb_rel(user, members, now);
+            }
+            (Participant::Permitted, Rx::Request { .. }) => self.arb_req_permitted(user, now),
+            (Participant::PendingRevoke, Rx::Release) => self.arb_rel(user, members, now),
+            (Participant::NotPermittedSends, Rx::Release) => {
+                if self.parts.get(user).is_some_and(|p| p.g_taken) {
+                    self.enter(user, Participant::NotPermittedTaken, now);
+                    let h = self.holder().unwrap_or_default().to_string();
+                    self.send(user, Wire::Taken { speaker: h, seq: 0 });
+                } else {
+                    self.enter(user, Participant::NotPermittedIdle, now);
+                    self.send(user, Wire::Idle { prev: self.prev.clone(), seq: 0 });
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -420,237 +644,246 @@ impl Floor {
 mod tests {
     use super::*;
 
-    fn req(u: &str, p: u8) -> Request {
-        Request {
-            user_id: u.into(),
-            priority: p,
-            want_ms: Some(30_000),
-            in_pub_room: true,
-            has_half_track: true,
-            allowed: true,
-            others_present: true,
-        }
+    const ON: Ctx = Ctx { in_room: true, has_half: true, in_pub_room: true, permitted: true };
+
+    fn m(us: &[&str]) -> Vec<String> {
+        us.iter().map(|u| u.to_string()).collect()
     }
 
-    fn floor() -> Floor {
-        Floor::new(timers::T2_MS)
+    fn wires(out: &[Out], to: &str) -> Vec<Wire> {
+        out.iter().filter(|o| o.to == to).map(|o| o.wire.clone()).collect()
     }
 
-    #[test]
-    fn idle_은_직전_화자를_싣는다() {
-        let mut f = floor();
-        f.on_request(&req("a", 0), 0);
-        let out = f.on_release("a", 1_000);
-        // ★화면이 *"방금 누가 말했나"* 를 지울지 남길지 이 값으로 정한다.
-        assert!(matches!(&out[0], Out::Idle { prev, .. } if prev.as_deref() == Some("a")));
+    fn req(f: &mut Floor, who: &str, prio: u8, ms: &[String], now: u64) -> Vec<Out> {
+        f.rx(who, Rx::Request { priority: prio }, ON, ms, now)
     }
 
     #[test]
-    fn 시간을_안_실으면_상한만큼이다() {
+    fn idle_request_grants_and_tells_others() {
+        let ms = m(&["a", "b"]);
         let mut f = Floor::new(timers::T2_MS);
-        let out = f.on_request(&Request { want_ms: None, ..req("a", 0) }, 0);
-        // ★`0` 이 아니라 상한이다 — `0` 이면 허가 즉시 만료되는 발언권이 된다.
-        assert!(matches!(out.first(), Some(Out::Granted { remaining_ms, .. }) if *remaining_ms == timers::T2_MS));
-    }
-
-    #[test]
-    fn 요청이_상한보다_길면_깎는다() {
-        let mut f = Floor::new(timers::T2_MS);
-        let out = f.on_request(&Request { want_ms: Some(timers::T2_MS * 10), ..req("a", 0) }, 0);
-        assert!(matches!(out.first(), Some(Out::Granted { remaining_ms, .. }) if *remaining_ms == timers::T2_MS));
-    }
-
-    #[test]
-    fn 허가는_요청_우선순위를_깎지_않는다() {
-        let mut f = floor();
-        let out = f.on_request(&req("u1", 200), 0);
-        assert!(matches!(&out[0], Out::Granted { priority: 200, .. }), "{out:?}");
-        assert!(matches!(&out[1], Out::Taken { speaker, .. } if speaker == "u1"));
-    }
-
-    #[test]
-    fn 선점은_한_걸음이고_큐를_안_거친다() {
-        let mut f = floor();
-        f.on_request(&req("a", 10), 0);
-        let out = f.on_request(&req("b", 200), 10);
-        assert!(matches!(&out[0], Out::Revoke { user_id, cause } if user_id == "a" && *cause == cause::PREEMPTED));
-        assert!(matches!(&out[1], Out::Granted { user_id, .. } if user_id == "b"));
-        assert!(matches!(&out[2], Out::Taken { speaker, .. } if speaker == "b"));
-        // ★선점자에게 `QUEUE_INFO` 가 가면 안 된다.
-        assert!(!out.iter().any(|o| matches!(o, Out::QueueInfo { .. })));
-        assert_eq!(f.queue_len(), 0);
-    }
-
-    #[test]
-    fn 같은_우선순위는_선점이_아니라_큐다() {
-        let mut f = floor();
-        f.on_request(&req("a", 100), 0);
-        let out = f.on_request(&req("b", 100), 10);
+        let out = req(&mut f, "a", 0, &ms, 0);
+        assert_eq!(wires(&out, "a"), vec![Wire::Granted { priority: 0, duration_s: 30 }]);
+        assert_eq!(wires(&out, "b"), vec![Wire::Taken { speaker: "a".into(), seq: 1 }]);
         assert_eq!(f.speaker(), Some("a"));
-        // ★`priority` 는 **지금 허가된 사람**의 값이다 — 대기자 자기 값이 아니다.
-        assert!(matches!(&out[0], Out::QueueInfo { user_id, position: 1, size: 1, .. } if user_id == "b"));
+        assert_eq!(f.participant("a"), Participant::Permitted);
     }
 
     #[test]
-    fn 큐가_있으면_idle_을_안_보낸다() {
-        // ★보내면 화면이 "아무도 안 말함"으로 깜빡였다가 다음 화자로 바뀐다.
-        let mut f = floor();
-        f.on_request(&req("a", 10), 0);
-        f.on_request(&req("b", 10), 1);
-        let out = f.on_release("a", 100);
-        assert!(!out.iter().any(|o| matches!(o, Out::Idle { .. })), "{out:?}");
+    fn alone_is_denied_only_in_idle() {
+        let mut f = Floor::new(timers::T2_MS);
+        let out = req(&mut f, "a", 0, &m(&["a"]), 0);
+        assert_eq!(wires(&out, "a"), vec![Wire::Deny { cause: reject::ONLY_ONE_PARTICIPANT, text: None }]);
+    }
+
+    #[test]
+    fn gates_run_before_the_state_machine() {
+        let ms = m(&["a", "b"]);
+        let mut f = Floor::new(timers::T2_MS);
+        let cases = [
+            (Ctx { in_room: false, ..ON }, Wire::Deny { cause: reject::OTHER, text: Some(NOT_IN_ROOM) }),
+            (Ctx { has_half: false, ..ON }, Wire::Deny { cause: reject::RECEIVE_ONLY, text: None }),
+            (Ctx { in_pub_room: false, ..ON }, Wire::Deny { cause: reject::NOT_PUB_ROOM, text: None }),
+            (Ctx { permitted: false, ..ON }, Wire::Deny { cause: reject::NO_PERMISSION, text: None }),
+        ];
+        for (ctx, want) in cases {
+            let out = f.rx("a", Rx::Request { priority: 0 }, ctx, &ms, 0);
+            assert_eq!(wires(&out, "a"), vec![want]);
+        }
+        assert!(f.rx("a", Rx::Ack, ON, &ms, 0).is_empty());
+        assert!(f.rx("a", Rx::Release, Ctx { in_room: false, ..ON }, &ms, 0).is_empty());
+    }
+
+    #[test]
+    fn release_by_speaker_sends_no_idle_to_speaker() {
+        let ms = m(&["a", "b"]);
+        let mut f = Floor::new(timers::T2_MS);
+        req(&mut f, "a", 0, &ms, 0);
+        let out = f.rx("a", Rx::Release, ON, &ms, 10);
+        assert!(wires(&out, "a").is_empty());
+        assert_eq!(wires(&out, "b"), vec![Wire::Idle { prev: Some("a".into()), seq: 2 }]);
+        let again = f.rx("a", Rx::Release, ON, &ms, 600);
+        assert_eq!(wires(&again, "a"), vec![Wire::Idle { prev: Some("a".into()), seq: 3 }]);
+    }
+
+    #[test]
+    fn queue_then_succession_without_idle() {
+        let ms = m(&["a", "b"]);
+        let mut f = Floor::new(timers::T2_MS);
+        req(&mut f, "a", 0, &ms, 0);
+        let q = req(&mut f, "b", 0, &ms, 10);
+        assert_eq!(wires(&q, "b"), vec![Wire::QueueInfo { position: 1, priority: 0 }]);
+        let out = f.rx("a", Rx::Release, ON, &ms, 20);
+        assert_eq!(wires(&out, "b"), vec![Wire::Granted { priority: 0, duration_s: 30 }]);
+        assert_eq!(wires(&out, "a"), vec![Wire::Taken { speaker: "b".into(), seq: 2 }]);
+        assert!(out.iter().all(|o| !matches!(o.wire, Wire::Idle { .. })));
+    }
+
+    #[test]
+    fn preempt_revokes_with_grace_then_succeeds() {
+        let ms = m(&["a", "b"]);
+        let mut f = Floor::new(timers::T2_MS);
+        req(&mut f, "a", 0, &ms, 0);
+        let out = req(&mut f, "b", 1, &ms, 10);
+        assert_eq!(wires(&out, "a"), vec![Wire::Revoke { cause: revoke::PREEMPTED }]);
+        assert_eq!(wires(&out, "b"), vec![Wire::QueueInfo { position: 1, priority: 1 }]);
+        assert_eq!(f.general(), General::PendingRevoke);
+        assert_eq!(f.holder(), Some("a"));
+        let done = f.rx("a", Rx::Release, ON, &ms, 50);
+        assert_eq!(wires(&done, "b"), vec![Wire::Granted { priority: 1, duration_s: 30 }]);
         assert_eq!(f.speaker(), Some("b"));
     }
 
     #[test]
-    fn 큐가_비면_idle_이_나간다() {
-        let mut f = floor();
-        f.on_request(&req("a", 10), 0);
-        let out = f.on_release("a", 100);
-        assert!(matches!(out[0], Out::Idle { .. }));
-        assert_eq!(f.speaker(), None);
+    fn preempt_during_grace_is_discarded() {
+        let ms = m(&["a", "b", "c"]);
+        let mut f = Floor::new(timers::T2_MS);
+        req(&mut f, "a", 0, &ms, 0);
+        req(&mut f, "b", 1, &ms, 10);
+        let out = req(&mut f, "c", 2, &ms, 20);
+        assert!(out.is_empty());
+        assert_eq!(f.queue_view(), vec![("b".to_string(), 1)]);
     }
 
     #[test]
-    fn t2_는_첫_rtp_부터_센다() {
-        // ★허가 시각부터 세면 큐에서 늦게 켠 사람이 남보다 짧게 말한다.
-        let mut f = Floor::new(1_000);
-        f.on_request(&req("u1", 10), 0);
-        // 허가만 받고 아직 안 말한다 — ★상한이 안 돈다(`T1` 창 안에서 본다).
-        assert!(f.tick(2_000).iter().all(|o| !matches!(o, Out::Revoke { cause: 2, .. })));
-        f.on_rtp("u1", 2_500);
-        assert!(f.tick(3_000).is_empty());
-        let out = f.tick(4_000);
-        assert!(matches!(&out[0], Out::Revoke { cause, .. } if *cause == cause::MAX_DURATION), "{out:?}");
+    fn t3_closes_grace_when_release_never_comes() {
+        let ms = m(&["a", "b"]);
+        let mut f = Floor::new(timers::T2_MS);
+        req(&mut f, "a", 0, &ms, 0);
+        req(&mut f, "b", 1, &ms, 10);
+        f.rtp("a", 1_000);
+        let resend = f.tick(&ms, 1_010);
+        assert_eq!(wires(&resend, "a"), vec![Wire::Revoke { cause: revoke::PREEMPTED }]);
+        assert_eq!(wires(&f.tick(&ms, 2_010), "a"), vec![Wire::Revoke { cause: revoke::PREEMPTED }]);
+        let out = f.tick(&ms, 10 + timers::T3_MS);
+        assert_eq!(f.speaker(), Some("b"));
+        assert_eq!(wires(&out, "a"), vec![Wire::Taken { speaker: "b".into(), seq: 2 }]);
     }
 
     #[test]
-    fn 상한_회수만_재요청을_막는다() {
-        let mut f = Floor::new(1_000);
-        f.on_request(&req("u1", 10), 0);
-        f.on_rtp("u1", 0);
-        f.tick(2_000);
-        // ★`T9` 안에는 `DENY(4)`.
-        let out = f.on_request(&req("u1", 10), 2_100);
-        assert!(matches!(&out[0], Out::Deny { cause, .. } if *cause == cause::RETRY_AFTER));
-        // 지나면 선다.
-        let out = f.on_request(&req("u1", 10), 2_000 + timers::T9_MS);
-        assert!(matches!(out[0], Out::Granted { .. }));
+    fn unpermitted_rtp_in_taken_is_revoked_unconditionally() {
+        let ms = m(&["a", "b"]);
+        let mut f = Floor::new(timers::T2_MS);
+        req(&mut f, "a", 0, &ms, 0);
+        let out = f.rtp("b", 100);
+        assert_eq!(wires(&out, "b"), vec![Wire::Revoke { cause: revoke::NO_PERMISSION }]);
+        assert_eq!(f.participant("b"), Participant::NotPermittedSends);
+        let rel = f.rx("b", Rx::Release, ON, &ms, 200);
+        assert_eq!(wires(&rel, "b"), vec![Wire::Taken { speaker: "a".into(), seq: 2 }]);
     }
 
     #[test]
-    fn t1_은_회수_통지가_없다() {
-        // ★`RELEASE` 와 같다 — 그 허가가 끝난 것으로 본다.
-        let mut f = floor();
-        f.on_request(&req("u1", 10), 0);
-        f.on_rtp("u1", 0);
-        let out = f.tick(timers::T1_MS + 1);
-        assert!(!out.iter().any(|o| matches!(o, Out::Revoke { .. })), "{out:?}");
-        assert!(out.iter().any(|o| matches!(o, Out::Idle { .. })));
+    fn rtp_in_idle_is_revoked_only_after_release() {
+        let ms = m(&["a", "b"]);
+        let mut f = Floor::new(timers::T2_MS);
+        req(&mut f, "a", 0, &ms, 0);
+        f.tick(&ms, timers::T1_MS + 1);
+        assert_eq!(f.general(), General::Idle);
+        assert!(f.rtp("a", timers::T1_MS + 2).is_empty());
+        req(&mut f, "b", 0, &ms, 10_000);
+        f.rx("b", Rx::Release, ON, &ms, 10_100);
+        let out = f.rtp("b", 10_200);
+        assert_eq!(wires(&out, "b"), vec![Wire::Revoke { cause: revoke::NO_PERMISSION }]);
     }
 
     #[test]
-    fn 권한을_잃은_화자는_삼번으로_회수된다() {
-        let mut f = floor();
-        f.on_request(&req("u1", 10), 0);
-        let out = f.on_permission_lost("u1", 10);
-        assert!(matches!(&out[0], Out::Revoke { user_id, cause: 3 } if user_id == "u1"), "{out:?}");
-        // ★`T9` 는 사유 `2` 만 건다 — 비트가 올라오면 곧바로 말할 수 있어야 한다.
-        let back = f.on_request(&req("u1", 10), 20);
-        assert!(matches!(back[0], Out::Granted { .. }), "{back:?}");
+    fn t2_revokes_from_first_rtp_and_arms_retry_after() {
+        let ms = m(&["a", "b"]);
+        let mut f = Floor::new(timers::T2_MS);
+        req(&mut f, "a", 0, &ms, 0);
+        for t in (5_000..=35_000).step_by(1_000) {
+            f.rtp("a", t);
+        }
+        let out = f.tick(&ms, 35_001);
+        assert_eq!(wires(&out, "a"), vec![Wire::Revoke { cause: revoke::BURST_TOO_LONG }]);
+        f.rx("a", Rx::Release, ON, &ms, 35_050);
+        let deny = req(&mut f, "a", 0, &ms, 35_100);
+        assert_eq!(wires(&deny, "a"), vec![Wire::Deny { cause: reject::RETRY_AFTER_NOT_EXPIRED, text: None }]);
+        f.tick(&ms, 35_001 + timers::T9_MS + 1);
+        let ok = req(&mut f, "a", 0, &ms, 40_000);
+        assert_eq!(wires(&ok, "a"), vec![Wire::Granted { priority: 0, duration_s: 30 }]);
     }
 
     #[test]
-    fn 권한을_잃은_대기자는_큐에서_빠지고_백이를_받는다() {
-        // ★무통지면 `T104` 소진("클라 버그" 경로)으로만 알게 된다.
-        let mut f = floor();
-        f.on_request(&req("a", 10), 0);
-        f.on_request(&req("b", 10), 1);
-        let out = f.on_permission_lost("b", 2);
-        assert!(matches!(&out[0], Out::Deny { user_id, cause } if user_id == "b" && *cause == cause::NO_PERMISSION));
-        assert_eq!(f.queue_len(), 0);
+    fn regrant_carries_remaining_t2() {
+        let ms = m(&["a", "b"]);
+        let mut f = Floor::new(timers::T2_MS);
+        req(&mut f, "a", 0, &ms, 0);
+        f.rtp("a", 1_000);
+        let out = req(&mut f, "a", 0, &ms, 11_000);
+        assert_eq!(wires(&out, "a"), vec![Wire::Granted { priority: 0, duration_s: 20 }]);
     }
 
     #[test]
-    fn 자격_관문이_상태보다_먼저다() {
-        let mut f = floor();
-        let mut r = req("u1", 10);
-        r.allowed = false;
-        assert!(matches!(&f.on_request(&r, 0)[0], Out::Deny { cause, .. } if *cause == cause::NO_PERMISSION));
-        let mut r = req("u1", 10);
-        r.in_pub_room = false;
-        assert!(matches!(&f.on_request(&r, 0)[0], Out::Deny { cause, .. } if *cause == cause::NOT_PUB_ROOM));
-        let mut r = req("u1", 10);
-        r.has_half_track = false;
-        assert!(matches!(&f.on_request(&r, 0)[0], Out::Deny { cause, .. } if *cause == cause::RECEIVE_ONLY));
-        let mut r = req("u1", 10);
-        r.others_present = false;
-        assert!(matches!(&f.on_request(&r, 0)[0], Out::Deny { cause, .. } if *cause == cause::ALONE));
+    fn queue_position_answers_regardless_of_membership_while_taken() {
+        let ms = m(&["a", "b"]);
+        let mut f = Floor::new(timers::T2_MS);
+        assert!(f.rx("b", Rx::QueuePos, ON, &ms, 0).is_empty());
+        req(&mut f, "a", 0, &ms, 0);
+        let out = f.rx("b", Rx::QueuePos, ON, &ms, 10);
+        assert_eq!(wires(&out, "b"), vec![Wire::QueueInfo { position: NOT_IN_QUEUE, priority: 0 }]);
     }
 
     #[test]
-    fn 같은_사람_재요청은_남은_시간을_싣는다() {
-        let mut f = Floor::new(10_000);
-        f.on_request(&req("u1", 10), 0);
-        f.on_rtp("u1", 1_000);
-        let out = f.on_request(&req("u1", 10), 4_000);
-        let Out::Granted { remaining_ms, .. } = out[0].clone() else { panic!("{out:?}") };
-        assert_eq!(remaining_ms, 7_000, "★T2 남은 값이다");
-        // ★RTP 시각을 갱신하지 않는다 — 재요청으로 상한을 늘릴 수 없다.
-        assert_eq!(out.len(), 1, "★TAKEN 을 다시 뿌리지 않는다");
+    fn t20_resends_succession_grant_until_rtp() {
+        let ms = m(&["a", "b"]);
+        let mut f = Floor::new(timers::T2_MS);
+        req(&mut f, "a", 0, &ms, 0);
+        req(&mut f, "b", 0, &ms, 10);
+        f.rx("a", Rx::Release, ON, &ms, 20);
+        let r1 = f.tick(&ms, 20 + timers::T20_MS);
+        assert_eq!(wires(&r1, "b"), vec![Wire::Granted { priority: 0, duration_s: 30 }]);
+        f.rtp("b", 1_500);
+        assert!(wires(&f.tick(&ms, 20 + 2 * timers::T20_MS), "b").is_empty());
     }
 
     #[test]
-    fn seq_는_재전송도_센다() {
-        let mut f = floor();
-        f.on_request(&req("a", 10), 0);
-        let s1 = f.seq;
-        f.on_release("a", 1);
-        assert_eq!(f.seq, s1 + 1, "★IDLE 도 센다");
+    fn permission_lost_revokes_speaker_and_denies_waiter() {
+        let ms = m(&["a", "b", "c"]);
+        let mut f = Floor::new(timers::T2_MS);
+        req(&mut f, "a", 0, &ms, 0);
+        req(&mut f, "b", 0, &ms, 10);
+        let w = f.permission_lost("b", 20);
+        assert_eq!(wires(&w, "b"), vec![Wire::Deny { cause: reject::NO_PERMISSION, text: None }]);
+        let s = f.permission_lost("a", 30);
+        assert_eq!(wires(&s, "a"), vec![Wire::Revoke { cause: revoke::NO_PERMISSION }]);
+        assert_eq!(f.general(), General::PendingRevoke);
     }
 
     #[test]
-    fn 회수_뒤_release_는_t8_을_멈춘다() {
-        let mut f = Floor::new(1_000);
-        f.on_request(&req("u1", 10), 0);
-        f.on_rtp("u1", 0);
-        f.tick(2_000);
-        f.on_release("u1", 2_100);
-        // ★`RELEASE` 를 받았으니 한 번 더 보내지 않는다.
-        assert!(f.tick(10_000).iter().all(|o| !matches!(o, Out::Revoke { .. })));
+    fn away_releases_speaker_but_not_the_revoked() {
+        let ms = m(&["a", "b"]);
+        let mut f = Floor::new(timers::T2_MS);
+        req(&mut f, "a", 0, &ms, 0);
+        let out = f.away("a", &ms, 10);
+        assert_eq!(f.general(), General::Idle);
+        assert_eq!(wires(&out, "b"), vec![Wire::Idle { prev: Some("a".into()), seq: 2 }]);
+        req(&mut f, "a", 0, &ms, 100);
+        req(&mut f, "b", 1, &ms, 110);
+        assert!(f.away("a", &ms, 120).is_empty());
+        assert_eq!(f.general(), General::PendingRevoke);
     }
 
     #[test]
-    fn 회수가_유실되면_한_번만_더_보낸다() {
-        let mut f = Floor::new(1_000);
-        f.on_request(&req("u1", 10), 0);
-        f.on_rtp("u1", 0);
-        f.tick(2_000);
-        let again = f.tick(2_000 + timers::T8_MS);
-        assert_eq!(again.len(), 1, "★C8=1 — 딱 한 번");
-        assert!(f.tick(99_000).is_empty(), "★그 뒤는 0(죽은 DC 에 영원 재송 금지)");
+    fn ready_tells_current_holder_once() {
+        let ms = m(&["a", "b"]);
+        let mut f = Floor::new(timers::T2_MS);
+        assert_eq!(wires(&f.ready("b"), "b"), vec![Wire::Idle { prev: None, seq: 1 }]);
+        req(&mut f, "a", 0, &ms, 0);
+        assert_eq!(wires(&f.ready("b"), "b"), vec![Wire::Taken { speaker: "a".into(), seq: 3 }]);
+        assert!(f.ready("a").is_empty());
     }
 
     #[test]
-    fn 큐에_없으면_순번을_안_답한다() {
-        let mut f = floor();
-        f.on_request(&req("a", 10), 0);
-        assert!(f.on_queue_pos("없는사람").is_empty(), "★계수 후 무응답");
-    }
-
-    #[test]
-    fn 큐는_우선순위_뒤_선착순이다() {
-        let mut f = floor();
-        // ★화자를 제일 높게 둔다 — 아니면 vip 가 큐가 아니라 선점으로 간다.
-        f.on_request(&req("a", 250), 0);
-        f.on_request(&req("b", 10), 1);
-        f.on_request(&req("c", 10), 2);
-        f.on_request(&req("vip", 200), 3);
-        assert_eq!(f.queue_len(), 3);
-        let out = f.on_release("a", 10);
-        // ★우선순위가 높은 vip 가 먼저, 같은 단은 먼저 온 b.
-        assert!(matches!(&out[0], Out::Granted { user_id, .. } if user_id == "vip"), "{out:?}");
-        let out = f.on_release("vip", 20);
-        assert!(matches!(&out[0], Out::Granted { user_id, .. } if user_id == "b"), "{out:?}");
+    fn idle_is_resent_by_t7_up_to_c7() {
+        let ms = m(&["a", "b"]);
+        let mut f = Floor::new(timers::T2_MS);
+        req(&mut f, "a", 0, &ms, 0);
+        f.rx("a", Rx::Release, ON, &ms, 10);
+        let mut sent = 0;
+        for k in 1..20u64 {
+            sent += wires(&f.tick(&ms, 10 + k * timers::T7_MS), "b").len();
+        }
+        assert_eq!(sent, (timers::C7 - 1) as usize);
     }
 }
