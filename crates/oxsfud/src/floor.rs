@@ -46,6 +46,17 @@ pub enum Participant {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Timer {
+    T1,
+    T2,
+    T3,
+    T7,
+    T8,
+    T9,
+    T20,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rx {
     Request { priority: u8 },
     Release,
@@ -276,7 +287,11 @@ impl Floor {
     }
 
     pub fn tick(&mut self, members: &[String], now: u64) -> Vec<Out> {
-        self.retry.retain(|_, until| *until > now);
+        let lapsed: Vec<String> =
+            self.retry.iter().filter(|(_, until)| **until <= now).map(|(u, _)| u.clone()).collect();
+        for u in lapsed {
+            self.fire(Timer::T9, Some(&u), members, now);
+        }
         let due: Vec<String> = self
             .parts
             .iter()
@@ -288,48 +303,89 @@ impl Floor {
             .map(|(u, _)| u.clone())
             .collect();
         for u in due {
-            let cause = match self.parts.get_mut(&u) {
-                Some(p) => {
-                    p.c8 += 1;
-                    p.t8_at = now + timers::T8_MS;
-                    p.cause
-                }
-                None => continue,
-            };
-            self.send(&u, Wire::Revoke { cause });
+            self.fire(Timer::T8, Some(&u), members, now);
         }
+        let quiet = now.saturating_sub(self.last_rtp_at) > timers::T1_MS;
         match self.g {
             General::Taken => {
-                let speaker = self.speaker.clone().unwrap_or_default();
                 if self.first_rtp_at.is_some_and(|f| now.saturating_sub(f) > self.t2_ms) {
-                    self.retry.insert(speaker.clone(), now + timers::T9_MS);
-                    self.prevoke_enter(&speaker, revoke::BURST_TOO_LONG, now);
-                } else if now.saturating_sub(self.last_rtp_at) > timers::T1_MS {
-                    self.prev = Some(speaker);
-                    self.idle_enter(members, now);
+                    self.fire(Timer::T2, None, members, now);
+                } else if quiet {
+                    self.fire(Timer::T1, None, members, now);
                 } else if self.succ && !self.rtp_seen && self.c20 <= timers::C20 && now >= self.t20_at {
-                    if self.c20 < timers::C20 {
-                        self.part_a(&speaker, self.granted(), now);
-                    }
-                    self.c20 += 1;
-                    self.t20_at = now + timers::T20_MS;
+                    self.fire(Timer::T20, None, members, now);
                 }
             }
             General::PendingRevoke => {
-                if now >= self.t3_at || now.saturating_sub(self.last_rtp_at) > timers::T1_MS {
-                    self.prev = self.revoking.clone();
-                    self.idle_enter(members, now);
+                if now >= self.t3_at {
+                    self.fire(Timer::T3, None, members, now);
+                } else if quiet {
+                    self.fire(Timer::T1, None, members, now);
                 }
             }
             General::Idle => {
                 if self.idle_bcast && self.c7 < timers::C7 && now >= self.t7_at {
-                    self.c7 += 1;
-                    self.t7_at = now + timers::T7_MS;
-                    self.fan(Arb::Idle, None, members, now);
+                    self.fire(Timer::T7, None, members, now);
                 }
             }
         }
         std::mem::take(&mut self.out)
+    }
+
+    pub fn expire(&mut self, timer: Timer, user: Option<&str>, members: &[String], now: u64) -> Vec<Out> {
+        self.fire(timer, user, members, now);
+        std::mem::take(&mut self.out)
+    }
+
+    fn fire(&mut self, timer: Timer, user: Option<&str>, members: &[String], now: u64) {
+        match timer {
+            Timer::T1 => {
+                self.prev = match self.g {
+                    General::Taken => self.speaker.clone(),
+                    _ => self.revoking.clone(),
+                };
+                self.idle_enter(members, now);
+            }
+            Timer::T2 => {
+                let speaker = self.speaker.clone().unwrap_or_default();
+                self.retry.insert(speaker.clone(), now + timers::T9_MS);
+                self.prevoke_enter(&speaker, revoke::BURST_TOO_LONG, now);
+            }
+            Timer::T3 => {
+                self.prev = self.revoking.clone();
+                self.idle_enter(members, now);
+            }
+            Timer::T7 => {
+                self.c7 += 1;
+                self.t7_at = now + timers::T7_MS;
+                self.fan(Arb::Idle, None, members, now);
+            }
+            Timer::T20 => {
+                let speaker = self.speaker.clone().unwrap_or_default();
+                if self.c20 < timers::C20 {
+                    self.part_a(&speaker, self.granted(), now);
+                }
+                self.c20 += 1;
+                self.t20_at = now + timers::T20_MS;
+            }
+            Timer::T8 => {
+                let Some(u) = user else { return };
+                let cause = match self.parts.get_mut(u) {
+                    Some(p) => {
+                        p.c8 += 1;
+                        p.t8_at = now + timers::T8_MS;
+                        p.cause
+                    }
+                    None => return,
+                };
+                self.send(u, Wire::Revoke { cause });
+            }
+            Timer::T9 => {
+                if let Some(u) = user {
+                    self.retry.remove(u);
+                }
+            }
+        }
     }
 
     fn default_part(&self) -> Participant {
