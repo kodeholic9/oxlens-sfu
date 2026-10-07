@@ -127,6 +127,7 @@ pub struct Floor {
     parts: BTreeMap<String, Part>,
     retry: BTreeMap<String, u64>,
     seq: u16,
+    bcast: Option<u16>,
     out: Vec<Out>,
 }
 
@@ -154,6 +155,7 @@ impl Floor {
             parts: BTreeMap::new(),
             retry: BTreeMap::new(),
             seq: 0,
+            bcast: None,
             out: Vec::new(),
         }
     }
@@ -359,16 +361,20 @@ impl Floor {
         }
     }
 
+    fn next_seq(&mut self) -> u16 {
+        match self.bcast {
+            Some(seq) => seq,
+            None => {
+                self.seq = self.seq.wrapping_add(1);
+                self.seq
+            }
+        }
+    }
+
     fn send(&mut self, user: &str, wire: Wire) {
         let wire = match wire {
-            Wire::Taken { speaker, .. } => {
-                self.seq = self.seq.wrapping_add(1);
-                Wire::Taken { speaker, seq: self.seq }
-            }
-            Wire::Idle { prev, .. } => {
-                self.seq = self.seq.wrapping_add(1);
-                Wire::Idle { prev, seq: self.seq }
-            }
+            Wire::Taken { speaker, .. } => Wire::Taken { speaker, seq: self.next_seq() },
+            Wire::Idle { prev, .. } => Wire::Idle { prev, seq: self.next_seq() },
             w => w,
         };
         self.out.push(Out { to: user.to_string(), wire });
@@ -424,11 +430,16 @@ impl Floor {
     }
 
     fn fan(&mut self, ev: Arb, skip: Option<&str>, members: &[String], now: u64) {
+        if matches!(ev, Arb::Taken(_) | Arb::Idle) {
+            self.seq = self.seq.wrapping_add(1);
+            self.bcast = Some(self.seq);
+        }
         for m in members {
             if Some(m.as_str()) != skip {
                 self.part_a(m, ev.clone(), now);
             }
         }
+        self.bcast = None;
     }
 
     fn granted(&self) -> Arb {
@@ -667,6 +678,23 @@ mod tests {
         assert_eq!(wires(&out, "b"), vec![Wire::Taken { speaker: "a".into(), seq: 1 }]);
         assert_eq!(f.speaker(), Some("a"));
         assert_eq!(f.participant("a"), Participant::Permitted);
+    }
+
+    #[test]
+    fn one_broadcast_carries_one_seq() {
+        let ms = m(&["a", "b", "c", "d"]);
+        let mut f = Floor::new(timers::T2_MS);
+        let out = req(&mut f, "a", 0, &ms, 0);
+        let seqs: Vec<u16> = out
+            .iter()
+            .filter_map(|o| match &o.wire {
+                Wire::Taken { seq, .. } => Some(*seq),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(seqs, vec![1, 1, 1]);
+        let rel = f.rx("a", Rx::Release, ON, &ms, 10);
+        assert!(rel.iter().all(|o| matches!(o.wire, Wire::Idle { seq: 2, .. })));
     }
 
     #[test]
