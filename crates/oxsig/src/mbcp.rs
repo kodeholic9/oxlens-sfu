@@ -37,7 +37,6 @@ pub const F_DURATION: u8 = 1;
 pub const F_CAUSE: u8 = 2;
 pub const F_QUEUE_INFO: u8 = 3;
 pub const F_GRANTED_PARTY: u8 = 4;
-pub const F_QUEUE_SIZE: u8 = 7;
 pub const F_SEQ: u8 = 8;
 pub const F_ACK_TYPE: u8 = 12;
 pub const F_PREV_SPEAKER: u8 = 0x1A;
