@@ -119,6 +119,7 @@ enum Arb {
 #[derive(Debug, Clone)]
 pub struct Floor {
     t2_ms: u64,
+    queue_max: usize,
     g: General,
     speaker: Option<String>,
     sprio: u8,
@@ -147,6 +148,7 @@ impl Floor {
     pub fn new(t2_ms: u64) -> Self {
         Self {
             t2_ms,
+            queue_max: QUEUE_MAX,
             g: General::Idle,
             speaker: None,
             sprio: 0,
@@ -658,7 +660,7 @@ impl Floor {
         } else if priority > self.holder_priority() && !self.pre_queued() {
             self.arb_preempt(user, priority, now);
         } else if priority > self.holder_priority() {
-        } else if self.queue.len() >= QUEUE_MAX {
+        } else if self.queue.len() >= self.queue_max {
             self.send(user, Wire::Deny { cause: reject::QUEUE_FULL, text: None });
         } else {
             self.insert(Waiter { user: user.to_string(), priority, pre: false });
@@ -992,3 +994,6 @@ mod tests {
         assert_eq!(sent, (timers::C7 - 1) as usize);
     }
 }
+
+#[cfg(test)]
+mod replay;
