@@ -397,6 +397,8 @@ pub async fn serve(
     // ★**발행자에게 돌려주는 TWCC 주기**(정§11-2) — 100ms 다.
     let mut fb = tokio::time::interval(std::time::Duration::from_millis(TWCC_FB_MS));
     fb.tick().await;
+    let mut obs = tokio::time::interval(std::time::Duration::from_millis(crate::floor::timers::TICK_MS));
+    obs.tick().await;
 
     loop {
         let (n, from, proto) = tokio::select! {
@@ -478,7 +480,6 @@ pub async fn serve(
                 view.store(Arc::new(
                     egress.iter().map(|(k, (p, _))| (k.clone(), *p as u64)).collect(),
                 ));
-                ingress.store(Arc::new(stats.iter().map(|(k, s)| (k.clone(), s.last_at())).collect()));
                 // ★**계수도 같이 건넨다**(운영 §3-5) — 세기만 하고 안 보이면 안 센 것과 같다.
                 counts.store(Arc::new(c));
                 // ★**판정도 1초 한 번이다**(정§10-3 tick 1,000ms) — 타이머를 또 두지 않는다.
@@ -491,6 +492,10 @@ pub async fn serve(
             },
             _ = chunk.tick() => {
                 probe_chunk(&mut down, &mut srtp, &table, &dispatch, &mut c).await;
+                continue;
+            },
+            _ = obs.tick() => {
+                ingress.store(Arc::new(stats.iter().map(|(k, s)| (k.clone(), s.last_at())).collect()));
                 continue;
             },
             _ = fb.tick() => {
