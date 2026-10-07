@@ -92,6 +92,7 @@ struct Part {
     c8: u8,
     t8_at: u64,
     cause: u8,
+    since: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -220,7 +221,10 @@ impl Floor {
         std::mem::take(&mut self.out)
     }
 
-    pub fn rtp(&mut self, user: &str, now: u64) -> Vec<Out> {
+    pub fn rtp(&mut self, user: &str, at: u64, now: u64) -> Vec<Out> {
+        if self.parts.get(user).is_some_and(|p| at < p.since) {
+            return Vec::new();
+        }
         match self.participant(user) {
             Participant::NotPermittedIdle => {
                 if self.parts.get(user).is_some_and(|p| p.released) {
@@ -228,7 +232,7 @@ impl Floor {
                 }
             }
             Participant::NotPermittedTaken => self.revoke3(user, now),
-            Participant::Permitted | Participant::PendingRevoke => self.arb_rtp(user, now),
+            Participant::Permitted | Participant::PendingRevoke => self.arb_rtp(user, at),
             Participant::NotPermittedSends => {}
         }
         std::mem::take(&mut self.out)
@@ -344,12 +348,14 @@ impl Floor {
             c8: 0,
             t8_at: 0,
             cause: 0,
+            since: 0,
         })
     }
 
     fn enter(&mut self, user: &str, state: Participant, now: u64) {
         let p = self.part_mut(user);
         p.state = state;
+        p.since = now;
         match state {
             Participant::NotPermittedIdle => p.g_taken = false,
             Participant::NotPermittedTaken => p.g_taken = true,
@@ -779,7 +785,7 @@ mod tests {
         let mut f = Floor::new(timers::T2_MS);
         req(&mut f, "a", 0, &ms, 0);
         req(&mut f, "b", 1, &ms, 10);
-        f.rtp("a", 1_000);
+        f.rtp("a", 1_000, 1_000);
         let resend = f.tick(&ms, 1_010);
         assert_eq!(wires(&resend, "a"), vec![Wire::Revoke { cause: revoke::PREEMPTED }]);
         assert_eq!(wires(&f.tick(&ms, 2_010), "a"), vec![Wire::Revoke { cause: revoke::PREEMPTED }]);
@@ -793,7 +799,7 @@ mod tests {
         let ms = m(&["a", "b"]);
         let mut f = Floor::new(timers::T2_MS);
         req(&mut f, "a", 0, &ms, 0);
-        let out = f.rtp("b", 100);
+        let out = f.rtp("b", 100, 100);
         assert_eq!(wires(&out, "b"), vec![Wire::Revoke { cause: revoke::NO_PERMISSION }]);
         assert_eq!(f.participant("b"), Participant::NotPermittedSends);
         let rel = f.rx("b", Rx::Release, ON, &ms, 200);
@@ -807,11 +813,26 @@ mod tests {
         req(&mut f, "a", 0, &ms, 0);
         f.tick(&ms, timers::T1_MS + 1);
         assert_eq!(f.general(), General::Idle);
-        assert!(f.rtp("a", timers::T1_MS + 2).is_empty());
+        assert!(f.rtp("a", timers::T1_MS + 2, timers::T1_MS + 2).is_empty());
         req(&mut f, "b", 0, &ms, 10_000);
         f.rx("b", Rx::Release, ON, &ms, 10_100);
-        let out = f.rtp("b", 10_200);
+        let out = f.rtp("b", 10_200, 10_200);
         assert_eq!(wires(&out, "b"), vec![Wire::Revoke { cause: revoke::NO_PERMISSION }]);
+    }
+
+    #[test]
+    fn rtp_observed_late_is_judged_by_arrival() {
+        let ms = m(&["a", "b"]);
+        let mut f = Floor::new(timers::T2_MS);
+        req(&mut f, "a", 0, &ms, 0);
+        f.rx("a", Rx::Release, ON, &ms, 4_679);
+        assert!(f.rtp("a", 4_670, 5_007).is_empty());
+        assert_eq!(f.participant("a"), Participant::NotPermittedIdle);
+        let later = f.tick(&ms, 8_000);
+        assert!(!wires(&later, "a").iter().any(|w| matches!(w, Wire::Revoke { .. })));
+        req(&mut f, "b", 0, &ms, 9_000);
+        let out = f.rtp("a", 9_500, 10_000);
+        assert_eq!(wires(&out, "a"), vec![Wire::Revoke { cause: revoke::NO_PERMISSION }]);
     }
 
     #[test]
@@ -820,7 +841,7 @@ mod tests {
         let mut f = Floor::new(timers::T2_MS);
         req(&mut f, "a", 0, &ms, 0);
         for t in (5_000..=35_000).step_by(1_000) {
-            f.rtp("a", t);
+            f.rtp("a", t, t);
         }
         let out = f.tick(&ms, 35_001);
         assert_eq!(wires(&out, "a"), vec![Wire::Revoke { cause: revoke::BURST_TOO_LONG }]);
@@ -837,7 +858,7 @@ mod tests {
         let ms = m(&["a", "b"]);
         let mut f = Floor::new(timers::T2_MS);
         req(&mut f, "a", 0, &ms, 0);
-        f.rtp("a", 1_000);
+        f.rtp("a", 1_000, 1_000);
         let out = req(&mut f, "a", 0, &ms, 11_000);
         assert_eq!(wires(&out, "a"), vec![Wire::Granted { priority: 0, duration_s: 20 }]);
     }
@@ -861,7 +882,7 @@ mod tests {
         f.rx("a", Rx::Release, ON, &ms, 20);
         let r1 = f.tick(&ms, 20 + timers::T20_MS);
         assert_eq!(wires(&r1, "b"), vec![Wire::Granted { priority: 0, duration_s: 30 }]);
-        f.rtp("b", 1_500);
+        f.rtp("b", 1_500, 1_500);
         assert!(wires(&f.tick(&ms, 20 + 2 * timers::T20_MS), "b").is_empty());
     }
 

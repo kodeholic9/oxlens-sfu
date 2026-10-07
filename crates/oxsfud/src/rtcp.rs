@@ -257,6 +257,7 @@ pub struct RecvStats {
     last_sr_at: Option<u64>,
     started: bool,
     probation: u32,
+    last_at: u64,
 }
 
 impl RecvStats {
@@ -277,6 +278,7 @@ impl RecvStats {
             last_sr_at: None,
             started: false,
             probation: MIN_SEQUENTIAL,
+            last_at: 0,
         }
     }
 
@@ -292,6 +294,7 @@ impl RecvStats {
 
     /// 패킷 하나를 셌다. ★**핫패스다** — 할당이 없다.
     pub fn on_rtp(&mut self, seq: u16, rtp_ts: u32, now_ms: u64) {
+        self.last_at = now_ms;
         if !self.started {
             self.init_seq(seq);
             self.started = true;
@@ -387,6 +390,10 @@ impl RecvStats {
 
     pub fn received(&self) -> u32 {
         self.received
+    }
+
+    pub fn last_at(&self) -> u64 {
+        self.last_at
     }
 }
 

@@ -478,7 +478,7 @@ pub async fn serve(
                 view.store(Arc::new(
                     egress.iter().map(|(k, (p, _))| (k.clone(), *p as u64)).collect(),
                 ));
-                ingress.store(Arc::new(stats.iter().map(|(k, s)| (k.clone(), u64::from(s.received()))).collect()));
+                ingress.store(Arc::new(stats.iter().map(|(k, s)| (k.clone(), s.last_at())).collect()));
                 // ★**계수도 같이 건넨다**(운영 §3-5) — 세기만 하고 안 보이면 안 센 것과 같다.
                 counts.store(Arc::new(c));
                 // ★**판정도 1초 한 번이다**(정§10-3 tick 1,000ms) — 타이머를 또 두지 않는다.

@@ -1721,21 +1721,21 @@ pub fn floor_tick(node: &mut Node, now: u64) -> FloorOut {
             .filter(|p| p.duplex == Duplex::Half && p.kind == Kind::Audio)
             .filter(|p| node.peers.get(&p.session_id).and_then(|x| x.pub_room.as_deref()) == Some(r.as_str()))
             .filter_map(|p| {
-                let got = ingress.get(&(pub_ufrag(node, &p.session_id), p.ssrc)).copied()?;
-                Some((p.ssrc, p.user_id.clone(), got))
+                let at = ingress.get(&(pub_ufrag(node, &p.session_id), p.ssrc)).copied()?;
+                Some((p.ssrc, p.user_id.clone(), at))
             })
             .collect();
         let mut talking = Vec::new();
-        for (ssrc, user, got) in seen {
-            if node.rtp_seen.insert(ssrc, got).is_some_and(|was| was != got) {
-                talking.push(user);
+        for (ssrc, user, at) in seen {
+            if node.rtp_seen.insert(ssrc, at) != Some(at) {
+                talking.push((user, at));
             }
         }
         let Some(f) = node.floors.get_mut(&r) else { continue };
         let before = f.holder().map(str::to_string);
         let mut outs = Vec::new();
-        for u in &talking {
-            outs.extend(f.rtp(u, now));
+        for (u, at) in &talking {
+            outs.extend(f.rtp(u, *at, now));
         }
         outs.extend(f.tick(&members, now));
         let moved = f.holder().map(str::to_string) != before;
