@@ -15,7 +15,6 @@
 use std::collections::BTreeMap;
 
 const VER_MASK: u8 = 0xC0;
-const RESERVED_MASK: u8 = 0x20;
 const ACK_MASK: u8 = 0x10;
 const TYPE_MASK: u8 = 0x0F;
 
@@ -96,6 +95,10 @@ impl Msg {
         self.with(id, vec![v])
     }
 
+    pub fn with_u8_spare(self, id: u8, v: u8) -> Self {
+        self.with(id, vec![v, 0])
+    }
+
     pub fn with_u16(self, id: u8, v: u16) -> Self {
         self.with(id, v.to_be_bytes().to_vec())
     }
@@ -115,6 +118,10 @@ impl Msg {
 
     pub fn get_u8(&self, id: u8) -> Option<u8> {
         self.get(id).and_then(|v| v.first().copied())
+    }
+
+    pub fn get_u8_spare(&self, id: u8) -> Option<u8> {
+        self.get(id).filter(|v| v.len() == 2).map(|v| v[0])
     }
 
     pub fn get_u16(&self, id: u8) -> Option<u16> {
@@ -155,7 +162,7 @@ pub fn decode(payload: &[u8]) -> Option<Msg> {
         return None;
     }
     let head = payload[0];
-    if head & VER_MASK != 0 || head & RESERVED_MASK != 0 {
+    if head & VER_MASK != 0 {
         return None;
     }
     let t = head & TYPE_MASK;
@@ -225,14 +232,16 @@ mod tests {
 
     #[test]
     fn 짓고_되읽으면_같다() {
-        let m = Msg::new(REQUEST).with_str(F_ROOM, "r1").with_u8(F_PRIORITY, 7);
+        let m = Msg::new(REQUEST).with_str(F_ROOM, "r1").with_u8_spare(F_PRIORITY, 7);
         let w = m.encode().expect("짓는다");
         assert_eq!(w[0], REQUEST, "★A 비트 없이 나간다");
         assert_eq!(w[1], 2, "★TLV 두 개");
         let back = decode(&w).expect("읽힌다");
         assert_eq!(back, m);
         assert_eq!(back.room(), Some("r1"));
-        assert_eq!(back.get_u8(F_PRIORITY), Some(7));
+        assert_eq!(back.get_u8_spare(F_PRIORITY), Some(7));
+        assert_eq!(back.get(F_PRIORITY), Some(&[7, 0][..]));
+        assert_eq!(Msg::new(REQUEST).with_u8(F_PRIORITY, 7).get_u8_spare(F_PRIORITY), None);
     }
 
     #[test]
@@ -246,9 +255,8 @@ mod tests {
     fn 모르는_종류는_처리_불가다() {
         // 종류 `7` 은 미채택 — 비워 둔 번호다.
         assert!(decode(&[7, 0]).is_none());
-        // 판이 다르거나 예약 비트가 서면 우리 것이 아니다.
         assert!(decode(&[0x40, 0]).is_none());
-        assert!(decode(&[0x20, 0]).is_none());
+        assert_eq!(decode(&[0x20, 0]).map(|m| m.msg_type), Some(REQUEST));
     }
 
     #[test]

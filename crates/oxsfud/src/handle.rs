@@ -1611,7 +1611,7 @@ pub fn on_floor(node: &mut Node, ufrag: &str, payload: &[u8], now: u64) -> Floor
     } else {
         match msg.msg_type {
             oxsig::mbcp::REQUEST => {
-                floor::Rx::Request { priority: msg.get_u8(oxsig::mbcp::F_PRIORITY).unwrap_or(0) }
+                floor::Rx::Request { priority: msg.get_u8_spare(oxsig::mbcp::F_PRIORITY).unwrap_or(0) }
             }
             oxsig::mbcp::RELEASE => floor::Rx::Release,
             oxsig::mbcp::QUEUE_POS_REQUEST => floor::Rx::QueuePos,
@@ -1755,7 +1755,7 @@ fn emit_floor(node: &Node, room_id: &str, outs: Vec<floor::Out>) -> Vec<DcOut> {
         let m = match o.wire {
             floor::Wire::Granted { priority, duration_s } => Msg::new(mbcp::GRANTED)
                 .with_str(mbcp::F_ROOM, room_id)
-                .with_u8(mbcp::F_PRIORITY, priority)
+                .with_u8_spare(mbcp::F_PRIORITY, priority)
                 .with_u16(mbcp::F_DURATION, duration_s)
                 .ack(),
             floor::Wire::Deny { cause, text } => {
