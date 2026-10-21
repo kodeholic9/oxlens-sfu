@@ -1,19 +1,15 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.1 · 연§3 · 연§4 · 연§6 · 연§10 · model: claude-opus-5
+// spec: v1.2 @5f1b3b9 · 연:TRN 연:ERR 연:FLR.wire 정:RULE-BUS-REQUEST · model: claude-opus-5-5
+//! A 평면 wire(WS 프레임 · op · 코드 · body 형 · DC 프레임 · MBCP)와 B 평면 봉투.
 
-//! `oxsig` — A 평면 wire 의 타입. 프레임·op·코드·공통 형·body 가 여기 산다.
-//!
-//! ★**body 의 권위는 이 크레이트의 타입이다.** `serde_json::Value` 로 받아 넘기지 않는다 —
-//! 형을 비껴가면 어느 필드가 계약인지가 소스마다 갈린다.
-
-pub mod body;
+pub mod bplane;
 pub mod code;
+pub mod dc;
 pub mod frame;
 pub mod mbcp;
 pub mod op;
-pub mod types;
+pub mod wire;
 
-pub use code::{Code, Family};
-pub use frame::{Header, Kind};
+pub use code::Code;
+pub use frame::{Frame, FrameError, Kind};
 pub use op::{Lane, Op};
-pub use types::{is_participant_type, Affiliation, Assign, Failure, MemberInfo, Permission, Source, StreamType, TrackEntry, Version};

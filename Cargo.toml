@@ -1,8 +1,5 @@
 [workspace]
-# ★재작성 중(spec/v1.1) — 덩어리마다 아래층부터 members 를 되돌린다.
-#   그래야 `cargo build`(workspace 전량)가 게이트로 살아 있다 — `-p` 스코프는 쓰지 않는다.
-#   복구 순서: oxsig → common → oxhubd → oxsfud.
-members = ["crates/oxsig", "crates/common", "crates/oxhubd", "crates/oxsfud", "crates/oxadmin"]
+members = ["crates/oxsig"]
 resolver = "3"
 
 [workspace.package]
@@ -41,9 +38,6 @@ webrtc-srtp = "0.17.1"
 webrtc-util = "0.17.1"
 sctp-proto = "0.9"
 tokio-util = { version = "0.7", features = ["rt"] }
-# ★★**1.10 이상으로 고정한다**(정§15-0) — 1.10.0 이 *"routers unregistering liveness
-#   tokens and queryables"* 를 고쳤고, ★그 자리가 router 가 남의 토큰을 관리하는 자리라
-#   이 형상의 핵심 기전이다. 그 아래 판에서는 ★**살아 있는 방이 사라진 것으로 보인다.**
 zenoh = "1.10"
 bytes = "1"
 hmac = "0.12"
