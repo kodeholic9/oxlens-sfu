@@ -1,432 +1,341 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.1 · 정§4-1 · §4-1-1 · §4-2 · §14-1 · 연§4-4 · §5-4 · model: claude-opus-5
+// spec: v1.2 @124a233 · 정:IMPL-ROOM-LIFE 정:IMPL-ROOM-DERIVED 정:IMPL-ROOM-VERSION-ISSUE 정:IMPL-ROOM-EMIT 정:IMPL-ROOM-RESYNC 정:IMPL-TRK-FROM-PUB 연:RULE-ROOM-SEQ-CONTENT 연:RULE-ROOM-ONE-COUNTER 연:RULE-ROOM-HIDDEN-ONLY-FOUR 연:RULE-TRK-FIELDS-BY-TYPE · model: claude-opus-5-5
+//! 방 — 빈 그릇과 수명 · 명단 · 트랙 목록 · `seq` 와 통지 enqueue 를 한 임계 구역에서.
 
-//! 방 수명 — ★**빈 그릇과 자리 둘.**
-//!
-//! ★★**수명·`3004` 판정은 등록 기준이고 `user_count` 는 보이는 수다 — 기준이 다른 것이 계약이다.**
-//! 투명 봇만 남은 방은 `user_count` 가 `0` 이지만 ★**살아 있다**(녹화 중인 방을 폭파하지 않는다).
+use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
-use oxsig::{Code, MemberInfo, Permission, Version};
+use arc_swap::{ArcSwap, ArcSwapOption};
+use oxsig::Op;
+use oxsig::bplane::UnitEvent;
+use oxsig::code::Code;
+use oxsig::wire::{
+    CreateRoomReq, CreateRoomRes, GetRoomRes, Kind, MediaCodecs, MemberInfo, Permission, RoomSnapshot, RoomSummary,
+    TrackEntry, TrackEntryType, Version,
+};
 
-/// TTL 둘. ★`None` = 영구. ★`empty` 라는 낱말은 쓰지 않는다(업계가 반대 뜻으로 쓴다).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Ttl {
-    /// *"아무도 안 들어옴"*.
-    pub unused_secs: Option<u32>,
-    /// *"다 나감"*.
-    pub departure_secs: Option<u32>,
-}
+use crate::media::{PubStream, Slot};
+use crate::sfu::{Out, Sfu, lock, now_ms};
+use crate::table::slot_track_id;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+pub const ALL: Permission = Permission { publish_audio: true, publish_video: true, publish_screen: true, floor_request: true };
+
+#[derive(Debug, Clone)]
 pub struct Member {
-    /// ★**자리의 주인은 세션이다** — 같은 `user_id` 의 재입장은 옛 자리를 축출한다(정§4-2 ②).
-    pub session_id: String,
     pub user_id: String,
-    /// ★명단·정원에서 빠지지만 ★**수명 판정에는 센다.**
-    pub hidden: bool,
-    /// `1` 녹화.
-    pub participant_type: u8,
-    /// 앱이 붙이는 라벨 — ★**권한이 아니다**(연§4-4). 서버는 저장만 한다.
+    pub session_id: String,
     pub role: u8,
-    /// ★**입장 시점의 의도** — `true` 참여 / `false` 청취. 입장 뒤 바뀌지 않는다.
     pub select: bool,
-    /// 토큰이 준 것. 불투명하다.
+    pub participant_type: u8,
     pub metadata: Option<serde_json::Value>,
-    /// ★**그 방에서 무엇을 할 수 있나**(정§6-4) — 씨앗은 토큰이고 갱신은 방 단위다.
     pub permission: Permission,
+    pub hidden: bool,
 }
 
 impl Member {
-    fn info(&self) -> MemberInfo {
+    pub fn info(&self) -> MemberInfo {
         MemberInfo {
             user_id: self.user_id.clone(),
-            role: self.role,
+            role: Some(self.role),
             select: self.select,
             participant_type: self.participant_type,
             metadata: self.metadata.clone(),
-            // ★**기본과 다를 때만 싣는다** — 정원 1,000 의 명단이 통째로 나가지 않게.
-            permission: (self.permission != Permission::default()).then_some(self.permission),
+            permission: (self.permission != ALL).then_some(self.permission),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
+pub struct Inner {
+    pub members: BTreeMap<String, Member>,
+    pub perm: HashMap<String, Permission>,
+    pub tracks: Vec<Arc<PubStream>>,
+}
+
 pub struct Room {
     pub id: String,
     pub name: String,
     pub capacity: u32,
     pub created_at: u64,
-    pub ttl: Ttl,
-    members: Vec<Member>,
-    /// ★비기 시작한 시각. 생성 직후에는 ★**생성 시각**이다(비는 사건이 따로 없다).
-    ///
-    /// ★★**`None` 이 "안 비었다" 이고 `0` 을 표식으로 쓰지 않는다** — 시각 0 과 겹치면
-    /// 기동 직후에 만든 방이 *"방금 비었다"* 로 읽혀 한 tick 을 헛되이 쓴다.
-    empty_since: Option<u64>,
-    ever_joined: bool,
-    /// 방 공통 스냅샷 번호.
-    pub seq: u64,
-    /// ★**무전 audio 슬롯의 가상 SSRC** — 방과 수명이 같다(정§6-2 갈래별 후속).
-    /// 화자가 바뀌어도 이 값은 그대로라 ★**재협상이 없다**(N:1).
-    pub slot_audio_ssrc: u32,
-    /// ★★**권한 오버라이드 표 — 멤버십보다 오래 산다**(정§6-4 · §4-1).
-    ///
-    /// ★**나갔다 들어와도, 새 토큰으로 다시 붙어도 결정자의 결정이 산다** — 갱신값을
-    /// 세션에 두거나 멤버십과 함께 버리면 ★**방을 나갔다 들어오는 것만으로 풀린다.**
-    /// ★표는 방과 수명이 같다(방이 사라지면 함께 사라진다).
-    overrides: std::collections::BTreeMap<String, Permission>,
-}
-
-/// ★`0` 을 피한다 — RTP 에서 `0` 은 값이 아니라 *"안 정해졌다"* 로 읽히는 자리가 많다.
-fn fresh_ssrc() -> u32 {
-    let mut raw = [0u8; 4];
-    getrandom::fill(&mut raw).expect("OS 난수");
-    u32::from_be_bytes(raw) | 1
-}
-
-/// tick 이 낸 판단.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Sweep {
-    /// 아무 일 없다.
-    None,
-    /// ★**"방금 비었다"의 최초 관측** — 이 tick 에는 만료를 판정하지 않는다.
-    JustEmptied,
-    /// 만료 — 폭파한다.
-    Expired,
+    pub codecs: MediaCodecs,
+    pub unused_ttl: Option<u32>,
+    pub departure_ttl: Option<u32>,
+    pub inner: Mutex<Inner>,
+    pub seq: AtomicU64,
+    pub empty_since: AtomicU64,
+    pub ever_joined: AtomicBool,
+    pub floor: Mutex<crate::floor::FloorRoom>,
+    pub holder: ArcSwapOption<String>,
+    pub prev_speaker: ArcSwapOption<String>,
+    pub slots: [Slot; 2],
+    pub listed: ArcSwap<Vec<Arc<PubStream>>>,
+    pub cool: Mutex<HashMap<String, u64>>,
+    pub closed: AtomicBool,
 }
 
 impl Room {
-    pub fn new(id: String, name: String, capacity: u32, ttl: Ttl, now: u64) -> Self {
-        Self {
-            id,
-            name,
-            capacity,
-            created_at: now,
-            ttl,
-            members: Vec::new(),
-            empty_since: Some(now),
-            ever_joined: false,
-            seq: 0,
-            slot_audio_ssrc: fresh_ssrc(),
-            overrides: std::collections::BTreeMap::new(),
+    pub fn slot(&self, kind: Kind) -> &Slot {
+        match kind {
+            Kind::Audio => &self.slots[0],
+            Kind::Video => &self.slots[1],
         }
     }
 
-    /// ★**등록 기준** — 수명·`3004` 가 보는 수. `hidden` 도 센다.
-    pub fn registered(&self) -> usize {
-        self.members.len()
+    pub fn lock(&self) -> MutexGuard<'_, Inner> {
+        lock(&self.inner)
     }
 
-    /// ★**보이는 수** — 명단·정원이 보는 수. 투명은 빠진다.
-    pub fn user_count(&self) -> usize {
-        self.members.iter().filter(|m| !m.hidden).count()
+    pub fn version(&self, sfu: &Sfu) -> Version {
+        Version { epoch: sfu.epoch.clone(), seq: self.seq.load(Ordering::SeqCst) }
     }
 
-    /// ★**녹화 중인가는 등록에서 센다** — 방 플래그로 저장하면 봇이 조용히 나간 뒤에도 켜져 있다.
-    pub fn rec(&self) -> bool {
-        self.members.iter().any(|m| m.participant_type == 1)
+    pub fn listed_tracks(&self) -> Vec<Arc<PubStream>> {
+        self.listed.load().iter().cloned().collect()
     }
 
-    /// 그 사람이 투명으로 들어와 있나 — ★**퇴장 통지를 낼지 가른다**(정§17-2 ⑦).
-    pub fn is_hidden(&self, user_id: &str) -> bool {
-        self.members.iter().any(|m| m.user_id == user_id && m.hidden)
+    pub fn publish_listed(&self, g: &Inner) {
+        self.listed.store(Arc::new(g.tracks.clone()));
     }
 
-    /// ★**명단 그대로** — 투명은 빠진다(연§4-4).
-    pub fn participants(&self) -> Vec<MemberInfo> {
-        self.members.iter().filter(|m| !m.hidden).map(Member::info).collect()
+    pub fn emit<B: serde::Serialize>(&self, sfu: &Sfu, _g: &Inner, op: Op, exclude: Option<&str>, body: impl FnOnce(Version) -> B) {
+        let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let b = body(Version { epoch: sfu.epoch.clone(), seq });
+        let ev = UnitEvent { op: op.as_u16(), body: serde_json::to_string(&b).unwrap_or_default(), exclude: exclude.map(str::to_string) };
+        let _ = sfu.out_tx.send(Out::Room { room: self.id.clone(), ev });
     }
 
-    /// ★`seq++` ⟺ **그 방 공통 스냅샷이 바뀌었다**(연§4-6-1). 투명 입퇴장은 통지가
-    /// 없으므로 ★**올리지 않는다** — 올리면 클라에게 갭이 *"유실"* 과 *"투명"* 두 뜻이 된다(정§14-1).
-    fn bump(&mut self, visible: bool) {
-        if visible {
-            self.seq += 1;
+    pub fn bare<B: serde::Serialize>(&self, sfu: &Sfu, _g: &Inner, op: Op, exclude: Option<&str>, body: &B) {
+        let ev = UnitEvent { op: op.as_u16(), body: serde_json::to_string(body).unwrap_or_default(), exclude: exclude.map(str::to_string) };
+        let _ = sfu.out_tx.send(Out::Room { room: self.id.clone(), ev });
+    }
+
+    pub fn visible(&self, g: &Inner) -> Vec<MemberInfo> {
+        g.members.values().filter(|m| !m.hidden).map(Member::info).collect()
+    }
+
+    pub fn user_count(&self, g: &Inner) -> u32 {
+        g.members.values().filter(|m| !m.hidden).count() as u32
+    }
+
+    pub fn rec(&self, g: &Inner) -> bool {
+        g.members.values().any(|m| m.participant_type == 1)
+    }
+
+    pub fn slot_entries(&self) -> Vec<TrackEntry> {
+        let vcodec = self.codecs.video.clone().unwrap_or_else(|| "H264".into());
+        vec![
+            TrackEntry {
+                type_: TrackEntryType::Slot,
+                room_id: self.id.clone(),
+                track_id: slot_track_id(&self.id, false),
+                kind: Kind::Audio,
+                codec: None,
+                fmtp: None,
+                user_id: None,
+                source: None,
+                active: None,
+                muted: None,
+                simulcast: None,
+                scalability: None,
+            },
+            TrackEntry {
+                type_: TrackEntryType::Slot,
+                room_id: self.id.clone(),
+                track_id: slot_track_id(&self.id, true),
+                kind: Kind::Video,
+                codec: Some(vcodec.clone()),
+                fmtp: crate::rtp::sub_fmtp(&vcodec).map(str::to_string),
+                user_id: None,
+                source: None,
+                active: None,
+                muted: None,
+                simulcast: None,
+                scalability: None,
+            },
+        ]
+    }
+
+    pub fn tracks(&self, g: &Inner) -> Vec<TrackEntry> {
+        let mut v = self.slot_entries();
+        v.extend(g.tracks.iter().filter(|s| s.listed.load(Ordering::Relaxed)).map(|s| entry(self, s)));
+        v
+    }
+
+    pub fn snapshot(&self, sfu: &Sfu, me: &str) -> Option<RoomSnapshot> {
+        let g = self.lock();
+        let me = g.members.get(me)?.info();
+        Some(RoomSnapshot { participants: self.visible(&g), me, tracks: self.tracks(&g), version: self.version(sfu) })
+    }
+
+    pub fn summary(&self) -> RoomSummary {
+        let g = self.lock();
+        RoomSummary {
+            room_id: self.id.clone(),
+            name: self.name.clone(),
+            capacity: self.capacity,
+            user_count: self.user_count(&g),
+            created_at: self.created_at,
+            rec: self.rec(&g),
         }
     }
+}
 
-    /// 정원은 ★**보이는 수**로 본다 — 투명 봇이 자리를 먹지 않는다.
-    ///
-    /// ★**순서가 계약이다** — 같은 신원의 옛 자리를 **먼저** 뺀 뒤 정원을 센다(정§4-2 ②:
-    /// *"이후 판정은 축출 뒤 값으로"*). 안 그러면 정원이 찬 방에서 take-over 가 `4001` 로 죽는다.
-    pub fn join(&mut self, mut m: Member) -> Result<(), Code> {
-        let retaken = self.members.iter().any(|x| x.user_id == m.user_id);
-        if retaken {
-            self.members.retain(|x| x.user_id != m.user_id);
-        }
-        if !m.hidden && self.user_count() as u32 >= self.capacity {
-            return Err(Code::RoomFull);
-        }
-        // ★★**표에 있으면 토큰값 대신 그것으로 초기화한다**(정§4-2 · §6-4) —
-        //   그래서 나갔다 들어와도, 새 토큰으로 다시 붙어도 결정자의 결정이 산다.
-        if let Some(&p) = self.overrides.get(&m.user_id) {
-            m.permission = p;
-        }
-        let visible = !m.hidden;
-        self.members.push(m);
-        self.ever_joined = true;
-        self.empty_since = None;
-        // ★재입장은 명단의 줄 수를 안 바꾸지만 ★**내용이 바뀐다**(role·select) — 올린다.
-        self.bump(visible);
-        Ok(())
+pub fn entry(room: &Room, s: &PubStream) -> TrackEntry {
+    let video = s.is_video();
+    TrackEntry {
+        type_: TrackEntryType::Individual,
+        room_id: room.id.clone(),
+        track_id: s.track_id.clone(),
+        kind: s.kind,
+        codec: video.then(|| room.codecs.video.clone().unwrap_or_else(|| "H264".into())),
+        fmtp: s.fmtp.clone(),
+        user_id: Some(s.user_id.clone()),
+        source: if video { Some(s.source.unwrap_or(oxsig::wire::Source::Camera)) } else { None },
+        active: Some(!s.is_half()),
+        muted: Some(s.muted.load(Ordering::Relaxed)),
+        simulcast: video.then_some(s.simulcast),
+        scalability: (video && s.simulcast).then(|| "L2T1".to_string()),
     }
+}
 
-    /// 권한 비트를 바꾼다(정§6-4 ①②) — ★**판정만 한다.** 회수·통지는 부르는 쪽이다.
-    ///
-    /// ★`None` = 아무 일도 안 했다(멱등, 또는 명단에 없는 사람).
-    /// ★**넷 다 기본이면 표에서 지운다** — 기본과 같은 값은 보관하지 않는다.
-    pub fn set_permission(&mut self, user_id: &str, want: Permission) -> Option<Permission> {
-        let m = self.members.iter_mut().find(|m| m.user_id == user_id)?;
-        // ① ★**지금 값과 같으면 아무것도 하지 않는다** — 통지도 `seq` 도 없다.
-        if m.permission == want {
-            return None;
-        }
-        let hidden = m.hidden;
-        // ② ★**비트를 먼저 바꾼다** — 통지가 앞서면 클라의 자동 발행이 아직 안 내려간 비트를 통과한다.
-        m.permission = want;
-        if want == Permission::default() {
-            self.overrides.remove(user_id);
-        } else {
-            self.overrides.insert(user_id.to_string(), want);
-        }
-        // ★**투명 참가자는 `seq` 도 안 올린다**(정§6-4 ④) — 감추기로 한 축이 한 프레임으로 무너진다.
-        if !hidden {
-            self.seq += 1;
-        }
-        Some(want)
+pub fn remove_entry(room: &Room, s: &PubStream) -> TrackEntry {
+    TrackEntry {
+        type_: TrackEntryType::Individual,
+        room_id: room.id.clone(),
+        track_id: s.track_id.clone(),
+        kind: s.kind,
+        codec: None,
+        fmtp: None,
+        user_id: None,
+        source: None,
+        active: None,
+        muted: None,
+        simulcast: None,
+        scalability: None,
     }
+}
 
-    /// 그 사람이 이 방에서 무엇을 할 수 있나 — ★**명단에 없으면 `None`.**
-    pub fn permission_of(&self, user_id: &str) -> Option<Permission> {
-        self.members.iter().find(|m| m.user_id == user_id).map(|m| m.permission)
+fn filled_codecs(c: Option<&MediaCodecs>) -> MediaCodecs {
+    let pick = |v: Option<&String>, d: &str| match v {
+        Some(s) if !s.is_empty() => crate::rtp::canon_codec(s),
+        _ => d.to_string(),
+    };
+    MediaCodecs { audio: Some(pick(c.and_then(|c| c.audio.as_ref()), "opus")), video: Some(pick(c.and_then(|c| c.video.as_ref()), "H264")) }
+}
+
+pub fn create(sfu: &Arc<Sfu>, req: &CreateRoomReq, capacity: u32, unused: u32, departure: u32) -> Result<CreateRoomRes, (Code, String)> {
+    let id = req.room_id.clone().filter(|s| !s.is_empty()).ok_or((Code::MISSING_FIELD, "room_id".to_string()))?;
+    if let Some(r) = sfu.room(&id) {
+        return Ok(CreateRoomRes { room_id: r.id.clone(), name: r.name.clone(), capacity: r.capacity, created_at: r.created_at, media_codecs: r.codecs.clone() });
     }
-
-    /// 그 사람이 이 방에서 투명한가 — 통지 판정에 쓴다.
-    pub fn hidden_of(&self, user_id: &str) -> Option<bool> {
-        self.members.iter().find(|m| m.user_id == user_id).map(|m| m.hidden)
+    let codecs = filled_codecs(req.media_codecs.as_ref());
+    if let Some(v) = codecs.video.as_deref()
+        && !crate::rtp::has_keyframe_judge(v)
+    {
+        return Err((Code::CODEC_REQUIRED, format!("unsupported video codec {v}")));
     }
-
-    pub fn leave(&mut self, user_id: &str) -> bool {
-        let visible = self.members.iter().any(|m| m.user_id == user_id && !m.hidden);
-        let before = self.members.len();
-        self.members.retain(|m| m.user_id != user_id);
-        let gone = before != self.members.len();
-        if gone {
-            self.bump(visible);
-        }
-        gone
-    }
-
-    /// ★**스트림 층이 바뀌었다** — 명단과 같은 축이라 같은 카운터가 오른다(연§4-6-1).
-    pub fn bump_stream(&mut self) {
-        self.seq += 1;
-    }
-
-    /// 지금 이 방에 있는 세션들 — ★**투명도 받는다**(빠지는 것은 명단·통지 넷뿐).
-    pub fn session_ids(&self) -> Vec<String> {
-        self.members.iter().map(|m| m.session_id.clone()).collect()
-    }
-
-    /// 이 방 것으로 나가는 판번호.
-    pub fn version(&self, epoch: &str) -> Version {
-        Version { epoch: epoch.to_string(), seq: self.seq }
-    }
-
-    /// ★**한 tick 에 한 걸음** — 비는 것을 본 tick 에는 만료를 판정하지 않는다.
-    pub fn tick(&mut self, now: u64) -> Sweep {
-        if self.registered() > 0 {
-            self.empty_since = None;
-            return Sweep::None;
-        }
-        let Some(since) = self.empty_since else {
-            // ★CAS — "방금 비었다"의 최초 관측. 이 tick 에는 만료를 판정하지 않는다.
-            self.empty_since = Some(now);
-            return Sweep::JustEmptied;
-        };
-        let ttl = if self.ever_joined { self.ttl.departure_secs } else { self.ttl.unused_secs };
-        match ttl {
-            // ★`None` = 영구.
-            None => Sweep::None,
-            Some(secs) => {
-                if now.saturating_sub(since) >= secs as u64 * 1_000 {
-                    Sweep::Expired
-                } else {
-                    Sweep::None
-                }
+    let now = now_ms();
+    let room = Arc::new(Room {
+        id: id.clone(),
+        name: req.name.clone(),
+        capacity,
+        created_at: now,
+        codecs: codecs.clone(),
+        unused_ttl: Some(req.unused_ttl_secs.unwrap_or(unused)),
+        departure_ttl: Some(req.departure_ttl_secs.unwrap_or(departure)),
+        inner: Mutex::new(Inner::default()),
+        seq: AtomicU64::new(1),
+        empty_since: AtomicU64::new(now),
+        ever_joined: AtomicBool::new(false),
+        floor: Mutex::new(crate::floor::FloorRoom::new(sfu.policy.floor.queue_max as usize)),
+        holder: ArcSwapOption::empty(),
+        prev_speaker: ArcSwapOption::empty(),
+        slots: [Slot::new(), Slot::new()],
+        listed: ArcSwap::from_pointee(Vec::new()),
+        cool: Mutex::new(HashMap::new()),
+        closed: AtomicBool::new(false),
+    });
+    let won = {
+        let mut m = lock(&sfu.rooms);
+        match m.get(&id) {
+            Some(r) => r.clone(),
+            None => {
+                m.insert(id.clone(), room.clone());
+                room.clone()
             }
         }
+    };
+    if Arc::ptr_eq(&won, &room) {
+        sfu.room_token(&id, true);
+        tracing::info!(kind = "ev", spec = "IMPL-ROOM-LIFE", room = id.as_str(), "room created");
     }
+    Ok(CreateRoomRes { room_id: won.id.clone(), name: won.name.clone(), capacity: won.capacity, created_at: won.created_at, media_codecs: won.codecs.clone() })
+}
 
-    /// 명시 삭제 — ★**사람이 있으면 `3004`.** 운영 `destroy` 는 이 판정을 안 본다(운영 규격서 §4-3).
-    pub fn may_destroy(&self) -> Result<(), Code> {
-        if self.registered() > 0 {
-            return Err(Code::RoomNotEmpty);
+pub fn get(sfu: &Arc<Sfu>, room_id: &str, viewer: Option<&str>, tracks: bool) -> Result<GetRoomRes, (Code, String)> {
+    let r = sfu.room(room_id).ok_or((Code::ROOM_NOT_FOUND, "room not found".to_string()))?;
+    let g = r.lock();
+    let me = viewer.and_then(|v| g.members.get(v)).map(Member::info);
+    Ok(GetRoomRes {
+        room_id: r.id.clone(),
+        name: r.name.clone(),
+        capacity: r.capacity,
+        user_count: r.user_count(&g),
+        participants: r.visible(&g),
+        me,
+        created_at: r.created_at,
+        media_codecs: r.codecs.clone(),
+        version: r.version(sfu),
+        tracks: tracks.then(|| r.tracks(&g)),
+    })
+}
+
+pub fn list(sfu: &Arc<Sfu>) -> Vec<RoomSummary> {
+    let rooms: Vec<Arc<Room>> = lock(&sfu.rooms).values().cloned().collect();
+    rooms.iter().map(|r| r.summary()).collect()
+}
+
+pub fn remove(sfu: &Arc<Sfu>, room: &Arc<Room>) {
+    room.closed.store(true, Ordering::SeqCst);
+    let gone = {
+        let mut m = lock(&sfu.rooms);
+        match m.get(&room.id) {
+            Some(r) if Arc::ptr_eq(r, room) => m.remove(&room.id).is_some(),
+            _ => false,
         }
-        Ok(())
+    };
+    for s in &room.slots {
+        s.rows.store(Arc::new(Vec::new()));
+        s.bound.store(None);
+    }
+    lock(&room.cool).clear();
+    if gone {
+        sfu.room_token(&room.id, false);
+        tracing::info!(kind = "ev", spec = "IMPL-ROOM-LIFE", room = room.id.as_str(), "room removed");
     }
 }
 
-/// 방 창고. ★**명시 id 생성은 멱등이다**(있으면 그 방을 돌려준다 — `name` 은 무시).
-#[derive(Debug, Default)]
-pub struct Rooms {
-    items: Vec<Room>,
-}
-
-impl Rooms {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn get(&self, id: &str) -> Option<&Room> {
-        self.items.iter().find(|r| r.id == id)
-    }
-
-    pub fn get_mut(&mut self, id: &str) -> Option<&mut Room> {
-        self.items.iter_mut().find(|r| r.id == id)
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &Room> {
-        self.items.iter()
-    }
-
-    pub fn len(&self) -> usize {
-        self.items.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
-    }
-
-    /// ★**멱등** — 같은 id 로 다시 만들면 그 방이 그대로 온다.
-    pub fn create(&mut self, id: String, name: String, capacity: u32, ttl: Ttl, now: u64) -> &Room {
-        if let Some(i) = self.items.iter().position(|r| r.id == id) {
-            return &self.items[i];
+pub fn sweep(sfu: &Arc<Sfu>) {
+    let now = now_ms();
+    let rooms: Vec<Arc<Room>> = lock(&sfu.rooms).values().cloned().collect();
+    for r in rooms {
+        let empty = r.lock().members.is_empty();
+        if !empty {
+            continue;
         }
-        self.items.push(Room::new(id, name, capacity, ttl, now));
-        self.items.last().expect("방금 넣었다")
-    }
-
-    pub fn remove(&mut self, id: &str) -> bool {
-        let before = self.items.len();
-        self.items.retain(|r| r.id != id);
-        before != self.items.len()
-    }
-
-    /// 만료된 방을 낸다. ★**좀비 회수 뒤에 돈다**(급사 참가자가 남아 있으면 유예 시작이 늦는다).
-    pub fn sweep(&mut self, now: u64) -> Vec<String> {
-        let mut expired = Vec::new();
-        for r in self.items.iter_mut() {
-            if r.tick(now) == Sweep::Expired {
-                expired.push(r.id.clone());
+        let since = r.empty_since.load(Ordering::SeqCst);
+        if since == 0 {
+            let _ = r.empty_since.compare_exchange(0, now, Ordering::SeqCst, Ordering::SeqCst);
+            continue;
+        }
+        let ttl = if r.ever_joined.load(Ordering::SeqCst) { r.departure_ttl } else { r.unused_ttl };
+        let Some(ttl) = ttl else { continue };
+        if now.saturating_sub(since) >= ttl as u64 * 1000 {
+            let still_empty = r.lock().members.is_empty();
+            if still_empty {
+                remove(sfu, &r);
             }
         }
-        expired
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn ttl(u: u32, d: u32) -> Ttl {
-        Ttl { unused_secs: Some(u), departure_secs: Some(d) }
-    }
-
-    fn member(id: &str, hidden: bool, pt: u8) -> Member {
-        Member {
-            session_id: format!("s-{id}"),
-            user_id: id.into(),
-            hidden,
-            participant_type: pt,
-            role: 255,
-            select: true,
-            metadata: None,
-            permission: Permission::default(),
-        }
-    }
-
-    #[test]
-    fn 명시_id_생성은_멱등이다() {
-        let mut rs = Rooms::new();
-        rs.create("r1".into(), "첫 이름".into(), 10, ttl(300, 60), 0);
-        let again = rs.create("r1".into(), "다른 이름".into(), 99, ttl(1, 1), 100);
-        assert_eq!(again.name, "첫 이름", "★name 은 무시한다");
-        assert_eq!(rs.len(), 1);
-    }
-
-    #[test]
-    fn 투명은_정원을_안_먹고_명단에도_없다() {
-        let mut r = Room::new("r1".into(), "n".into(), 1, ttl(300, 60), 0);
-        r.join(member("u1", false, 0)).expect("join");
-        // ★정원 1 인데 투명 봇은 들어온다.
-        r.join(member("bot", true, 1)).expect("hidden join");
-        assert_eq!(r.user_count(), 1, "★보이는 수");
-        assert_eq!(r.registered(), 2, "★등록 기준");
-        assert_eq!(r.join(member("u2", false, 0)), Err(Code::RoomFull));
-    }
-
-    #[test]
-    fn 녹화는_등록에서_센다() {
-        // ★방 플래그로 저장하면 봇이 조용히 나간 뒤에도 '녹화 중'이 켜져 있다.
-        let mut r = Room::new("r1".into(), "n".into(), 10, ttl(300, 60), 0);
-        r.join(member("bot", true, 1)).expect("join");
-        assert!(r.rec());
-        r.leave("bot");
-        assert!(!r.rec());
-    }
-
-    #[test]
-    fn 투명_봇만_남은_방은_안_폭파된다() {
-        // ★수명 판정을 user_count 로 하면 녹화 중인 방이 TTL 로 폭파된다.
-        let mut r = Room::new("r1".into(), "n".into(), 10, ttl(1, 1), 0);
-        r.join(member("bot", true, 1)).expect("join");
-        assert_eq!(r.user_count(), 0);
-        assert_eq!(r.tick(999_999), Sweep::None, "★등록이 남아 있으면 산다");
-    }
-
-    #[test]
-    fn 비는_것을_본_tick_에는_판정하지_않는다() {
-        let mut r = Room::new("r1".into(), "n".into(), 10, ttl(300, 1), 0);
-        r.join(member("u1", false, 0)).expect("join");
-        r.leave("u1");
-        assert_eq!(r.tick(10_000), Sweep::JustEmptied, "★최초 관측");
-        assert_eq!(r.tick(10_500), Sweep::None, "★아직 1초 전");
-        assert_eq!(r.tick(11_000), Sweep::Expired);
-    }
-
-    #[test]
-    fn 안_들어온_방과_다_나간_방은_다른_시계를_쓴다() {
-        // unused — 기준 시각은 ★생성 시각이다(비는 사건이 따로 없다).
-        let mut fresh = Room::new("r1".into(), "n".into(), 10, ttl(1, 300), 0);
-        assert_eq!(fresh.tick(2_000), Sweep::Expired);
-
-        let mut used = Room::new("r2".into(), "n".into(), 10, ttl(1, 300), 0);
-        used.join(member("u1", false, 0)).expect("join");
-        used.leave("u1");
-        used.tick(1_000);
-        assert_eq!(used.tick(2_000), Sweep::None, "★한 번 쓰인 방은 departure 시계다");
-    }
-
-    #[test]
-    fn 영구_방은_안_거둔다() {
-        let mut r = Room::new("r1".into(), "n".into(), 10, Ttl { unused_secs: None, departure_secs: None }, 0);
-        r.tick(1);
-        assert_eq!(r.tick(u64::MAX / 2), Sweep::None);
-    }
-
-    #[test]
-    fn 사람이_있으면_삭제가_3004_다() {
-        let mut r = Room::new("r1".into(), "n".into(), 10, ttl(300, 60), 0);
-        r.join(member("bot", true, 1)).expect("join");
-        // ★투명도 사람으로 센다 — 녹화 중인 방을 지우지 않기 위해서다.
-        assert_eq!(r.may_destroy(), Err(Code::RoomNotEmpty));
-    }
-
-    #[test]
-    fn 재입장은_자리를_바꿔_낀다() {
-        let mut r = Room::new("r1".into(), "n".into(), 10, ttl(300, 60), 0);
-        r.join(member("u1", false, 0)).expect("join");
-        r.join(member("u1", false, 0)).expect("rejoin");
-        assert_eq!(r.registered(), 1, "★같은 신원이 둘이 되지 않는다");
     }
 }

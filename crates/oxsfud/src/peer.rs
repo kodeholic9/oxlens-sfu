@@ -1,277 +1,385 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.1 · 정§4-2 · §7-2 · 연§4-1 · §4-3 · model: claude-opus-5
+// spec: v1.2 @124a233 · 정:IMPL-LINK-PEER-STATE 정:RULE-LINK-PAIR-LIVENESS 정:RULE-LINK-TRANSPORT 정:IMPL-LINK-ICE-RESTART 정:RULE-AFF-ONE-SET 정:IMPL-SES-DATA · model: claude-opus-5-5
+//! Peer(세션 × 미디어 서버) 와 전송 객체(Conn — 자격 한 벌 = 연결 하나). 신원은 객체이고 ufrag · 주소는 조회 키다.
 
-//! Peer — ★**서버당 하나다**(연§4-2). 방이 여럿이어도 연결은 하나이고,
-//! 받기 `mid` 예산·PT 표·ICE 자격이 전부 이 단위에 산다.
-//!
-//! ★★**그래서 같은 신원의 재입장이 "그 서버의 다른 방 멤버십까지" 지운다**(정§4-2 ②) —
-//! 지우는 것이 방이 아니라 ★**Peer** 이기 때문이다.
+use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
-use std::collections::BTreeMap;
+use arc_swap::{ArcSwap, ArcSwapOption};
+use bytes::Bytes;
+use oxsig::bplane::Home;
+use oxsig::wire::{ExtMap, PcMode, RoomJoinReqCodecs};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
-use oxsig::body::session::PcMode;
-use oxsig::types::{Assign, Kind};
+use crate::media::{PubStream, PubTrack};
+use crate::room::Room;
+use crate::sfu::{Sfu, lock, mono_ms};
+use crate::table::Table;
 
-use crate::identity::IceCreds;
+pub const ALIVE: u8 = 0;
+pub const SUSPECT: u8 = 1;
+pub const PAIR_EXPIRE_MS: u64 = 30_000;
+pub const DC_BUFFER: usize = 64;
 
-/// 받기 `mid` 발급기(연§4-1 규칙 셋).
-///
-/// ★**`1pc` 은 `32` 부터** — 내 보내기 m-line(브라우저 배정 0~31)과 한 BUNDLE 이라 비켜 준다.
-/// `2pc` 는 받기 연결에 클라 m-line 이 아예 없어 비켜 줄 상대가 없다(`0` 부터).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MidPool {
-    next: u16,
-    /// 해제분. ★**같은 `kind` 에만 되쓴다** — m-line 의 media type 을 바꾸면
-    /// 재활용되지 않는 절에서 브라우저(libwebrtc)가 거부한다(구현 근거, 연§4-1).
-    free: Vec<(Kind, u16)>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    Publish,
+    Subscribe,
+    Both,
 }
 
-impl MidPool {
-    pub fn new(mode: PcMode) -> Self {
-        Self { next: if mode == PcMode::One { 32 } else { 0 }, free: Vec::new() }
-    }
+pub struct Creds {
+    pub cur: (String, String),
+    pub pend: Option<(String, String)>,
+}
 
-    /// ★**해제분이 있으면 그것부터 — 의무다**(연§4-1 ③, 20260911).
-    ///
-    /// 안 그러면 전환이 잦을수록 m-line 수가 새 값으로만 자라 ★**천장에 먼저 닿는다.**
-    pub fn take(&mut self, kind: Kind) -> String {
-        if let Some(i) = self.free.iter().position(|(k, _)| *k == kind) {
-            let (_, mid) = self.free.remove(i);
-            return mid.to_string();
+pub struct TcpLink {
+    pub id: u64,
+    pub addr: SocketAddr,
+    pub tx: mpsc::Sender<Bytes>,
+    pub closed: AtomicBool,
+    pub cancel: CancellationToken,
+    pub conn: Mutex<Weak<Conn>>,
+}
+
+#[derive(Clone)]
+pub enum Path {
+    Udp(SocketAddr),
+    Tcp(Arc<TcpLink>),
+}
+
+impl Path {
+    pub fn addr(&self) -> SocketAddr {
+        match self {
+            Path::Udp(a) => *a,
+            Path::Tcp(l) => l.addr,
         }
-        let mid = self.next;
-        self.next += 1;
-        mid.to_string()
     }
 
-    pub fn give(&mut self, kind: Kind, mid: &str) {
-        if let Ok(v) = mid.parse::<u16>() {
-            self.free.push((kind, v));
+    pub fn key(&self) -> PairKey {
+        match self {
+            Path::Udp(a) => PairKey::Udp(*a),
+            Path::Tcp(l) => PairKey::Tcp(l.id),
         }
     }
 
-    /// 지금 쥐고 있는 받기 m-section 개수 — ★`4005` 는 값 폭이 아니라 이 수로 난다(연§6-2).
-    pub fn in_use(&self, base: u16) -> usize {
-        (self.next - base) as usize - self.free.len()
+    pub fn alive(&self, now: u64, last_ok: u64) -> bool {
+        match self {
+            Path::Udp(_) => now.saturating_sub(last_ok) < PAIR_EXPIRE_MS,
+            Path::Tcp(l) => !l.closed.load(Ordering::Relaxed),
+        }
     }
 }
 
-/// 한 세션의 Peer. ★**미디어 자원 전부가 여기 매달린다.**
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PairKey {
+    Udp(SocketAddr),
+    Tcp(u64),
+}
+
+pub struct Pair {
+    pub path: Path,
+    pub last_ok: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ExtIds {
+    pub mid: Option<u8>,
+    pub audio_level: Option<u8>,
+    pub abs_send_time: Option<u8>,
+    pub twcc: Option<u8>,
+}
+
+pub const URI_MID: &str = "urn:ietf:params:rtp-hdrext:sdes:mid";
+pub const URI_AUDIO_LEVEL: &str = "urn:ietf:params:rtp-hdrext:ssrc-audio-level";
+pub const URI_ABS_SEND_TIME: &str = "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time";
+pub const URI_TWCC: &str = "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01";
+pub const URI_RID: &str = "urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id";
+pub const URI_RRID: &str = "urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id";
+
+pub fn server_extmap() -> Vec<ExtMap> {
+    [(1, URI_MID), (4, URI_AUDIO_LEVEL), (5, URI_ABS_SEND_TIME), (6, URI_TWCC), (10, URI_RID), (11, URI_RRID)]
+        .iter()
+        .map(|(id, uri)| ExtMap { id: *id, uri: (*uri).to_string() })
+        .collect()
+}
+
+impl ExtIds {
+    pub fn from_table(map: &[ExtMap]) -> ExtIds {
+        let find = |uri: &str| map.iter().find(|e| e.uri == uri).map(|e| e.id);
+        let server = server_extmap();
+        let pick = |uri: &str| find(uri).or_else(|| server.iter().find(|e| e.uri == uri).map(|e| e.id));
+        ExtIds { mid: pick(URI_MID), audio_level: pick(URI_AUDIO_LEVEL), abs_send_time: pick(URI_ABS_SEND_TIME), twcc: pick(URI_TWCC) }
+    }
+}
+
+pub struct Dc {
+    pub tx: Mutex<Option<mpsc::Sender<Vec<u8>>>>,
+    pub pending: Mutex<VecDeque<Vec<u8>>>,
+    pub dropped: AtomicU64,
+}
+
+pub struct Conn {
+    pub id: u64,
+    pub role: Role,
+    pub user_id: String,
+    pub peer: OnceLock<Weak<Peer>>,
+    pub sfu: Weak<Sfu>,
+    pub creds: Mutex<Creds>,
+    pub path: ArcSwapOption<Path>,
+    pub pairs: Mutex<HashMap<PairKey, Pair>>,
+    pub state: AtomicU8,
+    pub suspect_since: AtomicU64,
+    pub state_since: AtomicU64,
+    pub dtls_in: Mutex<Option<mpsc::Sender<Bytes>>>,
+    pub srtp_in: Mutex<Option<webrtc_srtp::context::Context>>,
+    pub srtp_out: Mutex<Option<webrtc_srtp::context::Context>>,
+    pub secured: AtomicBool,
+    pub dc: Dc,
+    pub cancel: CancellationToken,
+    pub table: Mutex<Table>,
+    pub ack: AtomicU64,
+    pub twcc_out: AtomicU32,
+    pub sub_ext: ArcSwap<ExtIds>,
+    pub rtx_budget: Mutex<(u64, u32)>,
+    pub pubs: ArcSwap<HashMap<u32, Arc<PubTrack>>>,
+    pub rtx_of: ArcSwap<HashMap<u32, Arc<PubTrack>>>,
+    pub sims: ArcSwap<Vec<Arc<PubStream>>>,
+    pub twcc_in: Mutex<crate::rtcp_io::TwccIn>,
+    pub bwe: Mutex<crate::layer::Bwe>,
+    pub auto_layer: AtomicU8,
+}
+
+impl Conn {
+    pub fn new(sfu: &Arc<Sfu>, role: Role, user_id: &str, mid_start: u8) -> Arc<Conn> {
+        let ufrag = common::ident::random_hex(4);
+        let pwd: String = common::ident::random_hex(11);
+        let c = Arc::new(Conn {
+            id: sfu.next_id(),
+            role,
+            user_id: user_id.to_string(),
+            peer: OnceLock::new(),
+            sfu: Arc::downgrade(sfu),
+            creds: Mutex::new(Creds { cur: (ufrag.clone(), pwd), pend: None }),
+            path: ArcSwapOption::empty(),
+            pairs: Mutex::new(HashMap::new()),
+            state: AtomicU8::new(SUSPECT),
+            suspect_since: AtomicU64::new(0),
+            state_since: AtomicU64::new(mono_ms()),
+            dtls_in: Mutex::new(None),
+            srtp_in: Mutex::new(None),
+            srtp_out: Mutex::new(None),
+            secured: AtomicBool::new(false),
+            dc: Dc { tx: Mutex::new(None), pending: Mutex::new(VecDeque::new()), dropped: AtomicU64::new(0) },
+            cancel: CancellationToken::new(),
+            table: Mutex::new(Table::new(mid_start)),
+            ack: AtomicU64::new(0),
+            twcc_out: AtomicU32::new(1),
+            sub_ext: ArcSwap::from_pointee(ExtIds::from_table(&server_extmap())),
+            rtx_budget: Mutex::new((0, 0)),
+            pubs: ArcSwap::from_pointee(HashMap::new()),
+            rtx_of: ArcSwap::from_pointee(HashMap::new()),
+            sims: ArcSwap::from_pointee(Vec::new()),
+            twcc_in: Mutex::new(crate::rtcp_io::TwccIn::default()),
+            bwe: Mutex::new(crate::layer::Bwe::default()),
+            auto_layer: AtomicU8::new(0),
+        });
+        sfu.index_ufrag(&ufrag, &c);
+        c
+    }
+
+    pub fn peer(&self) -> Option<Arc<Peer>> {
+        self.peer.get().and_then(Weak::upgrade)
+    }
+
+    pub fn ufrag(&self) -> String {
+        lock(&self.creds).cur.0.clone()
+    }
+
+    pub fn pwd_for(&self, ufrag: &str) -> Option<String> {
+        let c = lock(&self.creds);
+        if c.cur.0 == ufrag {
+            return Some(c.cur.1.clone());
+        }
+        c.pend.as_ref().filter(|p| p.0 == ufrag).map(|p| p.1.clone())
+    }
+
+    pub fn restart(&self, sfu: &Arc<Sfu>, me: &Arc<Conn>) -> (String, String) {
+        let ufrag = common::ident::random_hex(4);
+        let pwd = common::ident::random_hex(11);
+        let old = {
+            let mut c = lock(&self.creds);
+            c.pend.replace((ufrag.clone(), pwd.clone()))
+        };
+        if let Some((u, _)) = old {
+            sfu.unindex_ufrag(&u);
+        }
+        sfu.index_ufrag(&ufrag, me);
+        (ufrag, pwd)
+    }
+
+    pub fn promote(&self, sfu: &Sfu, ufrag: &str) -> bool {
+        let old = {
+            let mut c = lock(&self.creds);
+            match c.pend.take() {
+                Some(p) if p.0 == ufrag => Some(std::mem::replace(&mut c.cur, p)),
+                other => {
+                    c.pend = other;
+                    None
+                }
+            }
+        };
+        match old {
+            Some((u, _)) => {
+                sfu.unindex_ufrag(&u);
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn send(&self, b: &[u8]) -> bool {
+        let Some(path) = self.path.load_full() else {
+            return false;
+        };
+        self.send_on(&path, b)
+    }
+
+    pub fn send_on(&self, path: &Path, b: &[u8]) -> bool {
+        match path {
+            Path::Udp(a) => match self.sfu.upgrade() {
+                Some(s) => s.udp.try_send_to(b, *a).is_ok(),
+                None => false,
+            },
+            Path::Tcp(l) => {
+                if b.len() > 65_535 || l.closed.load(Ordering::Relaxed) {
+                    return false;
+                }
+                let mut f = Vec::with_capacity(b.len() + 2);
+                f.extend_from_slice(&(b.len() as u16).to_be_bytes());
+                f.extend_from_slice(b);
+                l.tx.try_send(Bytes::from(f)).is_ok()
+            }
+        }
+    }
+
+    pub fn send_rtp(&self, plain: &[u8]) -> bool {
+        let enc = {
+            let mut g = lock(&self.srtp_out);
+            match g.as_mut() {
+                Some(ctx) => ctx.encrypt_rtp(plain).ok(),
+                None => None,
+            }
+        };
+        match enc {
+            Some(e) => self.send(&e),
+            None => false,
+        }
+    }
+
+    pub fn send_rtcp(&self, plain: &[u8]) -> bool {
+        let enc = {
+            let mut g = lock(&self.srtp_out);
+            match g.as_mut() {
+                Some(ctx) => ctx.encrypt_rtcp(plain).ok(),
+                None => None,
+            }
+        };
+        match enc {
+            Some(e) => self.send(&e),
+            None => false,
+        }
+    }
+
+    pub fn is_alive(&self) -> bool {
+        self.state.load(Ordering::Relaxed) == ALIVE
+    }
+
+    pub fn state_name(&self) -> &'static str {
+        if self.is_alive() { "alive" } else { "suspect" }
+    }
+
+    pub fn publishes(&self) -> bool {
+        matches!(self.role, Role::Publish | Role::Both)
+    }
+
+    pub fn rtx_allow(&self, now: u64) -> bool {
+        let mut b = lock(&self.rtx_budget);
+        if now.saturating_sub(b.0) >= 3_000 {
+            b.0 = now;
+            b.1 = 0;
+        }
+        if b.1 >= 200 {
+            return false;
+        }
+        b.1 += 1;
+        true
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct JoinTags {
+    pub extmap: Vec<ExtMap>,
+    pub codecs: Vec<RoomJoinReqCodecs>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Ready {
+    pub first_at: u64,
+    pub open: bool,
+}
+
 pub struct Peer {
     pub session_id: String,
     pub user_id: String,
     pub pc_mode: PcMode,
-    pub ice: IceCreds,
-    /// 내가 듣는 방들 = ★**이 서버에 입장한 방들**(입장이 곧 구독).
-    pub sub_rooms: Vec<String>,
-    /// ★**하나뿐이라 단수다.**
-    pub pub_room: Option<String>,
-    pub mids: MidPool,
-    /// `track_id` → 내 자리. ★**수신자별 층**이라 Peer 가 쥔다(연§4-1-1).
-    pub assigns: BTreeMap<String, Assign>,
-    /// ★**구독자 PT 표 — 연결마다 하나**(정§7-2-1). egress 의 PT 가 이 표의 값이다.
-    pub pt: crate::pt::PtTable,
-    /// `READY{tracks}` 를 받은 시각 — ★**게이트는 전이중 video 에만** 걸린다(정§7-4).
-    ///
-    /// ★**참·거짓이 아니라 시각이다** — 정체 판정의 시작점이 바로 이 순간이고(정§14-3),
-    /// `0` 을 부재 표식으로 두면 *"게이트 열림"* 과 *"시각 미상"* 이 한 값이 된다.
-    pub ready_at: Option<u64>,
-    /// `READY{camera}` 를 받은 시각 — ★**individual video 의 시작점**이다(정§7-4).
-    ///
-    /// 그 전의 무패킷은 카메라 워밍업이라 ★**정체가 아니다.**
-    pub camera_at: Option<u64>,
-    /// `track_id` → 그 구독자가 건 상한(연§6-3 `SUBSCRIBE_LAYER`).
-    ///
-    /// ★**부분 갱신이다** — 생략한 축은 안 바꾼다. 그래서 값이 아니라 **표**를 들고 있는다.
-    pub layers: BTreeMap<String, LayerCap>,
-    /// ★**이 발행자가 협상해 온 확장 번호**(연§6-3) — 신고가 없으면 서버 선언값이다.
-    ///
-    /// ★**전송로마다 다를 수 있다** — 상수로 박아 두면 다른 번호로 협상한 클라의 패킷을
-    /// ★**조용히 못 읽는다**(빨강이 아니라 무증상이다).
-    pub ext: ExtIds,
-}
-
-/// 읽을 확장의 번호 둘. ★**둘이 답하는 물음이 다르다**(`rtpext` 머리말) —
-/// `mid` 는 **어느 스트림이냐**, `rid` 는 **어느 단이냐**.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ExtIds {
-    pub mid: u8,
-    pub rid: u8,
-}
-
-impl Default for ExtIds {
-    fn default() -> Self {
-        Self { mid: crate::identity::ext::MID, rid: crate::identity::ext::RID }
-    }
-}
-
-/// 한 트랙에 건 상한. ★**`paused` 는 레이어 값이 아니다** — 다른 축이다(연§6-3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct LayerCap {
-    pub spatial: Option<u8>,
-    pub temporal: Option<u8>,
-    pub paused: bool,
-    /// 대역이 모자랄 때 채울 순서(기본 `128`) — 값만 보관한다(쓰는 것은 자동 레이어).
-    pub priority: u16,
+    pub home: Home,
+    pub pub_conn: Arc<Conn>,
+    pub sub_conn: Arc<Conn>,
+    pub rooms: Mutex<BTreeSet<String>>,
+    pub pub_room: ArcSwapOption<Room>,
+    pub streams: Mutex<Vec<Arc<PubStream>>>,
+    pub ready: Mutex<HashMap<String, Ready>>,
+    pub alive: AtomicBool,
 }
 
 impl Peer {
-    pub fn new(session_id: String, user_id: String, pc_mode: PcMode) -> Self {
-        Self {
-            session_id,
-            user_id,
-            pc_mode,
-            ice: IceCreds::fresh(),
-            sub_rooms: Vec::new(),
-            pub_room: None,
-            mids: MidPool::new(pc_mode),
-            assigns: BTreeMap::new(),
-            pt: crate::pt::PtTable::new(),
-            ready_at: None,
-            camera_at: None,
-            layers: BTreeMap::new(),
-            ext: ExtIds::default(),
+    pub fn conns(&self) -> Vec<Arc<Conn>> {
+        if Arc::ptr_eq(&self.pub_conn, &self.sub_conn) {
+            vec![self.pub_conn.clone()]
+        } else {
+            vec![self.pub_conn.clone(), self.sub_conn.clone()]
         }
     }
 
-    /// ★**내가 받는 연결의 자격** — `1pc` 은 연결이 하나라 보내기 자격 그것이다(연§9-10).
-    ///
-    /// 여기서 `2pc` 의 것을 `1pc` 에 쓰면 그 자격은 아무도 latch 하지 않아
-    /// ★**보낼 주소가 영영 안 잡힌다** — 영상이 조용히 안 나온다.
-    pub fn recv_ufrag(&self) -> &str {
-        match self.pc_mode {
-            PcMode::One => &self.ice.publish_ufrag,
-            PcMode::Two => &self.ice.subscribe_ufrag,
-        }
+    pub fn room_ids(&self) -> Vec<String> {
+        lock(&self.rooms).iter().cloned().collect()
     }
 
-    pub fn affiliation(&self) -> oxsig::Affiliation {
-        oxsig::Affiliation { sub_rooms: self.sub_rooms.clone(), pub_room: self.pub_room.clone() }
-    }
-}
-
-/// `ensure` 가 낸 것. ★**튜플로 두면 부르는 쪽마다 자리를 헷갈린다.**
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Ensured {
-    pub idx: usize,
-    /// 걷힌 Peer 가 듣던 방들 — 부르는 쪽이 방마다 `left` 를 내야 한다(정§4-2 ②).
-    pub orphaned: Vec<String>,
-    /// 걷힌 Peer 의 세션 — ★그 세션의 전송 자격도 같이 내린다.
-    pub evicted: Option<String>,
-    /// ★**이번에 세웠나** — 세웠으면 ICE 자격을 장부에 올려야 한다.
-    pub created: bool,
-}
-
-/// 이 유닛의 Peer 들. ★**키는 세션이다** — 같은 사람의 새 세션은 새 Peer 다.
-#[derive(Debug, Default)]
-pub struct Peers {
-    items: Vec<Peer>,
-}
-
-impl Peers {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn in_room(&self, r: &str) -> bool {
+        lock(&self.rooms).contains(r)
     }
 
-    pub fn get(&self, session_id: &str) -> Option<&Peer> {
-        self.items.iter().find(|p| p.session_id == session_id)
+    pub fn pub_room_id(&self) -> Option<String> {
+        self.pub_room.load().as_ref().map(|r| r.id.clone())
     }
 
-    pub fn get_mut(&mut self, session_id: &str) -> Option<&mut Peer> {
-        self.items.iter_mut().find(|p| p.session_id == session_id)
+    pub fn affiliation(&self) -> oxsig::wire::Affiliation {
+        oxsig::wire::Affiliation { sub_rooms: self.room_ids(), pub_room: self.pub_room_id() }
     }
 
-    pub fn len(&self) -> usize {
-        self.items.len()
+    pub fn stream(&self, track_id: &str) -> Option<Arc<PubStream>> {
+        lock(&self.streams).iter().find(|s| s.track_id == track_id).cloned()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
+    pub fn stream_by_ssrc(&self, ssrc: u32) -> Option<Arc<PubStream>> {
+        lock(&self.streams).iter().find(|s| s.ssrc == ssrc && ssrc != 0).cloned()
     }
 
-    /// 그 세션의 Peer 를 낸다. ★**없으면 세운다** — 그 자리에서 옛 Peer 도 걷어낸다.
-    ///
-    /// 걷힌 Peer 의 방 목록을 돌려준다 — 부르는 쪽이 그 방들에서 ★**퇴장시켜야 한다**
-    /// (정§4-2 ② *"옛 Peer 를 통째로 축출"* · 방마다 `left`).
-    pub fn ensure(&mut self, session_id: &str, user_id: &str, mode: PcMode) -> Ensured {
-        if let Some(i) = self.items.iter().position(|p| p.session_id == session_id) {
-            return Ensured { idx: i, orphaned: Vec::new(), evicted: None, created: false };
-        }
-        // ★같은 신원의 옛 Peer — 통째로 걷는다(방이 아니라 Peer 가 단위다).
-        let mut orphaned = Vec::new();
-        let mut evicted = None;
-        if let Some(i) = self.items.iter().position(|p| p.user_id == user_id) {
-            orphaned = self.items[i].sub_rooms.clone();
-            evicted = Some(self.items[i].session_id.clone());
-            self.items.remove(i);
-        }
-        self.items.push(Peer::new(session_id.into(), user_id.into(), mode));
-        Ensured { idx: self.items.len() - 1, orphaned, evicted, created: true }
-    }
-
-    /// ★**읽기 전용 훑기** — 세션 이름을 모르고 사람 이름만 아는 자리가 쓴다(운영 경로).
-    pub fn iter(&self) -> impl Iterator<Item = &Peer> {
-        self.items.iter()
-    }
-
-    pub fn at(&self, i: usize) -> &Peer {
-        &self.items[i]
-    }
-
-    pub fn at_mut(&mut self, i: usize) -> &mut Peer {
-        &mut self.items[i]
-    }
-
-    /// 세션이 갔다 — Peer 가 쥐고 있던 방들을 돌려준다.
-    pub fn drop_session(&mut self, session_id: &str) -> Vec<String> {
-        let Some(i) = self.items.iter().position(|p| p.session_id == session_id) else {
-            return Vec::new();
-        };
-        let rooms = self.items[i].sub_rooms.clone();
-        self.items.remove(i);
-        rooms
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn 받기_mid_시작은_모드가_정한다() {
-        assert_eq!(MidPool::new(PcMode::One).take(Kind::Audio), "32");
-        assert_eq!(MidPool::new(PcMode::Two).take(Kind::Audio), "0");
-    }
-
-    #[test]
-    fn 해제분이_있으면_그것부터_쓴다() {
-        let mut p = MidPool::new(PcMode::Two);
-        let a = p.take(Kind::Audio);
-        let b = p.take(Kind::Audio);
-        assert_eq!((a.as_str(), b.as_str()), ("0", "1"));
-        p.give(Kind::Audio, "0");
-        // ★새 값(2)이 아니라 해제분(0)이다 — 의무다(연§4-1 ③).
-        assert_eq!(p.take(Kind::Audio), "0");
-        // ★같은 kind 의 해제분이 없으면 새 값이다 — media type 을 바꾸지 않는다.
-        p.give(Kind::Audio, "1");
-        assert_eq!(p.take(Kind::Video), "2");
-    }
-
-    #[test]
-    fn 같은_신원의_새_세션은_옛_peer_를_통째로_걷는다() {
-        let mut ps = Peers::new();
-        let e = ps.ensure("s-1", "u1", PcMode::One);
-        assert!(e.orphaned.is_empty() && e.created && e.evicted.is_none());
-        ps.at_mut(e.idx).sub_rooms = vec!["r1".into(), "r2".into()];
-        let e = ps.ensure("s-2", "u1", PcMode::Two);
-        // ★방 하나가 아니라 ★**그 Peer 의 방 전부**가 딸려 나간다(정§4-2 ②).
-        assert_eq!(e.orphaned, vec!["r1".to_string(), "r2".to_string()]);
-        assert_eq!(e.evicted.as_deref(), Some("s-1"));
-        assert_eq!(ps.len(), 1, "옛 Peer 는 남지 않는다");
-
-        // ★같은 세션이 또 들어오면 세우지 않는다 — 자격을 다시 발급하면 전송이 끊긴다.
-        let again = ps.ensure("s-2", "u1", PcMode::Two);
-        assert!(!again.created && again.evicted.is_none());
+    pub fn active_count(&self) -> usize {
+        lock(&self.streams).len()
     }
 }

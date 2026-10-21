@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/oxsig", "crates/common", "crates/oxhubd"]
+members = ["crates/oxsig", "crates/common", "crates/oxhubd", "crates/oxsfud"]
 resolver = "3"
 
 [workspace.package]
@@ -43,6 +43,7 @@ bytes = "1"
 hmac = "0.12"
 sha1 = "0.10"
 crc32fast = "1"
+rtcp = "0.17"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

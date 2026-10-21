@@ -1,253 +1,254 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.1 · 정§14-1 · §15-6 · §18-1 · model: claude-opus-5
+// spec: v1.2 @124a233 · 정:RULE-CFG-THREE-PLACES 정:RULE-BUS-FATE 정:RULE-OPS-SURFACE 정:IMPL-ROOM-VERSION-ISSUE 운영 규격서 §8-2 · model: claude-opus-5-5
+//! oxsfud — 미디어 서버. 방 · 발행 · 구독 · 발언권 · 전송(ICE-lite · DTLS · SRTP · SCTP)의 상태 마스터.
 
-//! `oxsfud` — 미디어 서버 프로세스.
-//!
-//! ★**기동 신원**(`epoch` = `sfu_id` = §15-1 `{inst}`)을 여기서 발급해 hub 에 알린다 —
-//! ★**기동마다 새 값**이라야 재기동을 가릴 수 있고, 운영 `kill` 의 확인값이 이 값이다.
+mod admin;
+mod bus;
+mod floor;
+mod layer;
+mod media;
+mod net;
+mod peer;
+mod publish;
+mod room;
+mod rpc;
+mod rtcp_io;
+mod rtp;
+mod secure;
+mod session;
+mod sfu;
+mod stun;
+mod table;
+mod tick;
 
-use common::Args;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
+use std::time::Duration;
 
-#[tokio::main]
-async fn main() -> std::process::ExitCode {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-    // `--no-lifeline` 은 사람이 손으로 띄울 때만 쓴다 — supervisor 는 항상 채널을 준다.
-    let no_lifeline = argv.iter().any(|a| a == "--no-lifeline");
-    let argv: Vec<String> = argv.into_iter().filter(|a| a != "--no-lifeline").collect();
+use common::policy::Policy;
 
-    // ★이 바이너리만 아는 인자 — 정§18-1 CLI 칸(포트·public-ip)의 sfud 몫.
-    const MINE: &[&str] =
-        &["--grpc-listen", "--udp-port", "--public-ip", "--zenoh-connect", "--zenoh-namespace"];
-    let args = match Args::parse_allowing(&argv, MINE) {
+use crate::sfu::Sfu;
+
+#[derive(Default)]
+struct Args {
+    grpc_listen: Option<String>,
+    udp_port: Option<u16>,
+    tcp_port: Option<u16>,
+    policy: Option<String>,
+    public_ip: Option<String>,
+    id: Option<String>,
+    build: Option<String>,
+    zenoh_namespace: Option<String>,
+    zenoh_connect: Option<String>,
+    log_dir: Option<String>,
+    log_socket: Option<String>,
+    version: bool,
+}
+
+fn parse_args() -> Result<Args, String> {
+    let mut a = Args::default();
+    let mut it = std::env::args().skip(1);
+    while let Some(k) = it.next() {
+        let mut val = || it.next().ok_or_else(|| format!("{k} 에 값이 없다"));
+        match k.as_str() {
+            "--grpc-listen" => a.grpc_listen = Some(val()?),
+            "--udp-port" => a.udp_port = Some(val()?.parse().map_err(|_| "--udp-port 가 수가 아니다".to_string())?),
+            "--tcp-port" => a.tcp_port = Some(val()?.parse().map_err(|_| "--tcp-port 가 수가 아니다".to_string())?),
+            "--policy" => a.policy = Some(val()?),
+            "--public-ip" => a.public_ip = Some(val()?),
+            "--id" => a.id = Some(val()?),
+            "--build" => a.build = Some(val()?),
+            "--zenoh-namespace" => a.zenoh_namespace = Some(val()?),
+            "--zenoh-connect" => a.zenoh_connect = Some(val()?),
+            "--log-dir" => a.log_dir = Some(val()?),
+            "--log-socket" => a.log_socket = Some(val()?),
+            "--version" => a.version = true,
+            other => return Err(format!("모르는 인자: {other}")),
+        }
+    }
+    Ok(a)
+}
+
+fn identity(label: Option<&str>) -> String {
+    common::ident::build_identity(env!("OX_GIT_SHA"), env!("OX_BUILD_TIME"), label)
+}
+
+fn auto_ip() -> IpAddr {
+    std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|s| {
+            s.connect("8.8.8.8:80")?;
+            s.local_addr()
+        })
+        .map(|a| a.ip())
+        .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
+}
+
+fn resolve_ip(v: Option<&str>) -> Result<IpAddr, String> {
+    match v {
+        None => Ok(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        Some("auto") => Ok(auto_ip()),
+        Some(s) => s.parse().map_err(|_| format!("--public-ip 가 주소가 아니다: {s}")),
+    }
+}
+
+fn bind_udp(ip: IpAddr, port: u16) -> Result<std::net::UdpSocket, String> {
+    match std::net::UdpSocket::bind(SocketAddr::new(ip, port)) {
+        Ok(s) => Ok(s),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrNotAvailable => {
+            std::net::UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port)).map_err(|e| e.to_string())
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn watch_parent() {
+    std::thread::Builder::new()
+        .name("ox-parent".into())
+        .spawn(|| {
+            let mut buf = [0u8; 64];
+            loop {
+                match std::io::Read::read(&mut std::io::stdin(), &mut buf) {
+                    Ok(0) | Err(_) => {
+                        tracing::warn!(kind = "ev", spec = "RULE-BUS-FATE", "parent liveness closed — exit");
+                        std::process::exit(0);
+                    }
+                    Ok(_) => {}
+                }
+            }
+        })
+        .ok();
+}
+
+fn watch_runtime(beat: Arc<std::sync::atomic::AtomicU64>) {
+    std::thread::Builder::new()
+        .name("ox-watchdog".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+                let last = beat.load(std::sync::atomic::Ordering::Relaxed);
+                if last != 0 && common::ident::now_ms().saturating_sub(last) > 10_000 {
+                    tracing::error!(kind = "ev", spec = "RULE-BUS-FATE", stalled_ms = common::ident::now_ms() - last, "runtime hang — exit");
+                    std::thread::sleep(Duration::from_millis(200));
+                    std::process::exit(70);
+                }
+            }
+        })
+        .ok();
+}
+
+fn main() {
+    let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("{e}");
-            return std::process::ExitCode::from(2);
+            eprintln!("oxsfud: {e}");
+            std::process::exit(2);
         }
     };
+    let build = identity(args.build.as_deref());
     if args.version {
-        println!("{}", common::BuildId::new(args.build.clone()).line());
-        return std::process::ExitCode::SUCCESS;
+        println!("{build}");
+        return;
     }
-    let Some(node_id) = args.id.clone() else {
-        eprintln!("args: --id 가 없다 — node_id 는 안정 배치 키라 필수다");
-        return std::process::ExitCode::from(2);
+    let policy = match args.policy.as_deref() {
+        Some(p) => Policy::load(std::path::Path::new(p)),
+        None => Policy::parse(""),
     };
-
-    // ★정책은 배포 하나에 하나다 — hub 와 ★**같은 파일**을 읽는다(두 벌을 두면 값이 갈린다).
-    let Some(policy_path) = args.policy.clone() else {
-        eprintln!("args: --policy 가 없다 — `[media]` 값을 지어낼 수는 없다");
-        return std::process::ExitCode::from(2);
-    };
-    let policy = match std::fs::read_to_string(&policy_path)
-        .map_err(|e| format!("policy {policy_path}: {e}"))
-        .and_then(|s| common::Policy::parse(&s).map_err(|e| e.to_string()))
-    {
-        Ok(v) => v,
+    let policy = match policy {
+        Ok(p) => p,
         Err(e) => {
-            eprintln!("{e}");
-            return std::process::ExitCode::from(2);
+            eprintln!("oxsfud: 정책 파일 — {}", e.0);
+            std::process::exit(2);
         }
     };
-
-    // ★기동마다 새 값 — 설정의 고정 별칭을 쓰지 않는다(어기면 클라가 `seq` 재시작을 못 가린다).
-    let epoch = format!("sfu-{}", uuid::Uuid::new_v4().simple());
-
-    eprintln!(
-        "[boot] node_id={node_id} epoch={epoch} build={} lifeline={} grpc={} udp={} ip={}",
-        common::BuildId::new(args.build.clone()).line(),
-        if no_lifeline { "off" } else { "on" },
-        args.extra.get("--grpc-listen").map(String::as_str).unwrap_or("-"),
-        args.extra.get("--udp-port").map(String::as_str).unwrap_or("-"),
-        args.extra.get("--public-ip").map(String::as_str).unwrap_or("-"),
-    );
-
-    if !no_lifeline {
-        // ★부모가 어떤 방식으로 죽든 성립한다 — 부모가 죽이는 방식은 강제 종료를 못 덮는다.
-        oxsfud::lifeline::spawn_watch_stdin();
-    }
-
-    // ★B 평면을 연다 — 이것이 답하는 순간이 `Running` 이다(정§16-1).
-    let Some(addr) = args.extra.get("--grpc-listen").cloned() else {
-        eprintln!("args: --grpc-listen 이 없다 — B 평면 없이는 hub 가 이 유닛을 못 본다");
-        return std::process::ExitCode::from(2);
-    };
-    let listen: std::net::SocketAddr = match addr.parse() {
-        Ok(v) => v,
+    let node = args.id.clone().unwrap_or_else(|| "node-a".into());
+    common::log::init(common::log::LogConfig {
+        node: &node,
+        proc_name: "oxsfud",
+        logging: &policy.logging,
+        log_dir: args.log_dir.as_deref(),
+        log_socket: args.log_socket.as_deref(),
+    });
+    let ip = match resolve_ip(args.public_ip.as_deref()) {
+        Ok(ip) => ip,
         Err(e) => {
-            eprintln!("args: --grpc-listen {addr}: {e}");
-            return std::process::ExitCode::from(2);
+            eprintln!("oxsfud: {e}");
+            std::process::exit(2);
         }
     };
-    // ★**지문은 프로세스 것이다** — 재협상마다 바뀌면 클라가 연결을 새로 세운다.
-    let dtls = match oxsfud::identity::Dtls::bake() {
-        Ok(v) => v,
+    let udp_port = args.udp_port.unwrap_or(20000);
+    let grpc = args.grpc_listen.clone().unwrap_or_else(|| "127.0.0.1:50061".into());
+    let udp = match bind_udp(ip, udp_port) {
+        Ok(s) => s,
         Err(e) => {
-            eprintln!("{e}");
-            return std::process::ExitCode::from(1);
+            eprintln!("oxsfud: UDP {ip}:{udp_port} — {e}");
+            std::process::exit(2);
         }
     };
-    let ip = resolve_public_ip(args.extra.get("--public-ip").map(String::as_str));
-    let udp: u16 = match args.extra.get("--udp-port").map(|s| s.parse()) {
-        Some(Ok(v)) => v,
-        Some(Err(e)) => {
-            eprintln!("args: --udp-port {e}");
-            return std::process::ExitCode::from(2);
-        }
-        None => {
-            eprintln!("args: --udp-port 가 없다 — 미디어를 받을 자리가 없다");
-            return std::process::ExitCode::from(2);
-        }
-    };
-    // ★**먼저 열어 보고 그 결과만 광고한다** — 못 연 포트를 후보로 내면 클라가 붙을 수
-    //   없는 곳으로 검사를 보낸다(RFC 6544 는 passive 후보가 실제로 듣고 있다고 전제한다).
-    let tcp_listener = match tokio::net::TcpListener::bind(("0.0.0.0", udp)).await {
-        Ok(l) => {
-            eprintln!("[tcp] listen 0.0.0.0:{udp}");
-            Some(l)
-        }
+    let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+        Ok(rt) => rt,
         Err(e) => {
-            eprintln!("[tcp] listen {udp} 를 못 열었다({e}) — udp 만으로 간다");
-            None
+            eprintln!("oxsfud: runtime — {e}");
+            std::process::exit(2);
         }
     };
-    let node = oxsfud::handle::Node::new(
-        epoch.clone(),
-        dtls.clone(),
-        ip.clone(),
-        udp,
-        tcp_listener.as_ref().map(|_| udp),
-        policy.media.max_bitrate_bps as u64,
-    );
-
-    // ★★**광고하는 IP 로 바인드한다.** 응답의 **출발 주소**가 요청의 **목적 주소**와 같아야
-    //   하고(RFC 5389 §7.3.1), `0.0.0.0` 으로 열면 커널이 경로를 보고 다른 IP 를 고른다 —
-    //   클라는 그것을 ★**source address mismatch** 로 읽고 그 후보를 버린다(실측 20260912).
-    //
-    //   ★**못 붙으면 `0.0.0.0`** 이다 — 광고값이 이 기계의 주소가 아닌 배치(NAT 뒤 공인 IP)가
-    //   그 경우이고, 거기서는 NAT 이 출발 주소를 도로 공인 IP 로 바꿔 준다. 어느 쪽인지
-    //   로그가 말한다(조용히 갈리지 않는다).
-    let sock = match tokio::net::UdpSocket::bind((ip.as_str(), udp)).await {
-        Ok(v) => {
-            eprintln!("[udp] listen {ip}:{udp}");
-            std::sync::Arc::new(v)
-        }
-        Err(e) => match tokio::net::UdpSocket::bind(("0.0.0.0", udp)).await {
-            Ok(v) => {
-                eprintln!("[udp] listen 0.0.0.0:{udp} — 광고값 {ip} 는 이 기계 것이 아니다({e}). NAT 배치로 본다");
-                std::sync::Arc::new(v)
-            }
+    watch_parent();
+    rt.block_on(async move {
+        let _ = udp.set_nonblocking(true);
+        let udp = match tokio::net::UdpSocket::from_std(udp) {
+            Ok(u) => Arc::new(u),
             Err(e) => {
-                eprintln!("udp {udp}: {e}");
-                return std::process::ExitCode::from(1);
+                eprintln!("oxsfud: UDP — {e}");
+                std::process::exit(2);
             }
-        },
-    };
-    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(64);
-    let (dc_tx, dc_rx) = tokio::sync::mpsc::channel(256);
-    let (tcp_tx, tcp_rx) = tokio::sync::mpsc::channel(256);
-    if let Some(l) = tcp_listener {
-        tokio::spawn(oxsfud::transport::tcp::serve(
-            l,
-            node.ice.clone(),
-            oxsfud::transport::tcp::IDENTIFY_TIMEOUT,
-            tcp_tx,
-            oxsfud::transport::tcp::KEEPALIVE,
-        ));
-    }
-    tokio::spawn(oxsfud::transport::udp::serve(
-        sock,
-        node.ice.clone(),
-        dtls.cert,
-        cmd_tx.clone(),
-        cmd_rx,
-        dc_tx,
-        node.egress.clone(),
-        node.ingress.clone(),
-        node.counts.clone(),
-        policy.media.max_bitrate_bps as u64,
-        tcp_rx,
-    ));
-    // ★★**버스는 전제다**(정§15-0) — 통지가 나가는 유일한 길이라(§15-4) 못 열면 이 유닛은
-    //   ★**미디어는 흐르는데 아무도 명단을 못 받는** 상태가 된다. 그래서 여기서 선다.
-    //   ★붙는 곳은 제 node 의 hub 다 — hub 가 router 를 든다(§15-0).
-    let Some(z_connect) = args.extra.get("--zenoh-connect").cloned() else {
-        eprintln!("args: --zenoh-connect 가 없다 — 버스 없이는 통지가 아무 데도 안 간다(정§15-4)");
-        return std::process::ExitCode::from(2);
-    };
-    let z_ns = args.extra.get("--zenoh-namespace").cloned().unwrap_or_else(|| "ox".into());
-    let bus = match oxsfud::bus::open(&z_connect, &z_ns, &node_id, &epoch).await {
-        Ok(v) => {
-            eprintln!("[bus] client → {z_connect} ns={z_ns}");
-            std::sync::Arc::new(v)
+        };
+        let tcp = match args.tcp_port {
+            Some(p) => match tokio::net::TcpListener::bind(SocketAddr::new(ip, p)).await {
+                Ok(l) => Some(l),
+                Err(_) => match tokio::net::TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), p)).await {
+                    Ok(l) => Some(l),
+                    Err(e) => {
+                        eprintln!("oxsfud: TCP {p} — {e}");
+                        std::process::exit(2);
+                    }
+                },
+            },
+            None => None,
+        };
+        let namespace = args.zenoh_namespace.clone().unwrap_or_else(|| "ox".into());
+        let sfu = match Sfu::new(node.clone(), build.clone(), policy, &namespace, ip, udp_port, args.tcp_port, udp) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("oxsfud: {e}");
+                std::process::exit(2);
+            }
+        };
+        tracing::info!(
+            kind = "ev",
+            spec = "RULE-CFG-THREE-PLACES",
+            epoch = sfu.epoch.as_str(),
+            node = node.as_str(),
+            build = build.as_str(),
+            grpc = grpc.as_str(),
+            udp = format!("{ip}:{udp_port}").as_str(),
+            tcp = format!("{:?}", args.tcp_port).as_str(),
+            zenoh_connect = format!("{:?}", args.zenoh_connect).as_str(),
+            namespace = namespace.as_str(),
+            auto_layer = format!("{:?}", sfu.policy.media.auto_layer).as_str(),
+            max_bitrate_bps = sfu.policy.media.max_bitrate_bps,
+            slot_mid_reserve = sfu.policy.media.slot_mid_reserve,
+            queue_max = sfu.policy.floor.queue_max,
+            "boot"
+        );
+        watch_runtime(sfu.beat.clone());
+        net::spawn_udp(&sfu);
+        if let Some(l) = tcp {
+            net::spawn_tcp(&sfu, l);
         }
-        Err(e) => {
-            eprintln!("[bus] ★못 열었다: {e}");
-            return std::process::ExitCode::from(1);
+        tick::spawn_all(&sfu);
+        bus::spawn(&sfu, args.zenoh_connect.clone());
+        if let Err(e) = rpc::serve(sfu.clone(), &grpc).await {
+            eprintln!("oxsfud: gRPC {grpc} — {e}");
+            std::process::exit(2);
         }
-    };
-
-    let svc = std::sync::Arc::new(oxsfud::grpc::Sfu::new(
-        oxsfud::grpc::Identity {
-            epoch,
-            build: common::BuildId::new(args.build.clone()).line(),
-        },
-        node,
-        cmd_tx,
-        bus,
-    ));
-    svc.spawn_reaper();
-    svc.spawn_floor(dc_rx);
-    eprintln!("[b] listen {listen}");
-    if let Err(e) = tonic::transport::Server::builder()
-        .add_service(svc.into_server())
-        .serve(listen)
-        .await
-    {
-        eprintln!("[b] {e}");
-        return std::process::ExitCode::from(1);
-    }
-    std::process::ExitCode::SUCCESS
-}
-
-
-fn resolve_public_ip(arg: Option<&str>) -> String {
-    match arg {
-        None => "127.0.0.1".into(),
-        Some("auto") => match default_iface_ip() {
-            Some(ip) => {
-                eprintln!("[ip] --public-ip auto → {ip}");
-                ip
-            }
-            None => {
-                eprintln!("[ip] --public-ip auto — 기본 인터페이스를 못 찾았다. 127.0.0.1 로 간다");
-                "127.0.0.1".into()
-            }
-        },
-        Some(ip) => ip.into(),
-    }
-}
-
-fn default_iface_ip() -> Option<String> {
-    let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    s.connect("8.8.8.8:53").ok()?;
-    let ip = s.local_addr().ok()?.ip();
-    (!ip.is_unspecified() && !ip.is_loopback()).then(|| ip.to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::resolve_public_ip;
-
-    #[test]
-    fn 없으면_루프백_있으면_그_값() {
-        assert_eq!(resolve_public_ip(None), "127.0.0.1");
-        assert_eq!(resolve_public_ip(Some("203.0.113.7")), "203.0.113.7");
-    }
-
-    #[test]
-    fn auto_는_주소가_되거나_루프백으로_선다() {
-        let ip = resolve_public_ip(Some("auto"));
-        assert!(ip.parse::<std::net::IpAddr>().is_ok(), "{ip}");
-    }
+    });
 }

@@ -6,33 +6,29 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
-common = { workspace = true }
 oxsig = { workspace = true }
+common = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-uuid = { workspace = true }
-prost = { workspace = true }
-zenoh = { workspace = true }
+tokio-util = { workspace = true }
 tonic = { workspace = true }
-tokio-stream = { workspace = true }
-getrandom = { workspace = true }
-sha2 = { workspace = true }
+tracing = { workspace = true }
+zenoh = { workspace = true }
 arc-swap = { workspace = true }
-hmac = { workspace = true }
-sha1 = { workspace = true }
-crc32fast = { workspace = true }
 bytes = { workspace = true }
-async-trait = { workspace = true }
 dtls = { workspace = true }
-sctp-proto = { workspace = true }
 webrtc-srtp = { workspace = true }
 webrtc-util = { workspace = true }
+sctp-proto = { workspace = true }
+rtcp = { workspace = true }
+hmac = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+crc32fast = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
+rcgen = { workspace = true }
 
-[[bin]]
-name = "oxsfud"
-path = "src/main.rs"
-
-[lib]
-name = "oxsfud"
-path = "src/lib.rs"
+[lints]
+workspace = true

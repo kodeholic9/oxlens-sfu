@@ -1,120 +1,122 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.1 · 정§15-0 · §15-4 · model: claude-opus-5
+// spec: v1.2 @124a233 · 정:RULE-BUS-PRESENCE 정:RULE-BUS-EVENTS 정:IMPL-BUS-HOME-LOST 정:RULE-BUS-FATE · model: claude-opus-5-5
+//! sfud 버스 — zenoh client. `room` 토큰을 선언하고 `ev` 를 Drop 으로 put 한다. `node` 토큰이 사라지면 그 홈의 Peer 를 거둔다.
 
-//! sfud 쪽 버스 — ★**client 하나다**(정§15-0). router 는 제 node 의 hub 가 든다.
-//!
-//! ★★**이벤트는 sfud 가 직접 낸다**(정§15-4) — hub 가 재발행하지 않는다.
-//! 재발행을 두면 ★**재발행 계층과 사망 시 명시 철회 로직**이 통째로 따라붙는다.
-//!
-//! ★★**로컬 멤버에게도 구독으로만 간다.** 같은 node 라고 hub 에 직접 건네고 남에게는
-//! put 하면, ★**같은 통지가 두 번 가는 창**이 생긴다(정§15-4 증상 첫 줄).
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
-use common::bus::Keys;
-use zenoh::qos::CongestionControl;
+use common::bus::BusConfig;
+use common::keyspace::{Token, parse_token};
+use zenoh::sample::SampleKind;
 
-/// ★**밀린 통지의 상한** — 넘으면 버린다(정§15-4 `Drop`). 갭은 `seq` 가 드러내고
-/// §14-3·§14-4 가 메운다.
-const QUEUE: usize = 1024;
+use crate::sfu::{Out, Sfu, lock};
 
-/// 이 sfud 가 쥔 버스 한 자리.
-pub struct Bus {
-    pub keys: Keys,
-    /// ★**배치 키**(정§15-3) — 안정값이라 재기동해도 같다.
-    pub node_id: String,
-    /// ★**기동 신원**(`epoch`=`sfu_id`=`{inst}`) — 기동마다 새 값이라 재기동을 가른다.
-    pub inst: String,
-    /// ★★**보내는 큐가 하나다** — put 마다 태스크를 띄우면 두 통지가 서로를 앞질러
-    /// ★**`version.seq` 가 역전된다**(클라는 뒤엣것을 버린다, 정§15-4 우선순위 줄).
-    tx: tokio::sync::mpsc::Sender<(String, Vec<u8>)>,
-    session: zenoh::Session,
-}
-
-/// ★**떨어뜨리면 그 방의 자리가 꺼진다** — 그래서 방이 사는 동안 들고 있는다.
-pub struct RoomToken(#[allow(dead_code)] zenoh::liveliness::LivelinessToken);
-
-impl std::fmt::Debug for RoomToken {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("RoomToken")
-    }
-}
-
-/// 버스를 연다. ★**못 열면 `Err`** — 조용히 없는 채로 돌면 통지가 아무 데도 안 간다.
-pub async fn open(
-    connect: &str,
-    namespace: &str,
-    node_id: &str,
-    inst: &str,
-) -> Result<Bus, String> {
-    // ★**키를 깨는 값은 여기서 막는다** — 붙고 나서 아무에게도 안 보이는 것이 제일 나쁘다.
-    for (what, v) in [("namespace", namespace), ("node_id", node_id), ("inst", inst)] {
-        if !common::bus::is_key_segment(v) {
-            return Err(format!("{what} 가 키 조각이 못 된다: {v:?}"));
+pub fn spawn(sfu: &Arc<Sfu>, connect: Option<String>) {
+    let Some(rx) = lock(&sfu.out_rx).take() else { return };
+    let s = sfu.clone();
+    match connect {
+        Some(c) => {
+            tokio::spawn(async move { run(s, c, rx).await });
+        }
+        None => {
+            tokio::spawn(async move {
+                let mut rx = rx;
+                while rx.recv().await.is_some() {}
+            });
         }
     }
-    let mut cfg = zenoh::Config::default();
-    // ★**client 다** — peer 로 열면 관문이 무너진다(정§15-0).
-    for (path, v) in [
-        ("mode", "\"client\"".to_string()),
-        ("connect/endpoints", format!("[\"{connect}\"]")),
-        ("scouting/multicast/enabled", "false".into()),
-        ("transport/unicast/qos/enabled", "true".into()),
-        ("transport/unicast/lowlatency", "false".into()),
-    ] {
-        cfg.insert_json5(path, &v).map_err(|e| format!("zenoh 설정 {path}: {e}"))?;
+}
+
+async fn run(sfu: Arc<Sfu>, connect: String, mut rx: tokio::sync::mpsc::UnboundedReceiver<Out>) {
+    let cfg = BusConfig { mode: "client", listen: vec![], connect: vec![connect], multicast_scouting: false };
+    let session = loop {
+        match common::bus::open(&cfg).await {
+            Ok(s) => break s,
+            Err(e) => {
+                tracing::warn!(kind = "diag", "bus open: {e}");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+    };
+    sfu.bus_up.store(true, Ordering::SeqCst);
+    tracing::info!(kind = "ev", spec = "RULE-BUS-PRESENCE", "bus connected");
+    watch_nodes(&sfu, &session).await;
+    let mut tokens: HashMap<String, zenoh::liveliness::LivelinessToken> = HashMap::new();
+    let existing: Vec<String> = lock(&sfu.rooms).keys().cloned().collect();
+    for r in existing {
+        declare(&sfu, &session, &mut tokens, &r).await;
     }
-    let session = zenoh::open(cfg).await.map_err(|e| format!("zenoh open: {e}"))?;
-    let session2 = session.clone();
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, Vec<u8>)>(QUEUE);
+    while let Some(o) = rx.recv().await {
+        match o {
+            Out::Room { room, ev } => {
+                common::bus::put_event(&session, &sfu.keys.ev_room(&room), oxsig::bplane::encode(&ev)).await;
+            }
+            Out::User { user, ev } => {
+                common::bus::put_event(&session, &sfu.keys.ev_user(&user), oxsig::bplane::encode(&ev)).await;
+            }
+            Out::Token { room, up: true } => declare(&sfu, &session, &mut tokens, &room).await,
+            Out::Token { room, up: false } => {
+                if let Some(t) = tokens.remove(&room) {
+                    let _ = t.undeclare().await;
+                }
+            }
+        }
+    }
+}
+
+async fn declare(sfu: &Sfu, s: &zenoh::Session, tokens: &mut HashMap<String, zenoh::liveliness::LivelinessToken>, room: &str) {
+    if tokens.contains_key(room) {
+        return;
+    }
+    let key = sfu.keys.room(room, &sfu.node, &sfu.epoch);
+    match s.liveliness().declare_token(key.clone()).await {
+        Ok(t) => {
+            tokens.insert(room.to_string(), t);
+        }
+        Err(e) => tracing::warn!(kind = "diag", key = key.as_str(), "room token: {e}"),
+    }
+}
+
+async fn watch_nodes(sfu: &Arc<Sfu>, s: &zenoh::Session) {
+    let sub = match s.liveliness().declare_subscriber(sfu.keys.node_all()).history(true).await {
+        Ok(x) => x,
+        Err(e) => {
+            tracing::warn!(kind = "diag", "node watch: {e}");
+            return;
+        }
+    };
+    let sfu = sfu.clone();
     tokio::spawn(async move {
-        while let Some((key, body)) = rx.recv().await {
-            // ★★**`Drop` 이다**(정§15-4 혼잡 정책). `Block` 이면 큐가 밀릴 때 메시지가
-            //   아니라 ★**전송 세션이 닫히고, 그 세션이 선언한 토큰이 전부 사라진다.**
-            //   ★**이벤트 하나를 지키려고 노드 전체를 잃지 않는다.**
-            let _ = session.put(key, body).congestion_control(CongestionControl::Drop).await;
+        while let Ok(sample) = sub.recv_async().await {
+            let key = sample.key_expr().as_str().to_string();
+            let Some(Token::Node { node, inst }) = parse_token(sfu.keys.prefix(), &key) else { continue };
+            match sample.kind() {
+                SampleKind::Put => {
+                    lock(&sfu.nodes).insert(node, vec![inst]);
+                }
+                SampleKind::Delete => {
+                    let others = {
+                        let mut n = lock(&sfu.nodes);
+                        let known_others = n.keys().filter(|k| **k != sfu.node).count();
+                        if n.get(&node).is_some_and(|v| v.contains(&inst)) {
+                            n.remove(&node);
+                        }
+                        let alive_others = n.keys().filter(|k| **k != sfu.node).count();
+                        (known_others, alive_others)
+                    };
+                    let (known, alive) = others;
+                    if node == sfu.node {
+                        continue;
+                    }
+                    if known < 2 || alive == 0 {
+                        tracing::info!(kind = "diag", spec = "IMPL-BUS-HOME-LOST", node = node.as_str(), known, alive, "node token gone — isolation or two-node, not reaping");
+                        continue;
+                    }
+                    crate::session::home_lost(&sfu, &node, &inst);
+                }
+            }
         }
     });
-    Ok(Bus {
-        keys: Keys::new(namespace),
-        node_id: node_id.to_string(),
-        inst: inst.to_string(),
-        tx,
-        session: session2,
-    })
-}
-
-impl Bus {
-    /// 이 sfud 가 쥔 방을 버스에 세운다 — ★★**토큰이 곧 「그 방은 여기 있다」**(정§15-2).
-    ///
-    /// ★**선언 주체 = 그 상태의 소유자**다. 통보가 아니라 선언이라 ★**주체가 죽으면
-    /// 아무도 지우지 않아도 키가 사라진다** — 종전 브로드캐스트 방식의 약점
-    /// (*"소멸 통보를 빠뜨리면 죽은 방이 노드를 영원히 문다"*)이 여기엔 없다.
-    pub async fn declare_room(&self, room: &str) -> Option<RoomToken> {
-        // ★키를 깨는 방 이름은 선언하지 않는다 — 선언해도 아무에게도 안 보인다.
-        if !common::bus::is_key_segment(room) {
-            eprintln!("[bus] ★방 이름이 키 조각이 못 된다 — 위치를 못 세운다: {room:?}");
-            return None;
-        }
-        self.session
-            .liveliness()
-            .declare_token(self.keys.room(room, &self.node_id, &self.inst))
-            .await
-            .ok()
-            .map(RoomToken)
-    }
-
-    /// ★**낸 순서 그대로 줄에 세운다** — 순서가 `version.seq` 의 뜻이다.
-    ///
-    /// ★**줄이 차면 버린다**(막지 않는다) — 여기서 기다리면 통지 하나가 dispatch 를 세운다.
-    pub fn put(&self, key: String, body: Vec<u8>) {
-        if self.tx.try_send((key, body)).is_err() {
-            eprintln!("[bus] ★통지 줄이 찼다 — 한 건 버렸다(seq 갭으로 드러난다)");
-        }
-    }
-
-}
-
-impl std::fmt::Debug for Bus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Bus")
-    }
 }

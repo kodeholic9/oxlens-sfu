@@ -1,52 +1,862 @@
 // author: kodeholic (powered by Claude)
-// spec: floor 원천 · 3GPP TS 24.380 §6.3.4 · §6.3.5 · 연§8-4 · §11 · model: claude-opus-5-5
+// spec: v1.2 @124a233 · 생성본 spec/protocol/out/floor/server/floor_server.ts(IR 1812dea47fd2095f) 이식 · 정:IMPL-FLR-LOCK 정:IMPL-FLR-RTP-OBSERVE 정:IMPL-FLR-POLICY 정:IMPL-FLR-FIRST-NOTICE 정:IMPL-FLR-MEDIA-BIND 정:RULE-FLR-SNAPSHOT 연:FLR.wire 연:RULE-FLR-TIMERS · model: claude-opus-5-5
+//! 발언권 — 판정 로직(6.3.4) · 참가자 상태기(6.3.5)는 생성본을 걸음 그대로 옮긴다. 판정은 락 안, 송신 · 결합은 락 밖.
 
-//! 발언권 서버 — 판정 로직(6.3.4)과 참가자마다의 상태기(6.3.5)를 원문 짜임새 그대로 둔다.
-//!
-//! 판정 로직이 받는 것은 셋이다 — Idle 의 요청 · 화자의 재요청 · 참가자가 넘긴 선점 요청.
-//! 대기·재통보·만석·순번·반환 확인은 참가자 절이 한다. 절이 없는 칸은 버리고 머문다.
-//! 시계와 소켓은 주인이 쥔다 — 여기는 사람마다 보낼 것만 돌려준다.
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
-use std::collections::BTreeMap;
+use oxsig::mbcp::{self, deny as cause, revoke, tlv, timers as timer};
+use oxsig::wire::Kind;
 
-use oxsig::mbcp::{reject, revoke};
+use crate::media::PubStream;
+use crate::room::Room;
+use crate::sfu::{Sfu, lock, mono_ms};
 
-pub mod timers {
-    pub const T1_MS: u64 = 4_000;
-    pub const T2_MS: u64 = 30_000;
-    pub const T3_MS: u64 = 3_000;
-    pub const T7_MS: u64 = 1_000;
-    pub const C7: u8 = 10;
-    pub const T8_MS: u64 = 1_000;
-    pub const C8: u8 = 3;
-    pub const T20_MS: u64 = 1_000;
-    pub const C20: u8 = 3;
-    pub const T9_MS: u64 = 3_000;
-    pub const TICK_MS: u64 = 250;
-}
-
-pub const QUEUE_MAX: usize = 10;
-pub const NOT_IN_QUEUE: u8 = 254;
-pub const NOT_IN_ROOM: &str = "not_in_room";
+const SEQ_WRAP: u32 = 65_536;
+const QPOS_NOT_IN_QUEUE: u32 = 254;
+const PRIMING_FRAMES: u32 = 250;
+const RELEASE_SILENCE: u8 = 3;
+const PLI_BURST: [u64; 3] = [0, 500, 1500];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum General {
+pub enum G {
     Idle,
     Taken,
-    PendingRevoke,
+    Prevoke,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Participant {
-    NotPermittedIdle,
-    NotPermittedTaken,
+pub enum P {
+    NpIdle,
+    NpTaken,
     Permitted,
-    PendingRevoke,
-    NotPermittedSends,
+    Prevoke,
+    Releasing,
+    Npsends,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Timer {
+pub enum T {
+    Request,
+    Granted,
+    Taken,
+    Deny,
+    Release,
+    Idle,
+    Revoke,
+    QposReq,
+    Qinfo,
+    Ack,
+    Rtp,
+}
+
+#[derive(Debug, Clone)]
+pub struct Msg {
+    pub t: T,
+    pub a: Option<String>,
+    pub n: u32,
+    pub d: u32,
+    pub q: u32,
+}
+
+impl Msg {
+    fn new(t: T, a: Option<String>, n: u32, d: u32) -> Msg {
+        Msg { t, a, n, d, q: 0 }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Waiter {
+    pub u: String,
+    pub p: u32,
+    pub pre: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum Fx {
+    Bind(String),
+    Release(Option<String>),
+}
+
+#[derive(Debug, Clone)]
+pub struct Srv {
+    pub g: G,
+    pub speaker: Option<String>,
+    pub sprio: u32,
+    pub revoking: Option<String>,
+    pub rprio: u32,
+    pub rcause_g: u32,
+    pub queue: Vec<Waiter>,
+    pub succ: bool,
+    pub rtp_seen: bool,
+    pub first_rtp: bool,
+    pub c20: u32,
+    pub c7: u32,
+    pub idle_bcast: bool,
+    pub prev: Option<String>,
+    pub members: BTreeSet<String>,
+    pub pub_: HashMap<String, bool>,
+    pub half: HashMap<String, bool>,
+    pub perm: HashMap<String, bool>,
+    pub retry: HashMap<String, bool>,
+    pub part: HashMap<String, P>,
+    pub released: HashMap<String, bool>,
+    pub g_taken: HashMap<String, bool>,
+    pub c8: HashMap<String, u32>,
+    pub c21: HashMap<String, u32>,
+    pub tq: HashMap<String, u32>,
+    pub rcause: HashMap<String, u32>,
+    pub seq: u32,
+}
+
+impl Default for Srv {
+    fn default() -> Self {
+        Srv {
+            g: G::Idle,
+            speaker: None,
+            sprio: 0,
+            revoking: None,
+            rprio: 0,
+            rcause_g: 0,
+            queue: Vec::new(),
+            succ: false,
+            rtp_seen: false,
+            first_rtp: false,
+            c20: 0,
+            c7: 0,
+            idle_bcast: false,
+            prev: None,
+            members: BTreeSet::new(),
+            pub_: HashMap::new(),
+            half: HashMap::new(),
+            perm: HashMap::new(),
+            retry: HashMap::new(),
+            part: HashMap::new(),
+            released: HashMap::new(),
+            g_taken: HashMap::new(),
+            c8: HashMap::new(),
+            c21: HashMap::new(),
+            tq: HashMap::new(),
+            rcause: HashMap::new(),
+            seq: 0,
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct Step {
+    pub o: Vec<(String, Msg)>,
+    pub l: Vec<(&'static str, Option<String>)>,
+    pub fx: Vec<Fx>,
+}
+
+pub struct Env {
+    pub qmax: usize,
+    pub t2_secs: u32,
+    pub t2_remain: u32,
+}
+
+fn flag(m: &HashMap<String, bool>, u: &str) -> bool {
+    m.get(u).copied().unwrap_or(false)
+}
+
+fn num(m: &HashMap<String, u32>, u: &str) -> u32 {
+    m.get(u).copied().unwrap_or(0)
+}
+
+impl Srv {
+    fn part(&self, u: &str) -> P {
+        self.part.get(u).copied().unwrap_or(P::NpIdle)
+    }
+
+    pub fn holder(&self) -> Option<String> {
+        match self.g {
+            G::Taken => self.speaker.clone(),
+            G::Prevoke => self.revoking.clone(),
+            G::Idle => None,
+        }
+    }
+
+    fn holder_prio(&self) -> u32 {
+        if self.g == G::Taken { self.sprio } else { self.rprio }
+    }
+
+    fn alone(&self) -> bool {
+        self.members.len() <= 1
+    }
+
+    fn t2_left(&self, e: &Env) -> u32 {
+        if self.first_rtp { e.t2_remain } else { e.t2_secs }
+    }
+
+    fn in_q(&self, u: &str) -> bool {
+        self.queue.iter().any(|w| w.u == u)
+    }
+
+    fn pos(&self, u: &str) -> u32 {
+        match self.queue.iter().position(|w| w.u == u) {
+            Some(i) => i as u32 + 1,
+            None => QPOS_NOT_IN_QUEUE,
+        }
+    }
+
+    fn qprio(&self, u: &str) -> u32 {
+        self.queue.iter().find(|w| w.u == u).map(|w| w.p).unwrap_or(0)
+    }
+
+    fn dequeue(&mut self, u: &str) {
+        self.queue.retain(|w| w.u != u);
+    }
+
+    fn pre_q(&self) -> bool {
+        self.queue.iter().any(|w| w.pre)
+    }
+
+    fn insert_q(&mut self, w: Waiter) {
+        let before = |w: &Waiter, x: &Waiter| (w.pre && !x.pre) || (w.pre == x.pre && w.p > x.p);
+        match self.queue.iter().position(|x| before(&w, x)) {
+            Some(i) => self.queue.insert(i, w),
+            None => self.queue.push(w),
+        }
+    }
+
+    fn send(&mut self, r: &mut Step, u: &str, t: T, a: Option<String>, n: u32, d: u32) {
+        let seqd = matches!(t, T::Taken | T::Idle);
+        let bump = seqd && d == 0;
+        if bump {
+            self.seq = (self.seq + 1) % SEQ_WRAP;
+        }
+        let q = if bump {
+            self.seq
+        } else if seqd {
+            d
+        } else {
+            0
+        };
+        r.o.push((u.to_string(), Msg { t, a, n, d: if seqd { 0 } else { d }, q }));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn send_q(&mut self, r: &mut Step, u: &str, t: T, a: Option<String>, n: u32, d: u32, q: u32) {
+        r.o.push((u.to_string(), Msg { t, a, n, d, q }));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn send_e(&mut self, r: &mut Step, u: &str, p: P, t: T, a: Option<String>, n: u32, d: u32) {
+        self.enter_r(r, u, p);
+        self.send(r, u, t, a, n, d);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn send_eq(&mut self, r: &mut Step, u: &str, p: P, t: T, a: Option<String>, n: u32, d: u32, q: u32) {
+        self.enter_r(r, u, p);
+        self.send_q(r, u, t, a, n, d, q);
+    }
+
+    fn fan(&mut self, r: &mut Step, e: &Env, ev: Msg, skip: Option<&str>) {
+        let rest: Vec<String> = self.members.iter().filter(|x| Some(x.as_str()) != skip).cloned().collect();
+        let mut ev = ev;
+        if matches!(ev.t, T::Taken | T::Idle) {
+            self.seq = (self.seq + 1) % SEQ_WRAP;
+            ev.q = self.seq;
+        }
+        for u in rest {
+            self.part_a(r, e, &u, &ev);
+        }
+    }
+
+    fn enter_taken(&mut self, r: &mut Step, e: &Env) {
+        r.l.push(("FLR.S.G.TAKEN.enter", None));
+        self.idle_bcast = false;
+        let sp = self.speaker.clone().unwrap_or_default();
+        let mut g = Msg::new(T::Granted, None, self.sprio, e.t2_secs);
+        g.q = self.seq;
+        self.part_a(r, e, &sp, &g);
+        let taken = Msg::new(T::Taken, self.speaker.clone(), 0, 0);
+        self.fan(r, e, taken, Some(&sp));
+        r.fx.push(Fx::Bind(sp));
+    }
+
+    fn idle_enter(&mut self, r: &mut Step, e: &Env) {
+        if self.queue.is_empty() {
+            r.l.push(("FLR.S.G.IDLE.enter_empty", None));
+            self.g = G::Idle;
+            self.speaker = None;
+            self.revoking = None;
+            self.first_rtp = false;
+            self.idle_bcast = true;
+            self.c7 = 1;
+            let ev = Msg::new(T::Idle, self.prev.clone(), 0, 0);
+            self.fan(r, e, ev, None);
+            r.fx.push(Fx::Release(self.prev.clone()));
+            return;
+        }
+        r.l.push(("FLR.S.G.IDLE.enter_succession", None));
+        let w = self.queue.remove(0);
+        self.g = G::Taken;
+        self.speaker = Some(w.u);
+        self.sprio = w.p;
+        self.revoking = None;
+        self.succ = true;
+        self.rtp_seen = false;
+        self.first_rtp = false;
+        self.c20 = 1;
+        self.enter_taken(r, e);
+    }
+
+    fn prevoke_enter(&mut self, r: &mut Step, e: &Env, u: &str, c: u32) {
+        r.l.push(("FLR.S.G.PREVOKE.enter", None));
+        self.g = G::Prevoke;
+        self.revoking = Some(u.to_string());
+        self.rprio = self.sprio;
+        self.rcause_g = c;
+        self.speaker = None;
+        self.part_a(r, e, u, &Msg::new(T::Revoke, None, c, 0));
+    }
+
+    fn arb_req_idle(&mut self, r: &mut Step, e: &Env, u: &str, p: u32) {
+        if self.g != G::Idle {
+            r.l.push(("FLR.S.G.any.req_discard", None));
+            return;
+        }
+        if self.alone() {
+            r.l.push(("FLR.S.G.IDLE.req_alone", None));
+            self.part_a(r, e, u, &Msg::new(T::Deny, None, cause::ONLY_ONE as u32, 0));
+            return;
+        }
+        if flag(&self.retry, u) {
+            r.l.push(("FLR.S.G.IDLE.req_retry_after", None));
+            self.part_a(r, e, u, &Msg::new(T::Deny, None, cause::RETRY_AFTER as u32, 0));
+            return;
+        }
+        r.l.push(("FLR.S.G.IDLE.req_grant", None));
+        self.g = G::Taken;
+        self.speaker = Some(u.to_string());
+        self.sprio = p;
+        self.succ = false;
+        self.rtp_seen = false;
+        self.first_rtp = false;
+        self.c20 = 0;
+        self.enter_taken(r, e);
+    }
+
+    fn arb_req_permitted(&mut self, r: &mut Step, e: &Env, u: &str) {
+        if self.g == G::Taken && self.speaker.as_deref() == Some(u) {
+            r.l.push(("FLR.S.G.TAKEN.req_regrant", None));
+            let mut g = Msg::new(T::Granted, None, self.sprio, self.t2_left(e));
+            g.q = self.seq;
+            self.part_a(r, e, u, &g);
+            return;
+        }
+        r.l.push(("FLR.S.G.any.regrant_discard", None));
+    }
+
+    fn arb_preempt(&mut self, r: &mut Step, e: &Env, u: &str, p: u32) {
+        if self.g == G::Taken {
+            r.l.push(("FLR.S.G.TAKEN.preempt", None));
+            self.queue.insert(0, Waiter { u: u.to_string(), p, pre: true });
+            let sp = self.speaker.clone().unwrap_or_default();
+            self.prevoke_enter(r, e, &sp, revoke::PREEMPTED as u32);
+            self.part_a(r, e, u, &Msg::new(T::Qinfo, None, 1, p));
+            return;
+        }
+        r.l.push(("FLR.S.G.PREVOKE.preempt_discard", None));
+    }
+
+    fn arb_rel(&mut self, r: &mut Step, e: &Env, u: &str) {
+        if self.g == G::Taken && self.speaker.as_deref() == Some(u) {
+            r.l.push(("FLR.S.G.TAKEN.rel_speaker", None));
+            self.prev = Some(u.to_string());
+            self.idle_enter(r, e);
+            return;
+        }
+        if self.g == G::Prevoke && self.revoking.as_deref() == Some(u) {
+            r.l.push(("FLR.S.G.PREVOKE.rel_revoked", None));
+            self.prev = Some(u.to_string());
+            self.idle_enter(r, e);
+            return;
+        }
+        r.l.push(("FLR.S.G.any.rel_discard", None));
+    }
+
+    fn arb_rtp(&mut self, r: &mut Step, u: &str) {
+        if self.g == G::Taken && self.speaker.as_deref() == Some(u) {
+            r.l.push(("FLR.S.G.TAKEN.rtp", None));
+            self.rtp_seen = true;
+            self.first_rtp = true;
+            return;
+        }
+        if self.g == G::Prevoke && self.revoking.as_deref() == Some(u) {
+            r.l.push(("FLR.S.G.PREVOKE.rtp", None));
+            return;
+        }
+        r.l.push(("FLR.S.G.any.rtp_discard", None));
+    }
+
+    pub fn server_rx(&mut self, r: &mut Step, e: &Env, u: &str, m: &Msg) {
+        if m.t == T::Ack && self.part(u) != P::NpTaken {
+            r.l.push(("FLR.S.gate.ack_drop", None));
+            return;
+        }
+        let member = self.members.contains(u);
+        if !member && m.t == T::Request {
+            r.l.push(("FLR.S.gate.not_in_room", None));
+            self.send(r, u, T::Deny, None, cause::OTHER_REASON as u32, 0);
+            return;
+        }
+        if !member {
+            r.l.push(("FLR.S.gate.not_in_room_drop", None));
+            return;
+        }
+        if m.t == T::Request && !flag(&self.half, u) {
+            r.l.push(("FLR.S.gate.recv_only", None));
+            self.send(r, u, T::Deny, None, cause::RECV_ONLY as u32, 0);
+            return;
+        }
+        if m.t == T::Request && !flag(&self.pub_, u) {
+            r.l.push(("FLR.S.gate.not_pubroom", None));
+            self.send(r, u, T::Deny, None, cause::NOT_PUBROOM as u32, 0);
+            return;
+        }
+        if m.t == T::Request && !flag(&self.perm, u) {
+            r.l.push(("FLR.S.gate.no_permission", None));
+            self.send(r, u, T::Deny, None, cause::NO_PERMISSION as u32, 0);
+            return;
+        }
+        self.part_c(r, e, u, m);
+    }
+
+    pub fn ready(&mut self, r: &mut Step, u: &str) {
+        let h = self.holder();
+        if h.as_deref() == Some(u) {
+            r.l.push(("FLR.S.P.join.self", None));
+            return;
+        }
+        if h.is_some() {
+            r.l.push(("FLR.S.P.join.taken", None));
+            self.send(r, u, T::Taken, h, 0, 0);
+            return;
+        }
+        r.l.push(("FLR.S.P.join.idle", None));
+        let prev = self.prev.clone();
+        self.send(r, u, T::Idle, prev, 0, 0);
+    }
+
+    pub fn away(&mut self, r: &mut Step, e: &Env, u: &str) {
+        if self.g == G::Taken && self.speaker.as_deref() == Some(u) {
+            r.l.push(("FLR.S.G.TAKEN.client_release", None));
+            self.prev = Some(u.to_string());
+            self.idle_enter(r, e);
+            return;
+        }
+        if self.g == G::Prevoke && self.revoking.as_deref() == Some(u) {
+            r.l.push(("FLR.S.G.PREVOKE.client_release", None));
+            return;
+        }
+        if self.in_q(u) {
+            r.l.push(("FLR.S.away.queued", None));
+            self.dequeue(u);
+            return;
+        }
+        r.l.push(("FLR.S.away.other", None));
+    }
+
+    pub fn ws_pub_select(&mut self, r: &mut Step, u: &str) {
+        r.l.push(("FLR.S.ws.pub_select", None));
+        self.pub_.insert(u.to_string(), true);
+    }
+
+    pub fn ws_reg_half(&mut self, r: &mut Step, u: &str) {
+        r.l.push(("FLR.S.ws.reg_half", None));
+        self.half.insert(u.to_string(), true);
+    }
+
+    pub fn ws_pub_away(&mut self, r: &mut Step, e: &Env, u: &str) {
+        r.l.push(("FLR.S.ws.pub_away", None));
+        self.pub_.insert(u.to_string(), false);
+        self.away(r, e, u);
+    }
+
+    pub fn ws_leave(&mut self, r: &mut Step, e: &Env, u: &str) {
+        r.l.push(("FLR.S.ws.leave", None));
+        self.pub_.insert(u.to_string(), false);
+        self.away(r, e, u);
+        self.members.remove(u);
+        self.retry.insert(u.to_string(), false);
+        self.part.insert(u.to_string(), P::Releasing);
+    }
+
+    pub fn ws_join(&mut self, u: &str) {
+        self.members.insert(u.to_string());
+        self.part.insert(u.to_string(), P::NpIdle);
+        self.released.insert(u.to_string(), false);
+        self.g_taken.insert(u.to_string(), false);
+        self.c8.insert(u.to_string(), 0);
+        self.c21.insert(u.to_string(), 0);
+    }
+
+    fn part_a(&mut self, r: &mut Step, e: &Env, u: &str, ev: &Msg) {
+        let p = self.part(u);
+        match (ev.t, p) {
+            (T::Qinfo, _) => {
+                r.l.push(("FLR.S.P.any.a_QINFO", Some(u.to_string())));
+                self.send(r, u, T::Qinfo, None, ev.n, ev.d);
+            }
+            (T::Deny, _) => {
+                r.l.push(("FLR.S.P.any.a_DENY", Some(u.to_string())));
+                self.send(r, u, T::Deny, None, ev.n, 0);
+            }
+            (T::Granted, P::NpIdle) => {
+                r.l.push(("FLR.S.P.NP_IDLE.a_GRANTED", Some(u.to_string())));
+                self.send_eq(r, u, P::Permitted, T::Granted, None, ev.n, ev.d, ev.q);
+            }
+            (T::Taken, P::NpIdle) => {
+                r.l.push(("FLR.S.P.NP_IDLE.a_TAKEN", Some(u.to_string())));
+                self.tq.insert(u.to_string(), ev.q);
+                self.send_e(r, u, P::NpTaken, T::Taken, ev.a.clone(), 0, ev.q);
+            }
+            (T::Idle, P::NpIdle) => {
+                r.l.push(("FLR.S.P.NP_IDLE.a_IDLE", Some(u.to_string())));
+                self.send(r, u, T::Idle, ev.a.clone(), 0, ev.q);
+            }
+            (_, P::NpIdle) => r.l.push(("FLR.S.P.NP_IDLE.a_other", Some(u.to_string()))),
+            (T::Granted, P::NpTaken) => {
+                r.l.push(("FLR.S.P.NP_TAKEN.a_GRANTED", Some(u.to_string())));
+                self.send_eq(r, u, P::Permitted, T::Granted, None, ev.n, ev.d, ev.q);
+            }
+            (T::Taken, P::NpTaken) => {
+                r.l.push(("FLR.S.P.NP_TAKEN.a_TAKEN", Some(u.to_string())));
+                self.tq.insert(u.to_string(), ev.q);
+                self.c21.insert(u.to_string(), 1);
+                self.send(r, u, T::Taken, ev.a.clone(), 0, ev.q);
+            }
+            (T::Idle, P::NpTaken) => {
+                r.l.push(("FLR.S.P.NP_TAKEN.a_IDLE", Some(u.to_string())));
+                self.send_e(r, u, P::NpIdle, T::Idle, ev.a.clone(), 0, ev.q);
+            }
+            (_, P::NpTaken) => r.l.push(("FLR.S.P.NP_TAKEN.a_other", Some(u.to_string()))),
+            (T::Granted, P::Permitted) => {
+                r.l.push(("FLR.S.P.PERMITTED.a_GRANTED", Some(u.to_string())));
+                self.send_q(r, u, T::Granted, None, ev.n, ev.d, ev.q);
+            }
+            (T::Idle, P::Permitted) => {
+                r.l.push(("FLR.S.P.PERMITTED.a_IDLE", Some(u.to_string())));
+                self.enter_r(r, u, P::NpIdle);
+            }
+            (T::Taken, P::Permitted) => {
+                r.l.push(("FLR.S.P.PERMITTED.a_TAKEN", Some(u.to_string())));
+                self.tq.insert(u.to_string(), ev.q);
+                self.send_e(r, u, P::NpTaken, T::Taken, ev.a.clone(), 0, ev.q);
+            }
+            (T::Revoke, P::Permitted) => {
+                r.l.push(("FLR.S.P.PERMITTED.a_REVOKE", Some(u.to_string())));
+                self.rcause.insert(u.to_string(), ev.n);
+                self.send_e(r, u, P::Prevoke, T::Revoke, None, ev.n, 0);
+            }
+            (_, P::Permitted) => r.l.push(("FLR.S.P.PERMITTED.a_other", Some(u.to_string()))),
+            (T::Idle, P::Prevoke) => {
+                r.l.push(("FLR.S.P.PREVOKE.a_IDLE", Some(u.to_string())));
+                self.send_e(r, u, P::NpIdle, T::Idle, ev.a.clone(), 0, ev.q);
+            }
+            (T::Taken, P::Prevoke) => {
+                r.l.push(("FLR.S.P.PREVOKE.a_TAKEN", Some(u.to_string())));
+                self.tq.insert(u.to_string(), ev.q);
+                self.send_e(r, u, P::NpTaken, T::Taken, ev.a.clone(), 0, ev.q);
+            }
+            (_, P::Prevoke) => r.l.push(("FLR.S.P.PREVOKE.a_other", Some(u.to_string()))),
+            (_, P::Releasing) => r.l.push(("FLR.S.P.RELEASING.a_any", Some(u.to_string()))),
+            (T::Idle, P::Npsends) => {
+                r.l.push(("FLR.S.P.NPSENDS.a_IDLE", Some(u.to_string())));
+                self.g_taken.insert(u.to_string(), false);
+            }
+            (T::Taken, P::Npsends) => {
+                r.l.push(("FLR.S.P.NPSENDS.a_TAKEN", Some(u.to_string())));
+                self.g_taken.insert(u.to_string(), true);
+            }
+            (_, P::Npsends) => r.l.push(("FLR.S.P.NPSENDS.a_other", Some(u.to_string()))),
+        }
+        let _ = e;
+    }
+
+    fn part_c(&mut self, r: &mut Step, e: &Env, u: &str, ev: &Msg) {
+        let p = self.part(u);
+        let us = Some(u.to_string());
+        match (p, ev.t) {
+            (P::NpIdle, T::Request) => {
+                r.l.push(("FLR.S.P.NP_IDLE.rx_REQUEST", us));
+                self.arb_req_idle(r, e, u, ev.n);
+            }
+            (P::NpIdle, T::Release) => {
+                r.l.push(("FLR.S.P.NP_IDLE.rx_RELEASE", us));
+                self.dequeue(u);
+                let prev = self.prev.clone();
+                self.send(r, u, T::Idle, prev, 0, 0);
+            }
+            (P::NpIdle, T::Rtp) if flag(&self.released, u) => {
+                r.l.push(("FLR.S.P.NP_IDLE.rx_RTP_after_release", us));
+                self.revoke3(r, u);
+            }
+            (P::NpIdle, T::Rtp) => r.l.push(("FLR.S.P.NP_IDLE.rx_RTP_drop", us)),
+            (P::NpIdle, _) => r.l.push(("FLR.S.P.NP_IDLE.rx_other", us)),
+            (P::NpTaken, T::Request) => {
+                r.l.push(("FLR.S.P.NP_TAKEN.rx_REQUEST", us));
+                self.taken_req(r, e, u, ev.n);
+            }
+            (P::NpTaken, T::Release) => {
+                r.l.push(("FLR.S.P.NP_TAKEN.rx_RELEASE", us));
+                let next = if self.seq + 1 == SEQ_WRAP { 0 } else { self.seq + 1 };
+                self.tq.insert(u.to_string(), next);
+                self.c21.insert(u.to_string(), 1);
+                self.dequeue(u);
+                let h = self.holder();
+                self.send(r, u, T::Taken, h, 0, 0);
+            }
+            (P::NpTaken, T::Ack) if ev.n == mbcp::TAKEN as u32 && ev.q == num(&self.tq, u) => {
+                r.l.push(("FLR.S.P.NP_TAKEN.rx_ACK_taken", us));
+                self.c21.insert(u.to_string(), 0);
+            }
+            (P::NpTaken, T::Ack) if ev.n == mbcp::TAKEN as u32 => r.l.push(("FLR.S.P.NP_TAKEN.rx_ACK_taken_stale", us)),
+            (P::NpTaken, T::Ack) => r.l.push(("FLR.S.P.NP_TAKEN.rx_ACK_other", us)),
+            (P::NpTaken, T::QposReq) => {
+                r.l.push(("FLR.S.P.NP_TAKEN.rx_QPOS_REQ", us));
+                let (pos, pr) = (self.pos(u), self.qprio(u));
+                self.send(r, u, T::Qinfo, None, pos, pr);
+            }
+            (P::NpTaken, T::Rtp) => {
+                r.l.push(("FLR.S.P.NP_TAKEN.rx_RTP", us));
+                self.revoke3(r, u);
+            }
+            (P::NpTaken, _) => r.l.push(("FLR.S.P.NP_TAKEN.rx_other", us)),
+            (P::Permitted, T::Release) => {
+                r.l.push(("FLR.S.P.PERMITTED.rx_RELEASE", us));
+                self.released.insert(u.to_string(), true);
+                self.arb_rel(r, e, u);
+            }
+            (P::Permitted, T::Request) => {
+                r.l.push(("FLR.S.P.PERMITTED.rx_REQUEST", us));
+                self.arb_req_permitted(r, e, u);
+            }
+            (P::Permitted, T::Rtp) => {
+                r.l.push(("FLR.S.P.PERMITTED.rx_RTP", us));
+                self.arb_rtp(r, u);
+            }
+            (P::Permitted, _) => r.l.push(("FLR.S.P.PERMITTED.rx_other", us)),
+            (P::Prevoke, T::Release) => {
+                r.l.push(("FLR.S.P.PREVOKE.rx_RELEASE", us));
+                self.arb_rel(r, e, u);
+            }
+            (P::Prevoke, T::Rtp) => {
+                r.l.push(("FLR.S.P.PREVOKE.rx_RTP", us));
+                self.arb_rtp(r, u);
+            }
+            (P::Prevoke, _) => r.l.push(("FLR.S.P.PREVOKE.rx_other", us)),
+            (_, T::Release) if flag(&self.g_taken, u) => {
+                r.l.push(("FLR.S.P.NPSENDS.rx_RELEASE_taken", us));
+                let next = if self.seq + 1 == SEQ_WRAP { 0 } else { self.seq + 1 };
+                self.tq.insert(u.to_string(), next);
+                let h = self.holder();
+                self.send_e(r, u, P::NpTaken, T::Taken, h, 0, 0);
+            }
+            (_, T::Release) => {
+                r.l.push(("FLR.S.P.NPSENDS.rx_RELEASE_idle", us));
+                let prev = self.prev.clone();
+                self.send_e(r, u, P::NpIdle, T::Idle, prev, 0, 0);
+            }
+            (_, T::Rtp) => r.l.push(("FLR.S.P.NPSENDS.rx_RTP", us)),
+            _ => r.l.push(("FLR.S.P.NPSENDS.rx_other", us)),
+        }
+    }
+
+    fn enter_r(&mut self, r: &mut Step, u: &str, p: P) {
+        let us = Some(u.to_string());
+        let k = u.to_string();
+        match p {
+            P::NpIdle => {
+                r.l.push(("FLR.S.P.NP_IDLE.enter", us));
+                self.part.insert(k.clone(), p);
+                self.g_taken.insert(k.clone(), false);
+                self.c21.insert(k, 0);
+            }
+            P::NpTaken => {
+                r.l.push(("FLR.S.P.NP_TAKEN.enter", us));
+                self.part.insert(k.clone(), p);
+                self.g_taken.insert(k.clone(), true);
+                self.c21.insert(k, 1);
+            }
+            P::Permitted => {
+                r.l.push(("FLR.S.P.PERMITTED.enter", us));
+                self.part.insert(k.clone(), p);
+                self.released.insert(k.clone(), false);
+                self.c21.insert(k, 0);
+            }
+            P::Prevoke => {
+                r.l.push(("FLR.S.P.PREVOKE.enter", us));
+                self.part.insert(k.clone(), p);
+                self.c8.insert(k.clone(), 1);
+                self.c21.insert(k, 0);
+            }
+            _ => {
+                r.l.push(("FLR.S.P.NPSENDS.enter", us));
+                self.part.insert(k.clone(), p);
+                self.c8.insert(k.clone(), 1);
+                self.c21.insert(k, 0);
+            }
+        }
+    }
+
+    fn revoke3(&mut self, r: &mut Step, u: &str) {
+        self.rcause.insert(u.to_string(), revoke::NO_PERMISSION as u32);
+        self.send_e(r, u, P::Npsends, T::Revoke, None, revoke::NO_PERMISSION as u32, 0);
+    }
+
+    fn taken_req(&mut self, r: &mut Step, e: &Env, u: &str, p: u32) {
+        if flag(&self.retry, u) {
+            r.l.push(("FLR.S.P.NP_TAKEN.req_retry_after", None));
+            self.send(r, u, T::Deny, None, cause::RETRY_AFTER as u32, 0);
+            return;
+        }
+        if self.in_q(u) {
+            r.l.push(("FLR.S.P.NP_TAKEN.req_renotify", None));
+            let (pos, pr) = (self.pos(u), self.qprio(u));
+            self.send(r, u, T::Qinfo, None, pos, pr);
+            return;
+        }
+        if p > self.holder_prio() && !self.pre_q() {
+            r.l.push(("FLR.S.P.NP_TAKEN.req_preempt", None));
+            self.arb_preempt(r, e, u, p);
+            return;
+        }
+        if p > self.holder_prio() {
+            r.l.push(("FLR.S.P.NP_TAKEN.req_preempt_blocked", None));
+            return;
+        }
+        if self.queue.len() >= e.qmax {
+            r.l.push(("FLR.S.P.NP_TAKEN.req_full", None));
+            self.send(r, u, T::Deny, None, cause::QUEUE_FULL as u32, 0);
+            return;
+        }
+        r.l.push(("FLR.S.P.NP_TAKEN.req_enqueue", None));
+        self.insert_q(Waiter { u: u.to_string(), p, pre: false });
+        let pos = self.pos(u);
+        self.send(r, u, T::Qinfo, None, pos, p);
+    }
+
+    fn srv_t1(&mut self, r: &mut Step, e: &Env) {
+        if self.g == G::Taken {
+            r.l.push(("FLR.S.G.TAKEN.T1", None));
+            self.prev = self.speaker.clone();
+        } else {
+            r.l.push(("FLR.S.G.PREVOKE.T1", None));
+            self.prev = self.revoking.clone();
+        }
+        self.idle_enter(r, e);
+    }
+
+    fn srv_t2(&mut self, r: &mut Step, e: &Env) {
+        r.l.push(("FLR.S.G.TAKEN.T2", None));
+        let u = self.speaker.clone().unwrap_or_default();
+        self.retry.insert(u.clone(), true);
+        self.prevoke_enter(r, e, &u, revoke::TOO_LONG as u32);
+    }
+
+    fn srv_t3(&mut self, r: &mut Step, e: &Env) {
+        r.l.push(("FLR.S.G.PREVOKE.T3", None));
+        self.prev = self.revoking.clone();
+        self.idle_enter(r, e);
+    }
+
+    fn srv_t7(&mut self, r: &mut Step, e: &Env) {
+        r.l.push(("FLR.S.G.IDLE.T7", None));
+        self.c7 += 1;
+        let ev = Msg::new(T::Idle, self.prev.clone(), 0, 0);
+        self.fan(r, e, ev, None);
+    }
+
+    fn srv_t20(&mut self, r: &mut Step, e: &Env) {
+        if self.c20 < timer::C20 as u32 {
+            r.l.push(("FLR.S.G.TAKEN.T20", None));
+            self.c20 += 1;
+            let sp = self.speaker.clone().unwrap_or_default();
+            let mut g = Msg::new(T::Granted, None, self.sprio, e.t2_secs);
+            g.q = self.seq;
+            self.part_a(r, e, &sp, &g);
+            return;
+        }
+        r.l.push(("FLR.S.G.TAKEN.T20_exhaust", None));
+        self.c20 += 1;
+    }
+
+    fn srv_t8(&mut self, r: &mut Step, u: &str) {
+        let n = num(&self.c8, u) + 1;
+        self.c8.insert(u.to_string(), n);
+        if self.part(u) == P::Prevoke {
+            r.l.push(("FLR.S.P.PREVOKE.T8", Some(u.to_string())));
+            let c = num(&self.rcause, u);
+            self.send(r, u, T::Revoke, None, c, 0);
+            return;
+        }
+        r.l.push(("FLR.S.P.NPSENDS.T8", Some(u.to_string())));
+        self.send(r, u, T::Revoke, None, revoke::NO_PERMISSION as u32, 0);
+    }
+
+    fn srv_t21(&mut self, r: &mut Step, u: &str) {
+        let n = num(&self.c21, u);
+        self.c21.insert(u.to_string(), n + 1);
+        if n < timer::C21 as u32 {
+            r.l.push(("FLR.S.P.NP_TAKEN.T21", Some(u.to_string())));
+            let h = self.holder();
+            let q = num(&self.tq, u);
+            self.send(r, u, T::Taken, h, 0, q);
+            return;
+        }
+        r.l.push(("FLR.S.P.NP_TAKEN.T21_exhaust", Some(u.to_string())));
+    }
+
+    fn srv_t9(&mut self, r: &mut Step, u: &str) {
+        r.l.push(("FLR.S.T9.expire", Some(u.to_string())));
+        self.retry.insert(u.to_string(), false);
+    }
+
+    fn armed_server(&self) -> Vec<Tm> {
+        let mut on = Vec::new();
+        if matches!(self.g, G::Taken | G::Prevoke) {
+            on.push(Tm::T1);
+        }
+        if self.g == G::Taken && self.first_rtp {
+            on.push(Tm::T2);
+        }
+        if self.g == G::Prevoke {
+            on.push(Tm::T3);
+        }
+        if self.g == G::Idle && self.idle_bcast && self.c7 < timer::C7 as u32 {
+            on.push(Tm::T7);
+        }
+        if self.g == G::Taken && self.succ && !self.rtp_seen && self.c20 <= timer::C20 as u32 {
+            on.push(Tm::T20);
+        }
+        on
+    }
+
+    fn armed_participant(&self, u: &str) -> Vec<Tm> {
+        let mut on = Vec::new();
+        let p = self.part(u);
+        if matches!(p, P::Prevoke | P::Npsends) && num(&self.c8, u) < timer::C8 as u32 {
+            on.push(Tm::T8);
+        }
+        if flag(&self.retry, u) {
+            on.push(Tm::T9);
+        }
+        let c = num(&self.c21, u);
+        if p == P::NpTaken && c >= 1 && c <= timer::C21 as u32 {
+            on.push(Tm::T21);
+        }
+        on
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Tm {
     T1,
     T2,
     T3,
@@ -54,946 +864,365 @@ pub enum Timer {
     T8,
     T9,
     T20,
+    T21,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Rx {
-    Request { priority: u8 },
-    Release,
-    QueuePos,
-    Ack,
+fn starts(t: Tm) -> &'static [&'static str] {
+    match t {
+        Tm::T7 => &["FLR.S.G.IDLE.enter_empty"],
+        Tm::T20 => &["FLR.S.G.IDLE.enter_succession"],
+        Tm::T8 => &["FLR.S.P.PREVOKE.enter", "FLR.S.P.NPSENDS.enter"],
+        Tm::T21 => &["FLR.S.P.NP_TAKEN.enter", "FLR.S.P.NP_TAKEN.a_TAKEN", "FLR.S.P.NP_TAKEN.rx_RELEASE"],
+        Tm::T1 => &["FLR.S.G.TAKEN.enter"],
+        Tm::T3 => &["FLR.S.G.PREVOKE.enter"],
+        _ => &[],
+    }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Ctx {
-    pub in_room: bool,
-    pub has_half: bool,
-    pub in_pub_room: bool,
-    pub permitted: bool,
+fn dur(t: Tm, t2_ms: u64) -> u64 {
+    match t {
+        Tm::T1 => timer::T1_MS,
+        Tm::T2 => t2_ms,
+        Tm::T3 => timer::T3_MS,
+        Tm::T7 => timer::T7_MS,
+        Tm::T8 => timer::T8_MS,
+        Tm::T9 => timer::T9_MS,
+        Tm::T20 => timer::T20_MS,
+        Tm::T21 => timer::T21_MS,
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Wire {
-    Granted { priority: u8, duration_s: u16 },
-    Deny { cause: u8, text: Option<&'static str> },
-    Revoke { cause: u8 },
-    QueueInfo { position: u8, priority: u8 },
-    Taken { speaker: String, seq: u16 },
-    Idle { prev: Option<String>, seq: u16 },
+pub struct FloorRoom {
+    pub srv: Srv,
+    pub qmax: usize,
+    pub first_rtp_at: u64,
+    pub last_rtp_at: u64,
+    pub taken_at: u64,
+    pub deadlines: HashMap<(Tm, Option<String>), u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Out {
-    pub to: String,
-    pub wire: Wire,
-}
+impl FloorRoom {
+    pub fn new(qmax: usize) -> FloorRoom {
+        FloorRoom { srv: Srv::default(), qmax, first_rtp_at: 0, last_rtp_at: 0, taken_at: 0, deadlines: HashMap::new() }
+    }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Waiter {
-    user: String,
-    priority: u8,
-    pre: bool,
-}
+    fn env(&self, t2_secs: u32, now: u64) -> Env {
+        let t2_ms = t2_secs as u64 * 1000;
+        let remain = (self.first_rtp_at + t2_ms).saturating_sub(now) / 1000;
+        Env { qmax: self.qmax, t2_secs, t2_remain: remain as u32 }
+    }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Part {
-    state: Participant,
-    released: bool,
-    g_taken: bool,
-    c8: u8,
-    t8_at: u64,
-    cause: u8,
-    since: u64,
-}
-
-#[derive(Debug, Clone)]
-enum Arb {
-    Granted { priority: u8, duration_s: u16 },
-    Taken(String),
-    Idle,
-    Revoke(u8),
-    QueueInfo { position: u8, priority: u8 },
-    Deny(u8),
-}
-
-#[derive(Debug, Clone)]
-pub struct Floor {
-    t2_ms: u64,
-    queue_max: usize,
-    g: General,
-    speaker: Option<String>,
-    sprio: u8,
-    revoking: Option<String>,
-    rprio: u8,
-    queue: Vec<Waiter>,
-    succ: bool,
-    rtp_seen: bool,
-    first_rtp_at: Option<u64>,
-    last_rtp_at: u64,
-    c20: u8,
-    t20_at: u64,
-    t3_at: u64,
-    c7: u8,
-    t7_at: u64,
-    idle_bcast: bool,
-    prev: Option<String>,
-    parts: BTreeMap<String, Part>,
-    retry: BTreeMap<String, u64>,
-    seq: u16,
-    bcast: Option<u16>,
-    out: Vec<Out>,
-}
-
-impl Floor {
-    pub fn new(t2_ms: u64) -> Self {
-        Self {
-            t2_ms,
-            queue_max: QUEUE_MAX,
-            g: General::Idle,
-            speaker: None,
-            sprio: 0,
-            revoking: None,
-            rprio: 0,
-            queue: Vec::new(),
-            succ: false,
-            rtp_seen: false,
-            first_rtp_at: None,
-            last_rtp_at: 0,
-            c20: 0,
-            t20_at: 0,
-            t3_at: 0,
-            c7: 0,
-            t7_at: 0,
-            idle_bcast: false,
-            prev: None,
-            parts: BTreeMap::new(),
-            retry: BTreeMap::new(),
-            seq: 0,
-            bcast: None,
-            out: Vec::new(),
+    fn after(&mut self, step: &Step, was_first: bool, t2_ms: u64, now: u64) {
+        if !was_first && self.srv.first_rtp {
+            self.first_rtp_at = now;
         }
-    }
-
-    pub fn general(&self) -> General {
-        self.g
-    }
-
-    pub fn speaker(&self) -> Option<&str> {
-        match self.g {
-            General::Taken => self.speaker.as_deref(),
-            _ => None,
-        }
-    }
-
-    pub fn holder(&self) -> Option<&str> {
-        match self.g {
-            General::Taken => self.speaker.as_deref(),
-            General::PendingRevoke => self.revoking.as_deref(),
-            General::Idle => None,
-        }
-    }
-
-    pub fn priority(&self) -> Option<u8> {
-        match self.g {
-            General::Taken => Some(self.sprio),
-            General::PendingRevoke => Some(self.rprio),
-            General::Idle => None,
-        }
-    }
-
-    pub fn queue_len(&self) -> usize {
-        self.queue.len()
-    }
-
-    pub fn queue_view(&self) -> Vec<(String, u8)> {
-        self.queue.iter().map(|w| (w.user.clone(), w.priority)).collect()
-    }
-
-    pub fn participant(&self, user: &str) -> Participant {
-        self.parts.get(user).map(|p| p.state).unwrap_or(self.default_part())
-    }
-
-    pub fn rx(&mut self, user: &str, rx: Rx, ctx: Ctx, members: &[String], now: u64) -> Vec<Out> {
-        match rx {
-            Rx::Ack => {}
-            Rx::Request { .. } if !ctx.in_room => {
-                self.send(user, Wire::Deny { cause: reject::OTHER, text: Some(NOT_IN_ROOM) });
-            }
-            _ if !ctx.in_room => {}
-            Rx::Request { .. } if !ctx.has_half => {
-                self.send(user, Wire::Deny { cause: reject::RECEIVE_ONLY, text: None });
-            }
-            Rx::Request { .. } if !ctx.in_pub_room => {
-                self.send(user, Wire::Deny { cause: reject::NOT_PUB_ROOM, text: None });
-            }
-            Rx::Request { .. } if !ctx.permitted => {
-                self.send(user, Wire::Deny { cause: reject::NO_PERMISSION, text: None });
-            }
-            _ => self.part_c(user, rx, members, now),
-        }
-        std::mem::take(&mut self.out)
-    }
-
-    pub fn rtp(&mut self, user: &str, at: u64, now: u64) -> Vec<Out> {
-        if self.parts.get(user).is_some_and(|p| at < p.since) {
-            return Vec::new();
-        }
-        match self.participant(user) {
-            Participant::NotPermittedIdle => {
-                if self.parts.get(user).is_some_and(|p| p.released) {
-                    self.revoke3(user, now);
-                }
-            }
-            Participant::NotPermittedTaken => self.revoke3(user, now),
-            Participant::Permitted | Participant::PendingRevoke => self.arb_rtp(user, at),
-            Participant::NotPermittedSends => {}
-        }
-        std::mem::take(&mut self.out)
-    }
-
-    pub fn ready(&mut self, user: &str) -> Vec<Out> {
-        if self.holder() != Some(user) {
-            match self.holder().map(str::to_string) {
-                Some(h) => self.send(user, Wire::Taken { speaker: h, seq: 0 }),
-                None => self.send(user, Wire::Idle { prev: self.prev.clone(), seq: 0 }),
+        for (l, _) in &step.l {
+            if *l == "FLR.S.G.TAKEN.enter" {
+                self.taken_at = now;
+                self.last_rtp_at = 0;
             }
         }
-        std::mem::take(&mut self.out)
-    }
-
-    pub fn permission_lost(&mut self, user: &str, now: u64) -> Vec<Out> {
-        if self.g == General::Taken && self.speaker.as_deref() == Some(user) {
-            self.prevoke_enter(user, revoke::NO_PERMISSION, now);
-        } else if self.in_queue(user) {
-            self.dequeue(user);
-            self.part_a(user, Arb::Deny(reject::NO_PERMISSION), now);
-        }
-        std::mem::take(&mut self.out)
-    }
-
-    pub fn away(&mut self, user: &str, members: &[String], now: u64) -> Vec<Out> {
-        if self.g == General::Taken && self.speaker.as_deref() == Some(user) {
-            self.prev = Some(user.to_string());
-            self.idle_enter(members, now);
-        } else if self.in_queue(user) {
-            self.dequeue(user);
-        }
-        std::mem::take(&mut self.out)
-    }
-
-    pub fn leave(&mut self, user: &str, members: &[String], now: u64) -> Vec<Out> {
-        let out = self.away(user, members, now);
-        self.parts.remove(user);
-        self.retry.remove(user);
-        out
-    }
-
-    pub fn tick(&mut self, members: &[String], now: u64) -> Vec<Out> {
-        let lapsed: Vec<String> =
-            self.retry.iter().filter(|(_, until)| **until <= now).map(|(u, _)| u.clone()).collect();
-        for u in lapsed {
-            self.fire(Timer::T9, Some(&u), members, now);
-        }
-        let due: Vec<String> = self
-            .parts
-            .iter()
-            .filter(|(_, p)| {
-                matches!(p.state, Participant::PendingRevoke | Participant::NotPermittedSends)
-                    && p.c8 < timers::C8
-                    && now >= p.t8_at
-            })
-            .map(|(u, _)| u.clone())
-            .collect();
-        for u in due {
-            self.fire(Timer::T8, Some(&u), members, now);
-        }
-        let quiet = now.saturating_sub(self.last_rtp_at) > timers::T1_MS;
-        match self.g {
-            General::Taken => {
-                if self.first_rtp_at.is_some_and(|f| now.saturating_sub(f) > self.t2_ms) {
-                    self.fire(Timer::T2, None, members, now);
-                } else if quiet {
-                    self.fire(Timer::T1, None, members, now);
-                } else if self.succ && !self.rtp_seen && self.c20 <= timers::C20 && now >= self.t20_at {
-                    self.fire(Timer::T20, None, members, now);
-                }
-            }
-            General::PendingRevoke => {
-                if now >= self.t3_at {
-                    self.fire(Timer::T3, None, members, now);
-                } else if quiet {
-                    self.fire(Timer::T1, None, members, now);
-                }
-            }
-            General::Idle => {
-                if self.idle_bcast && self.c7 < timers::C7 && now >= self.t7_at {
-                    self.fire(Timer::T7, None, members, now);
-                }
+        let mut armed: Vec<(Tm, Option<String>)> = self.srv.armed_server().into_iter().map(|t| (t, None)).collect();
+        let users: Vec<String> = self.srv.part.keys().cloned().collect();
+        for u in users {
+            for t in self.srv.armed_participant(&u) {
+                armed.push((t, Some(u.clone())));
             }
         }
-        std::mem::take(&mut self.out)
-    }
-
-    pub fn expire(&mut self, timer: Timer, user: Option<&str>, members: &[String], now: u64) -> Vec<Out> {
-        self.fire(timer, user, members, now);
-        std::mem::take(&mut self.out)
-    }
-
-    fn fire(&mut self, timer: Timer, user: Option<&str>, members: &[String], now: u64) {
-        match timer {
-            Timer::T1 => {
-                self.prev = match self.g {
-                    General::Taken => self.speaker.clone(),
-                    _ => self.revoking.clone(),
+        self.deadlines.retain(|k, _| armed.contains(k));
+        for k in armed {
+            let restarted = step.l.iter().any(|(l, lu)| starts(k.0).contains(l) && (k.1.is_none() || lu.as_ref() == k.1.as_ref()));
+            if restarted || !self.deadlines.contains_key(&k) {
+                let at = match k.0 {
+                    Tm::T2 => self.first_rtp_at + t2_ms,
+                    _ => now + dur(k.0, t2_ms),
                 };
-                self.idle_enter(members, now);
-            }
-            Timer::T2 => {
-                let speaker = self.speaker.clone().unwrap_or_default();
-                self.retry.insert(speaker.clone(), now + timers::T9_MS);
-                self.prevoke_enter(&speaker, revoke::BURST_TOO_LONG, now);
-            }
-            Timer::T3 => {
-                self.prev = self.revoking.clone();
-                self.idle_enter(members, now);
-            }
-            Timer::T7 => {
-                self.c7 += 1;
-                self.t7_at = now + timers::T7_MS;
-                self.fan(Arb::Idle, None, members, now);
-            }
-            Timer::T20 => {
-                let speaker = self.speaker.clone().unwrap_or_default();
-                if self.c20 < timers::C20 {
-                    self.part_a(&speaker, self.granted(), now);
-                }
-                self.c20 += 1;
-                self.t20_at = now + timers::T20_MS;
-            }
-            Timer::T8 => {
-                let Some(u) = user else { return };
-                let cause = match self.parts.get_mut(u) {
-                    Some(p) => {
-                        p.c8 += 1;
-                        p.t8_at = now + timers::T8_MS;
-                        p.cause
-                    }
-                    None => return,
-                };
-                self.send(u, Wire::Revoke { cause });
-            }
-            Timer::T9 => {
-                if let Some(u) = user {
-                    self.retry.remove(u);
-                }
+                self.deadlines.insert(k, at);
             }
         }
     }
 
-    fn default_part(&self) -> Participant {
-        match self.g {
-            General::Idle => Participant::NotPermittedIdle,
-            _ => Participant::NotPermittedTaken,
-        }
-    }
-
-    fn part_mut(&mut self, user: &str) -> &mut Part {
-        let state = self.default_part();
-        self.parts.entry(user.to_string()).or_insert(Part {
-            state,
-            released: false,
-            g_taken: state == Participant::NotPermittedTaken,
-            c8: 0,
-            t8_at: 0,
-            cause: 0,
-            since: 0,
-        })
-    }
-
-    fn enter(&mut self, user: &str, state: Participant, now: u64) {
-        let p = self.part_mut(user);
-        p.state = state;
-        p.since = now;
-        match state {
-            Participant::NotPermittedIdle => p.g_taken = false,
-            Participant::NotPermittedTaken => p.g_taken = true,
-            Participant::Permitted => p.released = false,
-            Participant::PendingRevoke | Participant::NotPermittedSends => {
-                p.c8 = 1;
-                p.t8_at = now + timers::T8_MS;
+    fn due(&self, now: u64) -> Option<(Tm, Option<String>)> {
+        let mut best: Option<((Tm, Option<String>), u64)> = None;
+        for (k, at) in &self.deadlines {
+            let at = if k.0 == Tm::T1 { (*at).max(self.last_rtp_at + timer::T1_MS) } else { *at };
+            if at <= now && best.as_ref().is_none_or(|(_, b)| at < *b) {
+                best = Some((k.clone(), at));
             }
         }
+        best.map(|(k, _)| k)
     }
+}
 
-    fn next_seq(&mut self) -> u16 {
-        match self.bcast {
-            Some(seq) => seq,
-            None => {
-                self.seq = self.seq.wrapping_add(1);
-                self.seq
-            }
+fn run(sfu: &Arc<Sfu>, room: &Arc<Room>, f: impl FnOnce(&mut Srv, &mut Step, &Env)) {
+    let now = mono_ms();
+    let t2 = sfu.policy.floor.t2_stop_talking_secs as u32;
+    let step = {
+        let mut fr = lock(&room.floor);
+        let env = fr.env(t2, now);
+        let was = fr.srv.first_rtp;
+        let mut step = Step::default();
+        f(&mut fr.srv, &mut step, &env);
+        fr.after(&step, was, t2 as u64 * 1000, now);
+        room.holder.store(fr.srv.holder().map(Arc::new));
+        step
+    };
+    execute(sfu, room, step);
+}
+
+fn execute(sfu: &Arc<Sfu>, room: &Arc<Room>, step: Step) {
+    for (to, m) in &step.o {
+        send_dc(sfu, room, to, m);
+    }
+    for fx in step.fx {
+        match fx {
+            Fx::Bind(u) => bind(sfu, room, &u),
+            Fx::Release(prev) => release(sfu, room, prev),
         }
     }
-
-    fn send(&mut self, user: &str, wire: Wire) {
-        let wire = match wire {
-            Wire::Taken { speaker, .. } => Wire::Taken { speaker, seq: self.next_seq() },
-            Wire::Idle { prev, .. } => Wire::Idle { prev, seq: self.next_seq() },
-            w => w,
-        };
-        self.out.push(Out { to: user.to_string(), wire });
-    }
-
-    fn part_a(&mut self, user: &str, ev: Arb, now: u64) {
-        match ev {
-            Arb::QueueInfo { position, priority } => {
-                return self.send(user, Wire::QueueInfo { position, priority });
-            }
-            Arb::Deny(cause) => return self.send(user, Wire::Deny { cause, text: None }),
-            _ => {}
-        }
-        match (self.participant(user), ev) {
-            (Participant::NotPermittedIdle, Arb::Granted { priority, duration_s })
-            | (Participant::NotPermittedTaken, Arb::Granted { priority, duration_s }) => {
-                self.enter(user, Participant::Permitted, now);
-                self.send(user, Wire::Granted { priority, duration_s });
-            }
-            (Participant::NotPermittedIdle, Arb::Taken(s)) => {
-                self.enter(user, Participant::NotPermittedTaken, now);
-                self.send(user, Wire::Taken { speaker: s, seq: 0 });
-            }
-            (Participant::NotPermittedIdle, Arb::Idle) => {
-                self.send(user, Wire::Idle { prev: self.prev.clone(), seq: 0 });
-            }
-            (Participant::NotPermittedTaken, Arb::Taken(s)) => {
-                self.send(user, Wire::Taken { speaker: s, seq: 0 });
-            }
-            (Participant::NotPermittedTaken, Arb::Idle) | (Participant::PendingRevoke, Arb::Idle) => {
-                self.enter(user, Participant::NotPermittedIdle, now);
-                self.send(user, Wire::Idle { prev: self.prev.clone(), seq: 0 });
-            }
-            (Participant::Permitted, Arb::Granted { priority, duration_s }) => {
-                self.send(user, Wire::Granted { priority, duration_s });
-            }
-            (Participant::Permitted, Arb::Idle) => {
-                self.enter(user, Participant::NotPermittedIdle, now);
-            }
-            (Participant::Permitted, Arb::Taken(s)) | (Participant::PendingRevoke, Arb::Taken(s)) => {
-                self.enter(user, Participant::NotPermittedTaken, now);
-                self.send(user, Wire::Taken { speaker: s, seq: 0 });
-            }
-            (Participant::Permitted, Arb::Revoke(cause)) => {
-                self.enter(user, Participant::PendingRevoke, now);
-                self.part_mut(user).cause = cause;
-                self.send(user, Wire::Revoke { cause });
-            }
-            (Participant::NotPermittedSends, Arb::Idle) => self.part_mut(user).g_taken = false,
-            (Participant::NotPermittedSends, Arb::Taken(_)) => self.part_mut(user).g_taken = true,
-            _ => {}
+    if room.holder.load().is_none() {
+        for s in &room.slots {
+            s.bound.store(None);
         }
     }
+}
 
-    fn fan(&mut self, ev: Arb, skip: Option<&str>, members: &[String], now: u64) {
-        if matches!(ev, Arb::Taken(_) | Arb::Idle) {
-            self.seq = self.seq.wrapping_add(1);
-            self.bcast = Some(self.seq);
+fn half_stream(sfu: &Sfu, user: &str, kind: Kind) -> Option<Arc<PubStream>> {
+    sfu.peer_of_user(user)
+        .into_iter()
+        .flat_map(|p| lock(&p.streams).clone())
+        .find(|s| s.kind == kind && s.is_half() && !s.gone.load(Ordering::Relaxed))
+}
+
+fn bind(sfu: &Arc<Sfu>, room: &Arc<Room>, u: &str) {
+    let audio = half_stream(sfu, u, Kind::Audio);
+    room.slot(Kind::Audio).bound.store(audio);
+    let vcodec = room.codecs.video.clone().unwrap_or_else(|| "H264".into());
+    let video = half_stream(sfu, u, Kind::Video).filter(|s| {
+        let ok = crate::rtp::codec_matches(&vcodec, crate::rtp::sub_fmtp(&vcodec), &s.codec, s.fmtp.as_deref());
+        if !ok {
+            tracing::warn!(kind = "diag", room = room.id.as_str(), user = u, codec = s.codec.as_str(), "slot video codec mismatch — unbound");
         }
-        for m in members {
-            if Some(m.as_str()) != skip {
-                self.part_a(m, ev.clone(), now);
+        ok
+    });
+    let has_video = video.is_some();
+    room.slot(Kind::Video).bound.store(video);
+    let a = room.slot(Kind::Audio);
+    a.priming_left.store(PRIMING_FRAMES, Ordering::Relaxed);
+    a.priming_stop.store(false, Ordering::Relaxed);
+    a.silence_left.store(0, Ordering::Relaxed);
+    let now = mono_ms();
+    if has_video {
+        let mut b = lock(&room.slot(Kind::Video).pli_burst);
+        b.clear();
+        b.extend(PLI_BURST.iter().map(|d| now + d));
+    }
+    tracing::info!(kind = "ev", spec = "IMPL-FLR-MEDIA-BIND", room = room.id.as_str(), user = u, "granted bind");
+}
+
+fn release(_sfu: &Arc<Sfu>, room: &Arc<Room>, prev: Option<String>) {
+    for s in &room.slots {
+        s.bound.store(None);
+    }
+    let a = room.slot(Kind::Audio);
+    a.priming_stop.store(true, Ordering::Relaxed);
+    a.priming_left.store(0, Ordering::Relaxed);
+    a.silence_left.store(RELEASE_SILENCE, Ordering::Relaxed);
+    room.prev_speaker.store(prev.map(Arc::new));
+    lock(&room.slot(Kind::Video).pli_burst).clear();
+    tracing::info!(kind = "ev", spec = "IMPL-FLR-MEDIA-BIND", room = room.id.as_str(), "released");
+}
+
+fn wire(room: &str, m: &Msg) -> mbcp::Msg {
+    let t = match m.t {
+        T::Request => mbcp::REQUEST,
+        T::Granted => mbcp::GRANTED,
+        T::Taken => mbcp::TAKEN,
+        T::Deny => mbcp::DENY,
+        T::Release => mbcp::RELEASE,
+        T::Idle => mbcp::IDLE,
+        T::Revoke => mbcp::REVOKE,
+        T::QposReq => mbcp::QPOS_REQ,
+        T::Qinfo => mbcp::QINFO,
+        T::Ack | T::Rtp => mbcp::ACK,
+    };
+    let mut w = mbcp::Msg::new(t);
+    w.ack = matches!(m.t, T::Granted | T::Taken | T::Deny);
+    let u16be = |v: u32| (v as u16).to_be_bytes().to_vec();
+    match m.t {
+        T::Granted => {
+            w.push(tlv::PRIORITY, vec![m.n as u8, 0]);
+            w.push(tlv::DURATION, u16be(m.d));
+            w.push(tlv::SEQ, u16be(m.q));
+        }
+        T::Taken => {
+            if let Some(a) = &m.a {
+                w.push(tlv::SPEAKER, a.as_bytes().to_vec());
             }
+            w.push(tlv::SEQ, u16be(m.q));
         }
-        self.bcast = None;
-    }
-
-    fn granted(&self) -> Arb {
-        Arb::Granted { priority: self.sprio, duration_s: (self.t2_ms / 1_000) as u16 }
-    }
-
-    fn in_queue(&self, user: &str) -> bool {
-        self.queue.iter().any(|w| w.user == user)
-    }
-
-    fn position(&self, user: &str) -> u8 {
-        self.queue.iter().position(|w| w.user == user).map(|i| (i + 1).min(253) as u8).unwrap_or(NOT_IN_QUEUE)
-    }
-
-    fn queued_priority(&self, user: &str) -> u8 {
-        self.queue.iter().find(|w| w.user == user).map(|w| w.priority).unwrap_or(0)
-    }
-
-    fn dequeue(&mut self, user: &str) {
-        self.queue.retain(|w| w.user != user);
-    }
-
-    fn pre_queued(&self) -> bool {
-        self.queue.iter().any(|w| w.pre)
-    }
-
-    fn insert(&mut self, w: Waiter) {
-        let at = self
-            .queue
-            .iter()
-            .position(|q| (w.pre && !q.pre) || (w.pre == q.pre && w.priority > q.priority))
-            .unwrap_or(self.queue.len());
-        self.queue.insert(at, w);
-    }
-
-    fn holder_priority(&self) -> u8 {
-        if self.g == General::Taken { self.sprio } else { self.rprio }
-    }
-
-    fn enter_taken(&mut self, members: &[String], now: u64) {
-        let sp = self.speaker.clone().unwrap_or_default();
-        self.idle_bcast = false;
-        self.last_rtp_at = now;
-        if self.succ {
-            self.c20 = 1;
-            self.t20_at = now + timers::T20_MS;
+        T::Deny | T::Revoke => w.push(tlv::CAUSE, vec![m.n as u8]),
+        T::Idle => {
+            if let Some(a) = &m.a {
+                w.push(tlv::PREV, a.as_bytes().to_vec());
+            }
+            w.push(tlv::SEQ, u16be(m.q));
         }
-        self.part_a(&sp, self.granted(), now);
-        self.fan(Arb::Taken(sp.clone()), Some(&sp), members, now);
+        T::Qinfo => w.push(tlv::QINFO, vec![m.n as u8, m.d as u8]),
+        _ => {}
     }
+    w.push(tlv::ROOM, room.as_bytes().to_vec());
+    w
+}
 
-    fn idle_enter(&mut self, members: &[String], now: u64) {
-        if self.queue.is_empty() {
-            self.g = General::Idle;
-            self.speaker = None;
-            self.revoking = None;
-            self.first_rtp_at = None;
-            self.idle_bcast = true;
-            self.c7 = 1;
-            self.t7_at = now + timers::T7_MS;
-            self.fan(Arb::Idle, None, members, now);
-        } else {
-            let w = self.queue.remove(0);
-            self.g = General::Taken;
-            self.speaker = Some(w.user);
-            self.sprio = w.priority;
-            self.revoking = None;
-            self.succ = true;
-            self.rtp_seen = false;
-            self.first_rtp_at = None;
-            self.enter_taken(members, now);
-        }
+fn send_dc(sfu: &Arc<Sfu>, room: &Room, to: &str, m: &Msg) {
+    let Some(bytes) = mbcp::encode(&wire(&room.id, m)) else { return };
+    let Some(frame) = oxsig::dc::encode(oxsig::dc::SVC_FLOOR, &bytes) else { return };
+    let peer = sfu.peer_of_user(to).into_iter().find(|p| p.in_room(&room.id)).or_else(|| sfu.peer_of_user(to).into_iter().next());
+    match peer {
+        Some(p) => crate::secure::dc_send(&p.pub_conn, frame),
+        None => sfu.counters.drop("dc_no_peer"),
     }
+}
 
-    fn prevoke_enter(&mut self, user: &str, cause: u8, now: u64) {
-        self.g = General::PendingRevoke;
-        self.revoking = Some(user.to_string());
-        self.rprio = self.sprio;
-        self.speaker = None;
-        self.t3_at = now + timers::T3_MS;
-        self.part_a(user, Arb::Revoke(cause), now);
+pub fn on_dc(sfu: &Arc<Sfu>, user: &str, payload: &[u8]) {
+    let Some(f) = oxsig::dc::decode(payload) else {
+        sfu.counters.drop("dc_frame");
+        return;
+    };
+    if f.svc != oxsig::dc::SVC_FLOOR {
+        sfu.counters.drop("dc_svc");
+        return;
     }
-
-    fn arb_req_idle(&mut self, user: &str, priority: u8, members: &[String], now: u64) {
-        if self.g != General::Idle {
+    let Some(w) = mbcp::decode(f.payload) else {
+        sfu.counters.drop("mbcp_decode");
+        return;
+    };
+    let Some(room_id) = w.tlv(tlv::ROOM).map(|v| String::from_utf8_lossy(v).to_string()) else {
+        sfu.counters.drop("mbcp_no_room");
+        return;
+    };
+    let Some(room) = sfu.room(&room_id) else {
+        sfu.counters.drop("mbcp_unknown_room");
+        return;
+    };
+    let t = match w.msg_type {
+        mbcp::REQUEST => T::Request,
+        mbcp::RELEASE => T::Release,
+        mbcp::QPOS_REQ => T::QposReq,
+        mbcp::ACK => T::Ack,
+        _ => {
+            sfu.counters.drop("mbcp_s2c_type");
             return;
         }
-        if members.len() <= 1 {
-            self.part_a(user, Arb::Deny(reject::ONLY_ONE_PARTICIPANT), now);
-        } else if self.retry.contains_key(user) {
-            self.part_a(user, Arb::Deny(reject::RETRY_AFTER_NOT_EXPIRED), now);
-        } else {
-            self.g = General::Taken;
-            self.speaker = Some(user.to_string());
-            self.sprio = priority;
-            self.succ = false;
-            self.rtp_seen = false;
-            self.first_rtp_at = None;
-            self.c20 = 0;
-            self.enter_taken(members, now);
-        }
-    }
+    };
+    let n = match t {
+        T::Request => w.tlv(tlv::PRIORITY).and_then(|v| v.first().copied()).unwrap_or(0) as u32,
+        T::Ack => w.tlv(tlv::ACKTYPE).and_then(|v| v.first().copied()).unwrap_or(0) as u32,
+        _ => 0,
+    };
+    let q = w.tlv(tlv::SEQ).filter(|v| v.len() >= 2).map(|v| u16::from_be_bytes([v[0], v[1]]) as u32).unwrap_or(0);
+    let m = Msg { t, a: None, n, d: 0, q };
+    refresh(sfu, &room, user);
+    run(sfu, &room, |s, r, e| s.server_rx(r, e, user, &m));
+}
 
-    fn arb_req_permitted(&mut self, user: &str, now: u64) {
-        if self.g == General::Taken && self.speaker.as_deref() == Some(user) {
-            let duration_s = match self.first_rtp_at {
-                Some(f) => (self.t2_ms.saturating_sub(now.saturating_sub(f)) / 1_000) as u16,
-                None => (self.t2_ms / 1_000) as u16,
-            };
-            self.part_a(user, Arb::Granted { priority: self.sprio, duration_s }, now);
-        }
-    }
+fn refresh(sfu: &Sfu, room: &Room, user: &str) {
+    let peers = sfu.peer_of_user(user);
+    let half = peers.iter().any(|p| lock(&p.streams).iter().any(|s| s.is_half() && !s.gone.load(Ordering::Relaxed)));
+    let pubr = peers.iter().any(|p| p.pub_room_id().as_deref() == Some(room.id.as_str()));
+    let perm = room.lock().members.get(user).map(|m| m.permission.floor_request).unwrap_or(false);
+    let mut fr = lock(&room.floor);
+    fr.srv.half.insert(user.to_string(), half);
+    fr.srv.pub_.insert(user.to_string(), pubr);
+    fr.srv.perm.insert(user.to_string(), perm);
+}
 
-    fn arb_preempt(&mut self, user: &str, priority: u8, now: u64) {
-        if self.g != General::Taken {
-            return;
-        }
-        let old = self.speaker.clone().unwrap_or_default();
-        self.queue.insert(0, Waiter { user: user.to_string(), priority, pre: true });
-        self.prevoke_enter(&old, revoke::PREEMPTED, now);
-        self.part_a(user, Arb::QueueInfo { position: 1, priority }, now);
+pub fn observe_rtp(sfu: &Arc<Sfu>, room: &Arc<Room>, stream: &PubStream, now: u64) {
+    let last = stream.notify_at.load(Ordering::Relaxed);
+    {
+        let mut fr = lock(&room.floor);
+        fr.last_rtp_at = now;
     }
-
-    fn arb_rel(&mut self, user: &str, members: &[String], now: u64) {
-        let ours = match self.g {
-            General::Taken => self.speaker.as_deref() == Some(user),
-            General::PendingRevoke => self.revoking.as_deref() == Some(user),
-            General::Idle => false,
-        };
-        if ours {
-            self.prev = Some(user.to_string());
-            self.idle_enter(members, now);
-        }
+    if last != 0 && now.saturating_sub(last) < 500 {
+        return;
     }
+    stream.notify_at.store(now, Ordering::Relaxed);
+    let m = Msg::new(T::Rtp, None, 0, 0);
+    let u = stream.user_id.clone();
+    run(sfu, room, |s, r, e| s.part_c(r, e, &u, &m));
+}
 
-    fn arb_rtp(&mut self, user: &str, now: u64) {
-        match self.g {
-            General::Taken if self.speaker.as_deref() == Some(user) => {
-                self.rtp_seen = true;
-                self.first_rtp_at.get_or_insert(now);
-                self.last_rtp_at = now;
-            }
-            General::PendingRevoke if self.revoking.as_deref() == Some(user) => self.last_rtp_at = now,
-            _ => {}
-        }
+pub fn join(sfu: &Arc<Sfu>, room: &Arc<Room>, user: &str) {
+    {
+        let mut fr = lock(&room.floor);
+        fr.srv.ws_join(user);
     }
+    refresh(sfu, room, user);
+}
 
-    fn taken_req(&mut self, user: &str, priority: u8, now: u64) {
-        if self.retry.contains_key(user) {
-            self.send(user, Wire::Deny { cause: reject::RETRY_AFTER_NOT_EXPIRED, text: None });
-        } else if self.in_queue(user) {
-            let (position, priority) = (self.position(user), self.queued_priority(user));
-            self.send(user, Wire::QueueInfo { position, priority });
-        } else if priority > self.holder_priority() && !self.pre_queued() {
-            self.arb_preempt(user, priority, now);
-        } else if priority > self.holder_priority() {
-        } else if self.queue.len() >= self.queue_max {
-            self.send(user, Wire::Deny { cause: reject::QUEUE_FULL, text: None });
-        } else {
-            self.insert(Waiter { user: user.to_string(), priority, pre: false });
-            let position = self.position(user);
-            self.send(user, Wire::QueueInfo { position, priority });
-        }
-    }
+pub fn leave(sfu: &Arc<Sfu>, room: &Arc<Room>, user: &str) {
+    run(sfu, room, |s, r, e| s.ws_leave(r, e, user));
+}
 
-    fn revoke3(&mut self, user: &str, now: u64) {
-        self.enter(user, Participant::NotPermittedSends, now);
-        self.part_mut(user).cause = revoke::NO_PERMISSION;
-        self.send(user, Wire::Revoke { cause: revoke::NO_PERMISSION });
-    }
+pub fn pub_select(sfu: &Arc<Sfu>, room: &Arc<Room>, user: &str) {
+    run(sfu, room, |s, r, _| s.ws_pub_select(r, user));
+}
 
-    fn part_c(&mut self, user: &str, rx: Rx, members: &[String], now: u64) {
-        match (self.participant(user), rx) {
-            (Participant::NotPermittedIdle, Rx::Request { priority }) => {
-                self.arb_req_idle(user, priority, members, now)
-            }
-            (Participant::NotPermittedIdle, Rx::Release) => {
-                self.dequeue(user);
-                self.send(user, Wire::Idle { prev: self.prev.clone(), seq: 0 });
-            }
-            (Participant::NotPermittedTaken, Rx::Request { priority }) => self.taken_req(user, priority, now),
-            (Participant::NotPermittedTaken, Rx::Release) => {
-                self.dequeue(user);
-                let h = self.holder().unwrap_or_default().to_string();
-                self.send(user, Wire::Taken { speaker: h, seq: 0 });
-            }
-            (Participant::NotPermittedTaken, Rx::QueuePos) => {
-                let (position, priority) = (self.position(user), self.queued_priority(user));
-                self.send(user, Wire::QueueInfo { position, priority });
-            }
-            (Participant::Permitted, Rx::Release) => {
-                self.part_mut(user).released = true;
-                self.arb_rel(user, members, now);
-            }
-            (Participant::Permitted, Rx::Request { .. }) => self.arb_req_permitted(user, now),
-            (Participant::PendingRevoke, Rx::Release) => self.arb_rel(user, members, now),
-            (Participant::NotPermittedSends, Rx::Release) => {
-                if self.parts.get(user).is_some_and(|p| p.g_taken) {
-                    self.enter(user, Participant::NotPermittedTaken, now);
-                    let h = self.holder().unwrap_or_default().to_string();
-                    self.send(user, Wire::Taken { speaker: h, seq: 0 });
-                } else {
-                    self.enter(user, Participant::NotPermittedIdle, now);
-                    self.send(user, Wire::Idle { prev: self.prev.clone(), seq: 0 });
-                }
-            }
-            _ => {}
+pub fn pub_away(sfu: &Arc<Sfu>, room: &Arc<Room>, user: &str) {
+    run(sfu, room, |s, r, e| s.ws_pub_away(r, e, user));
+}
+
+pub fn reg_half(sfu: &Arc<Sfu>, room: &Arc<Room>, user: &str) {
+    run(sfu, room, |s, r, _| s.ws_reg_half(r, user));
+}
+
+pub fn release_track(sfu: &Arc<Sfu>, room: &Arc<Room>, user: &str) {
+    run(sfu, room, |s, r, e| s.away(r, e, user));
+}
+
+pub fn first_notice(sfu: &Arc<Sfu>, room: &Arc<Room>, user: &str) {
+    run(sfu, room, |s, r, _| s.ready(r, user));
+}
+
+pub fn is_holder(room: &Room, user: &str) -> bool {
+    lock(&room.floor).srv.holder().as_deref() == Some(user)
+}
+
+pub fn tick(sfu: &Arc<Sfu>, room: &Arc<Room>) {
+    for _ in 0..16 {
+        let now = mono_ms();
+        let due = lock(&room.floor).due(now);
+        let Some((t, u)) = due else { return };
+        let uu = u.clone().unwrap_or_default();
+        run(sfu, room, |s, r, e| match t {
+            Tm::T1 => s.srv_t1(r, e),
+            Tm::T2 => s.srv_t2(r, e),
+            Tm::T3 => s.srv_t3(r, e),
+            Tm::T7 => s.srv_t7(r, e),
+            Tm::T20 => s.srv_t20(r, e),
+            Tm::T8 => s.srv_t8(r, &uu),
+            Tm::T9 => s.srv_t9(r, &uu),
+            Tm::T21 => s.srv_t21(r, &uu),
+        });
+        let mut fr = lock(&room.floor);
+        let key = (t, u);
+        if fr.deadlines.contains_key(&key) && matches!(t, Tm::T7 | Tm::T8 | Tm::T20 | Tm::T21) {
+            let t2 = sfu.policy.floor.t2_stop_talking_secs as u64 * 1000;
+            fr.deadlines.insert(key, now + dur(t, t2));
+        } else if fr.deadlines.get(&key).is_some_and(|at| *at <= now) && matches!(t, Tm::T9) {
+            fr.deadlines.remove(&key);
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const ON: Ctx = Ctx { in_room: true, has_half: true, in_pub_room: true, permitted: true };
-
-    fn m(us: &[&str]) -> Vec<String> {
-        us.iter().map(|u| u.to_string()).collect()
-    }
-
-    fn wires(out: &[Out], to: &str) -> Vec<Wire> {
-        out.iter().filter(|o| o.to == to).map(|o| o.wire.clone()).collect()
-    }
-
-    fn req(f: &mut Floor, who: &str, prio: u8, ms: &[String], now: u64) -> Vec<Out> {
-        f.rx(who, Rx::Request { priority: prio }, ON, ms, now)
-    }
-
-    #[test]
-    fn idle_request_grants_and_tells_others() {
-        let ms = m(&["a", "b"]);
-        let mut f = Floor::new(timers::T2_MS);
-        let out = req(&mut f, "a", 0, &ms, 0);
-        assert_eq!(wires(&out, "a"), vec![Wire::Granted { priority: 0, duration_s: 30 }]);
-        assert_eq!(wires(&out, "b"), vec![Wire::Taken { speaker: "a".into(), seq: 1 }]);
-        assert_eq!(f.speaker(), Some("a"));
-        assert_eq!(f.participant("a"), Participant::Permitted);
-    }
-
-    #[test]
-    fn one_broadcast_carries_one_seq() {
-        let ms = m(&["a", "b", "c", "d"]);
-        let mut f = Floor::new(timers::T2_MS);
-        let out = req(&mut f, "a", 0, &ms, 0);
-        let seqs: Vec<u16> = out
-            .iter()
-            .filter_map(|o| match &o.wire {
-                Wire::Taken { seq, .. } => Some(*seq),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(seqs, vec![1, 1, 1]);
-        let rel = f.rx("a", Rx::Release, ON, &ms, 10);
-        assert!(rel.iter().all(|o| matches!(o.wire, Wire::Idle { seq: 2, .. })));
-    }
-
-    #[test]
-    fn alone_is_denied_only_in_idle() {
-        let mut f = Floor::new(timers::T2_MS);
-        let out = req(&mut f, "a", 0, &m(&["a"]), 0);
-        assert_eq!(wires(&out, "a"), vec![Wire::Deny { cause: reject::ONLY_ONE_PARTICIPANT, text: None }]);
-    }
-
-    #[test]
-    fn gates_run_before_the_state_machine() {
-        let ms = m(&["a", "b"]);
-        let mut f = Floor::new(timers::T2_MS);
-        let cases = [
-            (Ctx { in_room: false, ..ON }, Wire::Deny { cause: reject::OTHER, text: Some(NOT_IN_ROOM) }),
-            (Ctx { has_half: false, ..ON }, Wire::Deny { cause: reject::RECEIVE_ONLY, text: None }),
-            (Ctx { in_pub_room: false, ..ON }, Wire::Deny { cause: reject::NOT_PUB_ROOM, text: None }),
-            (Ctx { permitted: false, ..ON }, Wire::Deny { cause: reject::NO_PERMISSION, text: None }),
-        ];
-        for (ctx, want) in cases {
-            let out = f.rx("a", Rx::Request { priority: 0 }, ctx, &ms, 0);
-            assert_eq!(wires(&out, "a"), vec![want]);
-        }
-        assert!(f.rx("a", Rx::Ack, ON, &ms, 0).is_empty());
-        assert!(f.rx("a", Rx::Release, Ctx { in_room: false, ..ON }, &ms, 0).is_empty());
-    }
-
-    #[test]
-    fn release_by_speaker_sends_no_idle_to_speaker() {
-        let ms = m(&["a", "b"]);
-        let mut f = Floor::new(timers::T2_MS);
-        req(&mut f, "a", 0, &ms, 0);
-        let out = f.rx("a", Rx::Release, ON, &ms, 10);
-        assert!(wires(&out, "a").is_empty());
-        assert_eq!(wires(&out, "b"), vec![Wire::Idle { prev: Some("a".into()), seq: 2 }]);
-        let again = f.rx("a", Rx::Release, ON, &ms, 600);
-        assert_eq!(wires(&again, "a"), vec![Wire::Idle { prev: Some("a".into()), seq: 3 }]);
-    }
-
-    #[test]
-    fn queue_then_succession_without_idle() {
-        let ms = m(&["a", "b"]);
-        let mut f = Floor::new(timers::T2_MS);
-        req(&mut f, "a", 0, &ms, 0);
-        let q = req(&mut f, "b", 0, &ms, 10);
-        assert_eq!(wires(&q, "b"), vec![Wire::QueueInfo { position: 1, priority: 0 }]);
-        let out = f.rx("a", Rx::Release, ON, &ms, 20);
-        assert_eq!(wires(&out, "b"), vec![Wire::Granted { priority: 0, duration_s: 30 }]);
-        assert_eq!(wires(&out, "a"), vec![Wire::Taken { speaker: "b".into(), seq: 2 }]);
-        assert!(out.iter().all(|o| !matches!(o.wire, Wire::Idle { .. })));
-    }
-
-    #[test]
-    fn preempt_revokes_with_grace_then_succeeds() {
-        let ms = m(&["a", "b"]);
-        let mut f = Floor::new(timers::T2_MS);
-        req(&mut f, "a", 0, &ms, 0);
-        let out = req(&mut f, "b", 1, &ms, 10);
-        assert_eq!(wires(&out, "a"), vec![Wire::Revoke { cause: revoke::PREEMPTED }]);
-        assert_eq!(wires(&out, "b"), vec![Wire::QueueInfo { position: 1, priority: 1 }]);
-        assert_eq!(f.general(), General::PendingRevoke);
-        assert_eq!(f.holder(), Some("a"));
-        let done = f.rx("a", Rx::Release, ON, &ms, 50);
-        assert_eq!(wires(&done, "b"), vec![Wire::Granted { priority: 1, duration_s: 30 }]);
-        assert_eq!(f.speaker(), Some("b"));
-    }
-
-    #[test]
-    fn preempt_during_grace_is_discarded() {
-        let ms = m(&["a", "b", "c"]);
-        let mut f = Floor::new(timers::T2_MS);
-        req(&mut f, "a", 0, &ms, 0);
-        req(&mut f, "b", 1, &ms, 10);
-        let out = req(&mut f, "c", 2, &ms, 20);
-        assert!(out.is_empty());
-        assert_eq!(f.queue_view(), vec![("b".to_string(), 1)]);
-    }
-
-    #[test]
-    fn t3_closes_grace_when_release_never_comes() {
-        let ms = m(&["a", "b"]);
-        let mut f = Floor::new(timers::T2_MS);
-        req(&mut f, "a", 0, &ms, 0);
-        req(&mut f, "b", 1, &ms, 10);
-        f.rtp("a", 1_000, 1_000);
-        let resend = f.tick(&ms, 1_010);
-        assert_eq!(wires(&resend, "a"), vec![Wire::Revoke { cause: revoke::PREEMPTED }]);
-        assert_eq!(wires(&f.tick(&ms, 2_010), "a"), vec![Wire::Revoke { cause: revoke::PREEMPTED }]);
-        let out = f.tick(&ms, 10 + timers::T3_MS);
-        assert_eq!(f.speaker(), Some("b"));
-        assert_eq!(wires(&out, "a"), vec![Wire::Taken { speaker: "b".into(), seq: 2 }]);
-    }
-
-    #[test]
-    fn unpermitted_rtp_in_taken_is_revoked_unconditionally() {
-        let ms = m(&["a", "b"]);
-        let mut f = Floor::new(timers::T2_MS);
-        req(&mut f, "a", 0, &ms, 0);
-        let out = f.rtp("b", 100, 100);
-        assert_eq!(wires(&out, "b"), vec![Wire::Revoke { cause: revoke::NO_PERMISSION }]);
-        assert_eq!(f.participant("b"), Participant::NotPermittedSends);
-        let rel = f.rx("b", Rx::Release, ON, &ms, 200);
-        assert_eq!(wires(&rel, "b"), vec![Wire::Taken { speaker: "a".into(), seq: 2 }]);
-    }
-
-    #[test]
-    fn rtp_in_idle_is_revoked_only_after_release() {
-        let ms = m(&["a", "b"]);
-        let mut f = Floor::new(timers::T2_MS);
-        req(&mut f, "a", 0, &ms, 0);
-        f.tick(&ms, timers::T1_MS + 1);
-        assert_eq!(f.general(), General::Idle);
-        assert!(f.rtp("a", timers::T1_MS + 2, timers::T1_MS + 2).is_empty());
-        req(&mut f, "b", 0, &ms, 10_000);
-        f.rx("b", Rx::Release, ON, &ms, 10_100);
-        let out = f.rtp("b", 10_200, 10_200);
-        assert_eq!(wires(&out, "b"), vec![Wire::Revoke { cause: revoke::NO_PERMISSION }]);
-    }
-
-    #[test]
-    fn rtp_observed_late_is_judged_by_arrival() {
-        let ms = m(&["a", "b"]);
-        let mut f = Floor::new(timers::T2_MS);
-        req(&mut f, "a", 0, &ms, 0);
-        f.rx("a", Rx::Release, ON, &ms, 4_679);
-        assert!(f.rtp("a", 4_670, 5_007).is_empty());
-        assert_eq!(f.participant("a"), Participant::NotPermittedIdle);
-        let later = f.tick(&ms, 8_000);
-        assert!(!wires(&later, "a").iter().any(|w| matches!(w, Wire::Revoke { .. })));
-        req(&mut f, "b", 0, &ms, 9_000);
-        let out = f.rtp("a", 9_500, 10_000);
-        assert_eq!(wires(&out, "a"), vec![Wire::Revoke { cause: revoke::NO_PERMISSION }]);
-    }
-
-    #[test]
-    fn t2_revokes_from_first_rtp_and_arms_retry_after() {
-        let ms = m(&["a", "b"]);
-        let mut f = Floor::new(timers::T2_MS);
-        req(&mut f, "a", 0, &ms, 0);
-        for t in (5_000..=35_000).step_by(1_000) {
-            f.rtp("a", t, t);
-        }
-        let out = f.tick(&ms, 35_001);
-        assert_eq!(wires(&out, "a"), vec![Wire::Revoke { cause: revoke::BURST_TOO_LONG }]);
-        f.rx("a", Rx::Release, ON, &ms, 35_050);
-        let deny = req(&mut f, "a", 0, &ms, 35_100);
-        assert_eq!(wires(&deny, "a"), vec![Wire::Deny { cause: reject::RETRY_AFTER_NOT_EXPIRED, text: None }]);
-        f.tick(&ms, 35_001 + timers::T9_MS + 1);
-        let ok = req(&mut f, "a", 0, &ms, 40_000);
-        assert_eq!(wires(&ok, "a"), vec![Wire::Granted { priority: 0, duration_s: 30 }]);
-    }
-
-    #[test]
-    fn regrant_carries_remaining_t2() {
-        let ms = m(&["a", "b"]);
-        let mut f = Floor::new(timers::T2_MS);
-        req(&mut f, "a", 0, &ms, 0);
-        f.rtp("a", 1_000, 1_000);
-        let out = req(&mut f, "a", 0, &ms, 11_000);
-        assert_eq!(wires(&out, "a"), vec![Wire::Granted { priority: 0, duration_s: 20 }]);
-    }
-
-    #[test]
-    fn queue_position_answers_regardless_of_membership_while_taken() {
-        let ms = m(&["a", "b"]);
-        let mut f = Floor::new(timers::T2_MS);
-        assert!(f.rx("b", Rx::QueuePos, ON, &ms, 0).is_empty());
-        req(&mut f, "a", 0, &ms, 0);
-        let out = f.rx("b", Rx::QueuePos, ON, &ms, 10);
-        assert_eq!(wires(&out, "b"), vec![Wire::QueueInfo { position: NOT_IN_QUEUE, priority: 0 }]);
-    }
-
-    #[test]
-    fn t20_resends_succession_grant_until_rtp() {
-        let ms = m(&["a", "b"]);
-        let mut f = Floor::new(timers::T2_MS);
-        req(&mut f, "a", 0, &ms, 0);
-        req(&mut f, "b", 0, &ms, 10);
-        f.rx("a", Rx::Release, ON, &ms, 20);
-        let r1 = f.tick(&ms, 20 + timers::T20_MS);
-        assert_eq!(wires(&r1, "b"), vec![Wire::Granted { priority: 0, duration_s: 30 }]);
-        f.rtp("b", 1_500, 1_500);
-        assert!(wires(&f.tick(&ms, 20 + 2 * timers::T20_MS), "b").is_empty());
-    }
-
-    #[test]
-    fn permission_lost_revokes_speaker_and_denies_waiter() {
-        let ms = m(&["a", "b", "c"]);
-        let mut f = Floor::new(timers::T2_MS);
-        req(&mut f, "a", 0, &ms, 0);
-        req(&mut f, "b", 0, &ms, 10);
-        let w = f.permission_lost("b", 20);
-        assert_eq!(wires(&w, "b"), vec![Wire::Deny { cause: reject::NO_PERMISSION, text: None }]);
-        let s = f.permission_lost("a", 30);
-        assert_eq!(wires(&s, "a"), vec![Wire::Revoke { cause: revoke::NO_PERMISSION }]);
-        assert_eq!(f.general(), General::PendingRevoke);
-    }
-
-    #[test]
-    fn away_releases_speaker_but_not_the_revoked() {
-        let ms = m(&["a", "b"]);
-        let mut f = Floor::new(timers::T2_MS);
-        req(&mut f, "a", 0, &ms, 0);
-        let out = f.away("a", &ms, 10);
-        assert_eq!(f.general(), General::Idle);
-        assert_eq!(wires(&out, "b"), vec![Wire::Idle { prev: Some("a".into()), seq: 2 }]);
-        req(&mut f, "a", 0, &ms, 100);
-        req(&mut f, "b", 1, &ms, 110);
-        assert!(f.away("a", &ms, 120).is_empty());
-        assert_eq!(f.general(), General::PendingRevoke);
-    }
-
-    #[test]
-    fn ready_tells_current_holder_once() {
-        let ms = m(&["a", "b"]);
-        let mut f = Floor::new(timers::T2_MS);
-        assert_eq!(wires(&f.ready("b"), "b"), vec![Wire::Idle { prev: None, seq: 1 }]);
-        req(&mut f, "a", 0, &ms, 0);
-        assert_eq!(wires(&f.ready("b"), "b"), vec![Wire::Taken { speaker: "a".into(), seq: 3 }]);
-        assert!(f.ready("a").is_empty());
-    }
-
-    #[test]
-    fn idle_is_resent_by_t7_up_to_c7() {
-        let ms = m(&["a", "b"]);
-        let mut f = Floor::new(timers::T2_MS);
-        req(&mut f, "a", 0, &ms, 0);
-        f.rx("a", Rx::Release, ON, &ms, 10);
-        let mut sent = 0;
-        for k in 1..20u64 {
-            sent += wires(&f.tick(&ms, 10 + k * timers::T7_MS), "b").len();
-        }
-        assert_eq!(sent, (timers::C7 - 1) as usize);
-    }
+pub fn snapshot(room: &Room) -> serde_json::Value {
+    let fr = lock(&room.floor);
+    let s = &fr.srv;
+    let started = if s.holder().is_some() { Some(crate::sfu::now_ms().saturating_sub(mono_ms().saturating_sub(fr.taken_at))) } else { None };
+    serde_json::json!({
+        "speaker": s.holder(),
+        "queue": s.queue.iter().map(|w| serde_json::json!({ "user_id": w.u, "priority": w.p })).collect::<Vec<_>>(),
+        "started_at": started,
+    })
 }
-
-#[cfg(test)]
-mod replay;
