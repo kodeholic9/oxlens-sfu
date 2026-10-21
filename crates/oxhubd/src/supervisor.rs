@@ -1,445 +1,566 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.1 · 정§16-1 · §16-1-4 · §15-6 · §15-7 · model: claude-opus-5
+// spec: v1.2 @124a233 · 정:RULE-OPS-SUPERVISOR 정:RULE-OPS-SURFACE 정:RULE-BUS-FATE 정:IMPL-CFG-SYSTEM-FILE · 운영 규격서 §4-1 · model: claude-opus-5-5
+//! supervisor — 상태 여덟 · 종류 셋(process · remote · inproc) · 부모 생존 채널 · 기동 핸드셰이크(Hello) · backoff · 폭주.
 
-//! supervisor — ★**가름이 이 파일의 전부다.**
-//!
-//! `Down`(비정상 → backoff 재기동)과 `Stopped`(의도적 정지 → 방치)를 가르지 않으면
-//! `stop`/`load` 반복이 intensity 폭주로 읽혀 ★**hub 가 자폭한다.**
-//!
-//! ★**이 모듈은 판정만 한다** — 프로세스를 띄우고 거두는 것은 주인이 한다.
-//! 그래야 시계를 주입해 전이를 1층에서 전수로 시험할 수 있고, 흐름이 한 자리에 다 보인다
-//! (★콜백을 주입하지 않는다 — 흐름이 런타임에만 드러나면 추적이 불가능해진다).
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use common::system::{Unit, UnitKind};
+use common::rpc::UnitClient;
+use common::system::{System, UnitKind};
+use oxsig::Code;
+use oxsig::bplane::{UnitReq, UnitRes};
+use serde::Serialize;
+use tokio::sync::Notify;
+use tonic::transport::Channel;
 
-/// 정§16-1-4 — ★**사유가 여덟이라 여덟이다.**
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+const BACKOFF_CAP_MS: u64 = 30_000;
+const HELLO_POLL_MS: u64 = 200;
+const REMOTE_PROBE_MS: u64 = 1_000;
+const STOP_GRACE_MS: u64 = 5_000;
+pub const ZENOH_UNIT: &str = "zenoh";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum UnitState {
-    /// 설정이 끈 유닛 — 띄우지도 세지도 않는다.
     Disabled,
-    /// 쥐었으나 아직 안 띄웠다.
     Inactive,
-    /// 띄웠다. ★**아직 준비 신호가 없다.**
     Starting,
-    /// 준비됐다. ★★**유닛 `live` 가 이 상태 하나다.**
     Running,
-    /// graceful 종료 중.
     Stopping,
-    /// ★**의도적 정지 — 방치한다.**
     Stopped,
-    /// ★**비정상 종료 — backoff 뒤 재기동한다.**
     Down,
-    /// ★**backoff 폭주 — 더 못 살린다.**
     Blocked,
 }
 
-impl UnitState {
-    /// ★**유닛 `live` 는 이 하나다**(정§16-1 — 노드 축과 다른 물음).
-    pub fn is_live(self) -> bool {
-        self == UnitState::Running
-    }
-}
-
-/// 주인이 받아 손을 쓰는 판단. ★**콜백이 아니라 값이다.**
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Action {
-    /// 아무것도 안 한다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cmd {
     None,
-    /// 이 유닛을 띄운다.
-    Spawn(String),
-    /// 이 유닛에 종료 신호를 보낸다.
-    Signal(String),
-    /// ★**hub 를 내려라** — 살릴 수 없는 유닛이 생겼다(zenoh 면 노드가 통째로 내려간다).
-    ShutdownHub(String),
+    Stop,
+    Load,
+    Kill,
 }
 
-/// backoff 사다리. 창 안의 기동이 이 길이를 넘으면 `Blocked` 다.
-const BACKOFF_MS: &[u64] = &[500, 1_000, 2_000, 4_000, 8_000];
-/// intensity 창 — 이 시간 안의 기동만 센다.
-const WINDOW_MS: u64 = 60_000;
-
-#[derive(Debug, Clone)]
-pub struct UnitSup {
+pub struct Slot {
     pub id: String,
     pub kind: UnitKind,
-    pub order: u8,
+    pub order: u32,
+    pub role: String,
+    pub addr: Option<String>,
+    pub cmd: Vec<String>,
     pub state: UnitState,
-    /// ★**창 안의 기동 시각**만 쌓는다. `Stopped` 뒤의 기동은 여기 안 들어간다.
-    starts: Vec<u64>,
-    /// 총 재기동 횟수 — 관측용(창과 다른 축).
+    pub epoch: Option<String>,
     pub restarts: u32,
-    /// backoff 중이면 그 만료 시각.
-    retry_at: Option<u64>,
-    /// ★**기동 신원**(`epoch` = `sfu_id` = §15-1 `{inst}`) — 유닛이 등록할 때 받아 든다.
+    pub next_retry: Option<Instant>,
+    pub pid: Option<u32>,
+    pub starts: VecDeque<Instant>,
+    pub fails: u32,
+    pub client: Option<UnitClient<Channel>>,
+    cmd_req: Cmd,
+}
+
+pub struct Supervisor {
+    pub slots: Arc<Mutex<Vec<Slot>>>,
+    wake: Arc<Vec<Notify>>,
+    backoff_ms: u64,
+    intensity_max: u32,
+    intensity_window: Duration,
+    hello_timeout: Duration,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UnitView {
+    pub id: String,
+    pub kind: &'static str,
+    pub order: u32,
+    pub role: String,
+    pub addr: Option<String>,
+    pub state: UnitState,
+    pub restarts: u32,
+    pub next_retry_ms: Option<u64>,
     pub epoch: Option<String>,
 }
 
-impl UnitSup {
-    pub fn new(u: &Unit) -> Self {
-        Self {
-            id: u.id.clone(),
-            kind: u.kind,
-            order: u.order,
-            state: if u.enabled { UnitState::Inactive } else { UnitState::Disabled },
-            starts: Vec::new(),
-            restarts: 0,
-            retry_at: None,
-            epoch: None,
-        }
-    }
-
-    /// backoff 잔량 — `/admin/supervisor/status` 가 낸다. ★**backoff 중에만 값이 있다.**
-    pub fn next_retry_ms(&self, now: u64) -> Option<u64> {
-        self.retry_at.map(|t| t.saturating_sub(now))
-    }
-
-    fn prune(&mut self, now: u64) {
-        self.starts.retain(|t| now.saturating_sub(*t) <= WINDOW_MS);
-    }
-
-    /// ★★**무엇을 기동 시도로 세나 — 못 띄운 것도 센다.**
-    ///
-    /// 안 세면 intensity 가 안 올라 backoff 도 `Blocked` 도 안 걸리고
-    /// ★**없는 실행파일에 무한 재시도**를 돈다.
-    fn count_start(&mut self, now: u64) {
-        self.prune(now);
-        self.starts.push(now);
-        self.restarts += 1;
-    }
-
-    fn backoff_for(&self, n: usize) -> Option<u64> {
-        BACKOFF_MS.get(n.saturating_sub(1)).copied()
-    }
+pub struct StartCtx {
+    pub node: String,
+    pub build_label: Option<String>,
+    pub zenoh_namespace: String,
+    pub zenoh_connect: Option<String>,
+    pub log_dir: Option<String>,
+    pub log_socket: Option<String>,
 }
 
-/// 유닛 묶음의 판정기.
-#[derive(Debug, Clone, Default)]
-pub struct Supervisor {
-    pub units: Vec<UnitSup>,
+fn kind_name(k: UnitKind) -> &'static str {
+    match k {
+        UnitKind::Process => "process",
+        UnitKind::Remote => "remote",
+        UnitKind::Inproc => "inproc",
+    }
 }
 
 impl Supervisor {
-    pub fn new(units: &[Unit]) -> Self {
-        let mut v: Vec<UnitSup> = units.iter().map(UnitSup::new).collect();
-        v.sort_by(|a, b| (a.order, a.id.as_str()).cmp(&(b.order, b.id.as_str())));
-        Self { units: v }
-    }
-
-    pub fn get(&self, id: &str) -> Option<&UnitSup> {
-        self.units.iter().find(|u| u.id == id)
-    }
-
-    fn get_mut(&mut self, id: &str) -> Option<&mut UnitSup> {
-        self.units.iter_mut().find(|u| u.id == id)
-    }
-
-    /// 기동 — ★**순서 속성대로**(정지는 역순이다).
-    pub fn start_all(&mut self, now: u64) -> Vec<Action> {
-        let ids: Vec<String> = self
-            .units
-            .iter()
-            .filter(|u| u.state == UnitState::Inactive)
-            .map(|u| u.id.clone())
-            .collect();
-        ids.into_iter().map(|id| self.spawn(&id, now)).collect()
-    }
-
-    fn spawn(&mut self, id: &str, now: u64) -> Action {
-        match self.get_mut(id) {
-            Some(u) => {
-                u.count_start(now);
-                u.state = UnitState::Starting;
-                u.retry_at = None;
-                Action::Spawn(u.id.clone())
-            }
-            None => Action::None,
+    pub fn new(system: &System) -> Supervisor {
+        let mut slots = vec![Slot {
+            id: ZENOH_UNIT.into(),
+            kind: UnitKind::Inproc,
+            order: 0,
+            role: "bus".into(),
+            addr: None,
+            cmd: vec![],
+            state: UnitState::Inactive,
+            epoch: None,
+            restarts: 0,
+            next_retry: None,
+            pid: None,
+            starts: VecDeque::new(),
+            fails: 0,
+            client: None,
+            cmd_req: Cmd::None,
+        }];
+        for u in &system.unit {
+            slots.push(Slot {
+                id: u.id.clone(),
+                kind: u.kind,
+                order: u.order.max(1),
+                role: u.role.clone(),
+                addr: u.addr.clone(),
+                cmd: u.cmd.clone(),
+                state: if u.enabled { UnitState::Inactive } else { UnitState::Disabled },
+                epoch: None,
+                restarts: 0,
+                next_retry: None,
+                pid: None,
+                starts: VecDeque::new(),
+                fails: 0,
+                client: None,
+                cmd_req: Cmd::None,
+            });
+        }
+        slots.sort_by_key(|s| s.order);
+        let wake = Arc::new((0..slots.len()).map(|_| Notify::new()).collect());
+        Supervisor {
+            slots: Arc::new(Mutex::new(slots)),
+            wake,
+            backoff_ms: system.supervisor.backoff_ms,
+            intensity_max: system.supervisor.intensity_max,
+            intensity_window: Duration::from_secs(system.supervisor.intensity_window_secs),
+            hello_timeout: Duration::from_millis(system.supervisor.hello_timeout_ms),
         }
     }
 
-    /// 유닛이 준비됐다고 알려 왔다 — ★**기동 신원을 여기서 받아 든다.**
-    ///
-    /// ★**`Inactive` 에서 바로 오면 무시한다** — 띄운 적 없는 것이 살아 있을 수 없다.
-    pub fn on_ready(&mut self, id: &str, epoch: String) -> Action {
-        if let Some(u) = self.get_mut(id)
-            && u.state == UnitState::Starting
-        {
-            u.state = UnitState::Running;
-            u.epoch = Some(epoch);
-        }
-        Action::None
+    pub fn views(&self) -> Vec<UnitView> {
+        let now = Instant::now();
+        self.slots
+            .lock()
+            .map(|s| {
+                s.iter()
+                    .map(|u| UnitView {
+                        id: u.id.clone(),
+                        kind: kind_name(u.kind),
+                        order: u.order,
+                        role: u.role.clone(),
+                        addr: u.addr.clone(),
+                        state: u.state,
+                        restarts: u.restarts,
+                        next_retry_ms: u.next_retry.map(|t| t.saturating_duration_since(now).as_millis() as u64),
+                        epoch: u.epoch.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
-    /// 자식이 끝났다. ★`Stopping` 뒤였으면 의도적 정지고, 그 밖은 `Down` 이다.
-    pub fn on_exit(&mut self, id: &str, now: u64) -> Action {
-        let (state, n) = match self.get_mut(id) {
-            Some(u) => {
-                u.epoch = None;
-                if u.state == UnitState::Stopping {
-                    u.state = UnitState::Stopped;
-                    return Action::None;
-                }
-                u.state = UnitState::Down;
-                u.prune(now);
-                (u.state, u.starts.len())
+    pub fn set_state(&self, id: &str, st: UnitState) {
+        if let Ok(mut s) = self.slots.lock()
+            && let Some(u) = s.iter_mut().find(|u| u.id == id) {
+                u.state = st;
             }
-            None => return Action::None,
+    }
+
+    pub fn state_of(&self, id: &str) -> Option<UnitState> {
+        self.slots.lock().ok()?.iter().find(|u| u.id == id).map(|u| u.state)
+    }
+
+    pub fn sfu_id(&self) -> Option<String> {
+        self.slots.lock().ok()?.iter().find(|u| u.role == "sfu").map(|u| u.id.clone())
+    }
+
+    pub fn sfu_epoch(&self) -> Option<String> {
+        self.slots.lock().ok()?.iter().find(|u| u.role == "sfu" && u.state == UnitState::Running).and_then(|u| u.epoch.clone())
+    }
+
+    pub fn down_units(&self) -> Vec<String> {
+        self.slots
+            .lock()
+            .map(|s| s.iter().filter(|u| u.state != UnitState::Disabled && u.state != UnitState::Running).map(|u| u.id.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn supervising(&self) -> bool {
+        self.slots.lock().map(|s| s.iter().any(|u| u.kind != UnitKind::Inproc && u.state != UnitState::Disabled)).unwrap_or(false)
+    }
+
+    pub async fn sfu_call(&self, req: &UnitReq, timeout: Duration) -> Result<UnitRes, Code> {
+        let (client, id) = {
+            let s = self.slots.lock().map_err(|_| Code::INTERNAL_ERROR)?;
+            let u = s.iter().find(|u| u.role == "sfu").ok_or(Code::SFU_UNAVAILABLE)?;
+            if u.state != UnitState::Running {
+                return Err(Code::SFU_UNAVAILABLE);
+            }
+            (u.client.clone(), u.id.clone())
         };
-        debug_assert_eq!(state, UnitState::Down);
-        match self.get(id).and_then(|u| u.backoff_for(n)) {
-            Some(ms) => {
-                if let Some(u) = self.get_mut(id) {
-                    u.retry_at = Some(now + ms);
-                }
-                Action::None
+        self.call_slot(&id, client, req, timeout).await
+    }
+
+    pub async fn call_unit(&self, id: &str, req: &UnitReq, timeout: Duration) -> Result<UnitRes, Code> {
+        let client = {
+            let s = self.slots.lock().map_err(|_| Code::INTERNAL_ERROR)?;
+            let u = s.iter().find(|u| u.id == id).ok_or(Code::SFU_UNAVAILABLE)?;
+            if u.state != UnitState::Running {
+                return Err(Code::SFU_UNAVAILABLE);
             }
-            // ★사다리를 다 썼다 — 더 못 살린다.
+            u.client.clone()
+        };
+        self.call_slot(id, client, req, timeout).await
+    }
+
+    async fn call_slot(
+        &self,
+        id: &str,
+        client: Option<UnitClient<Channel>>,
+        req: &UnitReq,
+        timeout: Duration,
+    ) -> Result<UnitRes, Code> {
+        let mut c = match client {
+            Some(c) => c,
             None => {
-                if let Some(u) = self.get_mut(id) {
-                    u.state = UnitState::Blocked;
-                    u.retry_at = None;
+                let addr = self.slots.lock().ok().and_then(|s| s.iter().find(|u| u.id == id).and_then(|u| u.addr.clone()));
+                let addr = addr.ok_or(Code::SFU_UNAVAILABLE)?;
+                let c = common::rpc::connect(&addr).await.map_err(|_| Code::SFU_UNAVAILABLE)?;
+                if let Ok(mut s) = self.slots.lock()
+                    && let Some(u) = s.iter_mut().find(|u| u.id == id) {
+                        u.client = Some(c.clone());
+                    }
+                c
+            }
+        };
+        match common::rpc::call(&mut c, req, timeout).await {
+            Ok(r) => Ok(r),
+            Err(e) if e == "timeout" => Err(Code::SFU_ERROR),
+            Err(_) => Err(Code::SFU_UNAVAILABLE),
+        }
+    }
+
+    fn command(&self, id: &str, cmd: Cmd) -> Result<(UnitState, usize), Code> {
+        let mut s = self.slots.lock().map_err(|_| Code::INTERNAL_ERROR)?;
+        let idx = s.iter().position(|u| u.id == id).ok_or(Code::SFU_UNAVAILABLE)?;
+        let from = s[idx].state;
+        s[idx].cmd_req = cmd;
+        Ok((from, idx))
+    }
+
+    pub fn stop(&self, id: &str) -> Result<UnitState, Code> {
+        let (from, idx) = self.command(id, Cmd::Stop)?;
+        self.wake[idx].notify_one();
+        Ok(from)
+    }
+
+    pub fn load(&self, id: &str) -> Result<UnitState, Code> {
+        let (from, idx) = self.command(id, Cmd::Load)?;
+        self.wake[idx].notify_one();
+        Ok(from)
+    }
+
+    pub fn kill(&self, id: &str, if_epoch: &str) -> Result<UnitState, Code> {
+        {
+            let s = self.slots.lock().map_err(|_| Code::INTERNAL_ERROR)?;
+            let u = s.iter().find(|u| u.id == id).ok_or(Code::SFU_UNAVAILABLE)?;
+            if u.epoch.as_deref() != Some(if_epoch) {
+                return Err(Code::PRECONDITION_FAILED);
+            }
+        }
+        let (from, idx) = self.command(id, Cmd::Kill)?;
+        self.wake[idx].notify_one();
+        Ok(from)
+    }
+
+    pub fn epoch_of(&self, id: &str) -> Option<String> {
+        self.slots.lock().ok()?.iter().find(|u| u.id == id).and_then(|u| u.epoch.clone())
+    }
+
+    pub fn start(self: &Arc<Self>, ctx: Arc<StartCtx>, on_running: Arc<dyn Fn(String, String) + Send + Sync>) {
+        let n = self.slots.lock().map(|s| s.len()).unwrap_or(0);
+        for idx in 0..n {
+            let (kind, state) = match self.slots.lock() {
+                Ok(s) => (s[idx].kind, s[idx].state),
+                Err(_) => continue,
+            };
+            if kind == UnitKind::Inproc || state == UnitState::Disabled {
+                continue;
+            }
+            let me = self.clone();
+            let ctx = ctx.clone();
+            let cb = on_running.clone();
+            tokio::spawn(async move {
+                match kind {
+                    UnitKind::Process => me.run_process(idx, ctx, cb).await,
+                    UnitKind::Remote => me.run_remote(idx, cb).await,
+                    UnitKind::Inproc => {}
                 }
-                Action::ShutdownHub(id.to_string())
+            });
+        }
+    }
+
+    fn take_cmd(&self, idx: usize) -> Cmd {
+        match self.slots.lock() {
+            Ok(mut s) => std::mem::replace(&mut s[idx].cmd_req, Cmd::None),
+            Err(_) => Cmd::None,
+        }
+    }
+
+    fn with<R>(&self, idx: usize, f: impl FnOnce(&mut Slot) -> R) -> Option<R> {
+        self.slots.lock().ok().map(|mut s| f(&mut s[idx]))
+    }
+
+    fn record_start(&self, idx: usize, counted: bool) -> bool {
+        let window = self.intensity_window;
+        let max = self.intensity_max;
+        self.with(idx, |u| {
+            let now = Instant::now();
+            while u.starts.front().is_some_and(|t| now.duration_since(*t) > window) {
+                u.starts.pop_front();
+            }
+            if counted {
+                u.starts.push_back(now);
+            }
+            u.starts.len() as u32 > max
+        })
+        .unwrap_or(false)
+    }
+
+    async fn hello(&self, idx: usize) -> Option<String> {
+        let addr = self.with(idx, |u| u.addr.clone()).flatten()?;
+        let deadline = Instant::now() + self.hello_timeout;
+        while Instant::now() < deadline {
+            if let Ok(mut c) = common::rpc::connect(&addr).await
+                && let Ok(UnitRes::Hello(h)) = common::rpc::call(&mut c, &UnitReq::Hello, Duration::from_millis(1_000)).await {
+                    self.with(idx, |u| u.client = Some(c.clone()));
+                    return Some(h.epoch);
+                }
+            tokio::time::sleep(Duration::from_millis(HELLO_POLL_MS)).await;
+        }
+        None
+    }
+
+    async fn wait_cmd(&self, idx: usize, want: &[Cmd]) -> Cmd {
+        loop {
+            let c = self.take_cmd(idx);
+            if want.contains(&c) {
+                return c;
+            }
+            self.wake[idx].notified().await;
+        }
+    }
+
+    async fn run_process(self: Arc<Self>, idx: usize, ctx: Arc<StartCtx>, on_running: Arc<dyn Fn(String, String) + Send + Sync>) {
+        let mut counted = true;
+        loop {
+            let (id, cmd) = match self.with(idx, |u| (u.id.clone(), u.cmd.clone())) {
+                Some(v) => v,
+                None => return,
+            };
+            if self.record_start(idx, counted) {
+                self.with(idx, |u| u.state = UnitState::Blocked);
+                tracing::warn!(kind = "ev", spec = "SV-STATE-BLOCKED", unit = id.as_str(), "unit blocked");
+                self.wait_cmd(idx, &[Cmd::Load]).await;
+                self.with(idx, |u| u.starts.clear());
+                counted = false;
+                continue;
+            }
+            counted = true;
+            self.with(idx, |u| {
+                u.state = UnitState::Starting;
+                u.epoch = None;
+                u.client = None;
+                u.next_retry = None;
+            });
+            let mut c = tokio::process::Command::new(cmd.first().cloned().unwrap_or_default());
+            c.args(cmd.iter().skip(1));
+            c.arg("--id").arg(&ctx.node);
+            if let Some(l) = &ctx.build_label {
+                c.arg("--build").arg(l);
+            }
+            c.arg("--zenoh-namespace").arg(&ctx.zenoh_namespace);
+            if let Some(z) = &ctx.zenoh_connect {
+                c.arg("--zenoh-connect").arg(z);
+            }
+            if let Some(d) = &ctx.log_dir {
+                c.arg("--log-dir").arg(d);
+            }
+            if let Some(s) = &ctx.log_socket {
+                c.arg("--log-socket").arg(s);
+            }
+            c.stdin(std::process::Stdio::piped());
+            let mut child = match c.spawn() {
+                Ok(ch) => ch,
+                Err(e) => {
+                    tracing::warn!(kind = "diag", unit = id.as_str(), "spawn failed: {e}");
+                    self.down_and_backoff(idx).await;
+                    continue;
+                }
+            };
+            let _liveness = child.stdin.take();
+            self.with(idx, |u| u.pid = child.id());
+            let epoch = tokio::select! {
+                e = self.hello(idx) => e,
+                _ = child.wait() => None,
+            };
+            let Some(epoch) = epoch else {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                self.down_and_backoff(idx).await;
+                continue;
+            };
+            self.with(idx, |u| {
+                u.state = UnitState::Running;
+                u.epoch = Some(epoch.clone());
+                u.fails = 0;
+            });
+            tracing::info!(kind = "ev", spec = "SV-STATE-RUNNING", unit = id.as_str(), epoch = epoch.as_str(), "unit running");
+            on_running(id.clone(), epoch);
+            loop {
+                tokio::select! {
+                    _ = child.wait() => break,
+                    _ = self.wake[idx].notified() => {
+                        match self.take_cmd(idx) {
+                            Cmd::Stop => {
+                                self.with(idx, |u| u.state = UnitState::Stopping);
+                                signal(child.id(), nix::sys::signal::Signal::SIGTERM);
+                                if tokio::time::timeout(Duration::from_millis(STOP_GRACE_MS), child.wait()).await.is_err() {
+                                    let _ = child.start_kill();
+                                    let _ = child.wait().await;
+                                }
+                                break;
+                            }
+                            Cmd::Kill => {
+                                let _ = child.start_kill();
+                                let _ = child.wait().await;
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            let stopping = self.with(idx, |u| u.state == UnitState::Stopping).unwrap_or(false);
+            self.with(idx, |u| {
+                u.pid = None;
+                u.client = None;
+            });
+            if stopping {
+                self.with(idx, |u| u.state = UnitState::Stopped);
+                tracing::info!(kind = "ev", spec = "SV-STATE-STOPPED", unit = id.as_str(), "unit stopped");
+                self.wait_cmd(idx, &[Cmd::Load]).await;
+                counted = false;
+                continue;
+            }
+            tracing::warn!(kind = "ev", spec = "SV-STATE-DOWN", unit = id.as_str(), "unit down");
+            self.with(idx, |u| u.restarts = u.restarts.saturating_add(1));
+            self.down_and_backoff(idx).await;
+        }
+    }
+
+    async fn down_and_backoff(&self, idx: usize) {
+        let base = self.backoff_ms.max(1);
+        let wait = self
+            .with(idx, |u| {
+                u.state = UnitState::Down;
+                u.fails = u.fails.saturating_add(1);
+                let shift = u.fails.saturating_sub(1).min(16);
+                let w = base.saturating_mul(1u64 << shift).min(BACKOFF_CAP_MS);
+                u.next_retry = Some(Instant::now() + Duration::from_millis(w));
+                w
+            })
+            .unwrap_or(base);
+        let sleep = tokio::time::sleep(Duration::from_millis(wait));
+        tokio::pin!(sleep);
+        loop {
+            tokio::select! {
+                _ = &mut sleep => return,
+                _ = self.wake[idx].notified() => {
+                    if self.take_cmd(idx) == Cmd::Stop {
+                        self.with(idx, |u| u.state = UnitState::Stopped);
+                        self.wait_cmd(idx, &[Cmd::Load]).await;
+                        return;
+                    }
+                }
             }
         }
     }
 
-    /// ★**exec 가 실패했다 — 이것도 기동 시도다.** 안 세면 무한 재시도를 돈다.
-    pub fn on_spawn_failed(&mut self, id: &str, now: u64) -> Action {
-        self.on_exit(id, now)
-    }
-
-    /// 시계가 흘렀다 — backoff 가 만료된 유닛을 다시 띄운다.
-    pub fn tick(&mut self, now: u64) -> Vec<Action> {
-        let due: Vec<String> = self
-            .units
-            .iter()
-            .filter(|u| u.state == UnitState::Down && u.retry_at.is_some_and(|t| t <= now))
-            .map(|u| u.id.clone())
-            .collect();
-        due.into_iter().map(|id| self.spawn(&id, now)).collect()
-    }
-
-    /// 운영자가 내렸다 — ★**`Stopped` 로 적고 재기동하지 않는다.**
-    ///
-    /// ★**상태를 먼저 `Stopping` 으로 적고 신호를 낸다** — 그래야 자식이 끝났을 때
-    /// `on_exit` 이 그것을 ★**의도적 정지로 읽는다.** 순서가 뒤집히면 급사로 읽혀 되살아난다.
-    pub fn stop(&mut self, id: &str) -> Option<(UnitState, UnitState, Action)> {
-        let u = self.get_mut(id)?;
-        let from = u.state;
-        if from == UnitState::Disabled {
-            return Some((from, from, Action::None));
+    async fn run_remote(self: Arc<Self>, idx: usize, on_running: Arc<dyn Fn(String, String) + Send + Sync>) {
+        loop {
+            self.with(idx, |u| u.state = UnitState::Starting);
+            let Some(epoch) = self.hello(idx).await else {
+                self.with(idx, |u| u.state = UnitState::Down);
+                tokio::time::sleep(Duration::from_millis(REMOTE_PROBE_MS)).await;
+                continue;
+            };
+            let id = self.with(idx, |u| {
+                u.state = UnitState::Running;
+                u.epoch = Some(epoch.clone());
+                u.id.clone()
+            });
+            if let Some(id) = id {
+                on_running(id, epoch.clone());
+            }
+            loop {
+                tokio::time::sleep(Duration::from_millis(REMOTE_PROBE_MS)).await;
+                let client = self.with(idx, |u| u.client.clone()).flatten();
+                let ok = match client {
+                    Some(mut c) => matches!(
+                        common::rpc::call(&mut c, &UnitReq::Hello, Duration::from_millis(1_000)).await,
+                        Ok(UnitRes::Hello(h)) if h.epoch == epoch
+                    ),
+                    None => false,
+                };
+                if !ok {
+                    self.with(idx, |u| {
+                        u.state = UnitState::Down;
+                        u.client = None;
+                    });
+                    break;
+                }
+            }
         }
-        u.state = UnitState::Stopping;
-        u.retry_at = None;
-        Some((from, UnitState::Stopping, Action::Signal(u.id.clone())))
     }
 
-    /// 운영자가 죽였다 — ★★**급사 경로를 만드는 자리다**(운영 §4-1).
-    ///
-    /// ★**`stop` 과 같은 신호를 내지만 상태를 안 건드린다** — 그 차이 하나가
-    /// `on_exit` 에서 *"의도적 정지"* 와 *"죽었다"* 를 가른다. 그래서 backoff 가 되살린다.
-    /// ★**`to` 는 선언이다** — 실제 전이는 자식이 끝난 것을 본 뒤에 선다(지어내지 않는다).
-    pub fn kill(&mut self, id: &str) -> Option<(UnitState, UnitState, Action)> {
-        let u = self.get(id)?;
-        let from = u.state;
-        if from == UnitState::Disabled {
-            return Some((from, from, Action::None));
+    pub async fn shutdown_units(&self) {
+        let pids: Vec<(String, Option<u32>)> = self
+            .slots
+            .lock()
+            .map(|s| s.iter().rev().filter(|u| u.kind == UnitKind::Process).map(|u| (u.id.clone(), u.pid)).collect())
+            .unwrap_or_default();
+        for (id, pid) in pids {
+            self.set_state(&id, UnitState::Stopping);
+            signal(pid, nix::sys::signal::Signal::SIGTERM);
+            let deadline = Instant::now() + Duration::from_millis(STOP_GRACE_MS);
+            while Instant::now() < deadline && pid.is_some_and(alive) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            if pid.is_some_and(alive) {
+                signal(pid, nix::sys::signal::Signal::SIGKILL);
+            }
+            self.set_state(&id, UnitState::Stopped);
         }
-        Some((from, UnitState::Down, Action::Signal(u.id.clone())))
-    }
-
-    /// 운영자가 다시 올렸다. ★**`Stopped` 뒤의 기동은 창에 안 쌓는다** — 열 번 껐다 켠 것이
-    /// 폭주로 세이면 hub 가 자폭한다.
-    pub fn load(&mut self, id: &str, now: u64) -> Option<(UnitState, UnitState, Action)> {
-        let u = self.get_mut(id)?;
-        let from = u.state;
-        // ★`Disabled` 는 설정이 끈 것이라 `load` 가 먹지 않는다 — `Stopped` 와 다른 값인 이유다.
-        if from == UnitState::Disabled {
-            return Some((from, from, Action::None));
-        }
-        u.state = UnitState::Starting;
-        u.retry_at = None;
-        let action = Action::Spawn(u.id.clone());
-        let _ = now;
-        Some((from, UnitState::Starting, action))
-    }
-
-    /// 종료 — ★**정지는 기동의 역순이다**(§15-6: zenoh 는 나중에 닫힌다).
-    pub fn stop_order(&self) -> Vec<&UnitSup> {
-        let mut v: Vec<&UnitSup> = self.units.iter().filter(|u| u.state != UnitState::Disabled).collect();
-        v.sort_by(|a, b| (b.order, b.id.as_str()).cmp(&(a.order, a.id.as_str())));
-        v
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn unit(id: &str, order: u8, enabled: bool) -> Unit {
-        Unit {
-            id: id.into(),
-            kind: UnitKind::Process,
-            order,
-            role: String::new(),
-            cmd: vec!["x".into()],
-            addr: String::new(),
-            enabled,
-        }
+fn signal(pid: Option<u32>, sig: nix::sys::signal::Signal) {
+    if let Some(p) = pid {
+        let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(p as i32), sig);
     }
+}
 
-    fn sup() -> Supervisor {
-        Supervisor::new(&[unit("zenoh", 1, true), unit("sfu-1", 2, true), unit("off", 3, false)])
-    }
-
-    #[test]
-    fn 설정이_끈_유닛은_다른_값이다() {
-        let s = sup();
-        assert_eq!(s.get("off").expect("u").state, UnitState::Disabled);
-        assert_ne!(UnitState::Disabled, UnitState::Stopped, "★합치면 load 가 먹는 줄 안다");
-    }
-
-    #[test]
-    fn 기동은_순서대로_정지는_역순이다() {
-        let mut s = sup();
-        let acts = s.start_all(0);
-        assert_eq!(acts[0], Action::Spawn("zenoh".into()), "★zenoh 가 먼저 선다");
-        let ids: Vec<&str> = s.stop_order().iter().map(|u| u.id.as_str()).collect();
-        assert_eq!(ids, vec!["sfu-1", "zenoh"], "★나중에 닫힌다");
-    }
-
-    #[test]
-    fn 띄운_적_없으면_살아_있을_수_없다() {
-        let mut s = sup();
-        s.on_ready("sfu-1", "e1".into());
-        // ★`Inactive`→`Running` 직행이 되면 healthz/ready 가 200 을 낸다.
-        assert_eq!(s.get("sfu-1").expect("u").state, UnitState::Inactive);
-        assert!(!s.get("sfu-1").expect("u").state.is_live());
-    }
-
-    #[test]
-    fn 준비_신호가_기동_신원을_들여온다() {
-        let mut s = sup();
-        s.start_all(0);
-        s.on_ready("sfu-1", "sfu-7f3a".into());
-        let u = s.get("sfu-1").expect("u");
-        assert_eq!(u.state, UnitState::Running);
-        assert!(u.state.is_live(), "★유닛 live 는 Running 하나다");
-        assert_eq!(u.epoch.as_deref(), Some("sfu-7f3a"), "★kill 의 확인값이 이 값이다");
-    }
-
-    #[test]
-    fn 의도적_정지는_방치한다() {
-        let mut s = sup();
-        s.start_all(0);
-        s.on_ready("sfu-1", "e".into());
-        assert_eq!(
-            s.stop("sfu-1"),
-            Some((UnitState::Running, UnitState::Stopping, Action::Signal("sfu-1".into())))
-        );
-        s.on_exit("sfu-1", 10);
-        assert_eq!(s.get("sfu-1").expect("u").state, UnitState::Stopped);
-        // ★backoff 로 되살아나면 안 된다.
-        assert!(s.tick(999_999).is_empty(), "★Stopped 는 방치한다");
-    }
-
-    #[test]
-    fn 죽이기와_내리기는_같은_신호에_다른_뜻이다() {
-        // ★★**신호는 같고 상태가 다르다** — 그 차이 하나가 `on_exit` 에서 갈린다.
-        let mut s = sup();
-        s.start_all(0);
-        s.on_ready("sfu-1", "e1".into());
-
-        // 내리기 — 미리 `Stopping` 으로 적어 두어 급사로 안 읽힌다.
-        let (from, to, act) = s.stop("sfu-1").expect("있다");
-        assert_eq!((from, to), (UnitState::Running, UnitState::Stopping));
-        assert_eq!(act, Action::Signal("sfu-1".into()));
-        assert_eq!(s.on_exit("sfu-1", 1_000), Action::None);
-        assert_eq!(s.get("sfu-1").expect("있다").state, UnitState::Stopped);
-        assert!(s.tick(10_000).is_empty(), "★내린 것은 안 되살린다");
-
-        // 죽이기 — 상태를 안 건드리므로 그대로 급사 경로다.
-        s.load("sfu-1", 20_000);
-        s.on_ready("sfu-1", "e2".into());
-        let (from, to, act) = s.kill("sfu-1").expect("있다");
-        assert_eq!((from, to), (UnitState::Running, UnitState::Down));
-        assert_eq!(act, Action::Signal("sfu-1".into()));
-        s.on_exit("sfu-1", 21_000);
-        assert_eq!(s.get("sfu-1").expect("있다").state, UnitState::Down);
-        assert!(!s.tick(30_000).is_empty(), "★죽은 것은 backoff 가 되살린다");
-    }
-
-    #[test]
-    fn 죽이기는_기동_신원을_지운다() {
-        // ★`epoch` 는 기동마다 새 값이라, 그것이 살아 있으면 "내가 본 그 프로세스" 가 흐려진다.
-        let mut s = sup();
-        s.start_all(0);
-        s.on_ready("sfu-1", "e1".into());
-        assert_eq!(s.get("sfu-1").expect("있다").epoch.as_deref(), Some("e1"));
-        s.kill("sfu-1");
-        s.on_exit("sfu-1", 1_000);
-        assert_eq!(s.get("sfu-1").expect("있다").epoch, None);
-    }
-
-    #[test]
-    fn 급사는_backoff_로_되살린다() {
-        let mut s = sup();
-        s.start_all(0);
-        s.on_ready("sfu-1", "e".into());
-        s.on_exit("sfu-1", 100);
-        let u = s.get("sfu-1").expect("u");
-        assert_eq!(u.state, UnitState::Down);
-        assert_eq!(u.next_retry_ms(100), Some(500));
-        assert!(s.tick(200).is_empty(), "★만료 전엔 안 띄운다");
-        assert_eq!(s.tick(600), vec![Action::Spawn("sfu-1".into())]);
-    }
-
-    #[test]
-    fn 못_띄운_것도_기동_시도다() {
-        // ★안 세면 없는 실행파일에 무한 재시도를 돈다.
-        let mut s = sup();
-        let mut now = 0;
-        // 첫 기동 — 없는 실행파일이라 exec 가 실패한다.
-        s.start_all(now);
-        let mut last = s.on_spawn_failed("sfu-1", now);
-        // ★사다리를 타고 다시 띄우기를 되풀이한다 — 매번 "기동 시도"로 세야 한다.
-        for _ in 0..BACKOFF_MS.len() {
-            assert_eq!(last, Action::None, "아직 사다리가 남았다");
-            let wait = s.get("sfu-1").expect("u").next_retry_ms(now).expect("backoff");
-            now += wait;
-            assert_eq!(s.tick(now), vec![Action::Spawn("sfu-1".into())]);
-            last = s.on_spawn_failed("sfu-1", now);
-        }
-        assert_eq!(last, Action::ShutdownHub("sfu-1".into()));
-        assert_eq!(s.get("sfu-1").expect("u").state, UnitState::Blocked);
-        // ★더는 안 띄운다 — 무한 재시도가 여기서 멎는다.
-        assert!(s.tick(now + 999_999).is_empty());
-    }
-
-    #[test]
-    fn 껐다_켜기를_되풀이해도_자폭하지_않는다() {
-        // ★`Stopped` 뒤의 기동은 창에 안 쌓는다 — 열 번 stop/load 가 폭주로 세이면 hub 가 죽는다.
-        let mut s = sup();
-        s.start_all(0);
-        s.on_ready("sfu-1", "e".into());
-        for i in 0..10 {
-            let now = 1_000 + i * 10;
-            s.stop("sfu-1");
-            s.on_exit("sfu-1", now);
-            let (_, to, _) = s.load("sfu-1", now).expect("load");
-            assert_eq!(to, UnitState::Starting);
-            s.on_ready("sfu-1", "e".into());
-        }
-        assert_eq!(s.get("sfu-1").expect("u").state, UnitState::Running);
-        assert_ne!(s.get("sfu-1").expect("u").state, UnitState::Blocked);
-    }
-
-    #[test]
-    fn 꺼진_유닛은_load_가_안_먹는다() {
-        let mut s = sup();
-        let (from, to, act) = s.load("off", 0).expect("load");
-        assert_eq!(from, UnitState::Disabled);
-        assert_eq!(to, UnitState::Disabled);
-        assert_eq!(act, Action::None);
-    }
+fn alive(pid: u32) -> bool {
+    nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok()
 }

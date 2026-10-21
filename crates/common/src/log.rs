@@ -62,7 +62,10 @@ fn level_name(l: LoggingLevel) -> &'static str {
 }
 
 pub fn init(cfg: LogConfig<'_>) {
-    let base = std::env::var("OX_LOG").unwrap_or_else(|_| level_name(cfg.logging.level).to_string());
+    let base = std::env::var("OX_LOG").unwrap_or_else(|_| {
+        let l = level_name(cfg.logging.level);
+        format!("{l},zenoh=warn,zenoh_transport=warn,zenoh_link_tcp=warn,zenoh_config=warn,zenoh_runtime=warn,h2=warn,tonic=warn")
+    });
     let filter = EnvFilter::try_new(&base).unwrap_or_else(|_| EnvFilter::new("info"));
     let (filter, handle) = reload::Layer::new(filter);
     let counters = Arc::new(Counters::default());

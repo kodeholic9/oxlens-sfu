@@ -1,355 +1,743 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.1 · 정§3-1 · §3-2 · §3-3 · §3-5 · §16-1-2 · model: claude-opus-5
+// spec: v1.2 @124a233 · 정:SES 정:IMPL-ROOM-JOIN ① 정:RULE-BUS-EVENTS 정:RULE-BUS-REQUEST 연:SES.op 연:RULE-SES-AUTH-TWO-WAYS 연:RULE-SES-EVICT-OLD 연:RULE-ROOM-JOIN-NUMBER-TAGS · model: claude-opus-5-5
+//! 세션 — 게이트웨이가 든 클라 접속 하나. 폐기 경로는 하나(§17 순서는 미디어 서버가 돈다).
 
-//! 세션 — ★**인증 두 갈래, `session_id` 가 이긴다.**
-//!
-//! ★**판정만 한다** — 소켓도 시계도 주인이 쥔다. 그래야 갈래 전량을 1층에서 태운다.
+use std::collections::{BTreeSet, HashMap};
+use std::time::Instant;
 
-use oxsig::body::session::PcMode;
-use oxsig::{Code, Permission};
+use oxsig::bplane::{Caller, EndPath, Home, NodeReq, NodeRes, ResumePart, SessionData, UnitEvent, UnitReq, UnitRes};
+use oxsig::wire::{
+    Affiliation, AffiliationReq, BindReq, BindRes, IceRestartReq, MessageReq, PcMode, Permission, PublishTracksReq,
+    ReadyReq, ResumeRes, RoomEventBody, RoomJoinReq, RoomLeaveReq, SubscribeLayerReq, TrackSetReq,
+};
+use oxsig::{Code, Frame, Op};
 
-/// 세션 하나(정§3-1). ★**토큰은 붙을 때만 본다** — 접속 중 재검사가 없다.
-#[derive(Debug, Clone, PartialEq, Eq)]
+use crate::auth::{ALL_ALLOWED, Claims};
+use crate::conn::ConnHandle;
+use crate::route::{fail_frame, res_frame};
+use crate::state::Hub;
+
 pub struct Session {
-    /// ★**이어받아지는 동안 불변**이다.
-    pub id: String,
+    pub sid: String,
     pub user_id: String,
     pub participant_type: u8,
     pub hidden: bool,
-    /// ★**방 입장 때 `RoomMember.permission` 의 씨앗일 뿐**이다 — 갱신은 방 단위다.
+    pub metadata: Option<serde_json::Value>,
     pub permission: Permission,
     pub pc_mode: PcMode,
-    /// ★**이어받은 세션인가** — `RESUME` 이 이것을 본다.
+    pub conn: Option<ConnHandle>,
     pub resumed: bool,
-    /// 소켓이 죽은 순간. 살아 있으면 `None`.
-    pub dead_at: Option<u64>,
+    pub dropped_at: Option<Instant>,
+    pub rooms: HashMap<String, String>,
+    pub units: BTreeSet<String>,
+    pub user_sub: Option<tokio::task::JoinHandle<()>>,
+    pub token: Option<zenoh::liveliness::LivelinessToken>,
 }
 
-/// `BIND` 가 내는 답.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BindOutcome {
-    /// 판정 1 — ★**그 세션으로 인증. 토큰을 보지 않는다.** 같은 `session_id` 를 에코한다.
-    Resumed { session_id: String },
-    /// 판정 2 — 새 세션.
-    Fresh { session_id: String },
-    /// 판정 3 — 새 세션이고 ★**같은 신원의 산 세션을 축출**한다(옛 연결에 `LEAVE` `2010`).
-    FreshEvicting { session_id: String, evicted: String },
-    /// 실패 — 그 코드로 답한다.
-    Rejected(Code),
+#[derive(Default)]
+pub struct Registry {
+    pub by_sid: HashMap<String, Session>,
+    pub by_user: HashMap<String, String>,
 }
 
-/// 세션 창고. ★**창 안에서는 죽은 세션도 산다**(이어받기의 재료다).
-#[derive(Debug, Default)]
-pub struct Sessions {
-    items: Vec<Session>,
-    seq: u64,
-    /// ★**방금 축출된 것** — 통보할 대상을 잃지 않으려고 한 걸음 들고 있는다.
-    last_evicted: Vec<(String, String)>,
+fn serde_code(e: &serde_json::Error) -> Code {
+    if e.to_string().contains("missing field") { Code::MISSING_FIELD } else { Code::INVALID_PAYLOAD }
 }
 
-/// `BIND` 에 실려 온 것 중 판정에 쓰는 것.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BindInput {
-    pub session_id: Option<String>,
-    /// 토큰 검증 결과 — ★**판정 1 에서는 쓰지 않는다**(토큰을 안 본다).
-    pub verified: Option<VerifiedToken>,
-    /// 토큰 검증이 실패했으면 그 코드.
-    pub token_error: Option<Code>,
-    pub pc_mode: Option<PcMode>,
-    pub client_ver: Option<u32>,
+fn parse<T: serde::de::DeserializeOwned>(f: &Frame) -> Result<T, Frame> {
+    f.parse::<T>().map_err(|e| fail_frame(f.op, f.pid, &serde_code(&e).failure_msg(e.to_string())))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VerifiedToken {
-    pub user_id: String,
-    pub participant_type: u8,
-    pub hidden: bool,
-    pub permission: Permission,
+fn fail(f: &Frame, c: Code) -> Frame {
+    fail_frame(f.op, f.pid, &c.failure())
 }
 
-/// 이 규격서가 받는 세대.
-pub const SERVER_VER: u32 = 1;
+fn fail_msg(f: &Frame, c: Code, m: &str) -> Frame {
+    fail_frame(f.op, f.pid, &c.failure_msg(m))
+}
 
-impl Sessions {
-    pub fn new() -> Self {
-        Self::default()
+pub fn valid_room_id(r: &str) -> bool {
+    common::keyspace::valid_piece(r) && r.len() <= 255
+}
+
+pub fn lookup_user(hub: &Hub, sid: &str) -> Option<String> {
+    hub.sessions.lock().ok()?.by_sid.get(sid).map(|s| s.user_id.clone())
+}
+
+pub fn session_rooms(hub: &Hub, sid: &str) -> Option<Vec<String>> {
+    hub.sessions.lock().ok()?.by_sid.get(sid).map(|s| s.rooms.keys().cloned().collect())
+}
+
+fn bind_reply(hub: &Hub, f: &Frame, user: &str, sid: &str, pc: PcMode) -> Frame {
+    let res = BindRes {
+        user_id: user.to_string(),
+        server_ver: 1,
+        heartbeat_interval: u64::from(hub.policy.hub.heartbeat_interval_ms),
+        session_id: sid.to_string(),
+        resume_window_ms: u64::from(hub.policy.hub.resume_window_ms),
+        pc_mode: pc,
+    };
+    Frame::ok(f.op, f.pid, serde_json::to_vec(&res).unwrap_or_default())
+}
+
+pub async fn bind(hub: &std::sync::Arc<Hub>, conn: &ConnHandle, f: &Frame) -> Result<String, Frame> {
+    let req: BindReq = parse(f)?;
+    if req.client_ver.is_some_and(|v| v != 1) {
+        hub.count_code(1004);
+        return Err(fail(f, Code::VERSION_MISMATCH));
     }
-
-    fn next_id(&mut self) -> String {
-        self.seq += 1;
-        format!("s-{}", self.seq)
-    }
-
-    pub fn get(&self, id: &str) -> Option<&Session> {
-        self.items.iter().find(|s| s.id == id)
-    }
-
-    /// 그 사람의 세션들 — ★**unicast 통지의 대상**이다(정§17-2 ⑧).
-    /// 운영 §3-3 — ★**붙어 있는 것만** 낸다(소켓이 죽은 것은 창 안에 살아 있어도 "붙어 있지" 않다).
-    ///
-    /// ★**토큰·비밀은 안 낸다.** `hidden` 은 ★여기 나온다 — 명단에서 감추는 것은
-    /// 참가자끼리의 축이고(연§4-4), 운영자는 누가 붙어 있는지 다 본다.
-    pub fn admin_rows(&self) -> Vec<serde_json::Value> {
-        self.items
-            .iter()
-            .filter(|s| s.dead_at.is_none())
-            .map(|s| {
-                serde_json::json!({
-                    "session_id": s.id,
-                    "user_id": s.user_id,
-                    "participant_type": s.participant_type,
-                    "hidden": s.hidden,
-                })
-            })
-            .collect()
-    }
-
-    /// 지금 붙어 있는 사람들 — ★**죽은 소켓은 빼고** 센다(관심 선언의 대상이다, 정§15-4).
-    pub fn users(&self) -> std::collections::BTreeSet<String> {
-        self.items.iter().filter(|s| s.dead_at.is_none()).map(|s| s.user_id.clone()).collect()
-    }
-
-    pub fn sessions_of(&self, user_id: &str) -> Vec<String> {
-        self.items.iter().filter(|s| s.user_id == user_id).map(|s| s.id.clone()).collect()
-    }
-
-    pub fn live_of(&self, user_id: &str) -> Option<&Session> {
-        self.items.iter().find(|s| s.user_id == user_id && s.dead_at.is_none())
-    }
-
-    /// 창이 지난 세션을 거둔다. ★**창 안에서는 거두지 않는다** — 그것이 이어받기의 전부다.
-    pub fn sweep(&mut self, now: u64, window_ms: u64) -> Vec<String> {
-        let gone: Vec<String> = self
-            .items
-            .iter()
-            .filter(|s| s.dead_at.is_some_and(|t| now.saturating_sub(t) > window_ms))
-            .map(|s| s.id.clone())
-            .collect();
-        self.items.retain(|s| !gone.contains(&s.id));
-        gone
-    }
-
-    /// 소켓이 죽었다 — ★**세션은 창 동안 산다.**
-    pub fn on_socket_dead(&mut self, id: &str, now: u64) {
-        if let Some(s) = self.items.iter_mut().find(|s| s.id == id) {
-            s.dead_at = Some(now);
+    if let Some(old) = req.session_id.as_deref().filter(|s| !s.is_empty()) {
+        if let Some((user, pc)) = attach_local(hub, old, conn) {
+            conn.reply(bind_reply(hub, f, &user, old, pc));
+            tracing::info!(kind = "ev", spec = "CP-OP-BIND", user = user.as_str(), "bind resumed");
+            return Ok(old.to_string());
+        }
+        if let Some((user, pc)) = take_remote(hub, old, conn).await {
+            conn.reply(bind_reply(hub, f, &user, old, pc));
+            tracing::info!(kind = "ev", spec = "CP-OP-BIND", user = user.as_str(), "bind handed over");
+            return Ok(old.to_string());
         }
     }
-
-    /// ★**즉시 폐기 — 창을 잡지 않는다.** 운영자 절단(`cut`)과 클라 `LEAVE` 둘뿐이다.
-    ///
-    /// 창을 잡아 두면 클라가 `RESUME` 으로 그대로 돌아오고, ★`RESUME` 은 토큰을 안 보므로
-    /// ★**`cut` 이 아무것도 못 시킨다.**
-    pub fn discard(&mut self, id: &str) -> bool {
-        let before = self.items.len();
-        self.items.retain(|s| s.id != id);
-        before != self.items.len()
+    let claims = match crate::auth::verify_user(&hub.system, &req.token) {
+        Ok(c) => c,
+        Err(c) => {
+            hub.count_code(c.0);
+            return Err(fail(f, c));
+        }
+    };
+    let max = hub.policy.quota.max_sessions;
+    if max > 0 && hub.sessions.lock().map(|s| s.by_sid.len() as u32).unwrap_or(0) >= max {
+        hub.count_code(4003);
+        return Err(fail(f, Code::QUOTA_EXCEEDED));
     }
+    let pc = req.pc_mode.unwrap_or(PcMode::V2pc);
+    let sid = common::ident::random_hex(16);
+    evict_user(hub, &claims.sub, &sid).await;
+    let session = new_session(hub, &sid, &claims, pc, conn.clone()).await;
+    if let Ok(mut r) = hub.sessions.lock() {
+        r.by_user.insert(claims.sub.clone(), sid.clone());
+        r.by_sid.insert(sid.clone(), session);
+    }
+    conn.reply(bind_reply(hub, f, &claims.sub, &sid, pc));
+    tracing::info!(kind = "ev", spec = "CP-OP-BIND", user = claims.sub.as_str(), "bind new session");
+    Ok(sid)
+}
 
-    /// `BIND` 판정(정§3-2). ★**순서가 계약이다** — `session_id` 를 먼저 본다.
-    pub fn bind(&mut self, input: &BindInput, now: u64, window_ms: u64) -> BindOutcome {
-        // 5. 세대 — 미송신은 `1`.
-        if input.client_ver.unwrap_or(1) != SERVER_VER {
-            return BindOutcome::Rejected(Code::VersionMismatch);
+async fn new_session(hub: &std::sync::Arc<Hub>, sid: &str, c: &Claims, pc: PcMode, conn: ConnHandle) -> Session {
+    let user_sub = crate::bus::subscribe_user(hub, &c.sub).await;
+    let token = crate::bus::declare_sess(hub, &c.sub, sid).await;
+    Session {
+        sid: sid.to_string(),
+        user_id: c.sub.clone(),
+        participant_type: c.participant_type,
+        hidden: c.hidden,
+        metadata: c.metadata.clone(),
+        permission: c.permission.unwrap_or(ALL_ALLOWED),
+        pc_mode: pc,
+        conn: Some(conn),
+        resumed: false,
+        dropped_at: None,
+        rooms: HashMap::new(),
+        units: BTreeSet::new(),
+        user_sub,
+        token,
+    }
+}
+
+fn attach_local(hub: &Hub, sid: &str, conn: &ConnHandle) -> Option<(String, PcMode)> {
+    let mut r = hub.sessions.lock().ok()?;
+    let s = r.by_sid.get_mut(sid)?;
+    if let Some(old) = s.conn.take()
+        && old.id != conn.id && !old.is_closed() {
+            old.leave(Code::DUPLICATE_SESSION);
         }
-        // 1. ★창 안 + 서버 생존이면 그 세션으로 인증한다 — ★**토큰을 보지 않는다.**
-        //    이것을 빼먹고 토큰부터 보면 종일 켠 단말의 순간 재접속이 전부 `2003` 이 된다.
-        if let Some(want) = &input.session_id
-            && let Some(s) = self.items.iter_mut().find(|s| &s.id == want)
-            && s.dead_at.is_none_or(|t| now.saturating_sub(t) <= window_ms)
-        {
-            s.dead_at = None;
-            s.resumed = true;
-            return BindOutcome::Resumed { session_id: s.id.clone() };
+    s.conn = Some(conn.clone());
+    s.resumed = true;
+    s.dropped_at = None;
+    Some((s.user_id.clone(), s.pc_mode))
+}
+
+async fn take_remote(hub: &std::sync::Arc<Hub>, sid: &str, conn: &ConnHandle) -> Option<(String, PcMode)> {
+    let bus = hub.bus()?;
+    let keys = common::bus::live_keys(bus, &hub.keys.sess_by_sid(sid), crate::route::CALL_TIMEOUT).await;
+    let node = keys.iter().find_map(|k| match common::keyspace::parse_token(hub.keys.prefix(), k) {
+        Some(common::keyspace::Token::Sess { node, .. }) if node != hub.node => Some(node),
+        _ => None,
+    })?;
+    let data = match crate::route::node_call(hub, &node, &NodeReq::TakeSession { session_id: sid.to_string() }).await {
+        Ok(NodeRes::Session(Some(d))) => d,
+        _ => return None,
+    };
+    let claims = Claims {
+        sub: data.user_id.clone(),
+        participant_type: data.participant_type,
+        hidden: data.hidden,
+        metadata: data.metadata.clone(),
+        permission: Some(data.permission),
+        iat: 0,
+        exp: 0,
+    };
+    let mut s = new_session(hub, sid, &claims, data.pc_mode, conn.clone()).await;
+    s.resumed = true;
+    s.units = data.units.iter().cloned().collect();
+    for (room, n) in &data.rooms {
+        interest_inc(hub, room).await;
+        s.rooms.insert(room.clone(), n.clone());
+    }
+    let pc = s.pc_mode;
+    if let Ok(mut r) = hub.sessions.lock() {
+        r.by_user.insert(data.user_id.clone(), sid.to_string());
+        r.by_sid.insert(sid.to_string(), s);
+    }
+    Some((data.user_id, pc))
+}
+
+pub fn give_session(hub: &Hub, sid: &str) -> Option<SessionData> {
+    let s = {
+        let mut r = hub.sessions.lock().ok()?;
+        let s = r.by_sid.remove(sid)?;
+        if r.by_user.get(&s.user_id).is_some_and(|x| x == sid) {
+            r.by_user.remove(&s.user_id);
         }
-        // 2. 토큰 갈래.
-        let v = match (&input.verified, input.token_error) {
-            (Some(v), _) => v.clone(),
-            (None, Some(code)) => return BindOutcome::Rejected(code),
-            (None, None) => return BindOutcome::Rejected(Code::TokenInvalid),
-        };
-        // 4. 모르는 `pc_mode` — ★**조용한 기본값 금지.** 부재는 `2pc`.
-        let pc_mode = input.pc_mode.unwrap_or_default();
-        // 3. 같은 신원의 산 세션은 축출한다.
-        let evicted = self.live_of(&v.user_id).map(|s| s.id.clone());
-        let id = self.next_id();
-        self.items.push(Session {
-            id: id.clone(),
-            user_id: v.user_id,
-            participant_type: v.participant_type,
-            hidden: v.hidden,
-            permission: v.permission,
-            pc_mode,
-            resumed: false,
-            dead_at: None,
-        });
-        match evicted {
-            Some(old) => {
-                // 옛 세션은 통보만 하고 남기지 않는다 — ★**유령으로 두면 명단에 같은 사람이 둘.**
-                self.discard(&old);
-                let who = self.items.iter().find(|s| s.id == id).map(|s| s.user_id.clone());
-                if let Some(w) = who {
-                    self.last_evicted.retain(|(u, _)| u != &w);
-                    self.last_evicted.push((w, old.clone()));
-                }
-                BindOutcome::FreshEvicting { session_id: id, evicted: old }
+        s
+    };
+    if let Some(c) = &s.conn {
+        c.leave(Code::DUPLICATE_SESSION);
+    }
+    if let Some(t) = &s.user_sub {
+        t.abort();
+    }
+    let rooms: Vec<(String, String)> = s.rooms.iter().map(|(a, b)| (a.clone(), b.clone())).collect();
+    for (room, _) in &rooms {
+        interest_dec_sync(hub, room);
+    }
+    Some(SessionData {
+        session_id: s.sid.clone(),
+        user_id: s.user_id.clone(),
+        pc_mode: s.pc_mode,
+        participant_type: s.participant_type,
+        hidden: s.hidden,
+        metadata: s.metadata.clone(),
+        permission: s.permission,
+        units: s.units.iter().cloned().collect(),
+        rooms,
+    })
+}
+
+async fn evict_user(hub: &std::sync::Arc<Hub>, user: &str, new_sid: &str) {
+    let old = hub.sessions.lock().ok().and_then(|r| r.by_user.get(user).cloned());
+    if let Some(old) = old.filter(|o| o != new_sid) {
+        let conn = hub.sessions.lock().ok().and_then(|r| r.by_sid.get(&old).and_then(|s| s.conn.clone()));
+        if let Some(c) = conn {
+            c.leave(Code::DUPLICATE_SESSION);
+        }
+        dispose(hub, &old, EndPath::Evict).await;
+    }
+    let Some(bus) = hub.bus() else { return };
+    let keys = common::bus::live_keys(bus, &hub.keys.sess_by_user(user), crate::route::CALL_TIMEOUT).await;
+    let nodes: BTreeSet<String> = keys
+        .iter()
+        .filter_map(|k| match common::keyspace::parse_token(hub.keys.prefix(), k) {
+            Some(common::keyspace::Token::Sess { node, .. }) if node != hub.node => Some(node),
+            _ => None,
+        })
+        .collect();
+    for n in nodes {
+        let req = NodeReq::DropUser { user_id: user.to_string(), code: 2010, except_session: Some(new_sid.to_string()) };
+        let _ = crate::route::node_call(hub, &n, &req).await;
+    }
+}
+
+pub async fn drop_user(hub: &std::sync::Arc<Hub>, user: &str, code: u16, except: Option<&str>) -> Vec<String> {
+    let sids: Vec<String> = hub
+        .sessions
+        .lock()
+        .map(|r| r.by_sid.values().filter(|s| s.user_id == user && Some(s.sid.as_str()) != except).map(|s| s.sid.clone()).collect())
+        .unwrap_or_default();
+    let path = if code == 2009 { EndPath::Cut } else { EndPath::Evict };
+    for sid in &sids {
+        let conn = hub.sessions.lock().ok().and_then(|r| r.by_sid.get(sid).and_then(|s| s.conn.clone()));
+        if let Some(c) = conn {
+            c.leave(Code(code));
+        }
+        dispose(hub, sid, path).await;
+    }
+    sids
+}
+
+pub async fn client_leave(hub: &std::sync::Arc<Hub>, sid: &str) {
+    dispose(hub, sid, EndPath::Leave).await;
+}
+
+pub async fn conn_closed(hub: &std::sync::Arc<Hub>, sid: &str, conn_id: u64) {
+    let at = {
+        let Ok(mut r) = hub.sessions.lock() else { return };
+        let Some(s) = r.by_sid.get_mut(sid) else { return };
+        if s.conn.as_ref().is_some_and(|c| c.id == conn_id) {
+            s.conn = None;
+            let now = Instant::now();
+            s.dropped_at = Some(now);
+            now
+        } else {
+            return;
+        }
+    };
+    let hub = hub.clone();
+    let sid = sid.to_string();
+    let window = std::time::Duration::from_millis(u64::from(hub.policy.hub.resume_window_ms));
+    tokio::spawn(async move {
+        tokio::time::sleep(window).await;
+        let expired = hub
+            .sessions
+            .lock()
+            .map(|r| r.by_sid.get(&sid).is_some_and(|s| s.conn.is_none() && s.dropped_at == Some(at)))
+            .unwrap_or(false);
+        if expired {
+            dispose(&hub, &sid, EndPath::Window).await;
+        }
+    });
+}
+
+pub async fn dispose(hub: &std::sync::Arc<Hub>, sid: &str, path: EndPath) {
+    let s = {
+        let Ok(mut r) = hub.sessions.lock() else { return };
+        let Some(s) = r.by_sid.remove(sid) else { return };
+        if r.by_user.get(&s.user_id).is_some_and(|x| x == sid) {
+            r.by_user.remove(&s.user_id);
+        }
+        s
+    };
+    if let Some(t) = &s.user_sub {
+        t.abort();
+    }
+    drop(s.token);
+    for room in s.rooms.keys() {
+        interest_dec_sync(hub, room);
+    }
+    tracing::info!(kind = "ev", spec = "SV-STATE-SESSION-END", user = s.user_id.as_str(), path = format!("{path:?}"), "session end");
+    let units: Vec<String> = s.units.iter().cloned().collect();
+    let user = s.user_id.clone();
+    let sid = s.sid.clone();
+    let hub = hub.clone();
+    tokio::spawn(async move {
+        for n in units {
+            let req = UnitReq::SessionEnd { user_id: user.clone(), session_id: sid.clone(), path };
+            let _ = crate::route::unit(&hub, &n, req).await;
+        }
+    });
+}
+
+pub async fn interest_inc(hub: &std::sync::Arc<Hub>, room: &str) {
+    let exists = hub
+        .interest
+        .lock()
+        .map(|mut m| {
+            if let Some(i) = m.get_mut(room) {
+                i.count += 1;
+                true
+            } else {
+                false
             }
-            None => BindOutcome::Fresh { session_id: id },
-        }
+        })
+        .unwrap_or(false);
+    if exists {
+        return;
     }
-
-    /// 방금 축출된 세션 id — `bind` 가 기록해 둔 것을 ★**꺼내 온다(비운다).**
-    ///
-    /// ★★**장부가 아니라 한 걸음 들고 있는 것이다.** 안 비우면 옛 축출 기록이 다음 판정에
-    /// 섞여, 이어받기(판정 1)가 ★**이미 죽은 옛 소켓을 닫으라고 답한다** — 그러면 지금
-    /// 살아 있는 옛 소켓은 안 닫히고 `LEAVE` 도 못 받는다(실측 20260912: 한 hub 에
-    /// 같은 `user_id` 가 두 번째로 붙는 순간부터 축출 통지가 사라졌다).
-    pub fn take_evicted(&mut self, user_id: &str, except: &str) -> Option<String> {
-        let i = self.last_evicted.iter().position(|(u, s)| u == user_id && s != except)?;
-        Some(self.last_evicted.remove(i).1)
-    }
-
-    /// `RESUME` 판정(정§3-3). ★**`2008` 이 유일한 실패다** — 부분 실패 응답 형이 없다.
-    pub fn may_resume(&self, id: &str) -> Result<(), Code> {
-        match self.get(id) {
-            // ★새 세션에 `RESUME` = 클라 버그 가드.
-            Some(s) if s.resumed => Ok(()),
-            _ => Err(Code::SessionNotFound),
+    let task = crate::bus::subscribe_room(hub, room).await;
+    if let Ok(mut m) = hub.interest.lock() {
+        match m.get_mut(room) {
+            Some(i) => {
+                i.count += 1;
+                task.abort();
+            }
+            None => {
+                m.insert(room.to_string(), crate::state::Interest { count: 1, task });
+            }
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const WINDOW: u64 = 60_000;
-
-    fn tok(user: &str) -> VerifiedToken {
-        VerifiedToken {
-            user_id: user.into(),
-            participant_type: 0,
-            hidden: false,
-            permission: Permission::default(),
-        }
-    }
-
-    fn fresh(user: &str) -> BindInput {
-        BindInput {
-            session_id: None,
-            verified: Some(tok(user)),
-            token_error: None,
-            pc_mode: None,
-            client_ver: None,
-        }
-    }
-
-    #[test]
-    fn 순간_재접속은_토큰을_안_본다() {
-        // ★1을 빼먹고 토큰부터 보면 종일 켠 단말이 전부 2003 이다.
-        let mut s = Sessions::new();
-        let BindOutcome::Fresh { session_id } = s.bind(&fresh("u1"), 0, WINDOW) else {
-            panic!("fresh")
+pub fn interest_dec_sync(hub: &Hub, room: &str) {
+    if let Ok(mut m) = hub.interest.lock() {
+        let gone = match m.get_mut(room) {
+            Some(i) => {
+                i.count = i.count.saturating_sub(1);
+                i.count == 0
+            }
+            None => false,
         };
-        s.on_socket_dead(&session_id, 1_000);
-        let again = BindInput {
-            session_id: Some(session_id.clone()),
-            verified: None,
-            // ★토큰이 만료돼도 판정 1 은 그것을 보지 않는다.
-            token_error: Some(Code::TokenExpired),
-            pc_mode: None,
-            client_ver: None,
-        };
-        assert_eq!(
-            s.bind(&again, 2_000, WINDOW),
-            BindOutcome::Resumed { session_id: session_id.clone() }
+        if gone
+            && let Some(i) = m.remove(room) {
+                i.task.abort();
+            }
+    }
+}
+
+fn caller(hub: &Hub, sid: &str) -> Option<Caller> {
+    let r = hub.sessions.lock().ok()?;
+    let s = r.by_sid.get(sid)?;
+    Some(Caller {
+        user_id: s.user_id.clone(),
+        session_id: s.sid.clone(),
+        pc_mode: s.pc_mode,
+        participant_type: s.participant_type,
+        hidden: s.hidden,
+        metadata: s.metadata.clone(),
+        permission: s.permission,
+        home: Home { node: hub.node.clone(), inst: hub.my_inst() },
+    })
+}
+
+fn reconcile(hub: &Hub, sid: &str, node: &str, aff: &Affiliation) -> Vec<String> {
+    let mut dropped = Vec::new();
+    if let Ok(mut r) = hub.sessions.lock()
+        && let Some(s) = r.by_sid.get_mut(sid) {
+            let gone: Vec<String> =
+                s.rooms.iter().filter(|(room, n)| n.as_str() == node && !aff.sub_rooms.contains(room)).map(|(k, _)| k.clone()).collect();
+            for g in gone {
+                s.rooms.remove(&g);
+                dropped.push(g);
+            }
+        }
+    for g in &dropped {
+        interest_dec_sync(hub, g);
+    }
+    dropped
+}
+
+async fn forward(hub: &std::sync::Arc<Hub>, sid: &str, node: &str, f: &Frame) -> Result<UnitRes, Code> {
+    let c = caller(hub, sid).ok_or(Code::NOT_BOUND)?;
+    let body = String::from_utf8_lossy(f.body_json()).to_string();
+    let r = crate::route::unit(hub, node, UnitReq::RoomOp { caller: c, op: f.op, body }).await;
+    if matches!(r, Ok(UnitRes::Frame { .. }))
+        && let Ok(mut reg) = hub.sessions.lock()
+            && let Some(s) = reg.by_sid.get_mut(sid) {
+                s.units.insert(node.to_string());
+            }
+    r
+}
+
+fn room_node(hub: &Hub, sid: &str, room: &str) -> Option<String> {
+    hub.sessions
+        .lock()
+        .ok()
+        .and_then(|r| r.by_sid.get(sid).and_then(|s| s.rooms.get(room).cloned()))
+        .or_else(|| hub.room_place(room).map(|p| p.node))
+}
+
+fn ok_affiliation(res: &Result<UnitRes, Code>) -> Option<Affiliation> {
+    #[derive(serde::Deserialize)]
+    struct WithAff {
+        affiliation: Affiliation,
+    }
+    match res {
+        Ok(UnitRes::Frame { ok: true, body }) => serde_json::from_str::<WithAff>(body).ok().map(|w| w.affiliation),
+        _ => None,
+    }
+}
+
+fn ok_sub_rooms(res: &Result<UnitRes, Code>) -> Option<Affiliation> {
+    match res {
+        Ok(UnitRes::Frame { ok: true, body }) => serde_json::from_str::<Affiliation>(body).ok(),
+        _ => None,
+    }
+}
+
+fn admit_join(hub: &Hub) -> Option<u64> {
+    let limit = hub.policy.hub.join_admit_per_sec;
+    if limit == 0 {
+        return None;
+    }
+    let sec = common::ident::now_ms() / 1000;
+    let mut g = hub.join_window.lock().ok()?;
+    if g.0 != sec {
+        g.0 = sec;
+        g.1 = 0;
+    }
+    g.1 += 1;
+    if g.1 <= limit {
+        return None;
+    }
+    let base = u64::from(hub.policy.hub.join_retry_after_ms);
+    let r = common::ident::random_bytes(2);
+    let jitter = u64::from(u16::from_le_bytes([r[0], r[1]])) % base.max(1);
+    Some(base + jitter)
+}
+
+pub async fn handle_op(hub: &std::sync::Arc<Hub>, sid: &str, f: &Frame) -> Frame {
+    let Some(op) = Op::from_u16(f.op) else { return fail(f, Code::UNKNOWN_OP) };
+    let r = match op {
+        Op::Resume => return resume(hub, sid, f).await,
+        Op::RoomJoin => return room_join(hub, sid, f).await,
+        Op::RoomLeave => {
+            let req: RoomLeaveReq = match parse(f) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
+            if !valid_room_id(&req.room_id) {
+                return fail(f, Code::INVALID_PAYLOAD);
+            }
+            let Some(node) = room_node(hub, sid, &req.room_id) else { return fail(f, Code::NOT_IN_ROOM) };
+            let res = forward(hub, sid, &node, f).await;
+            if let Some(a) = ok_affiliation(&res) {
+                reconcile(hub, sid, &node, &a);
+            }
+            res
+        }
+        Op::PublishTracks => {
+            let req: PublishTracksReq = match parse(f) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
+            let room = match &req {
+                PublishTracksReq::Add { room_id, .. } | PublishTracksReq::Remove { room_id, .. } => room_id.clone(),
+            };
+            return routed(hub, sid, f, &room).await;
+        }
+        Op::Ready => {
+            let req: ReadyReq = match parse(f) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
+            return routed(hub, sid, f, &req.room_id).await;
+        }
+        Op::SubscribeLayer => {
+            let req: SubscribeLayerReq = match parse(f) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
+            return routed(hub, sid, f, &req.room_id).await;
+        }
+        Op::TrackSet => {
+            let req: TrackSetReq = match parse(f) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
+            return routed(hub, sid, f, &req.room_id).await;
+        }
+        Op::Message => {
+            let req: MessageReq = match parse(f) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
+            return routed(hub, sid, f, &req.room_id).await;
+        }
+        Op::Affiliation => {
+            let req: AffiliationReq = match parse(f) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
+            let Some(room) = req.pub_select.clone().or(req.pub_deselect.clone()) else {
+                return fail_msg(f, Code::MISSING_FIELD, "pub_select or pub_deselect");
+            };
+            if !valid_room_id(&room) {
+                return fail(f, Code::INVALID_PAYLOAD);
+            }
+            let Some(node) = room_node(hub, sid, &room) else { return fail(f, Code::ROOM_NOT_FOUND) };
+            let res = forward(hub, sid, &node, f).await;
+            if let Some(a) = ok_sub_rooms(&res) {
+                reconcile(hub, sid, &node, &a);
+            }
+            res
+        }
+        Op::IceRestart => {
+            let req: IceRestartReq = match parse(f) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
+            let Some(node) = hub.node_by_inst(&req.sfu_id) else {
+                hub.count_code(3010);
+                return fail(f, Code::PEER_NOT_FOUND);
+            };
+            forward(hub, sid, &node, f).await
+        }
+        Op::Task => return Frame::ok(f.op, f.pid, vec![]),
+        _ => return fail(f, Code::UNKNOWN_OP),
+    };
+    count_reply(hub, &r);
+    res_frame(f.op, f.pid, r)
+}
+
+fn count_reply(hub: &Hub, r: &Result<UnitRes, Code>) {
+    match r {
+        Ok(UnitRes::Frame { ok: false, body }) => {
+            if let Ok(fl) = serde_json::from_str::<oxsig::wire::Failure>(body) {
+                hub.count_code(fl.code);
+            }
+        }
+        Err(c) => hub.count_code(c.0),
+        _ => {}
+    }
+}
+
+async fn routed(hub: &std::sync::Arc<Hub>, sid: &str, f: &Frame, room: &str) -> Frame {
+    if !valid_room_id(room) {
+        return fail(f, Code::INVALID_PAYLOAD);
+    }
+    let Some(node) = room_node(hub, sid, room) else {
+        hub.count_code(3001);
+        return fail(f, Code::ROOM_NOT_FOUND);
+    };
+    let r = forward(hub, sid, &node, f).await;
+    count_reply(hub, &r);
+    res_frame(f.op, f.pid, r)
+}
+
+async fn room_join(hub: &std::sync::Arc<Hub>, sid: &str, f: &Frame) -> Frame {
+    let req: RoomJoinReq = match parse(f) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    if !valid_room_id(&req.room_id) {
+        hub.count_code(1002);
+        return fail_msg(f, Code::INVALID_PAYLOAD, "room_id");
+    }
+    let pc = hub.sessions.lock().ok().and_then(|r| r.by_sid.get(sid).map(|s| s.pc_mode)).unwrap_or(PcMode::V2pc);
+    let has_tags = req.extmap.is_some() || req.codecs.is_some();
+    match pc {
+        PcMode::V1pc if req.extmap.is_none() || req.codecs.is_none() => {
+            hub.count_code(1003);
+            return fail_msg(f, Code::MISSING_FIELD, "1pc ROOM_JOIN needs extmap and codecs");
+        }
+        PcMode::V2pc if has_tags => {
+            hub.count_code(1002);
+            return fail_msg(f, Code::INVALID_PAYLOAD, "2pc ROOM_JOIN carries no extmap/codecs");
+        }
+        _ => {}
+    }
+    let Some(place) = hub.room_place(&req.room_id) else {
+        hub.count_code(3001);
+        return fail(f, Code::ROOM_NOT_FOUND);
+    };
+    if let Some(retry) = admit_join(hub) {
+        hub.count_code(4009);
+        return fail_frame(
+            f.op,
+            f.pid,
+            &Code::OVERLOADED.failure_details("overloaded", serde_json::json!({ "retry_after_ms": retry })),
         );
-        assert!(s.may_resume(&session_id).is_ok());
     }
-
-    #[test]
-    fn 창_밖이면_토큰_갈래로_간다() {
-        let mut s = Sessions::new();
-        let BindOutcome::Fresh { session_id } = s.bind(&fresh("u1"), 0, WINDOW) else {
-            panic!("fresh")
-        };
-        s.on_socket_dead(&session_id, 1_000);
-        let late = BindInput {
-            session_id: Some(session_id),
-            verified: None,
-            token_error: Some(Code::TokenExpired),
-            pc_mode: None,
-            client_ver: None,
-        };
-        assert_eq!(s.bind(&late, 1_000 + WINDOW + 1, WINDOW), BindOutcome::Rejected(Code::TokenExpired));
+    let was_member = hub
+        .sessions
+        .lock()
+        .map(|r| r.by_sid.get(sid).is_some_and(|s| s.rooms.contains_key(&req.room_id)))
+        .unwrap_or(false);
+    if !was_member {
+        interest_inc(hub, &req.room_id).await;
+        if let Ok(mut r) = hub.sessions.lock()
+            && let Some(s) = r.by_sid.get_mut(sid) {
+                s.rooms.insert(req.room_id.clone(), place.node.clone());
+            }
     }
-
-    #[test]
-    fn 같은_신원은_축출된다() {
-        let mut s = Sessions::new();
-        let BindOutcome::Fresh { session_id: first } = s.bind(&fresh("u1"), 0, WINDOW) else {
-            panic!("fresh")
-        };
-        let out = s.bind(&fresh("u1"), 10, WINDOW);
-        let BindOutcome::FreshEvicting { evicted, .. } = out else { panic!("축출이어야 한다") };
-        assert_eq!(evicted, first);
-        // ★유령으로 두면 명단에 같은 사람이 둘이다.
-        assert!(s.get(&first).is_none());
+    let res = forward(hub, sid, &place.node, f).await;
+    match ok_affiliation(&res) {
+        Some(a) => {
+            reconcile(hub, sid, &place.node, &a);
+        }
+        None => {
+            if !was_member {
+                if let Ok(mut r) = hub.sessions.lock()
+                    && let Some(s) = r.by_sid.get_mut(sid) {
+                        s.rooms.remove(&req.room_id);
+                    }
+                interest_dec_sync(hub, &req.room_id);
+            }
+        }
     }
+    count_reply(hub, &res);
+    res_frame(f.op, f.pid, res)
+}
 
-    #[test]
-    fn 새_세션에_resume_은_2008_이다() {
-        let mut s = Sessions::new();
-        let BindOutcome::Fresh { session_id } = s.bind(&fresh("u1"), 0, WINDOW) else {
-            panic!("fresh")
-        };
-        assert_eq!(s.may_resume(&session_id), Err(Code::SessionNotFound));
+async fn resume(hub: &std::sync::Arc<Hub>, sid: &str, f: &Frame) -> Frame {
+    let (resumed, units, user) = match hub.sessions.lock() {
+        Ok(r) => match r.by_sid.get(sid) {
+            Some(s) => (s.resumed, s.units.iter().cloned().collect::<Vec<_>>(), s.user_id.clone()),
+            None => (false, vec![], String::new()),
+        },
+        Err(_) => (false, vec![], String::new()),
+    };
+    if !resumed {
+        hub.count_code(2008);
+        return fail(f, Code::SESSION_NOT_FOUND);
     }
-
-    #[test]
-    fn cut_은_창을_안_잡는다() {
-        // ★창을 잡으면 RESUME 으로 그대로 돌아온다 — cut 이 아무것도 못 시킨다.
-        let mut s = Sessions::new();
-        let BindOutcome::Fresh { session_id } = s.bind(&fresh("u1"), 0, WINDOW) else {
-            panic!("fresh")
-        };
-        assert!(s.discard(&session_id));
-        let back = BindInput {
-            session_id: Some(session_id),
-            verified: Some(tok("u1")),
-            token_error: None,
-            pc_mode: None,
-            client_ver: None,
-        };
-        // 판정 1 이 무효 → 2 로 간다(토큰 재검사). ★그것이 `cut` 의 목적이다.
-        assert!(matches!(s.bind(&back, 10, WINDOW), BindOutcome::Fresh { .. }));
+    let mut out = ResumeRes { snapshot: Default::default(), publications: vec![], mline_tables: vec![] };
+    for n in units {
+        match crate::route::unit(hub, &n, UnitReq::Resume { user_id: user.clone(), session_id: sid.to_string() }).await {
+            Ok(UnitRes::Resume(ResumePart { snapshot, publications, mline_tables })) => {
+                out.snapshot.extend(snapshot);
+                out.publications.extend(publications);
+                out.mline_tables.extend(mline_tables);
+            }
+            other => tracing::warn!(kind = "diag", node = n.as_str(), "resume part missing: {other:?}"),
+        }
     }
+    Frame::ok(f.op, f.pid, serde_json::to_vec(&out).unwrap_or_default())
+}
 
-    #[test]
-    fn 세대가_다르면_1004_다() {
-        let mut s = Sessions::new();
-        let mut i = fresh("u1");
-        i.client_ver = Some(2);
-        assert_eq!(s.bind(&i, 0, WINDOW), BindOutcome::Rejected(Code::VersionMismatch));
+pub fn deliver_user(hub: &Hub, user: &str, ev: &UnitEvent) {
+    let (conn, sid) = match hub.sessions.lock() {
+        Ok(r) => match r.by_user.get(user).and_then(|sid| r.by_sid.get(sid)) {
+            Some(s) => (s.conn.clone(), s.sid.clone()),
+            None => return,
+        },
+        Err(_) => return,
+    };
+    if ev.op == Op::RoomEvent.as_u16()
+        && let Ok(RoomEventBody::Affiliation { room_id, affiliation, .. }) = serde_json::from_str::<RoomEventBody>(&ev.body) {
+            let node = hub
+                .sessions
+                .lock()
+                .ok()
+                .and_then(|r| r.by_sid.get(&sid).and_then(|s| s.rooms.get(&room_id).cloned()))
+                .or_else(|| hub.room_place(&room_id).map(|p| p.node));
+            if let Some(n) = node {
+                reconcile(hub, &sid, &n, &affiliation);
+            }
+        }
+    if let (Some(c), Some(op)) = (conn, Op::from_u16(ev.op)) {
+        c.notify(op, ev.body.as_bytes().to_vec());
     }
+}
 
-    #[test]
-    fn 창이_지나면_거둔다() {
-        let mut s = Sessions::new();
-        let BindOutcome::Fresh { session_id } = s.bind(&fresh("u1"), 0, WINDOW) else {
-            panic!("fresh")
-        };
-        s.on_socket_dead(&session_id, 100);
-        assert!(s.sweep(100 + WINDOW, WINDOW).is_empty(), "★창 안에서는 안 거둔다");
-        assert_eq!(s.sweep(100 + WINDOW + 1, WINDOW), vec![session_id]);
+pub fn deliver_room(hub: &Hub, room: &str, ev: &UnitEvent) {
+    let Some(op) = Op::from_u16(ev.op) else { return };
+    let targets: Vec<ConnHandle> = match hub.sessions.lock() {
+        Ok(r) => r
+            .by_sid
+            .values()
+            .filter(|s| s.rooms.contains_key(room) && ev.exclude.as_deref() != Some(s.user_id.as_str()))
+            .filter_map(|s| s.conn.clone())
+            .collect(),
+        Err(_) => return,
+    };
+    for c in targets {
+        c.notify(op, ev.body.as_bytes().to_vec());
     }
+}
 
-    #[test]
-    fn pc_mode_부재는_2pc_다() {
-        let mut s = Sessions::new();
-        let BindOutcome::Fresh { session_id } = s.bind(&fresh("u1"), 0, WINDOW) else {
-            panic!("fresh")
-        };
-        assert_eq!(s.get(&session_id).expect("s").pc_mode, PcMode::Two);
+pub fn forget_room(hub: &Hub, room: &str) {
+    let mut hit = 0usize;
+    if let Ok(mut r) = hub.sessions.lock() {
+        for s in r.by_sid.values_mut() {
+            if s.rooms.remove(room).is_some() {
+                hit += 1;
+            }
+        }
+    }
+    if hit > 0
+        && let Ok(mut m) = hub.interest.lock()
+            && let Some(i) = m.remove(room) {
+                i.task.abort();
+            }
+}
+
+pub async fn shutdown_all(hub: &std::sync::Arc<Hub>) {
+    let sids: Vec<(String, Option<ConnHandle>)> =
+        hub.sessions.lock().map(|r| r.by_sid.values().map(|s| (s.sid.clone(), s.conn.clone())).collect()).unwrap_or_default();
+    for (sid, c) in sids {
+        if let Some(c) = c {
+            c.leave(Code::SERVER_SHUTDOWN);
+        }
+        dispose(hub, &sid, EndPath::Shutdown).await;
     }
 }

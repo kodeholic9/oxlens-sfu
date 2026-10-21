@@ -147,14 +147,14 @@ pub struct SessionData {
     pub metadata: Option<serde_json::Value>,
     pub permission: Permission,
     pub units: Vec<String>,
+    pub rooms: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NodeReq {
-    Unit { unit: Option<String>, req: UnitReq },
-    UnitByEpoch { epoch: String, req: UnitReq },
+    Unit { req: UnitReq },
     TakeSession { session_id: String },
-    CutUser { user_id: String },
+    DropUser { user_id: String, code: u16, except_session: Option<String> },
     Bus,
 }
 
