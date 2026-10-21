@@ -5,7 +5,7 @@
 
     python3 dev/gen_nodes.py 3
 
-포트 — hub HTTP 1974+i · sfu gRPC 50061+i · sfu UDP 20000+i · zenoh 7447+i
+포트 — hub HTTP 1974+i · sfu gRPC 50061+i · sfu UDP 20000+i · sfu TCP 20000+i(정:IMPL — TCP 전송로 · 설정됐을 때만 광고) · zenoh 7447+i
 """
 import sys
 from pathlib import Path
@@ -56,7 +56,7 @@ kind = "process"
 order = 1
 role = "sfu"
 addr = "127.0.0.1:{50061 + i}"
-cmd = ["./target/debug/oxsfud", "--grpc-listen", "127.0.0.1:{50061 + i}", "--udp-port", "{20000 + i}", "--policy", "policy.toml", "--public-ip", "auto"]
+cmd = ["./target/debug/oxsfud", "--grpc-listen", "127.0.0.1:{50061 + i}", "--udp-port", "{20000 + i}", "--tcp-port", "{20000 + i}", "--policy", "policy.toml", "--public-ip", "auto"]
 
 [zenoh]
 mode = "router"
@@ -69,4 +69,4 @@ namespace = "{NS}"
 '''
     out = HERE / f"system.{me}.toml"
     out.write_text(body, encoding="utf-8")
-    print(f"{out.name}  hub=127.0.0.1:{HUB_BASE + i}  sfu={me}@{50061 + i}  udp={20000 + i}  zenoh={7447 + i}")
+    print(f"{out.name}  hub=127.0.0.1:{HUB_BASE + i}  sfu={me}@{50061 + i}  udp={20000 + i}  tcp={20000 + i}  zenoh={7447 + i}")

@@ -29,7 +29,7 @@ kind = "process"
 order = 1
 role = "sfu"
 addr = "127.0.0.1:50062"
-cmd = ["./target/debug/oxsfud", "--grpc-listen", "127.0.0.1:50062", "--udp-port", "20001", "--policy", "policy.toml", "--public-ip", "auto"]
+cmd = ["./target/debug/oxsfud", "--grpc-listen", "127.0.0.1:50062", "--udp-port", "20001", "--tcp-port", "20001", "--policy", "policy.toml", "--public-ip", "auto"]
 
 [zenoh]
 mode = "router"
