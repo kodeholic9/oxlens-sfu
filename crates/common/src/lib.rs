@@ -1,23 +1,11 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.1 · 정§18-1 · 정책서 · model: claude-opus-5
+// spec: v1.2 @124a233 · 정:CFG 정:BUS 운영 규격서 §7 · §8 · model: claude-opus-5-5
+//! hub · sfud 공용 — 정책 · 시스템 파일 · 배치 · 버스 키 · 신원 · 로컬 gRPC Handle · 로그.
 
-//! `common` — 값의 자리 셋(정§18-1)이 여기 산다: ★**시스템 파일 · 정책 파일 · CLI 인자.**
-//!
-//! ★**판별 기준은 하나다** — 프로세스가 2개 떴을 때 서로 **달라져야 하면 인자**, **같아야 하면 파일**.
-
-/// B 평면 — ★**node 안의 유일한 길**(정§15-0). proto 에서 생성된다.
-pub mod b {
-    #![allow(clippy::doc_overindented_list_items)]
-    tonic::include_proto!("oxlens.b.v1");
-}
-
-pub mod args;
-pub mod bus;
-pub mod build;
+pub mod ident;
+pub mod keyspace;
+pub mod log;
+pub mod placement;
 pub mod policy;
+pub mod rpc;
 pub mod system;
-
-pub use args::Args;
-pub use build::BuildId;
-pub use policy::Policy;
-pub use system::System;

@@ -1,45 +1,9 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.1 · 운영 §3-4 · §8-2 · model: claude-opus-5
+// spec: v1.2 @124a233 · 정:RULE-BUS-SHAPE(node 안은 로컬 gRPC Handle 하나) · model: claude-opus-5-5
+//! B 평면 로컬 Handle 의 gRPC 정의를 짓는다.
 
-//! ★**빌드 신원을 컴파일 때 찍는다** — 돌고 있는 것이 **어느 소스의 산물인지**
-//! 서버가 ★**스스로 말하게** 한다. 사람이 기억으로 막을 일이 아니다.
-
-use std::process::Command;
-
-fn main() {
-    let sha = Command::new("git")
-        .args(["rev-parse", "--short=12", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|| "nogit".into());
-    let dirty = Command::new("git")
-        .args(["status", "--porcelain", "--untracked-files=no"])
-        .output()
-        .ok()
-        .map(|o| !o.stdout.is_empty())
-        .unwrap_or(false);
-    let at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    println!(
-        "cargo:rustc-env=OX_BUILD_STAMP={sha}{}+{at}",
-        if dirty { "-dirty" } else { "" }
-    );
-    // ★B 평면 proto — node 안의 유일한 길이다(정§15-0).
-    let proto = std::path::Path::new("../../proto/oxlens_b_v1.proto");
-    if proto.exists() {
-        tonic_build::configure()
-            .build_server(true)
-            .build_client(true)
-            .compile_protos(&[proto], &[std::path::Path::new("../../proto")])
-            .expect("proto 를 못 읽으면 B 평면이 통째로 없다");
-        println!("cargo:rerun-if-changed=../../proto/oxlens_b_v1.proto");
-    }
-
-    // ★소스가 바뀌면 다시 찍는다 — 안 그러면 stamp 가 첫 빌드에 얼어붙는다.
-    println!("cargo:rerun-if-changed=../");
-    println!("cargo:rerun-if-changed=../../Cargo.toml");
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("cargo:rerun-if-changed=proto/b_v1.proto");
+    tonic_build::configure().build_client(true).build_server(true).compile_protos(&["proto/b_v1.proto"], &["proto"])?;
+    Ok(())
 }
