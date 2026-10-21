@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @124a233 · 운영 규격서 §1 §3 §4 §5 §6 · 정:RULE-OPS-TOKEN · model: claude-opus-5-5
+// spec: v1.2 @250e836 · 운영 규격서 §1 §3 §4 §5 §6 · 정:RULE-OPS-TOKEN · model: claude-opus-5-5
 //! oxadmin — 운영 도구 하나. §6 표의 경로만 부른다 · 붙은 곳을 매번 stderr 첫 줄에 적는다 · 확인값은 먼저 읽어 되싣는다.
 
 use std::io::{Read, Write};
@@ -29,7 +29,7 @@ fn usage() -> ! {
 }
 
 fn parse() -> Opts {
-    let mut o = Opts { hub: String::new(), from: "default", api_key: None, api_secret: None, json: false, all: false, ttl: None, rest: vec![] };
+    let mut o = Opts { hub: String::new(), from: "기본값", api_key: None, api_secret: None, json: false, all: false, ttl: None, rest: vec![] };
     let mut hub_arg: Option<String> = None;
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -41,6 +41,10 @@ fn parse() -> Opts {
             "--all" => o.all = true,
             "--ttl" => o.ttl = it.next().and_then(|v| v.parse().ok()),
             "-h" | "--help" => usage(),
+            x if x.starts_with("--") => {
+                eprintln!("[oxadmin] 모르는 인자: {x}");
+                std::process::exit(2);
+            }
             _ => o.rest.push(a),
         }
     }
@@ -66,7 +70,11 @@ fn token(o: &Opts) -> Option<String> {
 }
 
 fn split_url(u: &str) -> Result<(String, String), String> {
-    let rest = u.strip_prefix("http://").ok_or_else(|| format!("http:// 주소만 받는다: {u}"))?;
+    let rest = match u.strip_prefix("http://") {
+        Some(r) => r,
+        None if !u.contains("://") => u,
+        None => return Err(format!("http 주소만 받는다: {u}")),
+    };
     let (host, base) = match rest.find('/') {
         Some(i) => (&rest[..i], rest[i..].trim_end_matches('/')),
         None => (rest, ""),
@@ -132,6 +140,61 @@ fn table(rows: &[Value], cols: &[&str]) {
     }
 }
 
+fn flat(v: &Value) -> String {
+    match v {
+        Value::Bool(true) => "yes".into(),
+        Value::Bool(false) => "no".into(),
+        Value::Object(_) => v.to_string(),
+        other => cell(other),
+    }
+}
+
+fn kv(v: &Value) {
+    match v.as_object() {
+        Some(m) => {
+            for (k, x) in m {
+                println!("{k}={}", flat(x));
+            }
+        }
+        None => println!("{}", cell(v)),
+    }
+}
+
+fn arity(o: &Opts, n: usize) {
+    if o.rest.len() != n {
+        eprintln!("[oxadmin] 인자 수가 맞지 않다: {:?}", o.rest);
+        std::process::exit(2);
+    }
+}
+
+fn bus_all(v: &Value) {
+    let rows = v.get("nodes").and_then(Value::as_array).cloned().unwrap_or_default();
+    let mut sets: Vec<(String, Option<Vec<String>>)> = Vec::new();
+    for r in &rows {
+        let node = cell(r.get("node").unwrap_or(&Value::Null));
+        let seen = r.pointer("/bus/nodes").and_then(Value::as_array).map(|a| {
+            let mut s: Vec<String> = a.iter().filter_map(|x| x.get("node").and_then(Value::as_str).map(str::to_string)).collect();
+            s.sort();
+            s
+        });
+        let err = r.get("error").map(cell);
+        println!("{node:<10} {}", match (&seen, &err) {
+            (_, Some(e)) => format!("error {e}"),
+            (Some(s), None) => s.join(","),
+            (None, None) => "-".into(),
+        });
+        sets.push((node, seen));
+    }
+    let first = sets.iter().find_map(|(_, s)| s.clone());
+    let agree = sets.iter().all(|(_, s)| s.is_some() && *s == first);
+    if agree {
+        println!("합의: 전 node 가 같은 것을 본다");
+    } else {
+        let off: Vec<&str> = sets.iter().filter(|(_, s)| s.is_none() || *s != first).map(|(n, _)| n.as_str()).collect();
+        println!("어긋남: {}", off.join(","));
+    }
+}
+
 fn show(o: &Opts, v: &Value, list: Option<(&str, &[&str])>) {
     if o.json {
         println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
@@ -158,14 +221,14 @@ fn call(o: &Opts, method: &str, path: &str, body: Option<&Value>) -> Value {
     match request(o, method, path, body) {
         Ok((s, v)) if (200..300).contains(&s) => v,
         Ok((s, v)) => {
-            eprintln!("oxadmin: HTTP {s} {}", cell(&v));
+            eprintln!("[oxadmin] HTTP {s} {}", cell(&v));
             if o.json {
                 println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
             }
             std::process::exit(1);
         }
         Err(e) => {
-            eprintln!("oxadmin: {e}");
+            eprintln!("[oxadmin] {e}");
             std::process::exit(1);
         }
     }
@@ -182,10 +245,11 @@ fn enc(s: &str) -> String {
 
 fn main() {
     let o = parse();
-    eprintln!("oxadmin: hub={} ({})", o.hub, o.from);
+    eprintln!("[oxadmin] hub={} ({})", o.hub, o.from);
     let cmd = o.rest.first().cloned().unwrap_or_else(|| usage());
     match cmd.as_str() {
         "sfus" => {
+            arity(&o, 1);
             let v = call(&o, "GET", "/admin/sfus", None);
             show(&o, &v, Some(("sfus", &["unit", "sfu_id", "addr", "unit_state", "live", "node_live"])));
         }
@@ -194,6 +258,7 @@ fn main() {
             show(&o, &v, Some(("rooms", &["room_id", "members"])));
         }
         "rooms" => {
+            arity(&o, 1);
             let v = call(&o, "GET", "/admin/rooms", None);
             show(&o, &v, Some(("rooms", &["room_id", "node", "sfu_id", "members", "member_ids"])));
         }
@@ -202,6 +267,7 @@ fn main() {
             show(&o, &v, None);
         }
         "users" => {
+            arity(&o, 1);
             let v = call(&o, "GET", "/admin/users", None);
             if o.json {
                 show(&o, &v, None);
@@ -226,15 +292,25 @@ fn main() {
                 println!("total: {}", cell(v.get("total").unwrap_or(&Value::Null)));
             }
         }
-        "snapshot" => show(&o, &call(&o, "GET", "/admin/snapshot", None), None),
-        "drops" => show(&o, &call(&o, "GET", "/admin/drops", None), None),
+        "snapshot" => {
+            arity(&o, 1);
+            let v = call(&o, "GET", "/admin/snapshot", None);
+            if o.json { show(&o, &v, None) } else { kv(&v) }
+        }
+        "drops" => {
+            arity(&o, 1);
+            show(&o, &call(&o, "GET", "/admin/drops", None), None);
+        }
         "bus" => {
+            arity(&o, 1);
             let path = if o.all { "/admin/bus?all=1" } else { "/admin/bus" };
-            show(&o, &call(&o, "GET", path, None), None);
+            let v = call(&o, "GET", path, None);
+            if o.all && !o.json { bus_all(&v) } else { show(&o, &v, None) }
         }
         "unit" => {
             let v = call(&o, "GET", "/admin/supervisor/status", None);
             match o.rest.get(1).map(String::as_str) {
+                Some("list") | None => show(&o, &v, Some(("units", &["id", "kind", "order", "state", "restarts", "next_retry_ms", "epoch"]))),
                 Some("show") => {
                     let id = arg(&o, 2);
                     let u = v.get("units").and_then(Value::as_array).and_then(|a| a.iter().find(|u| u.get("id").and_then(Value::as_str) == Some(id.as_str())).cloned());
@@ -246,12 +322,15 @@ fn main() {
                         }
                     }
                 }
-                _ => show(&o, &v, Some(("units", &["id", "kind", "order", "state", "restarts", "next_retry_ms", "epoch"]))),
+                Some(other) => {
+                    eprintln!("[oxadmin] 모르는 unit 명령: {other}");
+                    std::process::exit(2);
+                }
             }
         }
         "load" | "stop" => {
             let v = call(&o, "POST", &format!("/admin/supervisor/{cmd}/{}", enc(&arg(&o, 1))), None);
-            show(&o, &v, None);
+            if o.json { show(&o, &v, None) } else { kv(&v) }
         }
         "kill" => {
             let id = arg(&o, 1);
@@ -265,8 +344,9 @@ fn main() {
                 eprintln!("oxadmin: {id} 의 epoch 를 읽지 못했다(Running 이 아니다)");
                 std::process::exit(1);
             };
+            eprintln!("[oxadmin] if_epoch={epoch}");
             let v = call(&o, "POST", &format!("/admin/supervisor/kill/{}?if_epoch={}", enc(&id), enc(&epoch)), None);
-            show(&o, &v, None);
+            if o.json { show(&o, &v, None) } else { kv(&v) }
         }
         "shutdown" => {
             let snap = call(&o, "GET", "/admin/snapshot", None);
@@ -274,8 +354,9 @@ fn main() {
                 eprintln!("oxadmin: hub_id 를 읽지 못했다");
                 std::process::exit(1);
             };
+            eprintln!("[oxadmin] confirm={hub_id}");
             let v = call(&o, "POST", &format!("/admin/supervisor/shutdown?confirm={}", enc(hub_id)), None);
-            show(&o, &v, None);
+            if o.json { show(&o, &v, None) } else { kv(&v) }
         }
         "user-cut" => {
             let v = call(&o, "POST", &format!("/admin/users/{}/cut", enc(&arg(&o, 1))), None);
@@ -283,7 +364,7 @@ fn main() {
         }
         "reap" => {
             let v = call(&o, "POST", &format!("/admin/rooms/{}/reap/{}", enc(&arg(&o, 1)), enc(&arg(&o, 2))), None);
-            show(&o, &v, None);
+            if o.json { show(&o, &v, None) } else { kv(&v) }
         }
         "destroy" => {
             let room = arg(&o, 1);
@@ -293,8 +374,9 @@ fn main() {
                 eprintln!("oxadmin: {room} 의 version 을 읽지 못했다");
                 std::process::exit(1);
             };
+            eprintln!("[oxadmin] if_version={ver}");
             let v = call(&o, "POST", &format!("/admin/rooms/{}/destroy?if_version={}", enc(&room), enc(&ver)), None);
-            show(&o, &v, None);
+            if o.json { show(&o, &v, None) } else { kv(&v) }
         }
         "log-level" => {
             let level = arg(&o, 1);

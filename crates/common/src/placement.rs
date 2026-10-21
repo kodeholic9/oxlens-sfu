@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @124a233 · 정:RULE-BUS-PLACEMENT · model: claude-opus-5-5
-//! 방 배치 — HRW 순수 함수. 해시는 계약이다: FNV-1a 64(`node_id ‖ 0x00 ‖ room_id`) → splitmix64 mix.
+// spec: v1.2 @250e836 · 정:RULE-BUS-PLACEMENT · model: claude-opus-5-5
+//! 방 배치 — HRW 순수 함수. 해시는 계약이다: FNV-1a 64(`node_id ‖ 0x00 ‖ room_id`) → splitmix64 한 걸음(감마 덧셈부터).
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -14,7 +14,8 @@ pub fn score(node_id: &str, room_id: &str) -> u64 {
     mix(h)
 }
 
-fn mix(mut z: u64) -> u64 {
+fn mix(h: u64) -> u64 {
+    let mut z = h.wrapping_add(0x9e37_79b9_7f4a_7c15);
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     z ^ (z >> 31)
@@ -46,6 +47,13 @@ mod tests {
         h ^= 0;
         h = h.wrapping_mul(FNV_PRIME);
         assert_eq!(score("", ""), mix(h));
+    }
+
+    #[test]
+    fn same_answer_as_layer2_harness() {
+        assert_eq!(score("node-a", "r1"), 0x0a17_39dd_61bc_71f1);
+        assert_eq!(score("node-b", "nd1_3"), 0xbd17_cd18_93fe_bf09);
+        assert_eq!(score("node-c", "smoke-1"), 0xae3e_1535_7ed9_458a);
     }
 
     #[test]

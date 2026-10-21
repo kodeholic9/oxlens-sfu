@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @124a233 · 연:SES.http.TOKEN 연:ROOM.http.LIST_ROOMS 연:ROOM.http.CREATE_ROOM 연:ROOM.http.GET_ROOM 연:RULE-TRN-HTTP-AUTH-TWO 연:RULE-TRN-CORS 연:DEV-TRN-WS-ORIGIN 정:IMPL-SES-TOKEN-ISSUE 정:IMPL-ROOM-RESYNC 운영 규격서 §8-2 · model: claude-opus-5-5
+// spec: v1.2 @250e836 · 연:SES.http.TOKEN 연:ROOM.http.LIST_ROOMS 연:ROOM.http.CREATE_ROOM 연:ROOM.http.GET_ROOM 연:RULE-TRN-HTTP-AUTH-TWO 연:RULE-TRN-CORS 연:DEV-TRN-WS-ORIGIN 정:IMPL-SES-TOKEN-ISSUE 정:IMPL-ROOM-RESYNC 운영 규격서 §8-2 · model: claude-opus-5-5
 //! A 평면 HTTP · WS 업그레이드 · `/healthz`.
 
 use std::sync::Arc;
@@ -209,7 +209,17 @@ async fn create_room_inner(hub: &Arc<Hub>, headers: &HeaderMap, body: &[u8]) -> 
         departure_ttl_secs: hub.policy.hub.room_departure_ttl_secs,
     };
     match crate::route::unit(hub, &node, unit_req).await {
-        Ok(UnitRes::Created(c)) => (StatusCode::CREATED, Json(c)).into_response(),
+        Ok(UnitRes::Created(c)) => {
+            let inst = hub.nodes.read().ok().and_then(|n| n.get(&node).map(|e| e.inst.clone()));
+            if let (Some(inst), Ok(mut m)) = (inst, hub.rooms.write()) {
+                let v = m.entry(c.room_id.clone()).or_default();
+                let p = crate::state::Place { node: node.clone(), inst };
+                if !v.contains(&p) {
+                    v.push(p);
+                }
+            }
+            (StatusCode::CREATED, Json(c)).into_response()
+        }
         Ok(UnitRes::Fail { code, message, .. }) => failure(status_of(Code(code)), Code(code), Some(&message)),
         Ok(_) => fail_code(Code::SFU_ERROR),
         Err(c) => fail_code(c),

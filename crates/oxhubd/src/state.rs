@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @124a233 · 정:RULE-DOC-OWNERSHIP 정:RULE-BUS-PRESENCE 정:RULE-BUS-PLACEMENT 정:IMPL-BUS-FAULTS · model: claude-opus-5-5
+// spec: v1.2 @250e836 · 정:RULE-DOC-OWNERSHIP 정:RULE-BUS-PRESENCE 정:RULE-BUS-PLACEMENT 정:IMPL-BUS-FAULTS · model: claude-opus-5-5
 //! 게이트웨이 상태 — 세션과 배치만 든다. 방 상태는 복제하지 않는다.
 
 use std::collections::{BTreeMap, HashMap};
@@ -91,12 +91,16 @@ impl Hub {
     }
 
     pub fn node_by_inst(&self, inst: &str) -> Option<String> {
-        self.nodes
-            .read()
-            .ok()?
-            .iter()
-            .find(|(_, e)| e.inst == inst && e.gone_at.is_none())
-            .map(|(n, _)| n.clone())
+        if let Some(n) = self.nodes.read().ok()?.iter().find(|(_, e)| e.inst == inst && e.gone_at.is_none()).map(|(n, _)| n.clone()) {
+            return Some(n);
+        }
+        if self.units.views().iter().any(|u| u.role == "sfu" && u.epoch.as_deref() == Some(inst)) {
+            return Some(self.node.clone());
+        }
+        let rooms = self.rooms.read().ok()?;
+        let node = rooms.values().flatten().find(|p| p.inst == inst).map(|p| p.node.clone())?;
+        let live = self.nodes.read().ok()?.get(&node).is_some_and(|e| e.gone_at.is_none());
+        live.then_some(node)
     }
 
     pub fn candidates(&self) -> Vec<String> {

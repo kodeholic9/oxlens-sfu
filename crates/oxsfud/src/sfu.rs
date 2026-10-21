@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @124a233 · 정:RULE-CONC-SIX 정:IMPL-ROOM-VERSION-ISSUE 정:RULE-BUS-EVENTS 정:RULE-OPS-OBSERVE 정:RULE-LINK-TRANSPORT · model: claude-opus-5-5
+// spec: v1.2 @250e836 · 정:RULE-CONC-SIX 정:IMPL-ROOM-VERSION-ISSUE 정:RULE-BUS-EVENTS 정:RULE-OPS-OBSERVE 정:RULE-LINK-TRANSPORT · model: claude-opus-5-5
 //! 프로세스 전역 — 방 · Peer · 전송 색인(RCU) · 이벤트 출구 · 계수.
 
 use std::collections::HashMap;
@@ -25,9 +25,17 @@ pub fn now_ms() -> u64 {
     common::ident::now_ms()
 }
 
-pub fn mono_ms() -> u64 {
+fn mono_start() -> std::time::Instant {
     static START: OnceLock<std::time::Instant> = OnceLock::new();
-    START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64 + 1
+    *START.get_or_init(std::time::Instant::now)
+}
+
+pub fn mono_ms() -> u64 {
+    mono_start().elapsed().as_millis() as u64 + 1
+}
+
+pub fn mono_us() -> u64 {
+    mono_start().elapsed().as_micros() as u64 + 1_000
 }
 
 #[derive(Default)]

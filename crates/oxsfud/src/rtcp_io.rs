@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @124a233 · 정:IMPL-RTCP-TERMINATE 정:RULE-RTCP-NACK-UP 정:RULE-RTCP-NACK-DOWN 정:IMPL-FWD-SOURCE-SWITCH 연:RULE-LINK-SOURCE-SWITCH RFC 3550 RFC 4585 RFC 4588 · model: claude-opus-5-5
+// spec: v1.2 @250e836 · 정:IMPL-RTCP-TERMINATE 정:RULE-RTCP-NACK-UP 정:RULE-RTCP-NACK-DOWN 정:IMPL-FWD-SOURCE-SWITCH 연:RULE-LINK-SOURCE-SWITCH RFC 3550 RFC 4585 RFC 4588 · model: claude-opus-5-5
 //! RTCP — 서버는 두 세션의 종단이다. 수신 RR · REMB · TWCC 는 자체 생성, SR 은 번역, 구독자 RR 은 소비한다.
 
 use std::collections::BTreeMap;
@@ -27,6 +27,7 @@ use crate::sfu::{Sfu, lock, mono_ms, now_ms};
 use crate::table::Row;
 
 pub const SERVER_SSRC: u32 = 1;
+const PADDING_LEN: usize = 255;
 
 fn marshal(p: &dyn Packet) -> Vec<u8> {
     p.marshal().map(|b| b.to_vec()).unwrap_or_default()
@@ -71,7 +72,7 @@ pub fn on_rtcp(sfu: &Arc<Sfu>, conn: &Arc<Conn>, plain: &[u8]) {
         } else if let Some(r) = any.downcast_ref::<ReceiverEstimatedMaximumBitrate>() {
             lock(&conn.bwe).on_remb(r.bitrate as u64, mono_ms());
         } else if let Some(t) = any.downcast_ref::<TransportLayerCc>() {
-            lock(&conn.bwe).on_twcc(t, now_ms());
+            lock(&conn.bwe).on_twcc(t, mono_ms());
         }
     }
 }
@@ -190,13 +191,41 @@ fn send_rtx(row: &Row, conn: &Conn, orig: &[u8], out_seq: u16, ts_off: u32) {
     if let Some(id) = ids.abs_send_time {
         exts.push((id, rtp::abs_send_time(now_ms() * 1000).to_vec()));
     }
-    if let Some(id) = ids.twcc {
+    let twcc = ids.twcc.map(|id| {
         let s = conn.twcc_out.fetch_add(1, Ordering::Relaxed) as u16;
         exts.push((id, s.to_be_bytes().to_vec()));
-    }
+        s
+    });
     let w = Rewrite { pt: rtx_pt, seq, ts: p.ts.wrapping_add(ts_off), ssrc: rtx_ssrc, marker: p.marker, exts: &exts };
     let out = rtp::build_raw(&[], 0, &w, &body);
-    conn.send_rtp(&out);
+    if conn.send_rtp(&out)
+        && let Some(s) = twcc
+    {
+        lock(&conn.bwe).sent(s, out.len(), crate::sfu::mono_us());
+    }
+}
+
+pub fn send_padding(row: &Row, conn: &Conn) -> Option<usize> {
+    let rtx_ssrc = row.rtx_ssrc?;
+    let ids = conn.sub_ext.load();
+    let id = ids.twcc?;
+    let ts = lock(&row.rw).last_ts;
+    let seq = row.rtx_seq.fetch_add(1, Ordering::Relaxed) as u16;
+    let mut exts = Vec::new();
+    if let Some(a) = ids.abs_send_time {
+        exts.push((a, rtp::abs_send_time(now_ms() * 1000).to_vec()));
+    }
+    let s = conn.twcc_out.fetch_add(1, Ordering::Relaxed) as u16;
+    exts.push((id, s.to_be_bytes().to_vec()));
+    let mut body = vec![0u8; PADDING_LEN];
+    body[PADDING_LEN - 1] = PADDING_LEN as u8;
+    let w = Rewrite { pt: row.rtx_pt.load(Ordering::Relaxed), seq, ts, ssrc: rtx_ssrc, marker: false, exts: &exts };
+    let out = rtp::build_raw(&[], 0x20, &w, &body);
+    if !conn.send_rtp(&out) {
+        return None;
+    }
+    lock(&conn.bwe).sent(s, out.len(), crate::sfu::mono_us());
+    Some(out.len())
 }
 
 #[derive(Default)]

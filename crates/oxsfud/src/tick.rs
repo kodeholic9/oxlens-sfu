@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @124a233 · 정:RULE-GC-FOUR 정:IMPL-ROOM-STALL 정:IMPL-RTCP-TERMINATE 정:RULE-LINK-PAIR-LIVENESS 정:IMPL-FLR-RTP-OBSERVE 정:RULE-BUS-FATE · model: claude-opus-5-5
+// spec: v1.2 @250e836 · 정:RULE-GC-FOUR 정:IMPL-ROOM-STALL 정:IMPL-RTCP-TERMINATE 정:RULE-LINK-PAIR-LIVENESS 정:IMPL-FLR-RTP-OBSERVE 정:RULE-BUS-FATE · model: claude-opus-5-5
 //! 주기 — room sweep 5s · 발언권 2s · 정체 5s · RTCP(RR/REMB 1s · TWCC 100ms · NACK) · 생존 1s · TCP keepalive 20s.
 
 use std::sync::Arc;
@@ -38,6 +38,7 @@ pub fn spawn_all(sfu: &Arc<Sfu>) {
         for r in rooms(s) {
             crate::media::slot_tick(s, &r, now);
         }
+        crate::layer::probe_tick(s);
     });
     every(sfu, 50, |s| crate::rtcp_io::nack_tick(s));
     every(sfu, 100, |s| crate::rtcp_io::twcc_tick(s));
@@ -85,7 +86,7 @@ fn stall(sfu: &Arc<Sfu>) {
                 RowClass::Slot => {
                     let holder = room.holder.load_full();
                     let bound = room.slot(row.kind).bound.load_full();
-                    let ok = holder.as_deref().is_some_and(|h| h.as_str() != p.user_id) && bound.as_ref().is_some_and(|b| fresh(b, now));
+                    let ok = holder.as_deref().is_some_and(|h| h.as_str() != p.user_id) && bound.is_some();
                     (ok, first_ready)
                 }
                 RowClass::Full => match row.stream() {
@@ -94,7 +95,7 @@ fn stall(sfu: &Arc<Sfu>) {
                         let video = s.kind == Kind::Video;
                         let start = if video { first_ready.max(first) } else { first_ready };
                         let paused = crate::table::pref(&conn, &s.track_id).paused || (s.simulcast && conn.auto_layer.load(Ordering::Relaxed) == 2);
-                        let ok = !s.is_half() && !s.gone.load(Ordering::Relaxed) && !paused && fresh(&s, now) && (!video || first > 0) && (!video || row.open.load(Ordering::Relaxed));
+                        let ok = !s.is_half() && !s.gone.load(Ordering::Relaxed) && !paused && (!video || first > 0) && (!video || row.open.load(Ordering::Relaxed));
                         (ok, start)
                     }
                     None => (false, 0),
@@ -120,10 +121,6 @@ fn stall(sfu: &Arc<Sfu>) {
             }
         }
     }
-}
-
-fn fresh(s: &crate::media::PubStream, now: u64) -> bool {
-    s.tracks.load().iter().any(|t| now.saturating_sub(t.last_rx.load(Ordering::Relaxed)) < STALL_MS)
 }
 
 fn notify_stall(sfu: &Sfu, room: &Room, user: &str, now: u64) {

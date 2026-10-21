@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @124a233 · 정:RULE-PUB-TWO-LAYERS 정:RULE-FWD-STEPS 정:IMPL-FWD-ROOM 정:RULE-FWD-BRANCH-AUTHORITY 정:IMPL-FWD-SOURCE-SWITCH 정:IMPL-SIM-SWITCH 정:IMPL-PUB-ACCEPT 정:IMPL-FLR-RTP-OBSERVE 정:IMPL-FLR-MEDIA-BIND 정:RULE-RTCP-NACK-UP 정:RULE-CONC-SIX · model: claude-opus-5-5
+// spec: v1.2 @250e836 · 정:RULE-PUB-TWO-LAYERS 정:RULE-FWD-STEPS 정:IMPL-FWD-ROOM 정:RULE-FWD-BRANCH-AUTHORITY 정:IMPL-FWD-SOURCE-SWITCH 정:IMPL-SIM-SWITCH 정:IMPL-PUB-ACCEPT 정:IMPL-FLR-RTP-OBSERVE 정:IMPL-FLR-MEDIA-BIND 정:RULE-RTCP-NACK-UP 정:RULE-CONC-SIX · model: claude-opus-5-5
 //! 전달 핫패스 — 패킷 하나가 들어와 구독자마다 나가는 길. 매 패킷 읽는 자료는 RCU · 원자값이다.
 
 use std::collections::BTreeMap;
@@ -533,7 +533,7 @@ pub fn send_row(sfu: &Sfu, row: &Arc<Row>, src: u32, pkt: &Rtp<'_>, now: u64, ke
     if conn.send_rtp(&out) {
         row.egress.fetch_add(1, Ordering::Relaxed);
         if let Some(seq) = twcc_of(&conn, &exts) {
-            lock(&conn.bwe).sent(seq, out.len(), crate::sfu::now_ms());
+            lock(&conn.bwe).sent(seq, out.len(), crate::sfu::mono_us());
         }
     } else {
         sfu.counters.drop("egress_send");

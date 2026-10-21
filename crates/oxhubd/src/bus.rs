@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @124a233 · 정:RULE-BUS-PRESENCE 정:RULE-BUS-EVENTS 정:RULE-BUS-REQUEST 정:IMPL-BUS-FAULTS 정:RULE-BUS-PLACEMENT · model: claude-opus-5-5
+// spec: v1.2 @250e836 · 정:RULE-BUS-PRESENCE 정:RULE-BUS-EVENTS 정:RULE-BUS-REQUEST 정:IMPL-BUS-FAULTS 정:RULE-BUS-PLACEMENT · model: claude-opus-5-5
 //! hub 의 버스 — router 를 열고, `node` · `room` 토큰을 history 로 구독해 배치 맵을 배우고, `q/node/{me}/call` 에 답한다.
 
 use std::sync::Arc;
@@ -31,11 +31,8 @@ pub async fn open(hub: &Arc<Hub>) -> Result<(), String> {
 pub async fn declare_node(hub: &Arc<Hub>, inst: &str) {
     let Some(bus) = hub.bus() else { return };
     let mut g = hub.node_token.lock().await;
-    if g.as_ref().is_some_and(|(i, _)| i == inst) {
+    if g.is_some() {
         return;
-    }
-    if let Some((_, old)) = g.take() {
-        let _ = old.undeclare().await;
     }
     match bus.liveliness().declare_token(hub.keys.node(&hub.node, inst)).await {
         Ok(t) => {

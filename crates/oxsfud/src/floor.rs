@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @124a233 · 생성본 spec/protocol/out/floor/server/floor_server.ts(IR 1812dea47fd2095f) 이식 · 정:IMPL-FLR-LOCK 정:IMPL-FLR-RTP-OBSERVE 정:IMPL-FLR-POLICY 정:IMPL-FLR-FIRST-NOTICE 정:IMPL-FLR-MEDIA-BIND 정:RULE-FLR-SNAPSHOT 연:FLR.wire 연:RULE-FLR-TIMERS · model: claude-opus-5-5
+// spec: v1.2 @250e836 · 생성본 spec/protocol/out/floor/server/floor_server.ts(IR 1812dea47fd2095f) 이식 · 정:IMPL-FLR-LOCK 정:IMPL-FLR-RTP-OBSERVE 정:IMPL-FLR-POLICY 정:IMPL-FLR-FIRST-NOTICE 정:IMPL-FLR-MEDIA-BIND 정:RULE-FLR-SNAPSHOT 연:FLR.wire 연:RULE-FLR-TIMERS · model: claude-opus-5-5
 //! 발언권 — 판정 로직(6.3.4) · 참가자 상태기(6.3.5)는 생성본을 걸음 그대로 옮긴다. 판정은 락 안, 송신 · 결합은 락 밖.
 
 use std::collections::{BTreeSet, HashMap};
@@ -402,7 +402,7 @@ impl Srv {
         let member = self.members.contains(u);
         if !member && m.t == T::Request {
             r.l.push(("FLR.S.gate.not_in_room", None));
-            self.send(r, u, T::Deny, None, cause::OTHER_REASON as u32, 0);
+            self.send(r, u, T::Deny, Some("not_in_room".to_string()), cause::OTHER_REASON as u32, 0);
             return;
         }
         if !member {
@@ -1061,7 +1061,12 @@ fn wire(room: &str, m: &Msg) -> mbcp::Msg {
             }
             w.push(tlv::SEQ, u16be(m.q));
         }
-        T::Deny | T::Revoke => w.push(tlv::CAUSE, vec![m.n as u8]),
+        T::Deny | T::Revoke => {
+            w.push(tlv::CAUSE, vec![m.n as u8]);
+            if let Some(a) = &m.a {
+                w.push(tlv::REASON, a.as_bytes().to_vec());
+            }
+        }
         T::Idle => {
             if let Some(a) = &m.a {
                 w.push(tlv::PREV, a.as_bytes().to_vec());
