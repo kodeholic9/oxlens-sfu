@@ -210,12 +210,10 @@ async fn create_room_inner(hub: &Arc<Hub>, headers: &HeaderMap, body: &[u8]) -> 
     };
     match crate::route::unit(hub, &node, unit_req).await {
         Ok(UnitRes::Created(c)) => {
-            let inst = hub.nodes.read().ok().and_then(|n| n.get(&node).map(|e| e.inst.clone()));
-            if let (Some(inst), Ok(mut m)) = (inst, hub.rooms.write()) {
+            if let Ok(mut m) = hub.rooms.write() {
                 let v = m.entry(c.room_id.clone()).or_default();
-                let p = crate::state::Place { node: node.clone(), inst };
-                if !v.contains(&p) {
-                    v.push(p);
+                if !v.iter().any(|p| p.node == node) {
+                    v.push(crate::state::Place { node: node.clone(), inst: String::new() });
                 }
             }
             (StatusCode::CREATED, Json(c)).into_response()

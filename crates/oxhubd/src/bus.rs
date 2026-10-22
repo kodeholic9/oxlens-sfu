@@ -138,6 +138,7 @@ async fn watch_rooms(hub: Arc<Hub>) -> Result<(), String> {
                     hub.note_event("put", &key);
                     if let Ok(mut m) = hub.rooms.write() {
                         let v = m.entry(room.clone()).or_default();
+                        v.retain(|p| !(p.node == node && p.inst.is_empty()));
                         let p = Place { node, inst };
                         if !v.contains(&p) {
                             v.push(p);
@@ -154,7 +155,7 @@ async fn watch_rooms(hub: Arc<Hub>) -> Result<(), String> {
                         Ok(mut m) => {
                             let mut emptied = false;
                             if let Some(v) = m.get_mut(&room) {
-                                v.retain(|p| !(p.node == node && p.inst == inst));
+                                v.retain(|p| !(p.node == node && (p.inst == inst || p.inst.is_empty())));
                                 emptied = v.is_empty();
                             }
                             if emptied {
