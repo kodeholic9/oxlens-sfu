@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @250e836 · 생성본 spec/protocol/out/floor/server/floor_server.ts(IR 1812dea47fd2095f) 이식 · 정:IMPL-FLR-LOCK 정:IMPL-FLR-RTP-OBSERVE 정:IMPL-FLR-POLICY 정:IMPL-FLR-FIRST-NOTICE 정:IMPL-FLR-MEDIA-BIND 정:RULE-FLR-SNAPSHOT 연:FLR.wire 연:RULE-FLR-TIMERS · model: claude-opus-5-5
+// spec: v1.2 @50d5580 · 생성본 spec/protocol/out/floor/server/floor_server.ts(IR 1812dea47fd2095f) 이식 · 정:IMPL-FLR-LOCK 정:IMPL-FLR-RTP-OBSERVE 정:IMPL-FLR-POLICY 정:IMPL-FLR-FIRST-NOTICE 정:IMPL-FLR-MEDIA-BIND 정:RULE-FLR-SNAPSHOT 연:FLR.wire 연:RULE-FLR-TIMERS · model: claude-opus-5-5
 //! 발언권 — 판정 로직(6.3.4) · 참가자 상태기(6.3.5)는 생성본을 걸음 그대로 옮긴다. 판정은 락 안, 송신 · 결합은 락 밖.
 
 use std::collections::{BTreeSet, HashMap};
@@ -995,6 +995,7 @@ fn half_stream(sfu: &Sfu, user: &str, kind: Kind) -> Option<Arc<PubStream>> {
 }
 
 fn bind(sfu: &Arc<Sfu>, room: &Arc<Room>, u: &str) {
+    let succession = room.slot(Kind::Audio).bound.load().is_some();
     let audio = half_stream(sfu, u, Kind::Audio);
     room.slot(Kind::Audio).bound.store(audio);
     let vcodec = room.codecs.video.clone().unwrap_or_else(|| "H264".into());
@@ -1008,8 +1009,8 @@ fn bind(sfu: &Arc<Sfu>, room: &Arc<Room>, u: &str) {
     let has_video = video.is_some();
     room.slot(Kind::Video).bound.store(video);
     let a = room.slot(Kind::Audio);
-    a.priming_left.store(PRIMING_FRAMES, Ordering::Relaxed);
-    a.priming_stop.store(false, Ordering::Relaxed);
+    a.priming_left.store(if succession { 0 } else { PRIMING_FRAMES }, Ordering::Relaxed);
+    a.priming_stop.store(succession, Ordering::Relaxed);
     a.silence_left.store(0, Ordering::Relaxed);
     let now = mono_ms();
     if has_video {
@@ -1017,7 +1018,7 @@ fn bind(sfu: &Arc<Sfu>, room: &Arc<Room>, u: &str) {
         b.clear();
         b.extend(PLI_BURST.iter().map(|d| now + d));
     }
-    tracing::info!(kind = "ev", spec = "IMPL-FLR-MEDIA-BIND", room = room.id.as_str(), user = u, "granted bind");
+    tracing::info!(kind = "ev", spec = "IMPL-FLR-MEDIA-BIND", room = room.id.as_str(), user = u, succession = succession, "granted bind");
 }
 
 fn release(_sfu: &Arc<Sfu>, room: &Arc<Room>, prev: Option<String>) {
