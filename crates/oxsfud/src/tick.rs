@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @250e836 · 정:RULE-GC-FOUR 정:IMPL-ROOM-STALL 정:IMPL-RTCP-TERMINATE 정:RULE-LINK-PAIR-LIVENESS 정:IMPL-FLR-RTP-OBSERVE 정:RULE-BUS-FATE · model: claude-opus-5-5
+// spec: v1.2 @06c0cff · 정:RULE-GC-FOUR 정:IMPL-ROOM-STALL 정:IMPL-RTCP-TERMINATE 정:RULE-LINK-PAIR-LIVENESS 정:IMPL-FLR-RTP-OBSERVE 정:RULE-BUS-FATE · model: claude-opus-5-5
 //! 주기 — room sweep 5s · 발언권 2s · 정체 5s · RTCP(RR/REMB 1s · TWCC 100ms · NACK) · 생존 1s · TCP keepalive 20s.
 
 use std::sync::Arc;
@@ -82,12 +82,16 @@ fn stall(sfu: &Arc<Sfu>) {
             let Some(room_id) = row.room_id() else { continue };
             let Some(first_ready) = ready.get(&room_id).map(|r| r.first_at).filter(|t| *t > 0) else { continue };
             let Some(room) = sfu.room(&room_id) else { continue };
-            let (eligible, start) = match row.class {
+            let (eligible, start, speaker_rtp) = match row.class {
                 RowClass::Slot => {
                     let holder = room.holder.load_full();
                     let bound = room.slot(row.kind).bound.load_full();
                     let ok = holder.as_deref().is_some_and(|h| h.as_str() != p.user_id) && bound.is_some();
-                    (ok, first_ready)
+                    let (taken, rtp) = {
+                        let f = lock(&room.floor);
+                        (f.taken_at, f.last_rtp_at)
+                    };
+                    (ok, first_ready.max(taken), Some(rtp))
                 }
                 RowClass::Full => match row.stream() {
                     Some(s) => {
@@ -96,15 +100,15 @@ fn stall(sfu: &Arc<Sfu>) {
                         let start = if video { first_ready.max(first) } else { first_ready };
                         let paused = crate::table::pref(&conn, &s.track_id).paused || (s.simulcast && conn.auto_layer.load(Ordering::Relaxed) == 2);
                         let ok = !s.is_half() && !s.gone.load(Ordering::Relaxed) && !paused && (!video || first > 0) && (!video || row.open.load(Ordering::Relaxed));
-                        (ok, start)
+                        (ok, start, None)
                     }
-                    None => (false, 0),
+                    None => (false, 0, None),
                 },
             };
             let eligible = eligible && row.since.load(Ordering::Relaxed) <= conn.ack.load(Ordering::Relaxed) && now >= start;
             let egress = row.egress.load(Ordering::Relaxed);
             let mut st = lock(&row.stall);
-            if !eligible || st.0 == 0 {
+            if !eligible || st.0 == 0 || st.0 < start {
                 st.0 = now;
                 st.1 = egress;
                 continue;
@@ -112,7 +116,7 @@ fn stall(sfu: &Arc<Sfu>) {
             if now.saturating_sub(st.0) < STALL_MS {
                 continue;
             }
-            let stalled = egress == st.1;
+            let stalled = egress == st.1 && speaker_rtp.is_none_or(|at| at > st.0);
             st.0 = now;
             st.1 = egress;
             drop(st);
