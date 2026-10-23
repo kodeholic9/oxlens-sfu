@@ -24,6 +24,61 @@ pub const V2_STALE_MS: u64 = 1_000;
 pub const GCC_START_BPS: f64 = 300_000.0;
 pub const GCC_FLOOR_BPS: f64 = 30_000.0;
 pub const GCC_DECREASE_GAP_MS: u64 = 300;
+pub const PROBE_MS: u64 = 2_500;
+pub const PROBE_JUDGE_MS: u64 = 4_000;
+pub const PROBE_CHUNK_MS: u64 = 20;
+pub const PROBE_GAIN: f64 = 1.35;
+pub const PROBE_CAP_BPS: f64 = 3_000_000.0;
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Probe {
+    pub started: u64,
+    pub target: f64,
+    pub rate: f64,
+    pub seqs: std::collections::BTreeSet<u16>,
+    pub acked: usize,
+    pub first_arr: Option<i64>,
+    pub last_arr: Option<i64>,
+}
+
+impl Probe {
+    pub fn new(now: u64, need: f64) -> Probe {
+        Probe { started: now, target: need, rate: (need * PROBE_GAIN).min(PROBE_CAP_BPS), ..Probe::default() }
+    }
+
+    pub fn sending(&self, now: u64) -> bool {
+        now.saturating_sub(self.started) < PROBE_MS
+    }
+
+    pub fn due(&self, now: u64) -> bool {
+        now.saturating_sub(self.started) >= PROBE_JUDGE_MS
+    }
+
+    pub fn ack(&mut self, seq: u16, arr_us: i64, size: usize) -> bool {
+        if !self.seqs.contains(&seq) {
+            return false;
+        }
+        self.acked += size;
+        self.first_arr = Some(self.first_arr.map(|f| f.min(arr_us)).unwrap_or(arr_us));
+        self.last_arr = Some(self.last_arr.map(|l| l.max(arr_us)).unwrap_or(arr_us));
+        true
+    }
+
+    pub fn measured(&self) -> Option<f64> {
+        if self.acked == 0 {
+            return None;
+        }
+        let span_us = match (self.first_arr, self.last_arr) {
+            (Some(f), Some(l)) if l > f => (l - f) as f64,
+            _ => PROBE_MS as f64 * 1000.0,
+        };
+        Some(self.acked as f64 * 8.0 * 1_000_000.0 / span_us.max(PROBE_CHUNK_MS as f64 * 1000.0))
+    }
+
+    pub fn proven(&self) -> Option<bool> {
+        self.measured().map(|m| m >= self.target)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Layer {
@@ -307,7 +362,18 @@ mod tests {
         assert_eq!(policy_tick(&mut p, &s), None);
         s.now = 3000;
         s.remb = Some((100_000.0, 3000));
-        assert_eq!(policy_tick(&mut p, &s), None, "승격 유예 10s 중 remb skip");
+        assert_eq!(policy_tick(&mut p, &s), None, "S-sym-RULE-SIM-TICK-1 승격 유예 10s 중 remb skip");
+    }
+
+    #[test]
+    fn probe_unmeasured_is_none_not_zero() {
+        let mut p = Probe::new(0, 1_980_000.0);
+        p.seqs.insert(5);
+        assert_eq!(p.measured(), None, "S-sym-RULE-SIM-TICK-2 못 잰 것은 0 이 아니라 없음");
+        assert_eq!(p.proven(), None);
+        assert!(p.ack(5, 0, 250_000) && p.ack(5, 1_000_000, 250_000));
+        assert_eq!(p.proven(), Some(true));
+        assert!((p.rate - 1_980_000.0 * PROBE_GAIN).abs() < 1.0);
     }
 
     #[test]

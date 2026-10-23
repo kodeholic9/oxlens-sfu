@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @8a0d8cf · 정:RULE-DOC-OWNERSHIP · 정:RULE-DOC-CODE-MIRROR · 정:RULE-BUS-FATE · 정:RULE-CONC-SIX · model: claude-opus-5-5
+// spec: v1.2 @8a0d8cf · 정:RULE-DOC-OWNERSHIP · 정:RULE-DOC-CODE-MIRROR · 정:RULE-BUS-FATE · 정:RULE-CONC-SIX · 정:RULE-DOC-SCOPE-SERVER · model: claude-opus-5-5
 //! `oxsfud` — 미디어 서버: Peer · 방 · 발행 · 구독 · 발언권. 영역마다 한 디렉터리(개념 link · room · aff · pub · trk · sub · flr · bus / 가로지르는 것 fwd · sim · rtcp · aux · ops · gc · cfg).
 
 pub mod aff;

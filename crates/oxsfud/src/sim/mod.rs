@@ -6,7 +6,7 @@ pub mod core;
 
 use std::collections::VecDeque;
 
-use self::core::{Gcc, Layer, Policy, PENDING_MS};
+use self::core::{Gcc, Layer, Policy, Probe, PENDING_MS};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Sel {
@@ -68,6 +68,7 @@ pub struct Bwe {
     pub nack_rate: f64,
     pub drops: u64,
     pub est_at: u64,
+    pub probe: Option<Probe>,
 }
 
 impl Bwe {
@@ -81,6 +82,9 @@ impl Bwe {
     pub fn feedback(&mut self, acks: &[(u16, i64)], now: u64) {
         for (seq, arr_us) in acks {
             let Some(&(_, send_us, size)) = self.sent.iter().rev().find(|(s, _, _)| s == seq) else { continue };
+            if let Some(p) = self.probe.as_mut() {
+                p.ack(*seq, *arr_us, size);
+            }
             self.gcc.on_packet(send_us as f64 / 1000.0, *arr_us as f64 / 1000.0);
             self.acked.push_back((now, size));
         }

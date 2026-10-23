@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @8a0d8cf · 정:RULE-FWD-STEPS · 정:RULE-FWD-BRANCH-AUTHORITY · 정:IMPL-FWD-ROOM · 정:IMPL-FWD-SOURCE-SWITCH · 정:IMPL-FLR-MEDIA-BIND · 정:IMPL-FLR-RTP-OBSERVE · 정:IMPL-SUB-READY-GATE · 정:IMPL-SIM-SWITCH · 정:IMPL-PUB-ACCEPT · 정:RULE-CONC-SIX · model: claude-opus-5-5
+// spec: v1.2 @8a0d8cf · 정:RULE-FWD-STEPS · 정:RULE-FWD-BRANCH-AUTHORITY · 정:IMPL-FWD-ROOM · 정:IMPL-FWD-SOURCE-SWITCH · 정:IMPL-FLR-MEDIA-BIND · 정:IMPL-FLR-RTP-OBSERVE · 정:IMPL-SUB-READY-GATE · 정:IMPL-SIM-SWITCH · 정:IMPL-PUB-ACCEPT · 정:RULE-CONC-SIX · 정:RULE-CONC-PERF-AXES · model: claude-opus-5-5
 //! 전달 핫패스 — 업링크 스트림 찾기(시뮬캐스트는 rid 로 첫 RTP 에 붙인다) · 방은 매 패킷 `pub_room` · 반이중은 prefan 게이트(화자 = 발행자) · 줄 검사(확인된 차례) · 재기록 · 확장 다시 짓기 · 예열 CN · PLI burst.
 
 use std::sync::atomic::Ordering;
@@ -19,8 +19,14 @@ pub const PRIME_FRAMES: u32 = 250;
 pub const PRIME_GAP_MS: u64 = 20;
 pub const OPUS_SILENCE: [u8; 3] = [0xf8, 0xff, 0xfe];
 pub const PLI_BURST_MS: [u64; 3] = [0, 500, 1500];
-const PRIME_KEY: u64 = u64::MAX;
+const PRIME_BASE: u64 = 0xffff_0000_0000_0000;
+static PRIME_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn prime_key() -> u64 {
+    PRIME_BASE | PRIME_SEQ.fetch_add(1, Ordering::Relaxed)
+}
 const GATE_MS: u64 = 5000;
+const PROBE_PAD: usize = 224;
 
 fn now_ms() -> u64 {
     common::clock::wall_ms()
@@ -231,7 +237,7 @@ pub fn send_down(d: &Arc<Down>, p: &Peer, src: &Src<'_>, r: &Rtp<'_>, key: bool)
     let (seq, ts) = {
         let mut st = lock(&d.st);
         let changed = st.src_ssrc != src.ssrc;
-        if changed && d.kind == MediaKind::Video && !key && src.key != PRIME_KEY {
+        if changed && d.kind == MediaKind::Video && !key && src.key < PRIME_BASE {
             return false;
         }
         let m = st.rw.map(src.key, r.seq, r.ts, src.clock, now);
@@ -254,7 +260,7 @@ pub fn send_down(d: &Arc<Down>, p: &Peer, src: &Src<'_>, r: &Rtp<'_>, key: bool)
     ext::build(&tb, tb.form(), &vals, &mut eb);
     let mut out = Vec::with_capacity(r.payload.len() + 64);
     let pt = d.pt.load(Ordering::Acquire);
-    let byte1 = if src.key == PRIME_KEY { 0 } else { r.marker as u8 * 0x80 };
+    let byte1 = if src.key >= PRIME_BASE { 0 } else { r.marker as u8 * 0x80 };
     fc::build(&Egress { byte1, pt, seq, ts, ssrc: d.ssrc, csrc: r.csrc, ext: &eb, payload: r.payload, padding: r.padding }, &mut out);
     let ok = t.send_rtp(&out);
     if ok {
@@ -266,6 +272,41 @@ pub fn send_down(d: &Arc<Down>, p: &Peer, src: &Src<'_>, r: &Rtp<'_>, key: bool)
         }
     }
     true
+}
+
+pub fn probe_send(p: &Arc<Peer>, bytes: usize) -> Vec<(u16, usize)> {
+    let mut out = Vec::new();
+    let t = p.sub_transport();
+    let downs: Vec<Arc<Down>> = lock(&p.downs).values().filter(|d| d.kind == MediaKind::Video && d.class == Class::Full && d.rtx_ssrc.is_some() && d.loaded().is_some()).cloned().collect();
+    let Some(d) = downs.into_iter().find(|d| sendable(d, p) && lock(&d.st).rw.last.is_some()) else { return out };
+    let (Some(rs), rpt) = (d.rtx_ssrc, d.rtx_pt.load(Ordering::Acquire)) else { return out };
+    let table = ext_table(p);
+    let tb = ExtTable { audio_level: None, ..table };
+    let Some(_) = tb.twcc else { return out };
+    let mid = d.mid.to_string();
+    let mut sent = 0;
+    while sent < bytes {
+        let (seq, ts, osn) = {
+            let mut st = lock(&d.st);
+            st.rtx_seq = st.rtx_seq.wrapping_add(1);
+            let l = st.rw.last.unwrap_or(crate::fwd::core::Last { seq: 0, ts: 0, at_ms: 0 });
+            (st.rtx_seq, l.ts, l.seq)
+        };
+        let twcc_seq = t.twcc_out.fetch_add(1, Ordering::AcqRel);
+        let mut eb = Vec::with_capacity(24);
+        ext::build(&tb, tb.form(), &ExtValues { mid: Some(&mid), audio_level: None, t_us: common::clock::wall_us(), twcc_seq }, &mut eb);
+        let mut pad = vec![0u8; PROBE_PAD - 1];
+        pad.push(PROBE_PAD as u8);
+        let mut pkt = Vec::with_capacity(PROBE_PAD + 40);
+        fc::build(&Egress { byte1: 0, pt: rpt, seq, ts, ssrc: rs, csrc: &[], ext: &eb, payload: &osn.to_be_bytes(), padding: &pad }, &mut pkt);
+        if !t.send_rtp(&pkt) {
+            break;
+        }
+        lock(&t.sim).sent_packet(twcc_seq, common::clock::wall_us(), pkt.len());
+        out.push((twcc_seq, pkt.len()));
+        sent += pkt.len();
+    }
+    out
 }
 
 pub fn on_connected(t: &Arc<Transport>) {
@@ -358,21 +399,22 @@ async fn prime_run(room: Weak<crate::room::Room>, speaker: String, token: u64) {
     let mut seq: u16 = (common::ident::random_u32() & 0x7fff) as u16;
     let mut ts: u32 = common::ident::random_u32();
     let mut iv = tokio::time::interval(Duration::from_millis(PRIME_GAP_MS));
+    let key = prime_key();
     for _ in 0..PRIME_FRAMES {
         iv.tick().await;
         let Some(r) = room.upgrade() else { return };
         if r.audio.priming.load(Ordering::Acquire) != token {
             return;
         }
-        silence(&r, &speaker, seq, ts);
+        silence(&r, &speaker, key, seq, ts);
         seq = seq.wrapping_add(1);
         ts = ts.wrapping_add(960);
     }
 }
 
-fn silence(r: &crate::room::Room, skip: &str, seq: u16, ts: u32) {
+fn silence(r: &crate::room::Room, skip: &str, key: u64, seq: u16, ts: u32) {
     let pkt = Rtp { marker: false, pt: 111, seq, ts, ssrc: 0, csrc: &[], profile: 0, ext: &[], payload: &OPUS_SILENCE, padding: &[] };
-    let src = Src { key: PRIME_KEY, phys: None, ssrc: 0, user: "", track: "", clock: 48_000, audio_level: None };
+    let src = Src { key, phys: None, ssrc: (key & 0xffff_ffff) as u32, user: "", track: "", clock: 48_000, audio_level: None };
     for w in r.audio.subs.load().iter() {
         let Some(d) = w.upgrade() else { continue };
         let Some(dp) = d.peer.upgrade() else { continue };
@@ -393,10 +435,22 @@ pub fn floor_release(room_id: &str, prev: Option<&str>) {
     if room.media.audio().eq_ignore_ascii_case("opus") {
         let mut seq: u16 = (common::ident::random_u32() & 0x7fff) as u16;
         let mut ts: u32 = common::ident::random_u32();
+        let key = prime_key();
         for _ in 0..3 {
-            silence(&room, prev.unwrap_or(""), seq, ts);
+            silence(&room, prev.unwrap_or(""), key, seq, ts);
             seq = seq.wrapping_add(1);
             ts = ts.wrapping_add(960);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_prime_burst_is_its_own_source() {
+        let (a, b) = (prime_key(), prime_key());
+        assert!(a >= PRIME_BASE && b >= PRIME_BASE && a != b, "S-sym-IMPL-FWD-SOURCE-SWITCH-2 예열 · 해제 무음은 매번 새 출처 — 같은 키면 새 seq 시작이 구멍이 된다");
     }
 }

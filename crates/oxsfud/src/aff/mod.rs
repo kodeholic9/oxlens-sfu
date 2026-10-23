@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @8a0d8cf · 정:RULE-AFF-ONE-SET · 정:IMPL-AFF-PUB-ROOM · 정:IMPL-AFF-PUB-MOVE · 연:RULE-AFF-PROC · 연:RULE-AFF-RES-FORM · 연:RULE-AFF-PUB-SELECT-CODEC-RECHECK · 연:AFF.S.reject · 연:AFF.S.reject_perm · 연:AFF.S.select_moved · model: claude-opus-5-5
+// spec: v1.2 @8a0d8cf · 정:RULE-AFF-ONE-SET · 정:IMPL-AFF-PUB-ROOM · 정:IMPL-AFF-PUB-MOVE · 연:RULE-AFF-PROC · 연:RULE-AFF-RES-FORM · 연:RULE-AFF-PUB-SELECT-CODEC-RECHECK · 연:AFF.S.reject · 연:AFF.S.reject_perm · 연:AFF.S.select_moved · 정:RULE-AFF-SERVER-SCOPE · model: claude-opus-5-5
 //! AFF — `pub_room` 은 RCU 값(매 패킷 이 값으로 방을 정한다) · 적용 순서 deselect → select · 옮길 때 재검사 둘(코덱 · 권한) 하나라도 걸리면 아무것도 안 옮긴다 · 전이중(쉬는 것 포함)이 따라간다.
 
 use std::sync::atomic::Ordering;

@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @8a0d8cf · 정:RULE-PUB-TWO-LAYERS · 정:RULE-PUB-STATE · 정:IMPL-PUB-ACCEPT · 정:IMPL-PUB-RID-SPATIAL · 정:RULE-CONC-SIX · model: claude-opus-5-5
+// spec: v1.2 @8a0d8cf · 정:RULE-PUB-TWO-LAYERS · 정:RULE-PUB-STATE · 정:IMPL-PUB-ACCEPT · 정:IMPL-PUB-RID-SPATIAL · 정:RULE-CONC-SIX · 정:RULE-PUB-SERVER-SCOPE · model: claude-opus-5-5
 //! PUB — 발행 두 계층: 논리 `PublisherStream`(식별 · 신고 메타) · 물리 `PublisherTrack`(업링크 스트림 하나 — 수신 통계 · RTP 캐시 1024 · NACK · 구독자 목록).
 
 pub mod core;

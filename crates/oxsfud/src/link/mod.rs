@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @8a0d8cf · 정:RULE-LINK-SERVER-SCOPE · 정:IMPL-LINK-PEER-STATE · 정:RULE-LINK-TRANSPORT · 정:IMPL-SUB-TABLE · 정:IMPL-GC-PEER-REAP · 정:RULE-CONC-SIX · 연:LINK.type.ServerConfig · model: claude-opus-5-5
+// spec: v1.2 @8a0d8cf · 정:RULE-LINK-SERVER-SCOPE · 정:IMPL-LINK-PEER-STATE · 정:RULE-LINK-TRANSPORT · 정:IMPL-SUB-TABLE · 정:IMPL-GC-PEER-REAP · 정:RULE-CONC-SIX · 연:LINK.type.ServerConfig · 정:RULE-CONC-STATE-VOCAB · model: claude-opus-5-5
 //! LINK — Peer(세션 × 이 서버 · 수명 = 세션) · 전송 객체(자격 한 벌 = 연결 하나) · 배정표 줄의 다운링크 스트림 · 등록부(ufrag · 주소 → 전송 객체).
 
 pub mod core;

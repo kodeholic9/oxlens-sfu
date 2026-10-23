@@ -117,7 +117,7 @@ pub async fn room_join(ctx: &Ctx, env: &Envelope, body: &Value) -> Result<Value,
             Member {
                 user_id: env.user_id.clone(),
                 role: req.role.unwrap_or(oxsig::room::ROLE_DEFAULT),
-                select: req.select.unwrap_or(false),
+                select: req.select.unwrap_or(true),
                 participant_type: env.participant_type,
                 metadata: env.metadata.clone(),
                 permission: perm,
@@ -139,11 +139,11 @@ pub async fn room_join(ctx: &Ctx, env: &Envelope, body: &Value) -> Result<Value,
     });
     crate::sub::gate_close(&p, &room.id, now());
     wire::room_rows(ctx, &p, &room);
-    if req.select == Some(true) {
+    if req.select.unwrap_or(true) {
         crate::aff::join_select(ctx, &p, &room.id);
     }
     if !env.hidden {
-        let info = room.member(&env.user_id).map(|m| m.info());
+        let info = room.member(&env.user_id).map(|m| m.listed());
         room.change(|_, v| {
             let i = info?;
             let body = ParticipantEvent { kind: ParticipantEventType::Joined, room_id: room.id.clone(), user_id: i.user_id.clone(), role: Some(i.role), select: Some(i.select), participant_type: Some(i.participant_type), metadata: i.metadata.clone(), permission: i.permission, version: v };

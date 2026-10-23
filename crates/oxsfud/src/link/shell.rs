@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @8a0d8cf · 정:RULE-LINK-TRANSPORT · 정:RULE-LINK-PAIR-LIVENESS · 정:IMPL-LINK-PEER-STATE · 정:IMPL-LINK-ICE-RESTART · 정:RULE-GC-LEAVE-SEVEN · 연:RULE-LINK-SDP-DC-OPENER · 연:TRN.frame.DC · model: claude-opus-5-5
+// spec: v1.2 @8a0d8cf · 정:RULE-LINK-TRANSPORT · 정:RULE-LINK-PAIR-LIVENESS · 정:IMPL-LINK-PEER-STATE · 정:IMPL-LINK-ICE-RESTART · 정:RULE-GC-LEAVE-SEVEN · 연:RULE-LINK-SDP-DC-OPENER · 연:TRN.frame.DC · 정:RULE-DOC-FIXED-PARTS · model: claude-opus-5-5
 //! 연결 I/O — UDP 하나 · TCP passive(RFC 4571) · STUN 은 무결성 검증 뒤에만 · DTLS passive → SRTP 키 · SCTP/DCEP `"unreliable"` 하나 · 쌍별 생존 tick.
 
 use std::net::{IpAddr, SocketAddr};

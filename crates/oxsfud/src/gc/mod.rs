@@ -234,7 +234,8 @@ fn stall_one(ctx: &Ctx, room: &Arc<Room>, p: &Arc<Peer>, now: u64) {
                 continue;
             }
             if d.kind == MediaKind::Video {
-                if crate::sub::pref(p, &l.track_id).paused {
+                let sel = lock(&d.st).sel;
+                if crate::sub::pref(p, &l.track_id).paused || (s.simulcast && (sel.paused || sel.target.is_none())) {
                     continue;
                 }
                 let f = s.first_rtp_at.load(Ordering::Acquire);

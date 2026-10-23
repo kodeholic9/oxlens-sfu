@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @8a0d8cf · 정:IMPL-ROOM-LIFE · 정:IMPL-ROOM-DERIVED · 정:IMPL-ROOM-VERSION-ISSUE · 정:IMPL-ROOM-EMIT · 정:IMPL-ROOM-PERMISSION · 정:RULE-AFF-ONE-SET · 연:ROOM.type.Version · 연:ROOM.type.MemberInfo · 연:RULE-ROOM-HIDDEN · model: claude-opus-5-5
+// spec: v1.2 @8a0d8cf · 정:IMPL-ROOM-LIFE · 정:IMPL-ROOM-DERIVED · 정:IMPL-ROOM-VERSION-ISSUE · 정:IMPL-ROOM-EMIT · 정:IMPL-ROOM-PERMISSION · 정:RULE-AFF-ONE-SET · 연:ROOM.type.Version · 연:ROOM.type.MemberInfo · 연:RULE-ROOM-HIDDEN · 정:RULE-ROOM-SERVER-SCOPE · model: claude-opus-5-5
 //! ROOM — 방 그릇: 정체 · 수명(TTL 둘) · 명단(등록 기준 — 투명 포함) · 권한 오버라이드 표 · 판번호(증가와 통지 enqueue 를 한 임계 구역에서) · 슬롯 둘 · 발언권 제어기.
 
 pub mod core;
@@ -43,6 +43,14 @@ impl Member {
             permission: Some(self.permission),
         }
     }
+
+    pub fn listed(&self) -> MemberInfo {
+        let mut i = self.info();
+        if self.permission.is_default() {
+            i.permission = None;
+        }
+        i
+    }
 }
 
 #[derive(Default)]
@@ -58,7 +66,7 @@ pub struct Inner {
 
 impl Inner {
     pub fn participants(&self) -> Vec<MemberInfo> {
-        self.members.values().filter(|m| !m.hidden).map(Member::info).collect()
+        self.members.values().filter(|m| !m.hidden).map(Member::listed).collect()
     }
 
     pub fn user_count(&self) -> u32 {
@@ -254,4 +262,21 @@ impl Rooms {
 
 pub fn priming_now(r: &Room) -> u64 {
     r.audio.priming.load(Ordering::Acquire)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn m(p: Permission) -> Member {
+        Member { user_id: "u".into(), role: 255, select: true, participant_type: 0, metadata: None, permission: p, hidden: false, session_id: "s".into(), joined_at: 0 }
+    }
+
+    #[test]
+    fn listed_drops_default_permission_but_me_keeps_it() {
+        assert_eq!(m(Permission::default()).listed().permission, None, "연:RULE-ROOM-MEMBERINFO-SHAPE 기본이면 명단에 안 싣는다");
+        assert!(m(Permission::default()).info().permission.is_some(), "연:CAND-ROOM-ME-APART me 는 권한 포함");
+        let low = Permission { floor_request: false, ..Permission::default() };
+        assert_eq!(m(low).listed().permission, Some(low));
+    }
 }

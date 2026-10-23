@@ -13,7 +13,7 @@ use crate::fwd::core::{self as fc, Egress, Sr};
 use crate::link::table::Class;
 use crate::link::{lock, Down, Peer, Transport};
 use crate::r#pub::PubTrack;
-use crate::sim::core::{policy_tick, Signals, PLI_H_MS, PLI_L_MS};
+use crate::sim::core::{policy_tick, Layer, Probe, Signals, HEADROOM, H_BPS, L_BPS, PLI_H_MS, PLI_L_MS, PROBE_CHUNK_MS};
 
 pub const NACK_BUDGET: u32 = 200;
 pub const NACK_WINDOW_MS: u64 = 3000;
@@ -277,6 +277,27 @@ pub fn spawn_tick() {
     });
 }
 
+async fn probe_run(p: Arc<Peer>) {
+    let mut iv = tokio::time::interval(Duration::from_millis(PROBE_CHUNK_MS));
+    loop {
+        iv.tick().await;
+        let now = now_ms();
+        let rate = {
+            let g = lock(&p.sub_transport().sim);
+            match g.probe.as_ref() {
+                Some(pr) if pr.sending(now) => pr.rate,
+                _ => return,
+            }
+        };
+        let bytes = ((rate - L_BPS).max(0.0) * PROBE_CHUNK_MS as f64 / 1000.0 / 8.0) as usize;
+        let sent = crate::fwd::shell::probe_send(&p, bytes);
+        let mut g = lock(&p.sub_transport().sim);
+        if let Some(pr) = g.probe.as_mut() {
+            pr.seqs.extend(sent.iter().map(|(s, _)| *s));
+        }
+    }
+}
+
 fn layer_tick(ctx: &crate::cfg::Ctx, p: &Arc<Peer>, now: u64) {
     let downs: Vec<Arc<Down>> = lock(&p.downs).values().filter(|d| d.kind == MediaKind::Video && d.class == Class::Full).cloned().collect();
     let sims: Vec<(Arc<Down>, Arc<crate::r#pub::PubStream>)> = downs
@@ -305,6 +326,30 @@ fn layer_tick(ctx: &crate::cfg::Ctx, p: &Arc<Peer>, now: u64) {
             v2: ctx.v2(),
         };
         let mut pol = g.policy;
+        if s.v2 {
+            let need = sims.len() as f64 * H_BPS * HEADROOM;
+            if let Some(pr) = g.probe.as_ref().filter(|pr| pr.due(now)) {
+                let proven = pr.proven();
+                let measured = pr.measured();
+                tracing::info!(kind = "ev", spec = "PL-KEY-MEDIA-AUTO-LAYER", user = %p.user_id, epoch = %ctx.boot.epoch, probe = "judge", measured = ?measured, target = pr.target, proven = ?proven, "v2 프로브 판정");
+                if proven == Some(true) {
+                    g.gcc.est = g.gcc.est.max(measured.unwrap_or(0.0));
+                    g.est_at = now;
+                } else {
+                    pol.last_demote = now;
+                }
+                g.probe = None;
+            }
+            let clean = s.loss.map(|(l, _)| l <= crate::sim::core::LOSS_CLEAN).unwrap_or(true) && !s.overuse;
+            let short = s.est.map(|(e, _)| e < need).unwrap_or(true);
+            if g.probe.is_none() && pol.layer == Layer::Low && clean && short && now.saturating_sub(pol.last_demote) >= pol.backoff {
+                let pr = Probe::new(now, need);
+                tracing::info!(kind = "ev", spec = "PL-KEY-MEDIA-AUTO-LAYER", user = %p.user_id, epoch = %ctx.boot.epoch, probe = "start", rate = pr.rate, target = pr.target, "v2 프로브 시작");
+                g.probe = Some(pr);
+                let pp = p.clone();
+                tokio::spawn(async move { probe_run(pp).await });
+            }
+        }
         if let Some((l, why)) = policy_tick(&mut pol, &s) {
             tracing::info!(kind = "ev", spec = "PL-KEY-MEDIA-AUTO-LAYER", user = %p.user_id, epoch = %ctx.boot.epoch, layer = l.name(), reason = why, est = ?s.est, remb = ?s.remb, loss = ?s.loss, "자동 레이어");
         }

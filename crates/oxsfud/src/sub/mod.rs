@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @8a0d8cf · 정:IMPL-SUB-READY-GATE · 정:IMPL-SUB-PIPELINE · 정:RULE-SUB-STATE · 정:IMPL-PUB-RID-SPATIAL · 연:RULE-SUB-READY-PROC · 연:RULE-SUB-TGATE · 연:RULE-SUB-LAYER-PROC · 연:LINK.S.ack · model: claude-opus-5-5
+// spec: v1.2 @8a0d8cf · 정:IMPL-SUB-READY-GATE · 정:IMPL-SUB-PIPELINE · 정:RULE-SUB-STATE · 정:IMPL-PUB-RID-SPATIAL · 연:RULE-SUB-READY-PROC · 연:RULE-SUB-TGATE · 연:RULE-SUB-LAYER-PROC · 연:LINK.S.ack · 정:RULE-SUB-SERVER-SCOPE · model: claude-opus-5-5
 //! SUB — `READY`(게이트 해제 · 확인된 차례 · 처음 알리기 · `ready_at` 은 첫 번째만) · 게이트 시한(관측 latch) · `SUBSCRIBE_LAYER`(부분 갱신 · 상한 · 범위 밖은 그 축 최대로 자른다).
 
 pub mod ext;
