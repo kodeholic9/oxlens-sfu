@@ -1,40 +1,61 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @124a233 · 운영 규격서 §8-2 `--version` · 정:IMPL-ROOM-VERSION-ISSUE 정:RULE-BUS-KEYSPACE · model: claude-opus-5-5
-//! 빌드 신원(`{git SHA(+dirty)}.{빌드 시각}+{라벨}`)과 기동 신원(`epoch` = `sfu_id` = `{inst}`).
+// spec: v1.2 @8a0d8cf · 정:RULE-OPS-SURFACE · 정:IMPL-ROOM-VERSION-ISSUE · 정:RULE-BUS-KEYSPACE · 연:DEV-TRN-SESSION-SECRET · model: claude-opus-5-5
+//! 신원 — 빌드 신원(`{git SHA(+dirty)}.{빌드 시각}[+라벨]`) · 기동 신원(epoch = `sfu_id` = `{inst}` — 기동마다 새 불투명 값) · 예측할 수 없는 발급값.
 
-pub fn build_identity(sha: &str, built_at: &str, label: Option<&str>) -> String {
+pub fn build_identity(raw: &str, label: Option<&str>) -> String {
     match label {
-        Some(l) if !l.is_empty() => format!("{sha}.{built_at}+{l}"),
-        _ => format!("{sha}.{built_at}"),
+        Some(l) if !l.is_empty() => format!("{raw}+{l}"),
+        _ => raw.to_string(),
     }
 }
 
-pub fn random_bytes(n: usize) -> Vec<u8> {
-    let mut buf = vec![0u8; n];
-    if getrandom::fill(&mut buf).is_ok() {
-        return buf;
+pub fn fill_random(buf: &mut [u8]) {
+    if getrandom::fill(buf).is_err() {
+        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        buf.iter_mut().enumerate().for_each(|(i, b)| *b = ((t >> ((i % 16) * 8)) as u8) ^ (i as u8));
     }
-    let t = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or_default();
-    let seed = t.to_le_bytes();
-    (0..n).map(|i| seed[i % seed.len()] ^ (i as u8).wrapping_mul(31)).collect()
 }
 
-pub fn random_hex(n: usize) -> String {
-    random_bytes(n).iter().map(|b| format!("{b:02x}")).collect()
+pub fn random_u32() -> u32 {
+    let mut b = [0u8; 4];
+    fill_random(&mut b);
+    u32::from_le_bytes(b)
 }
 
-pub fn new_epoch() -> String {
-    random_hex(8)
+pub fn random_u64() -> u64 {
+    let mut b = [0u8; 8];
+    fill_random(&mut b);
+    u64::from_le_bytes(b)
 }
 
-pub fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or_default()
+pub fn hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+pub fn new_epoch(prefix: &str) -> String {
+    let mut b = [0u8; 8];
+    fill_random(&mut b);
+    format!("{prefix}-{}", hex(&b))
+}
+
+pub fn random_alnum(n: usize) -> String {
+    const SET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mut b = vec![0u8; n];
+    fill_random(&mut b);
+    b.iter().map(|x| SET[(*x as usize) % SET.len()] as char).collect()
+}
+
+pub fn uuid4() -> String {
+    let mut b = [0u8; 16];
+    fill_random(&mut b);
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h = hex(&b);
+    format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
 }
 
 #[cfg(test)]
@@ -42,10 +63,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn identity_form() {
-        assert_eq!(build_identity("abc", "17", Some("oxe2epy")), "abc.17+oxe2epy");
-        assert_eq!(build_identity("abc", "17", None), "abc.17");
-        assert_eq!(new_epoch().len(), 16);
-        assert_ne!(new_epoch(), new_epoch());
+    fn epochs_differ_and_label_joins() {
+        assert_ne!(new_epoch("sfu"), new_epoch("sfu"));
+        assert_eq!(build_identity("abc.1", Some("ci")), "abc.1+ci");
+        assert_eq!(build_identity("abc.1", None), "abc.1");
+        assert_eq!(random_alnum(22).len(), 22);
+        assert_eq!(uuid4().len(), 36);
     }
 }

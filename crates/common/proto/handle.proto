@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package oxlens.handle.v1;
+
+service Handle {
+  rpc Hello(HelloReq) returns (HelloRes);
+  rpc Call(CallReq) returns (CallRes);
+}
+
+message HelloReq {
+  string node = 1;
+  string hub_inst = 2;
+}
+
+message HelloRes {
+  string epoch = 1;
+  string build = 2;
+}
+
+message CallReq {
+  bytes envelope = 1;
+}
+
+message CallRes {
+  bytes reply = 1;
+}

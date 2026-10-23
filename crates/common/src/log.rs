@@ -1,292 +1,359 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @124a233 · 운영 규격서 §7(로깅) · 정:RULE-CONC-SIX 1 · model: claude-opus-5-5
-//! 로그 — logfmt 한 줄 = 한 datagram. 유한 채널 · 전담 스레드 · 소켓 실패 즉시 spool · 보내는 쪽은 기다리지 않는다.
+// spec: v1.2 @8a0d8cf · 정:RULE-OPS-LOGGER · 정:RULE-OPS-OBSERVE · 정:RULE-CONC-SIX · model: claude-opus-5-5
+//! 보내는 쪽 로깅 — `tracing` Layer 하나가 logfmt 줄(운영 규격서 §7-3)을 짓고 유한 채널 → 전담 스레드 → DGRAM 소켓 · 실패 즉시 spool · 소켓 미설정이면 stdout.
 
 use std::fmt::Write as _;
 use std::io::Write as _;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
+use std::os::unix::net::UnixDatagram;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use tracing::field::{Field, Visit};
-use tracing::{Event, Level, Subscriber};
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
-use tracing_subscriber::reload;
-use tracing_subscriber::util::SubscriberInitExt;
+use tracing::{Event, Level, Metadata, Subscriber};
+use tracing_subscriber::layer::{Context, SubscriberExt};
+use tracing_subscriber::Layer;
 
-use crate::policy::{Logging, LoggingLevel};
+use crate::clock;
 
-const KEY_ORDER: &[&str] = &["session", "room", "user", "epoch", "track", "ssrc", "seq", "floor_sequence", "mbcp_seq"];
+const KEY_ORDER: [&str; 10] = ["session", "room", "user", "epoch", "track", "ssrc", "seq", "floor_sequence", "mbcp_seq", "arev"];
 
-#[derive(Debug, Default)]
-pub struct Counters {
-    pub dropped: AtomicU64,
-    pub spooled: AtomicU64,
-    pub eagain: AtomicU64,
-    pub emsgsize: AtomicU64,
-    pub absent: AtomicU64,
-}
+pub type SinkFn = Box<dyn Fn(&str) + Send + Sync>;
 
-pub struct LogConfig<'a> {
-    pub node: &'a str,
-    pub proc_name: &'a str,
-    pub logging: &'a Logging,
-    pub log_dir: Option<&'a str>,
-    pub log_socket: Option<&'a str>,
-}
-
-type Handle = reload::Handle<EnvFilter, tracing_subscriber::Registry>;
-
-struct Shared {
-    handle: Handle,
-    base: String,
-    restore_at: Mutex<Option<std::time::Instant>>,
-}
-
-static SHARED: OnceLock<Shared> = OnceLock::new();
-static COUNTERS: OnceLock<Arc<Counters>> = OnceLock::new();
-
-pub fn counters() -> Option<Arc<Counters>> {
-    COUNTERS.get().cloned()
-}
-
-fn level_name(l: LoggingLevel) -> &'static str {
-    match l {
-        LoggingLevel::Trace => "trace",
-        LoggingLevel::Debug => "debug",
-        LoggingLevel::Info => "info",
-        LoggingLevel::Warn => "warn",
-        LoggingLevel::Error => "error",
-    }
-}
-
-fn now_ts() -> String {
-    chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.6f%:z").to_string()
-}
-
-pub fn init(cfg: LogConfig<'_>) {
-    let base = std::env::var("OX_LOG").unwrap_or_else(|_| {
-        let l = level_name(cfg.logging.level);
-        format!("{l},zenoh=warn,zenoh_transport=warn,zenoh_link_tcp=warn,zenoh_config=warn,zenoh_runtime=warn,h2=warn,tonic=warn")
-    });
-    let filter = EnvFilter::try_new(&base).unwrap_or_else(|_| EnvFilter::new("info"));
-    let (filter, handle) = reload::Layer::new(filter);
-    let counters = Arc::new(Counters::default());
-    let _ = COUNTERS.set(counters.clone());
-    let (tx, rx) = sync_channel::<String>(cfg.logging.queue_max_lines as usize);
-    let line_max = cfg.logging.line_max_bytes as usize;
-    let layer = LineLayer { node: cfg.node.to_string(), proc_name: cfg.proc_name.to_string(), tx, line_max, counters: counters.clone() };
-    let sink = Sink {
-        node: cfg.node.to_string(),
-        proc_name: cfg.proc_name.to_string(),
-        socket: cfg.log_socket.map(str::to_string),
-        spool_path: cfg
-            .log_dir
-            .map(|d| std::path::Path::new(d).join(format!("{}.{}.spool.log", cfg.node, cfg.proc_name))),
-        spool_max: cfg.logging.spool_max_bytes,
-        counters,
-    };
-    std::thread::Builder::new().name("ox-log".into()).spawn(move || sink.run(rx)).ok();
-    let _ = tracing_subscriber::registry().with(filter).with(layer).try_init();
-    let _ = SHARED.set(Shared { handle, base, restore_at: Mutex::new(None) });
-}
-
-pub fn set_level(level: &str, ttl_secs: Option<u64>) -> Result<(String, String), String> {
-    let sh = SHARED.get().ok_or("logger not initialised")?;
-    let f = EnvFilter::try_new(level).map_err(|e| e.to_string())?;
-    let from = sh.handle.with_current(|cur| cur.to_string()).map_err(|e| e.to_string())?;
-    sh.handle.reload(f).map_err(|e| e.to_string())?;
-    if let Ok(mut g) = sh.restore_at.lock() {
-        g.replace(std::time::Instant::now() + std::time::Duration::from_secs(ttl_secs.unwrap_or(u64::MAX / 4)));
-    }
-    Ok((from, level.to_string()))
-}
-
-pub fn restore_if_due() {
-    let Some(sh) = SHARED.get() else { return };
-    let due = match sh.restore_at.lock() {
-        Ok(g) => g.is_some_and(|t| std::time::Instant::now() >= t),
-        Err(_) => false,
-    };
-    if due {
-        if let Ok(f) = EnvFilter::try_new(&sh.base) {
-            let _ = sh.handle.reload(f);
-        }
-        if let Ok(mut g) = sh.restore_at.lock() {
-            g.take();
-        }
-    }
-}
-
-struct LineLayer {
-    node: String,
-    proc_name: String,
-    tx: SyncSender<String>,
-    line_max: usize,
-    counters: Arc<Counters>,
+pub struct LogConf {
+    pub node: String,
+    pub proc_name: String,
+    pub socket: Option<PathBuf>,
+    pub log_dir: Option<PathBuf>,
+    pub level: String,
+    pub line_max: usize,
+    pub queue_max: usize,
+    pub spool_max: u64,
+    pub sink: Option<SinkFn>,
 }
 
 #[derive(Default)]
+pub struct Counts {
+    pub sent: AtomicU64,
+    pub queue_dropped: AtomicU64,
+    pub spooled: AtomicU64,
+    pub spool_dropped: AtomicU64,
+    pub eagain: AtomicU64,
+    pub emsgsize: AtomicU64,
+    pub refused: AtomicU64,
+    pub truncated: AtomicU64,
+}
+
+static COUNTS: OnceLock<Arc<Counts>> = OnceLock::new();
+static LEVEL: AtomicU8 = AtomicU8::new(3);
+static BASE_LEVEL: AtomicU8 = AtomicU8::new(3);
+static OVERRIDE_UNTIL: AtomicU64 = AtomicU64::new(0);
+
+pub fn counts() -> Arc<Counts> {
+    COUNTS.get_or_init(|| Arc::new(Counts::default())).clone()
+}
+
+pub fn level_rank(s: &str) -> Option<u8> {
+    match s {
+        "trace" => Some(5),
+        "debug" => Some(4),
+        "info" => Some(3),
+        "warn" => Some(2),
+        "error" => Some(1),
+        _ => None,
+    }
+}
+
+pub fn level_name(r: u8) -> &'static str {
+    match r {
+        5 => "trace",
+        4 => "debug",
+        3 => "info",
+        2 => "warn",
+        _ => "error",
+    }
+}
+
+fn rank_of(l: &Level) -> u8 {
+    match *l {
+        Level::TRACE => 5,
+        Level::DEBUG => 4,
+        Level::INFO => 3,
+        Level::WARN => 2,
+        Level::ERROR => 1,
+    }
+}
+
+pub fn current_level() -> &'static str {
+    level_name(effective_level())
+}
+
+fn effective_level() -> u8 {
+    let until = OVERRIDE_UNTIL.load(Ordering::Relaxed);
+    if until != 0 && clock::wall_ms() >= until {
+        OVERRIDE_UNTIL.store(0, Ordering::Relaxed);
+        LEVEL.store(BASE_LEVEL.load(Ordering::Relaxed), Ordering::Relaxed);
+    }
+    LEVEL.load(Ordering::Relaxed)
+}
+
+pub fn override_level(level: &str, ttl_secs: Option<u64>) -> Option<(String, String, u64)> {
+    let r = level_rank(level)?;
+    let from = current_level().to_string();
+    LEVEL.store(r, Ordering::Relaxed);
+    let until = ttl_secs.map(|s| clock::wall_ms() + s * 1000).unwrap_or(0);
+    OVERRIDE_UNTIL.store(until, Ordering::Relaxed);
+    Some((from, level.to_string(), until))
+}
+
 struct Fields {
-    msg: String,
-    kind: Option<String>,
-    spec: Option<String>,
-    keyed: Vec<(String, String)>,
-    other: Vec<(String, String)>,
+    keys: Vec<(String, String)>,
+    msg: Option<String>,
 }
 
 impl Visit for Fields {
-    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        self.put(field.name(), format!("{value:?}"));
-    }
-
-    fn record_str(&mut self, field: &Field, value: &str) {
-        self.put(field.name(), value.to_string());
-    }
-}
-
-impl Fields {
-    fn put(&mut self, name: &str, v: String) {
-        match name {
-            "message" => self.msg = v,
-            "kind" => self.kind = Some(v),
-            "spec" => self.spec = Some(v),
-            n if KEY_ORDER.contains(&n) => self.keyed.push((n.to_string(), v)),
-            n => self.other.push((n.to_string(), v)),
+    fn record_str(&mut self, f: &Field, v: &str) {
+        if f.name() == "message" {
+            self.msg = Some(v.to_string());
+        } else {
+            self.keys.push((f.name().to_string(), v.to_string()));
         }
+    }
+
+    fn record_debug(&mut self, f: &Field, v: &dyn std::fmt::Debug) {
+        let s = format!("{v:?}");
+        if f.name() == "message" {
+            self.msg = Some(s);
+        } else {
+            self.keys.push((f.name().to_string(), s.trim_matches('"').to_string()));
+        }
+    }
+
+    fn record_u64(&mut self, f: &Field, v: u64) {
+        self.keys.push((f.name().to_string(), v.to_string()));
+    }
+
+    fn record_i64(&mut self, f: &Field, v: i64) {
+        self.keys.push((f.name().to_string(), v.to_string()));
+    }
+
+    fn record_bool(&mut self, f: &Field, v: bool) {
+        self.keys.push((f.name().to_string(), if v { "1".to_string() } else { "0".to_string() }));
     }
 }
 
 fn quote(v: &str) -> String {
-    if v.is_empty() || v.chars().any(|c| c.is_whitespace() || c == '"' || c == '=') {
-        format!("\"{}\"", v.replace('"', "'"))
+    if v.is_empty() || v.contains([' ', '"', '=', '\n', '\t']) {
+        format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"))
     } else {
         v.to_string()
     }
 }
 
-impl<S: Subscriber> Layer<S> for LineLayer {
-    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
-        let mut f = Fields::default();
-        event.record(&mut f);
-        let kind = f.kind.clone().unwrap_or_else(|| "diag".to_string());
-        let ts = now_ts();
-        let mut line = String::with_capacity(160);
-        let _ = write!(line, "ts={ts} node={} proc={} kind={kind}", self.node, self.proc_name);
-        if let (true, Some(s)) = (kind == "ev", &f.spec) {
-            let _ = write!(line, " spec={s}");
-        }
-        for k in KEY_ORDER {
-            if let Some((_, v)) = f.keyed.iter().find(|(n, _)| n == k) {
-                let _ = write!(line, " {k}={}", quote(v));
-            }
-        }
-        if *event.metadata().level() <= Level::WARN {
-            let _ = write!(line, " level={}", event.metadata().level().as_str().to_lowercase());
-        }
-        for (k, v) in &f.other {
-            let _ = write!(line, " {k}={}", quote(v));
-        }
-        let msg_part = format!(" msg={}", quote(&f.msg));
-        if line.len() + msg_part.len() > self.line_max {
-            let room = self.line_max.saturating_sub(line.len() + " truncated=1 msg=\"\"".len());
-            let cut: String = f.msg.chars().take(room).collect();
-            let _ = write!(line, " truncated=1 msg={}", quote(&cut));
-        } else {
-            line.push_str(&msg_part);
-        }
-        match self.tx.try_send(line) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
-                self.counters.dropped.fetch_add(1, Ordering::Relaxed);
-            }
+pub fn line(node: &str, proc_name: &str, keys: &[(String, String)], msg: Option<&str>, line_max: usize) -> (String, bool) {
+    let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.6f%:z");
+    let mut s = String::with_capacity(256);
+    let _ = write!(s, "ts={ts} mono={} node={} proc={}", clock::mono_us(), quote(node), quote(proc_name));
+    let get = |k: &str| keys.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+    let kind = get("kind").unwrap_or("diag");
+    let _ = write!(s, " kind={}", quote(kind));
+    if let (true, Some(spec)) = (kind == "ev", get("spec")) {
+        let _ = write!(s, " spec={}", quote(spec));
+    }
+    for k in KEY_ORDER {
+        if let Some(v) = get(k) {
+            let _ = write!(s, " {k}={}", quote(v));
         }
     }
+    for (k, v) in keys {
+        if k == "kind" || k == "spec" || KEY_ORDER.contains(&k.as_str()) {
+            continue;
+        }
+        let _ = write!(s, " {k}={}", quote(v));
+    }
+    let mut truncated = false;
+    if let Some(m) = msg {
+        let room = line_max.saturating_sub(s.len() + 20);
+        let mut m = m.to_string();
+        if m.len() > room {
+            let mut cut = room;
+            while cut > 0 && !m.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            m.truncate(cut);
+            truncated = true;
+        }
+        let _ = write!(s, " msg={}", quote(&m));
+        if truncated {
+            s.push_str(" truncated=1");
+        }
+    }
+    (s, truncated)
 }
 
-struct Sink {
+struct OxLayer {
     node: String,
     proc_name: String,
-    socket: Option<String>,
-    spool_path: Option<std::path::PathBuf>,
-    spool_max: u64,
-    counters: Arc<Counters>,
+    tx: SyncSender<String>,
+    line_max: usize,
+    counts: Arc<Counts>,
 }
 
-impl Sink {
-    fn run(self, rx: Receiver<String>) {
-        #[cfg(unix)]
-        let sock = std::os::unix::net::UnixDatagram::unbound().ok();
-        let mut spool: Option<std::fs::File> = None;
-        let mut spool_bytes: u64 = 0;
-        let mut failing = false;
-        let mut stdout = std::io::stdout();
-        while let Ok(line) = rx.recv() {
-            let Some(path) = self.socket.as_deref() else {
-                let _ = writeln!(stdout, "{line}");
-                continue;
-            };
-            #[cfg(unix)]
-            let sent = match sock.as_ref() {
-                Some(s) => match s.send_to(line.as_bytes(), path) {
-                    Ok(_) => Ok(()),
-                    Err(e) => Err(e),
-                },
-                None => Err(std::io::Error::other("no socket")),
-            };
-            #[cfg(not(unix))]
-            let sent: Result<(), std::io::Error> = Err(std::io::Error::other("no unix socket"));
-            match sent {
-                Ok(()) => {
-                    if failing {
-                        failing = false;
-                        let note = format!(
-                            "ts={} node={} proc={} kind=stat spooled={} dropped={}",
-                            now_ts(),
-                            self.node,
-                            self.proc_name,
-                            self.counters.spooled.load(Ordering::Relaxed),
-                            self.counters.dropped.load(Ordering::Relaxed)
-                        );
-                        #[cfg(unix)]
-                        if let Some(s) = sock.as_ref() {
-                            let _ = s.send_to(note.as_bytes(), path);
-                        }
-                    }
-                }
-                Err(e) => {
-                    failing = true;
-                    match e.raw_os_error() {
-                        Some(35) | Some(11) => self.counters.eagain.fetch_add(1, Ordering::Relaxed),
-                        Some(40) | Some(90) => self.counters.emsgsize.fetch_add(1, Ordering::Relaxed),
-                        _ => self.counters.absent.fetch_add(1, Ordering::Relaxed),
-                    };
-                    let Some(sp) = self.spool_path.as_ref() else {
-                        self.counters.dropped.fetch_add(1, Ordering::Relaxed);
-                        continue;
-                    };
-                    if spool.is_none() {
-                        if let Some(d) = sp.parent() {
-                            let _ = std::fs::create_dir_all(d);
-                        }
-                        spool = std::fs::OpenOptions::new().create(true).append(true).open(sp).ok();
-                    }
-                    let n = line.len() as u64 + 1;
-                    let wrote = match spool.as_mut() {
-                        Some(f) if spool_bytes + n <= self.spool_max => writeln!(f, "{line}").is_ok(),
-                        _ => false,
-                    };
-                    if wrote {
-                        spool_bytes += n;
-                        self.counters.spooled.fetch_add(1, Ordering::Relaxed);
-                    } else {
-                        self.counters.dropped.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
+impl<S: Subscriber> Layer<S> for OxLayer {
+    fn enabled(&self, meta: &Metadata<'_>, _ctx: Context<'_, S>) -> bool {
+        rank_of(meta.level()) <= effective_level()
+    }
+
+    fn on_event(&self, ev: &Event<'_>, _ctx: Context<'_, S>) {
+        if rank_of(ev.metadata().level()) > effective_level() {
+            return;
+        }
+        let mut f = Fields { keys: Vec::new(), msg: None };
+        ev.record(&mut f);
+        let (l, truncated) = line(&self.node, &self.proc_name, &f.keys, f.msg.as_deref(), self.line_max);
+        if truncated {
+            self.counts.truncated.fetch_add(1, Ordering::Relaxed);
+        }
+        match self.tx.try_send(l) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                self.counts.queue_dropped.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
+}
+
+struct Spool {
+    path: Option<PathBuf>,
+    file: Option<std::fs::File>,
+    size: u64,
+    max: u64,
+}
+
+impl Spool {
+    fn write(&mut self, l: &str, counts: &Counts) {
+        let Some(path) = self.path.clone() else {
+            counts.spool_dropped.fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        if self.size + l.len() as u64 + 1 > self.max {
+            counts.spool_dropped.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        if self.file.is_none() {
+            self.file = std::fs::OpenOptions::new().create(true).append(true).open(&path).ok();
+        }
+        match self.file.as_mut().map(|f| writeln!(f, "{l}")) {
+            Some(Ok(())) => {
+                self.size += l.len() as u64 + 1;
+                counts.spooled.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {
+                counts.spool_dropped.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+fn sender(rx: Receiver<String>, conf: SenderConf, counts: Arc<Counts>) {
+    let sock = UnixDatagram::unbound().ok();
+    if let Some(s) = &sock {
+        let _ = s.set_nonblocking(true);
+    }
+    let mut spool = Spool {
+        path: conf.log_dir.as_ref().map(|d| d.join(format!("{}.{}.spool.log", conf.node, conf.proc_name))),
+        file: None,
+        size: 0,
+        max: conf.spool_max,
+    };
+    let mut failing = false;
+    let mut since_spooled = 0u64;
+    let mut since_dropped = 0u64;
+    while let Ok(l) = rx.recv() {
+        if let Some(f) = &conf.sink {
+            f(&l);
+            continue;
+        }
+        let Some(path) = &conf.socket else {
+            let out = std::io::stdout();
+            let mut lock = out.lock();
+            let _ = writeln!(lock, "{l}");
+            continue;
+        };
+        let res = sock.as_ref().map(|s| s.send_to(l.as_bytes(), path));
+        match res {
+            Some(Ok(_)) => {
+                counts.sent.fetch_add(1, Ordering::Relaxed);
+                if failing {
+                    failing = false;
+                    let spooled = counts.spooled.load(Ordering::Relaxed) - since_spooled;
+                    let dropped = counts.spool_dropped.load(Ordering::Relaxed) + counts.queue_dropped.load(Ordering::Relaxed) - since_dropped;
+                    let keys = vec![("kind".to_string(), "stat".to_string()), ("spooled".to_string(), spooled.to_string()), ("dropped".to_string(), dropped.to_string())];
+                    let (r, _) = line(&conf.node, &conf.proc_name, &keys, None, conf.line_max);
+                    if let Some(s) = &sock {
+                        let _ = s.send_to(r.as_bytes(), path);
+                    }
+                }
+            }
+            Some(Err(e)) => {
+                match e.raw_os_error() {
+                    Some(35) | Some(11) => counts.eagain.fetch_add(1, Ordering::Relaxed),
+                    Some(40) | Some(90) => counts.emsgsize.fetch_add(1, Ordering::Relaxed),
+                    _ => counts.refused.fetch_add(1, Ordering::Relaxed),
+                };
+                if !failing {
+                    failing = true;
+                    since_spooled = counts.spooled.load(Ordering::Relaxed);
+                    since_dropped = counts.spool_dropped.load(Ordering::Relaxed) + counts.queue_dropped.load(Ordering::Relaxed);
+                }
+                spool.write(&l, &counts);
+            }
+            None => spool.write(&l, &counts),
+        }
+    }
+}
+
+struct SenderConf {
+    node: String,
+    proc_name: String,
+    socket: Option<PathBuf>,
+    log_dir: Option<PathBuf>,
+    line_max: usize,
+    spool_max: u64,
+    sink: Option<SinkFn>,
+}
+
+static INSTALLED: Mutex<bool> = Mutex::new(false);
+
+pub fn init(conf: LogConf) {
+    let mut done = match INSTALLED.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    if *done {
+        return;
+    }
+    let base = std::env::var("OX_LOG").ok().and_then(|l| level_rank(&l)).or_else(|| level_rank(&conf.level)).unwrap_or(3);
+    BASE_LEVEL.store(base, Ordering::Relaxed);
+    LEVEL.store(base, Ordering::Relaxed);
+    let (tx, rx) = sync_channel::<String>(conf.queue_max.max(1));
+    let counts = counts();
+    let sc = SenderConf {
+        node: conf.node.clone(),
+        proc_name: conf.proc_name.clone(),
+        socket: conf.socket,
+        log_dir: conf.log_dir,
+        line_max: conf.line_max,
+        spool_max: conf.spool_max,
+        sink: conf.sink,
+    };
+    let c2 = counts.clone();
+    let _ = std::thread::Builder::new().name("ox-log".to_string()).spawn(move || sender(rx, sc, c2));
+    let layer = OxLayer { node: conf.node, proc_name: conf.proc_name, tx, line_max: conf.line_max, counts };
+    let sub = tracing_subscriber::registry().with(layer);
+    let _ = tracing::subscriber::set_global_default(sub);
+    done.clone_from(&true);
 }
 
 #[cfg(test)]
@@ -294,9 +361,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn quoting() {
-        assert_eq!(quote("a b"), "\"a b\"");
-        assert_eq!(quote("ab"), "ab");
-        assert_eq!(quote(""), "\"\"");
+    fn logfmt_order_and_quoting() {
+        let keys = vec![
+            ("room".to_string(), "r1".to_string()),
+            ("kind".to_string(), "ev".to_string()),
+            ("spec".to_string(), "CP-OP-ROOM-JOIN".to_string()),
+            ("session".to_string(), "s-1".to_string()),
+            ("extra".to_string(), "a b".to_string()),
+        ];
+        let (l, t) = line("n1", "sfu", &keys, Some("joined"), 1024);
+        assert!(!t);
+        let at = |k: &str| l.find(k).unwrap_or(usize::MAX);
+        assert!(at(" kind=ev") < at(" spec=CP-OP-ROOM-JOIN"));
+        assert!(at(" spec=") < at(" session=s-1"));
+        assert!(at(" session=") < at(" room=r1"));
+        assert!(at(" room=") < at(" extra=\"a b\""));
+        assert!(l.ends_with(" msg=joined"));
+        assert!(l.contains(" mono="));
+    }
+
+    #[test]
+    fn long_message_is_cut_and_marked() {
+        let (l, t) = line("n", "hub", &[], Some(&"x".repeat(5000)), 1024);
+        assert!(t);
+        assert!(l.len() <= 1024);
+        assert!(l.ends_with(" truncated=1"));
     }
 }
