@@ -163,7 +163,7 @@ fn main() {
     let node = args.id.clone().unwrap_or_else(|| "node-a".into());
     common::log::init(common::log::LogConfig {
         node: &node,
-        proc_name: "oxsfud",
+        proc_name: "sfu",
         logging: &policy.logging,
         log_dir: args.log_dir.as_deref(),
         log_socket: args.log_socket.as_deref(),

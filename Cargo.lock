@@ -2228,6 +2228,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxlogd"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "common",
+ "nix 0.26.4",
+]
+
+[[package]]
 name = "oxsfud"
 version = "0.1.0"
 dependencies = [

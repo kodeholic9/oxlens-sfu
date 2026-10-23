@@ -1,6 +1,8 @@
 [hub]
 listen = "127.0.0.1:1976"
 base_path = "/media"
+log_dir = "/tmp/oxlens/node-c"
+log_socket = "/tmp/oxlens/node-c/log.sock"
 
 [hub.auth]
 jwt_secret = "change-me-in-production"
@@ -22,6 +24,13 @@ participant_types = [0]
 hidden_allowed = false
 ops_allowed = false
 hook_allowed = false
+
+[[unit]]
+id = "log-node-c"
+kind = "process"
+order = 1
+role = "log"
+cmd = ["./target/debug/oxlogd", "--policy", "policy.toml"]
 
 [[unit]]
 id = "node-c"

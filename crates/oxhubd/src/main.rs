@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @124a233 · 정:RULE-DOC-PLANES 정:RULE-CFG-THREE-PLACES 정:RULE-BUS-FATE 정:RULE-OPS-SURFACE 운영 규격서 §8 · 연:RULE-TRN-ENDPOINTS · model: claude-opus-5-5
+// spec: v1.2 @124a233 · 정:RULE-DOC-PLANES 정:RULE-CFG-THREE-PLACES 정:RULE-BUS-FATE 정:RULE-OPS-SURFACE 정:RULE-OPS-LOGGER 운영 규격서 §8 · 연:RULE-TRN-ENDPOINTS · model: claude-opus-5-5
 //! oxhubd — 게이트웨이. 세션 · 배치 · op 라우팅 · 운영 표면 · supervisor · 그 node 의 zenoh router.
 
 mod admin;
@@ -71,6 +71,7 @@ pub async fn shutdown(hub: &Arc<Hub>, code: i32) {
     if let Some(b) = hub.bus() {
         let _ = b.close().await;
     }
+    hub.units.shutdown_loggers().await;
     std::process::exit(code);
 }
 
@@ -155,12 +156,6 @@ async fn run(args: Args) -> i32 {
         policy
     );
     let hub = Arc::new(Hub::new(node.clone(), build, system, policy));
-    if let Err(e) = bus::open(&hub).await {
-        tracing::warn!(kind = "ev", spec = "SV-STATE-BLOCKED", "zenoh unit failed: {e}");
-        hub.units.set_state(supervisor::ZENOH_UNIT, UnitState::Blocked);
-        return 1;
-    }
-    hub.units.set_state(supervisor::ZENOH_UNIT, UnitState::Running);
     let ctx = Arc::new(StartCtx {
         node: node.clone(),
         build_label: args.build.clone(),
@@ -178,6 +173,17 @@ async fn run(args: Args) -> i32 {
             }
         });
     });
+    hub.units.start_loggers(ctx.clone(), on_running.clone());
+    if !hub.units.wait_loggers(std::time::Duration::from_millis(hub.system.supervisor.hello_timeout_ms)).await {
+        tracing::warn!(kind = "ev", spec = "RULE-OPS-LOGGER", "logger not ready — continuing (lines go to spool)");
+    }
+    if let Err(e) = bus::open(&hub).await {
+        tracing::warn!(kind = "ev", spec = "SV-STATE-BLOCKED", "zenoh unit failed: {e}");
+        hub.units.set_state(supervisor::ZENOH_UNIT, UnitState::Blocked);
+        hub.units.shutdown_loggers().await;
+        return 1;
+    }
+    hub.units.set_state(supervisor::ZENOH_UNIT, UnitState::Running);
     hub.units.start(ctx, on_running);
     {
         let hub = hub.clone();

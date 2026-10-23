@@ -61,6 +61,10 @@ fn level_name(l: LoggingLevel) -> &'static str {
     }
 }
 
+fn now_ts() -> String {
+    chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.6f%:z").to_string()
+}
+
 pub fn init(cfg: LogConfig<'_>) {
     let base = std::env::var("OX_LOG").unwrap_or_else(|_| {
         let l = level_name(cfg.logging.level);
@@ -74,6 +78,8 @@ pub fn init(cfg: LogConfig<'_>) {
     let line_max = cfg.logging.line_max_bytes as usize;
     let layer = LineLayer { node: cfg.node.to_string(), proc_name: cfg.proc_name.to_string(), tx, line_max, counters: counters.clone() };
     let sink = Sink {
+        node: cfg.node.to_string(),
+        proc_name: cfg.proc_name.to_string(),
         socket: cfg.log_socket.map(str::to_string),
         spool_path: cfg
             .log_dir
@@ -165,7 +171,7 @@ impl<S: Subscriber> Layer<S> for LineLayer {
         let mut f = Fields::default();
         event.record(&mut f);
         let kind = f.kind.clone().unwrap_or_else(|| "diag".to_string());
-        let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.6f%:z");
+        let ts = now_ts();
         let mut line = String::with_capacity(160);
         let _ = write!(line, "ts={ts} node={} proc={} kind={kind}", self.node, self.proc_name);
         if let (true, Some(s)) = (kind == "ev", &f.spec) {
@@ -200,6 +206,8 @@ impl<S: Subscriber> Layer<S> for LineLayer {
 }
 
 struct Sink {
+    node: String,
+    proc_name: String,
     socket: Option<String>,
     spool_path: Option<std::path::PathBuf>,
     spool_max: u64,
@@ -234,7 +242,10 @@ impl Sink {
                     if failing {
                         failing = false;
                         let note = format!(
-                            "kind=stat spooled={} dropped={}",
+                            "ts={} node={} proc={} kind=stat spooled={} dropped={}",
+                            now_ts(),
+                            self.node,
+                            self.proc_name,
                             self.counters.spooled.load(Ordering::Relaxed),
                             self.counters.dropped.load(Ordering::Relaxed)
                         );
@@ -256,6 +267,9 @@ impl Sink {
                         continue;
                     };
                     if spool.is_none() {
+                        if let Some(d) = sp.parent() {
+                            let _ = std::fs::create_dir_all(d);
+                        }
                         spool = std::fs::OpenOptions::new().create(true).append(true).open(sp).ok();
                     }
                     let n = line.len() as u64 + 1;

@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @124a233 · 정:RULE-OPS-SUPERVISOR 정:RULE-OPS-SURFACE 정:RULE-BUS-FATE 정:IMPL-CFG-SYSTEM-FILE · 운영 규격서 §4-1 · model: claude-opus-5-5
+// spec: v1.2 @124a233 · 정:RULE-OPS-SUPERVISOR 정:RULE-OPS-SURFACE 정:RULE-OPS-LOGGER 정:RULE-BUS-FATE 정:IMPL-CFG-SYSTEM-FILE · 운영 규격서 §4-1 · model: claude-opus-5-5
 //! supervisor — 상태 여덟 · 종류 셋(process · remote · inproc) · 부모 생존 채널 · 기동 핸드셰이크(Hello) · backoff · 폭주.
 
 use std::collections::VecDeque;
@@ -19,6 +19,7 @@ const HELLO_POLL_MS: u64 = 200;
 const REMOTE_PROBE_MS: u64 = 1_000;
 const STOP_GRACE_MS: u64 = 5_000;
 pub const ZENOH_UNIT: &str = "zenoh";
+pub const LOG_ROLE: &str = "log";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum UnitState {
@@ -135,7 +136,7 @@ impl Supervisor {
                 cmd_req: Cmd::None,
             });
         }
-        slots.sort_by_key(|s| s.order);
+        slots.sort_by_key(|s| (s.role != "log", s.order));
         let wake = Arc::new((0..slots.len()).map(|_| Notify::new()).collect());
         Supervisor {
             slots: Arc::new(Mutex::new(slots)),
@@ -288,13 +289,39 @@ impl Supervisor {
     }
 
     pub fn start(self: &Arc<Self>, ctx: Arc<StartCtx>, on_running: Arc<dyn Fn(String, String) + Send + Sync>) {
+        self.start_where(ctx, on_running, |role| role != LOG_ROLE);
+    }
+
+    pub fn start_loggers(self: &Arc<Self>, ctx: Arc<StartCtx>, on_running: Arc<dyn Fn(String, String) + Send + Sync>) {
+        self.start_where(ctx, on_running, |role| role == LOG_ROLE);
+    }
+
+    pub async fn wait_loggers(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let pending = self
+                .slots
+                .lock()
+                .map(|s| s.iter().any(|u| u.role == LOG_ROLE && u.state != UnitState::Running && u.state != UnitState::Disabled))
+                .unwrap_or(false);
+            if !pending {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    fn start_where(self: &Arc<Self>, ctx: Arc<StartCtx>, on_running: Arc<dyn Fn(String, String) + Send + Sync>, pick: impl Fn(&str) -> bool) {
         let n = self.slots.lock().map(|s| s.len()).unwrap_or(0);
         for idx in 0..n {
-            let (kind, state) = match self.slots.lock() {
-                Ok(s) => (s[idx].kind, s[idx].state),
+            let (kind, state, picked) = match self.slots.lock() {
+                Ok(s) => (s[idx].kind, s[idx].state, pick(&s[idx].role)),
                 Err(_) => continue,
             };
-            if kind == UnitKind::Inproc || state == UnitState::Disabled {
+            if kind == UnitKind::Inproc || state == UnitState::Disabled || !picked {
                 continue;
             }
             let me = self.clone();
@@ -400,6 +427,10 @@ impl Supervisor {
                 c.arg("--log-socket").arg(s);
             }
             c.stdin(std::process::Stdio::piped());
+            let is_log = self.with(idx, |u| u.role == LOG_ROLE).unwrap_or(false);
+            if is_log {
+                c.stdout(std::process::Stdio::piped());
+            }
             let mut child = match c.spawn() {
                 Ok(ch) => ch,
                 Err(e) => {
@@ -409,9 +440,16 @@ impl Supervisor {
                 }
             };
             let _liveness = child.stdin.take();
+            let ready_out = child.stdout.take();
             self.with(idx, |u| u.pid = child.id());
             let epoch = tokio::select! {
-                e = self.hello(idx) => e,
+                e = async {
+                    if is_log {
+                        read_ready(ready_out, self.hello_timeout).await
+                    } else {
+                        self.hello(idx).await
+                    }
+                } => e,
                 _ = child.wait() => None,
             };
             let Some(epoch) = epoch else {
@@ -535,10 +573,18 @@ impl Supervisor {
     }
 
     pub async fn shutdown_units(&self) {
+        self.stop_where(|role| role != LOG_ROLE).await;
+    }
+
+    pub async fn shutdown_loggers(&self) {
+        self.stop_where(|role| role == LOG_ROLE).await;
+    }
+
+    async fn stop_where(&self, pick: impl Fn(&str) -> bool) {
         let pids: Vec<(String, Option<u32>)> = self
             .slots
             .lock()
-            .map(|s| s.iter().rev().filter(|u| u.kind == UnitKind::Process).map(|u| (u.id.clone(), u.pid)).collect())
+            .map(|s| s.iter().rev().filter(|u| u.kind == UnitKind::Process && pick(&u.role)).map(|u| (u.id.clone(), u.pid)).collect())
             .unwrap_or_default();
         for (id, pid) in pids {
             self.set_state(&id, UnitState::Stopping);
@@ -553,6 +599,13 @@ impl Supervisor {
             self.set_state(&id, UnitState::Stopped);
         }
     }
+}
+
+async fn read_ready(out: Option<tokio::process::ChildStdout>, timeout: Duration) -> Option<String> {
+    use tokio::io::AsyncBufReadExt;
+    let mut lines = tokio::io::BufReader::new(out?).lines();
+    let line = tokio::time::timeout(timeout, lines.next_line()).await.ok()?.ok()??;
+    line.strip_prefix("ready epoch=").map(|e| e.trim().to_string()).filter(|e| !e.is_empty())
 }
 
 fn signal(pid: Option<u32>, sig: nix::sys::signal::Signal) {
