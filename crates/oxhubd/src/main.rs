@@ -108,6 +108,7 @@ async fn run(boot: cfg::Boot) {
     });
     shutdown.notified().await;
     tracing::info!(kind = "diag", "shutdown — clients · units · hub");
+    sup.begin_close();
     ses_.shutdown().await;
     sup.stop_all().await;
     bus_.close().await;

@@ -412,7 +412,7 @@ impl Bus {
                             Err(e) => Reply::fail(Failure::new(ErrCode::InvalidPayload).msg(e)).encode(),
                         }
                     } else if what == "bus" {
-                        serde_json::to_vec(&me.view()).unwrap_or_default()
+                        serde_json::to_vec(&me.view().await).unwrap_or_default()
                     } else if let Some(s) = me.serve.get().cloned() {
                         s(what, payload).await
                     } else {
@@ -428,7 +428,7 @@ impl Bus {
         Ok(())
     }
 
-    pub fn view(&self) -> Value {
+    pub async fn view(&self) -> Value {
         let nodes: Vec<Value> = self
             .live_nodes()
             .iter()
@@ -440,7 +440,8 @@ impl Bus {
             .filter(|(_, p)| p.node != self.node)
             .map(|(r, p)| json!({"room_id": r, "node": p.node, "inst": p.inst}))
             .collect();
-        let peers: Vec<Value> = Vec::new();
+        let mut peers: Vec<Value> = self.session.info().routers_zid().await.map(|z| json!({"zid": z.to_string(), "whatami": "router"})).collect();
+        peers.extend(self.session.info().peers_zid().await.map(|z| json!({"zid": z.to_string(), "whatami": "peer"})));
         let last = self.last_event.lock().ok().and_then(|g| g.clone()).map(|(at, k, key)| json!({"at_ms": at, "kind": k, "key": key}));
         json!({
             "node": self.node,

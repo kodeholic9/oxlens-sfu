@@ -222,7 +222,7 @@ async fn bus(State(a): State<Admin>, ConnectInfo(p): ConnectInfo<SocketAddr>, h:
     if q.get("all").map(|v| v == "1").unwrap_or(false) {
         let mut nodes = Vec::new();
         for (n, _) in a.bus.live_nodes() {
-            let v = if n == a.node { Some(a.bus.view()) } else { a.bus.ask(&n, "bus", Vec::new()).await.and_then(|b| serde_json::from_slice(&b).ok()) };
+            let v = if n == a.node { Some(a.bus.view().await) } else { a.bus.ask(&n, "bus", Vec::new()).await.and_then(|b| serde_json::from_slice(&b).ok()) };
             nodes.push(match v {
                 Some(b) => json!({"node": n, "bus": b}),
                 None => json!({"node": n, "error": ErrCode::SfuUnavailable.code()}),
@@ -230,7 +230,7 @@ async fn bus(State(a): State<Admin>, ConnectInfo(p): ConnectInfo<SocketAddr>, h:
         }
         return ok(json!({"asked": a.node, "nodes": nodes}));
     }
-    ok(a.bus.view())
+    ok(a.bus.view().await)
 }
 
 async fn user_media(State(a): State<Admin>, ConnectInfo(p): ConnectInfo<SocketAddr>, h: HeaderMap, Path(user): Path<String>) -> Response {

@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.2 @8a0d8cf · 정:RULE-BUS-FATE · 정:RULE-OPS-SURFACE · 정:RULE-CFG-THREE-PLACES · model: claude-opus-5-5
-//! `oxsfud` 실행 — 인자 · `--version` · 부모 생존 채널(stdin 이 파이프면 닫힐 때 끝낸다) · 런타임 밖의 자가 감시(멎으면 진단을 남기고 끝낸다).
+//! `oxsfud` 실행 — 인자 · `--version` · 부모 생존 채널(stdin 파이프가 닫히거나 부모가 바뀌면 끝낸다) · 런타임 밖의 자가 감시(멎으면 진단을 남기고 끝낸다).
 
 use std::io::Read;
 use std::os::unix::fs::FileTypeExt;
@@ -18,10 +18,10 @@ fn exit(msg: &str) -> ! {
     std::process::exit(2);
 }
 
-fn watch_parent() {
+fn watch_parent() -> bool {
     let piped = std::fs::metadata("/dev/stdin").map(|m| m.file_type().is_fifo()).unwrap_or(false);
     if !piped {
-        return;
+        return false;
     }
     let _ = std::thread::Builder::new().name("ox-parent".to_string()).spawn(|| {
         let mut buf = [0u8; 64];
@@ -36,12 +36,18 @@ fn watch_parent() {
             }
         }
     });
+    true
 }
 
-fn watchdog(beat: Arc<AtomicU64>) {
+fn watchdog(beat: Arc<AtomicU64>, parent: Option<u32>) {
     let _ = std::thread::Builder::new().name("ox-watchdog".to_string()).spawn(move || {
         loop {
             std::thread::sleep(Duration::from_millis(1000));
+            if let Some(pp) = parent
+                && std::os::unix::process::parent_id() != pp {
+                    eprintln!("oxsfud: 부모가 바뀌었다({pp} → {}) — 종료", std::os::unix::process::parent_id());
+                    std::process::exit(0);
+                }
             let last = beat.load(Ordering::Acquire);
             let now = common::clock::mono_ms();
             if last > 0 && now.saturating_sub(last) > HANG_MS {
@@ -60,9 +66,10 @@ fn main() {
         return;
     }
     let boot = cfg::Boot::load(&args, raw).unwrap_or_else(|e| exit(&e));
-    watch_parent();
+    let _ = watch_parent();
     let beat = Arc::new(AtomicU64::new(0));
-    watchdog(beat.clone());
+    let pp = std::os::unix::process::parent_id();
+    watchdog(beat.clone(), (pp != 1).then_some(pp));
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap_or_else(|e| exit(&e.to_string()));
     rt.block_on(async move {
         let b = beat.clone();

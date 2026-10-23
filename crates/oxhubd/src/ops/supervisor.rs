@@ -84,6 +84,7 @@ pub struct Supervisor {
     pub extra: Vec<String>,
     pub slots: Mutex<Vec<Slot>>,
     changed: Notify,
+    closing: std::sync::atomic::AtomicBool,
 }
 
 fn now() -> u64 {
@@ -127,7 +128,7 @@ impl Supervisor {
                 run: 0,
             })
             .collect();
-        Arc::new(Supervisor { sys, bus, extra, slots: Mutex::new(slots), changed: Notify::new() })
+        Arc::new(Supervisor { sys, bus, extra, slots: Mutex::new(slots), changed: Notify::new(), closing: std::sync::atomic::AtomicBool::new(false) })
     }
 
     pub fn ids(&self, role: Option<UnitRole>) -> Vec<String> {
@@ -379,7 +380,7 @@ impl Supervisor {
             self.bus.undeclare_node();
         }
         let moved = self.set(id, Event::Exited);
-        if state == UState::Stopping || moved.map(|(_, to)| to == UState::Stopped).unwrap_or(false) {
+        if state == UState::Stopping || moved.map(|(_, to)| to == UState::Stopped).unwrap_or(false) || self.closing.load(std::sync::atomic::Ordering::Acquire) {
             return;
         }
         let (exceeded, wait) = {
@@ -470,7 +471,12 @@ impl Supervisor {
         Some((from, UState::Starting))
     }
 
+    pub fn begin_close(&self) {
+        self.closing.store(true, std::sync::atomic::Ordering::Release);
+    }
+
     pub async fn stop_all(self: &Arc<Self>) {
+        self.begin_close();
         let mut ids = self.ids(None);
         ids.reverse();
         for id in ids {
