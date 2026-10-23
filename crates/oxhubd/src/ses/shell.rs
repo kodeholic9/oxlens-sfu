@@ -672,6 +672,9 @@ impl Ses {
     }
 
     async fn handle(&self, s: &Arc<Session>, op_code: u16, body: Value) -> Res {
+        if body.get("room_id").map(|v| !v.is_string() && !v.is_null()).unwrap_or(false) {
+            return Res::Reply(Err(fail(ErrCode::InvalidPayload).msg("room_id 형")));
+        }
         let room = body.get("room_id").and_then(Value::as_str).map(str::to_string);
         match op_code {
             op::RESUME => self.resume(s).await,
