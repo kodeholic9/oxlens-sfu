@@ -222,7 +222,11 @@ fn stall_one(ctx: &Ctx, room: &Arc<Room>, p: &Arc<Peer>, now: u64) {
             if sp == p.user_id {
                 continue;
             }
-            let lr = room.floor.last_rtp_at.load(Ordering::Acquire);
+            let lr = ctx
+                .links
+                .peer(&sp)
+                .map(|q| lock(&q.pubs).iter().filter(|s| s.half.load(Ordering::Acquire) && s.kind == d.kind && !s.gone.load(Ordering::Acquire)).flat_map(|s| s.phys.load().iter().map(|ph| ph.last_rtp_ms.load(Ordering::Acquire)).collect::<Vec<_>>()).max().unwrap_or(0))
+                .unwrap_or(0);
             let bound = slot.bound_at.load(Ordering::Acquire);
             if lr == 0 || lr < bound.max(ready) || now.saturating_sub(lr) > STALL_MS {
                 continue;

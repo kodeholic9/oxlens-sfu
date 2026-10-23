@@ -85,6 +85,7 @@ pub fn wire_out(room: &str, m: &Msg) -> Option<Vec<u8>> {
             };
             x.with_u16(tlv::SEQ, m.q)
         }
+        T::Deny if m.n == w::deny::OTHER_REASON as u32 => x.with_u8(tlv::CAUSE, m.n as u8).with_str(tlv::REASON, "not_in_room"),
         T::Deny | T::Revoke => x.with_u8(tlv::CAUSE, m.n.min(255) as u8),
         T::Qinfo => x.with_pair(tlv::QINFO, m.n.min(255) as u8, m.d.min(255) as u8),
         _ => x,
@@ -378,5 +379,21 @@ impl Floor {
             "last_rtp_at": if lr > 0 { json!(lr) } else { Value::Null },
             "timers": timers,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn not_in_room_deny_carries_reason_other_denies_do_not() {
+        let f = wire_out("r1", &Msg::new(T::Deny, None, w::deny::OTHER_REASON as u32, 0)).unwrap_or_default();
+        let (_, payload) = oxsig::trn::decode_dc(&f).unwrap_or((0, &[]));
+        let m = w::decode(payload).unwrap_or(w::Msg::new(w::ACK));
+        assert_eq!(m.get(tlv::REASON), Some(&b"not_in_room"[..]), "연:FLR.S.gate.not_in_room DENY(255, REASON)");
+        let f2 = wire_out("r1", &Msg::new(T::Deny, None, w::deny::QUEUE_FULL as u32, 0)).unwrap_or_default();
+        let (_, p2) = oxsig::trn::decode_dc(&f2).unwrap_or((0, &[]));
+        assert_eq!(w::decode(p2).and_then(|m| m.get(tlv::REASON).map(<[u8]>::to_vec)), None);
     }
 }

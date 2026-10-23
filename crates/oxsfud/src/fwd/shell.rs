@@ -242,6 +242,7 @@ pub fn send_down(d: &Arc<Down>, p: &Peer, src: &Src<'_>, r: &Rtp<'_>, key: bool)
         }
         let m = st.rw.map(src.key, r.seq, r.ts, src.clock, now);
         if changed {
+            st.nack_closed = false;
             st.src_ssrc = src.ssrc;
             st.src_user = Some(src.user.to_string());
             st.src_track = Some(src.track.to_string());
@@ -358,9 +359,18 @@ fn video_codec_ok(user: &str, room_video: &str) -> bool {
     v.is_empty() || v.iter().any(|s| s.codec.as_deref().map(|c| c.eq_ignore_ascii_case(room_video)).unwrap_or(false))
 }
 
+fn close_nack(slot: &crate::room::Slot) {
+    for w in slot.subs.load().iter() {
+        if let Some(d) = w.upgrade() {
+            lock(&d.st).nack_closed = true;
+        }
+    }
+}
+
 pub fn floor_bind(room_id: &str, user: &str, prime: bool) {
     let Some(ctx) = crate::cfg::get() else { return };
     let Some(room) = ctx.rooms.get(room_id) else { return };
+    close_nack(&room.video);
     let now = now_ms();
     room.audio.speaker.store(Some(Arc::new(user.to_string())));
     room.audio.bound_at.store(now, Ordering::Release);
@@ -428,6 +438,7 @@ fn silence(r: &crate::room::Room, skip: &str, key: u64, seq: u16, ts: u32) {
 pub fn floor_release(room_id: &str, prev: Option<&str>) {
     let Some(ctx) = crate::cfg::get() else { return };
     let Some(room) = ctx.rooms.get(room_id) else { return };
+    close_nack(&room.video);
     room.audio.priming.store(0, Ordering::Release);
     room.audio.speaker.store(None);
     room.video.speaker.store(None);

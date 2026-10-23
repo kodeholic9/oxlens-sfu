@@ -128,7 +128,8 @@ fn on_nack(peer: &Arc<Peer>, body: &[u8]) {
     for out_seq in lost {
         let (src, phys, ts_off) = {
             let st = lock(&d.st);
-            (st.rw.nack(out_seq), st.src_phys.as_ref().and_then(|w| w.upgrade()), st.rw.ts_off)
+            let src = if st.nack_closed { None } else { st.rw.nack(out_seq) };
+            (src, st.src_phys.as_ref().and_then(|w| w.upgrade()), st.rw.ts_off)
         };
         let Some(src) = src else {
             ctx.drops.rtx_gate.fetch_add(1, Ordering::Relaxed);

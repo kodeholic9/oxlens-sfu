@@ -33,6 +33,7 @@ pub struct Drops {
     pub rtx_gate: AtomicU64,
     pub rtx_miss: AtomicU64,
     pub rtx_budget: AtomicU64,
+    pub codes: dashmap::DashMap<u16, AtomicU64>,
 }
 
 impl Drops {
@@ -55,6 +56,7 @@ impl Drops {
             "dc_bad": g(&crate::aux::DC_BAD),
             "dc_unsent": g(&crate::aux::DC_UNSENT),
             "bus_dropped": g(&ctx.bus.dropped),
+            "codes": self.codes.iter().map(|e| (e.key().to_string(), json!(e.value().load(Ordering::Relaxed)))).collect::<serde_json::Map<String, Value>>(),
         })
     }
 }
@@ -108,6 +110,7 @@ pub async fn dispatch(call: Call) -> Reply {
             match r {
                 Ok(v) => Reply::ok(v),
                 Err(f) => {
+                    ctx.drops.codes.entry(f.code).or_default().fetch_add(1, Ordering::Relaxed);
                     tracing::info!(kind = "ev", spec = %format!("CP-CODE-{}", f.name.replace('_', "-")), user = %env.user_id, session = %env.session_id, epoch = %ctx.boot.epoch, op = %oxsig::op::name(op), code = f.code, "op 실패");
                     Reply::fail(f)
                 }

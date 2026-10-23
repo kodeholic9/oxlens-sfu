@@ -50,6 +50,7 @@ pub struct DownState {
     pub src_phys: Option<Weak<PubTrack>>,
     pub rtx_seq: u16,
     pub mid_at: u64,
+    pub nack_closed: bool,
     pub sel: crate::sim::Sel,
 }
 
