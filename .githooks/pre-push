@@ -8,20 +8,21 @@ need=0
 while read lref lsha rref rsha; do
   [ "$lsha" = "$zero" ] && continue
   if [ "$rsha" = "$zero" ]; then range="$lsha^!"; else range="$rsha..$lsha"; fi
-  git diff --name-only $range -- crates Cargo.toml Cargo.lock 2>/dev/null | grep -q . && need=1
+  # ★대조 대상은 push 하는 커밋이다(HEAD 가 아니다 — 앞 커밋까지만 올리는 push 도 있다 · 20261023)
+  git diff --name-only $range -- crates Cargo.toml Cargo.lock 2>/dev/null | grep -q . && need=1 && want="$want $(git rev-parse --short=12 $lsha)"
 done
 [ "$need" = 0 ] && exit 0
-head=$(git rev-parse --short=12 HEAD)
-python3 - "$rec" "$head" <<'PY'
+python3 - "$rec" $want <<'PY'
 import json, sys
-path, head = sys.argv[1], sys.argv[2]
+path, wants = sys.argv[1], sys.argv[2:]
 try:
     r = json.load(open(path))
 except Exception:
     print(f"✗ push 거절 — 3층 기록이 없다: {path}\n  oxlens-sdk-web 에서 `OXE2E_HUB=… npm run gate:live` 를 이 빌드로 돌린다")
     sys.exit(1)
 b = r.get("server_build") or ""
-if not r.get("passed") or not b.startswith(head) or "-dirty" in b:
+for head in wants:
+  if not r.get("passed") or not b.startswith(head) or "-dirty" in b:
     print(f"✗ push 거절 — 이 빌드({head})의 3층 통과 기록이 아니다: passed={r.get('passed')} server_build={b!r} at={r.get('at')}\n"
           f"  서버를 이 커밋으로 띄우고 oxlens-sdk-web 에서 `npm run gate:live` 를 다시 돌린다")
     sys.exit(1)
