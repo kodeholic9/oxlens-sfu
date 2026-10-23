@@ -13,12 +13,12 @@ fn main() {
     let o = match ops::parse(argv) {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("oxadmin: {e}\n{}", ops::USAGE);
+            eprintln!("[oxadmin] {e}\n{}", ops::USAGE);
             std::process::exit(2);
         }
     };
     let (url, from) = ops::resolve(&o);
-    eprintln!("oxadmin: hub={url} ({from})");
+    eprintln!("[oxadmin] hub={url} ({from})");
     let key = match (&o.key, &o.secret) {
         (Some(k), Some(s)) => Some((k.clone(), s.clone())),
         _ => None,
@@ -26,14 +26,14 @@ fn main() {
     let hub = match ops::http::Hub::new(&url, key) {
         Ok(h) => h,
         Err(e) => {
-            eprintln!("oxadmin: {e}");
+            eprintln!("[oxadmin] {e}");
             std::process::exit(2);
         }
     };
     match ops::run(&o, &hub) {
         Ok(out) => println!("{out}"),
         Err(e) => {
-            eprintln!("oxadmin: {e}");
+            eprintln!("[oxadmin] {e}");
             std::process::exit(1);
         }
     }

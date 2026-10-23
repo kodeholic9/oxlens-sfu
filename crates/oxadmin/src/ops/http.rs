@@ -21,7 +21,10 @@ pub struct Resp {
 
 impl Hub {
     pub fn new(url: &str, key: Option<(String, String)>) -> Result<Hub, String> {
-        let rest = url.strip_prefix("http://").ok_or_else(|| format!("hub 주소는 http:// 로 시작한다: {url}"))?;
+        if url.starts_with("https://") {
+            return Err(format!("TLS 는 이 도구가 안 붙는다: {url}"));
+        }
+        let rest = url.strip_prefix("http://").unwrap_or(url);
         let host = rest.split('/').next().unwrap_or(rest).to_string();
         Ok(Hub { host, key })
     }

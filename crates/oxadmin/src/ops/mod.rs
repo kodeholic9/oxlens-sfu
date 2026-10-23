@@ -54,7 +54,7 @@ pub fn resolve(o: &Opts) -> (String, &'static str) {
     if let Ok(h) = std::env::var("OXADMIN_URL") {
         return (h, "OXADMIN_URL");
     }
-    (DEFAULT_HUB.to_string(), "default")
+    (DEFAULT_HUB.to_string(), "기본값")
 }
 
 fn s(v: &Value, k: &str) -> String {
@@ -140,8 +140,38 @@ fn show(path: &str, v: &Value) -> String {
             out.push_str(&table(&rows));
             out
         }
+        ["admin", "rooms", _, "destroy"] => format!("room={} destroyed={} notified={}", s(v, "room_id"), if v.get("destroyed") == Some(&Value::Bool(true)) { "yes" } else { "no" }, s(v, "notified")),
+        ["admin", "rooms", _, "reap", _] => format!("room={} user={} left={} version={}", s(v, "room_id"), s(v, "user_id"), s(v, "left"), s(v, "version")),
+        ["admin", "bus"] if v.get("asked").is_some() => bus_all(v),
         _ => serde_json::to_string_pretty(v).unwrap_or_default(),
     }
+}
+
+fn bus_all(v: &Value) -> String {
+    let mut rows = vec![vec!["NODE".into(), "INST".into(), "SEES".into(), "PEERS".into(), "PENDING".into()]];
+    let mut views: Vec<(String, Vec<String>)> = Vec::new();
+    for n in list(v, "nodes") {
+        let node = s(&n, "node");
+        if n.get("error").is_some() {
+            rows.push(vec![node, "-".into(), format!("error {}", s(&n, "error")), "-".into(), "-".into()]);
+            continue;
+        }
+        let b = n.get("bus").cloned().unwrap_or(Value::Null);
+        let mut seen: Vec<String> = list(&b, "nodes").iter().map(|x| format!("{}/{}", s(x, "node"), s(x, "inst"))).collect();
+        seen.sort();
+        let pending = b.get("pending").map(|p| list(p, "rooms_unplaced").len() + list(p, "rooms_no_view").len()).unwrap_or(0);
+        rows.push(vec![node.clone(), s(&b, "inst"), seen.join(" "), list(&b, "peers").len().to_string(), pending.to_string()]);
+        views.push((node, seen));
+    }
+    let first = views.first().map(|x| x.1.clone());
+    let same = !views.is_empty() && views.len() == list(v, "nodes").len() && views.iter().all(|x| Some(&x.1) == first.as_ref());
+    let verdict = if same {
+        "합의: 전 node 가 같은 것을 본다".to_string()
+    } else {
+        let odd: Vec<String> = views.iter().filter(|x| Some(&x.1) != first.as_ref()).map(|x| x.0.clone()).collect();
+        format!("불일치: 시야가 다른 node {odd:?} · 못 닿은 node 는 위 error")
+    };
+    format!("{}\n{verdict}", table(&rows))
 }
 
 fn ok(r: Resp) -> Result<Value, String> {
@@ -209,11 +239,13 @@ pub fn run(o: &Opts, hub: &Hub) -> Result<String, String> {
         ["kill", id] => {
             let (_, st) = get("/admin/supervisor/status")?;
             let epoch = list(&st, "units").into_iter().find(|x| s(x, "id") == *id).map(|x| s(&x, "epoch")).filter(|e| e != "-").ok_or(format!("유닛 {id} 의 epoch 를 못 읽었다"))?;
+            eprintln!("[oxadmin] if_epoch={epoch} 를 되싣는다(§5)");
             post(&format!("/admin/supervisor/kill/{id}?if_epoch={epoch}"), None)?
         }
         ["shutdown"] => {
             let (_, snap) = get("/admin/snapshot")?;
             let hid = s(&snap, "hub_id");
+            eprintln!("[oxadmin] confirm={hid} 를 되싣는다(§5)");
             post(&format!("/admin/supervisor/shutdown?confirm={hid}"), None)?
         }
         ["user-cut", user] => post(&format!("/admin/users/{user}/cut"), None)?,
@@ -221,7 +253,9 @@ pub fn run(o: &Opts, hub: &Hub) -> Result<String, String> {
         ["destroy", room] => {
             let (_, snap) = get(&format!("/admin/rooms/{room}/snapshot"))?;
             let ver = snap.pointer("/room/version").cloned().ok_or("방 version 을 못 읽었다")?;
-            post(&format!("/admin/rooms/{room}/destroy?if_version={}:{}", s(&ver, "epoch"), s(&ver, "seq")), None)?
+            let iv = format!("{}:{}", s(&ver, "epoch"), s(&ver, "seq"));
+            eprintln!("[oxadmin] if_version={iv} 를 되싣는다(§5)");
+            post(&format!("/admin/rooms/{room}/destroy?if_version={iv}"), None)?
         }
         ["log-level", level] => {
             let mut b = serde_json::json!({"level": level});
@@ -251,6 +285,7 @@ mod tests {
     fn ladder_prefers_flag() {
         let o = parse(vec!["--hub".into(), "http://h:1".into(), "rooms".into()]).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(resolve(&o), ("http://h:1".to_string(), "--hub"), "O-sym-6-2");
+        assert!(http::Hub::new("127.0.0.1:1974", None).is_ok(), "스킴 없는 host:port 도 받는다");
         assert_eq!(o.args, vec!["rooms".to_string()]);
     }
 
