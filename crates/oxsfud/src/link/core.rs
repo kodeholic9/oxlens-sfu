@@ -417,6 +417,17 @@ mod tests {
     }
 
     #[test]
+    fn overlapping_restarts_keep_two_per_set() {
+        let mut c = Creds::new();
+        let cur = c.cur.ufrag.clone();
+        let (a, gone_a) = c.restart();
+        let (b, gone_b) = c.restart();
+        assert_eq!(gone_a, None);
+        assert_eq!(gone_b, Some(a.ufrag.clone()), "S-sym-IMPL-LINK-ICE-RESTART-2 대기분은 새 것으로 바뀐다");
+        assert!(c.pwd_of(&cur).is_some() && c.pwd_of(&b.ufrag).is_some() && c.pwd_of(&a.ufrag).is_none(), "S-sym-IMPL-LINK-ICE-RESTART-2 벌마다 최대 둘");
+    }
+
+    #[test]
     fn route_death_is_suspect_once() {
         let mut p = Pairs::default();
         let a: SocketAddr = "1.2.3.4:5".parse().unwrap_or_else(|_| panic!());
