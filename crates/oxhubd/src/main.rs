@@ -1,253 +1,118 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @124a233 · 정:RULE-DOC-PLANES 정:RULE-CFG-THREE-PLACES 정:RULE-BUS-FATE 정:RULE-OPS-SURFACE 정:RULE-OPS-LOGGER 운영 규격서 §8 · 연:RULE-TRN-ENDPOINTS · model: claude-opus-5-5
-//! oxhubd — 게이트웨이. 세션 · 배치 · op 라우팅 · 운영 표면 · supervisor · 그 node 의 zenoh router.
+// spec: v1.2 @8a0d8cf · 정:RULE-DOC-PLANES · 정:RULE-DOC-OWNERSHIP · 정:RULE-BUS-FATE · 정:RULE-OPS-SURFACE · 정:RULE-DOC-CODE-MIRROR · model: claude-opus-5-5
+//! `oxhubd` — 게이트웨이: 세션 · 배치 · op 라우팅 · supervisor · zenoh router. 영역마다 한 디렉터리(bus · ses · room · ops · aux · cfg).
 
-mod admin;
-mod auth;
+mod aux;
 mod bus;
-mod conn;
-mod http;
-mod route;
-mod session;
-mod state;
-mod supervisor;
+mod cfg;
+mod ops;
+mod room;
+mod ses;
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
-use axum::Router;
-use axum::routing::{get, post};
-use common::policy::Policy;
-use common::system::System;
+use common::args::Args;
 
-use crate::state::Hub;
-use crate::supervisor::{StartCtx, UnitState};
-
-#[derive(Default)]
-struct Args {
-    system: Option<String>,
-    policy: Option<String>,
-    id: Option<String>,
-    build: Option<String>,
-    version: bool,
-    listen: Option<String>,
-    log_dir: Option<String>,
-    log_socket: Option<String>,
-}
-
-fn parse_args() -> Result<Args, String> {
-    let mut a = Args::default();
-    let mut it = std::env::args().skip(1);
-    while let Some(k) = it.next() {
-        let mut val = || it.next().ok_or_else(|| format!("{k} 에 값이 없다"));
-        match k.as_str() {
-            "--system" => a.system = Some(val()?),
-            "--policy" => a.policy = Some(val()?),
-            "--id" => a.id = Some(val()?),
-            "--build" => a.build = Some(val()?),
-            "--listen" => a.listen = Some(val()?),
-            "--log-dir" => a.log_dir = Some(val()?),
-            "--log-socket" => a.log_socket = Some(val()?),
-            "--version" => a.version = true,
-            other => return Err(format!("모르는 인자: {other}")),
-        }
-    }
-    Ok(a)
-}
-
-fn identity(label: Option<&str>) -> String {
-    common::ident::build_identity(env!("OX_GIT_SHA"), env!("OX_BUILD_TIME"), label)
-}
-
-pub async fn shutdown(hub: &Arc<Hub>, code: i32) {
-    if hub.shutting_down.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    tracing::info!(kind = "ev", spec = "CP-CODE-SERVER-SHUTDOWN", "shutdown: clients → units → hub");
-    session::shutdown_all(hub).await;
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    hub.units.shutdown_units().await;
-    if let Some(b) = hub.bus() {
-        let _ = b.close().await;
-    }
-    hub.units.shutdown_loggers().await;
-    std::process::exit(code);
+fn exit(msg: &str) -> ! {
+    eprintln!("oxhubd: {msg}");
+    std::process::exit(2);
 }
 
 fn main() {
-    let args = match parse_args() {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("oxhubd: {e}");
-            std::process::exit(2);
-        }
-    };
-    if args.version {
-        println!("{}", identity(args.build.as_deref()));
+    let args = Args::parse(std::env::args().skip(1), &cfg::VALUED, &cfg::FLAGS).unwrap_or_else(|e| exit(&e));
+    let raw = env!("OX_BUILD_ID");
+    if args.flag("version") {
+        println!("{}", common::ident::build_identity(raw, args.get("build")));
         return;
     }
-    let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("oxhubd: runtime: {e}");
-            std::process::exit(1);
-        }
-    };
-    let code = rt.block_on(run(args));
-    std::process::exit(code);
+    let boot = cfg::Boot::load(&args, raw).unwrap_or_else(|e| exit(&e));
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap_or_else(|e| exit(&e.to_string()));
+    rt.block_on(run(boot));
 }
 
-async fn run(args: Args) -> i32 {
-    let Some(sys_path) = args.system.clone() else {
-        eprintln!("oxhubd: --system 이 필요하다");
-        return 2;
-    };
-    let mut system = match System::load(std::path::Path::new(&sys_path)) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("oxhubd: {e}");
-            return 2;
-        }
-    };
-    let policy = match args.policy.as_deref() {
-        Some(p) => match Policy::load(std::path::Path::new(p)) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("oxhubd: {e}");
-                return 2;
-            }
-        },
-        None => Policy::default(),
-    };
-    if let Some(l) = &args.listen {
-        system.hub.listen = l.clone();
-    }
-    if let Some(d) = &args.log_dir {
-        system.hub.log_dir = Some(d.clone());
-    }
-    if let Some(s) = &args.log_socket {
-        system.hub.log_socket = Some(s.clone());
-    }
-    let node = match args.id.clone().or_else(|| system.first_sfu().map(|u| u.id.clone())) {
-        Some(n) if common::keyspace::valid_piece(&n) => n,
-        _ => {
-            eprintln!("oxhubd: --id(node_id) 가 없거나 키 금지 문자를 담았다");
-            return 2;
-        }
-    };
-    let build = identity(args.build.as_deref());
-    common::log::init(common::log::LogConfig {
-        node: &node,
-        proc_name: "hub",
-        logging: &policy.logging,
-        log_dir: system.hub.log_dir.as_deref(),
-        log_socket: system.hub.log_socket.as_deref(),
+async fn run(boot: cfg::Boot) {
+    let _ = common::clock::start();
+    common::log::init(common::log::LogConf {
+        node: boot.node.clone(),
+        proc_name: "hub".to_string(),
+        socket: boot.log_socket.as_ref().map(PathBuf::from),
+        log_dir: boot.log_dir.as_ref().map(PathBuf::from),
+        level: format!("{:?}", boot.policy.logging.level).to_lowercase(),
+        line_max: boot.policy.logging.line_max_bytes as usize,
+        queue_max: boot.policy.logging.queue_max_lines as usize,
+        spool_max: boot.policy.logging.spool_max_bytes,
+        sink: None,
     });
-    tracing::info!(
-        kind = "diag",
-        "banner node={node} build={build} listen={} base={} units={} zenoh.listen={:?} zenoh.connect={:?} namespace={} policy={:?}",
-        system.hub.listen,
-        system.hub.base_path,
-        system.unit.iter().map(|u| u.id.as_str()).collect::<Vec<_>>().join(","),
-        system.zenoh.listen,
-        system.zenoh.connect,
-        system.zenoh.namespace,
-        policy
-    );
-    let hub = Arc::new(Hub::new(node.clone(), build, system, policy));
-    let ctx = Arc::new(StartCtx {
-        node: node.clone(),
-        build_label: args.build.clone(),
-        zenoh_namespace: hub.system.zenoh.namespace.clone(),
-        zenoh_connect: hub.system.zenoh.listen.first().cloned(),
-        log_dir: hub.system.hub.log_dir.clone(),
-        log_socket: hub.system.hub.log_socket.clone(),
-    });
-    let hub_cb = hub.clone();
-    let on_running: Arc<dyn Fn(String, String) + Send + Sync> = Arc::new(move |id: String, epoch: String| {
-        let hub = hub_cb.clone();
-        tokio::spawn(async move {
-            if hub.units.sfu_id().as_deref() == Some(id.as_str()) {
-                bus::declare_node(&hub, &epoch).await;
-            }
-        });
-    });
-    hub.units.start_loggers(ctx.clone(), on_running.clone());
-    if !hub.units.wait_loggers(std::time::Duration::from_millis(hub.system.supervisor.hello_timeout_ms)).await {
-        tracing::warn!(kind = "ev", spec = "RULE-OPS-LOGGER", "logger not ready — continuing (lines go to spool)");
+    if let Some(d) = &boot.log_dir {
+        let _ = std::fs::create_dir_all(d);
     }
-    if let Err(e) = bus::open(&hub).await {
-        tracing::warn!(kind = "ev", spec = "SV-STATE-BLOCKED", "zenoh unit failed: {e}");
-        hub.units.set_state(supervisor::ZENOH_UNIT, UnitState::Blocked);
-        hub.units.shutdown_loggers().await;
-        return 1;
-    }
-    hub.units.set_state(supervisor::ZENOH_UNIT, UnitState::Running);
-    hub.units.start(ctx, on_running);
-    {
-        let hub = hub.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                common::log::restore_if_due();
-                if hub.is_shutting_down() {
-                    break;
-                }
-            }
-        });
-    }
-    let base = hub.system.hub.base_path.trim_end_matches('/').to_string();
-    let app = Router::new()
-        .route(&format!("{base}/ws"), get(http::ws))
-        .route(&format!("{base}/auth/token"), post(http::token))
-        .route(&format!("{base}/rooms"), get(http::list_rooms).post(http::create_room).options(http::preflight))
-        .route(&format!("{base}/rooms/:room_id"), get(http::get_room).options(http::preflight))
-        .route("/healthz/live", get(http::live))
-        .route("/healthz/ready", get(http::ready))
-        .route("/admin/sfus", get(admin::sfus))
-        .route("/admin/sfus/:sfu_id/rooms", get(admin::sfu_rooms))
-        .route("/admin/rooms", get(admin::rooms))
-        .route("/admin/rooms/:room_id/snapshot", get(admin::room_snapshot))
-        .route("/admin/rooms/:room_id/reap/:user_id", post(admin::reap))
-        .route("/admin/rooms/:room_id/destroy", post(admin::destroy))
-        .route("/admin/users", get(admin::users))
-        .route("/admin/users/:user_id/cut", post(admin::user_cut))
-        .route("/admin/snapshot", get(admin::snapshot))
-        .route("/admin/drops", get(admin::drops))
-        .route("/admin/bus", get(admin::bus))
-        .route("/admin/supervisor/status", get(admin::sup_status))
-        .route("/admin/supervisor/load/:id", post(admin::sup_load))
-        .route("/admin/supervisor/stop/:id", post(admin::sup_stop))
-        .route("/admin/supervisor/kill/:id", post(admin::sup_kill))
-        .route("/admin/supervisor/shutdown", post(admin::sup_shutdown))
-        .route("/admin/log-level", post(admin::log_level))
-        .with_state(hub.clone());
-    let listener = match tokio::net::TcpListener::bind(&hub.system.hub.listen).await {
+    tracing::info!(kind = "diag", build = %boot.build, banner = %boot.banner(), "hub boot");
+    let grace = boot.sys.supervisor.node_grace_secs * 1000;
+    let z = &boot.sys.zenoh;
+    let bus_ = bus::Bus::open(&boot.node, &z.namespace, z.listen.clone(), z.connect.clone(), z.multicast_scouting, grace).await;
+    let bus_ = match bus_ {
+        Ok(b) => b,
+        Err(e) => exit(&e),
+    };
+    let ses_ = ses::Ses::new(bus_.clone(), boot.sys.clone(), boot.policy.clone(), &boot.node);
+    let s2 = ses_.clone();
+    bus_.set_sink(Arc::new(move |d| s2.deliver(d)));
+    let s3 = ses_.clone();
+    bus_.set_serve(Arc::new(move |what, payload| {
+        let s = s3.clone();
+        Box::pin(async move { s.serve(&what, &payload).await })
+    }));
+    ses_.spawn_sweeper();
+    let sup = ops::supervisor::Supervisor::new(boot.sys.clone(), bus_.clone(), boot.child_args());
+    let shutdown = Arc::new(tokio::sync::Notify::new());
+    let admin = ops::admin::Admin { bus: bus_.clone(), ses: ses_.clone(), sup: sup.clone(), build: boot.build.clone(), node: boot.node.clone(), shutdown: shutdown.clone() };
+    let s4 = ses_.clone();
+    let rooms = room::Rooms {
+        bus: bus_.clone(),
+        policy: boot.policy.clone(),
+        ident: Arc::new(move |h| ses::http::identify(&s4, h).map(|i| (i.user_id, i.session_id))),
+        status: Arc::new(ses::http::status_of),
+    };
+    let base = boot.sys.hub.base_path.trim_end_matches('/').to_string();
+    let a_plane = axum::Router::new().merge(ses::http::router(ses_.clone())).merge(room::router(rooms));
+    let app = if base.is_empty() { axum::Router::new().merge(a_plane) } else { axum::Router::new().nest(&base, a_plane) };
+    let app = app.merge(ops::admin::router(admin));
+    let listener = match tokio::net::TcpListener::bind(&boot.listen).await {
         Ok(l) => l,
-        Err(e) => {
-            tracing::warn!(kind = "diag", "listen {} failed: {e}", hub.system.hub.listen);
-            return 1;
-        }
+        Err(e) => exit(&format!("listen {}: {e}", boot.listen)),
     };
-    {
-        let hub = hub.clone();
-        tokio::spawn(async move {
-            let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(s) => s,
-                Err(_) => return,
-            };
-            tokio::select! {
-                _ = term.recv() => {}
-                _ = tokio::signal::ctrl_c() => {}
-            }
-            shutdown(&hub, 0).await;
-        });
-    }
-    let svc = app.into_make_service_with_connect_info::<SocketAddr>();
-    if let Err(e) = axum::serve(listener, svc).await {
-        tracing::warn!(kind = "diag", "serve failed: {e}");
-        return 1;
-    }
-    0
+    tracing::info!(kind = "diag", listen = %boot.listen, "hub listening");
+    let stop_srv = Arc::new(tokio::sync::Notify::new());
+    let server = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown({
+        let sd = stop_srv.clone();
+        async move { sd.notified().await }
+    });
+    let sup2 = sup.clone();
+    tokio::spawn(async move { sup2.start_all().await });
+    let sd = shutdown.clone();
+    tokio::spawn(async move {
+        let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = tokio::signal::ctrl_c() => {}
+        }
+        sd.notify_one();
+    });
+    let srv = tokio::spawn(async move {
+        let _ = server.await;
+    });
+    shutdown.notified().await;
+    tracing::info!(kind = "diag", "shutdown — clients · units · hub");
+    ses_.shutdown().await;
+    sup.stop_all().await;
+    bus_.close().await;
+    stop_srv.notify_one();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), srv).await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    std::process::exit(0);
 }
