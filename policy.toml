@@ -31,8 +31,8 @@ room_default_capacity = 1000
 # 연§5-1 — 브라우저 클라의 origin 허용. 빈 목록이면 같은 origin 배포 전제.
 allowed_origins = ["*"]
 # 정§4-1 — 방 생성 요청이 안 준 때의 기본.
-room_unused_ttl_secs = 300
-room_departure_ttl_secs = 60
+room_unused_ttl_secs = 30
+room_departure_ttl_secs = 5
 
 [quota]
 # ★0 = 상한 없음(검사하지 않는다). ★**이 배포 전체**의 상한이지 계정별이 아니다 —
