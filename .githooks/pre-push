@@ -7,6 +7,8 @@ zero=0000000000000000000000000000000000000000
 need=0
 while read lref lsha rref rsha; do
   [ "$lsha" = "$zero" ] && continue
+  # ★annotated 태그는 태그 객체 SHA 로 온다 — 가리키는 커밋으로 푼다(20261025 v1.2 태그 push 가 태그 객체를 빌드로 견줘 거절됐다)
+  lsha=$(git rev-parse "$lsha^{commit}" 2>/dev/null || echo "$lsha")
   if [ "$rsha" = "$zero" ]; then range="$lsha^!"; else range="$rsha..$lsha"; fi
   # ★대조 대상은 push 하는 커밋이다(HEAD 가 아니다 — 앞 커밋까지만 올리는 push 도 있다 · 20261023)
   git diff --name-only $range -- crates Cargo.toml Cargo.lock 2>/dev/null | grep -q . && need=1 && want="$want $(git rev-parse --short=12 $lsha)"
