@@ -1,8 +1,19 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @8a0d8cf · 정:IMPL-RTCP-TERMINATE · 정:RULE-RTCP-NACK-UP · 정:RULE-CONC-SANS-IO · model: claude-opus-5-5
-//! RTCP 산수(sans-IO) — 수신 통계(RFC 3550 A.1 · A.3 · A.8) · TWCC 피드백 창(draft-holmer §3.1 · libwebrtc 수신 쪽) · NACK 결손 추적.
+// spec: v1.2 @8a0d8cf · 정:IMPL-RTCP-TERMINATE · 정:RULE-RTCP-NACK-UP · 정:RULE-CONC-SANS-IO · 정:RULE-DOC-FIXED-PARTS · model: claude-opus-5-5
+//! RTCP 산수(sans-IO) — 수신 통계(RFC 3550 A.1 · A.3 · A.8) · TWCC 피드백 창(draft-holmer §3.1 · libwebrtc 수신 쪽) · NACK 결손 추적 · 패킷 꼴은 고정 부품 `rtcp` 로 짓고 읽는다.
 
 use std::collections::BTreeMap;
+
+use bytes::Bytes;
+use rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
+use rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+use rtcp::payload_feedbacks::receiver_estimated_maximum_bitrate::ReceiverEstimatedMaximumBitrate;
+use rtcp::receiver_report::ReceiverReport;
+use rtcp::reception_report::ReceptionReport;
+use rtcp::sender_report::SenderReport;
+use rtcp::transport_feedbacks::transport_layer_cc::{PacketStatusChunk, RecvDelta, RunLengthChunk, StatusChunkTypeTcc, SymbolTypeTcc, TransportLayerCc};
+use rtcp::transport_feedbacks::transport_layer_nack::{NackPair, TransportLayerNack};
+use webrtc_util::marshal::{Marshal, Unmarshal};
 
 pub const MIN_SEQUENTIAL: u32 = 2;
 pub const MAX_DROPOUT: u32 = 3000;
@@ -292,31 +303,20 @@ pub fn nack_pairs(seqs: &[u16]) -> Vec<(u16, u16)> {
 
 pub const SENDER_SSRC: u32 = 1;
 
-fn head(out: &mut Vec<u8>, count: u8, pt: u8) {
-    out.push(0x80 | (count & 0x1f));
-    out.push(pt);
-    out.extend_from_slice(&[0, 0]);
+fn bytes<P: Marshal>(p: &P) -> Vec<u8> {
+    p.marshal().map(|b| b.to_vec()).unwrap_or_default()
 }
 
-fn finish(out: &mut [u8], start: usize) {
-    let words = ((out.len() - start) / 4 - 1) as u16;
-    out[start + 2..start + 4].copy_from_slice(&words.to_be_bytes());
+fn sym(s: Sym) -> SymbolTypeTcc {
+    match s {
+        Sym::N => SymbolTypeTcc::PacketNotReceived,
+        Sym::S => SymbolTypeTcc::PacketReceivedSmallDelta,
+        Sym::L => SymbolTypeTcc::PacketReceivedLargeDelta,
+    }
 }
 
 pub fn encode_twcc(fb: &Feedback, media_ssrc: u32) -> Vec<u8> {
-    let mut out = Vec::with_capacity(64);
-    head(&mut out, 15, 205);
-    out.extend_from_slice(&SENDER_SSRC.to_be_bytes());
-    out.extend_from_slice(&media_ssrc.to_be_bytes());
-    out.extend_from_slice(&fb.base_seq.to_be_bytes());
-    out.extend_from_slice(&fb.status_count.to_be_bytes());
-    let rt = fb.reference_time & 0x00ff_ffff;
-    out.extend_from_slice(&[(rt >> 16) as u8, (rt >> 8) as u8, rt as u8, fb.fb_count]);
-    let code = |s: Sym| match s {
-        Sym::N => 0u16,
-        Sym::S => 1,
-        Sym::L => 2,
-    };
+    let mut packet_chunks = Vec::new();
     let mut i = 0;
     while i < fb.symbols.len() {
         let s = fb.symbols[i];
@@ -324,164 +324,97 @@ pub fn encode_twcc(fb: &Feedback, media_ssrc: u32) -> Vec<u8> {
         while i + n < fb.symbols.len() && fb.symbols[i + n] == s && n < 0x1fff {
             n += 1;
         }
-        let chunk = (code(s) << 13) | n as u16;
-        out.extend_from_slice(&chunk.to_be_bytes());
+        packet_chunks.push(PacketStatusChunk::RunLengthChunk(RunLengthChunk { type_tcc: StatusChunkTypeTcc::RunLengthChunk, packet_status_symbol: sym(s), run_length: n as u16 }));
         i += n;
     }
-    let mut di = 0;
-    for s in &fb.symbols {
-        match s {
-            Sym::N => {}
-            Sym::S => {
-                out.push(fb.deltas[di] as u8);
-                di += 1;
-            }
-            Sym::L => {
-                out.extend_from_slice(&(fb.deltas[di] as i16).to_be_bytes());
-                di += 1;
-            }
-        }
-    }
-    let pad = (4 - out.len() % 4) % 4;
-    if pad > 0 {
-        out.extend(std::iter::repeat_n(0u8, pad - 1));
-        out.push(pad as u8);
-        out[0] |= 0x20;
-    }
-    finish(&mut out, 0);
-    out
+    let recv_deltas = fb.symbols.iter().filter(|s| **s != Sym::N).zip(&fb.deltas).map(|(s, d)| RecvDelta { type_tcc_packet: sym(*s), delta: *d as i64 * 250 }).collect();
+    bytes(&TransportLayerCc {
+        sender_ssrc: SENDER_SSRC,
+        media_ssrc,
+        base_sequence_number: fb.base_seq,
+        packet_status_count: fb.status_count,
+        reference_time: fb.reference_time & 0x00ff_ffff,
+        fb_pkt_count: fb.fb_count,
+        packet_chunks,
+        recv_deltas,
+    })
 }
 
-pub fn parse_twcc(fci: &[u8]) -> Option<Vec<(u16, i64)>> {
-    if fci.len() < 8 {
-        return None;
-    }
-    let base = u16::from_be_bytes([fci[0], fci[1]]);
-    let count = u16::from_be_bytes([fci[2], fci[3]]) as usize;
-    let rt = ((fci[4] as i64) << 16) | ((fci[5] as i64) << 8) | fci[6] as i64;
-    let mut syms: Vec<u8> = Vec::with_capacity(count);
-    let mut i = 8;
-    while syms.len() < count {
-        let c = u16::from_be_bytes([*fci.get(i)?, *fci.get(i + 1)?]);
-        i += 2;
-        if c & 0x8000 == 0 {
-            let s = ((c >> 13) & 0x3) as u8;
-            let n = (c & 0x1fff) as usize;
-            for _ in 0..n.min(count - syms.len()) {
-                syms.push(s);
-            }
-        } else if c & 0x4000 == 0 {
-            for b in (0..14).rev() {
-                if syms.len() < count {
-                    syms.push(((c >> b) & 1) as u8);
-                }
-            }
-        } else {
-            for b in (0..7).rev() {
-                if syms.len() < count {
-                    syms.push(((c >> (b * 2)) & 3) as u8);
-                }
-            }
+pub fn parse_twcc(raw: &[u8]) -> Option<Vec<(u16, i64)>> {
+    let p = TransportLayerCc::unmarshal(&mut &raw[..]).ok()?;
+    let mut syms: Vec<SymbolTypeTcc> = Vec::with_capacity(p.packet_status_count as usize);
+    for c in &p.packet_chunks {
+        match c {
+            PacketStatusChunk::RunLengthChunk(r) => syms.extend(std::iter::repeat_n(r.packet_status_symbol, r.run_length as usize)),
+            PacketStatusChunk::StatusVectorChunk(v) => syms.extend(v.symbol_list.iter().copied()),
         }
     }
-    let mut at = rt * 64_000;
+    syms.truncate(p.packet_status_count as usize);
+    let mut at = p.reference_time as i64 * 64_000;
+    let mut deltas = p.recv_deltas.iter();
     let mut out = Vec::new();
     for (k, s) in syms.iter().enumerate() {
-        let seq = base.wrapping_add(k as u16);
-        match s {
-            1 => {
-                at += *fci.get(i)? as i64 * 250;
-                i += 1;
-                out.push((seq, at));
-            }
-            2 => {
-                at += i16::from_be_bytes([*fci.get(i)?, *fci.get(i + 1)?]) as i64 * 250;
-                i += 2;
-                out.push((seq, at));
-            }
-            _ => {}
+        if matches!(s, SymbolTypeTcc::PacketReceivedSmallDelta | SymbolTypeTcc::PacketReceivedLargeDelta) {
+            at += deltas.next()?.delta;
+            out.push((p.base_sequence_number.wrapping_add(k as u16), at));
         }
     }
     Some(out)
 }
 
 pub fn encode_rr(ssrc: u32, r: &Report, lsr: u32, dlsr: u32) -> Vec<u8> {
-    let mut out = Vec::with_capacity(32);
-    head(&mut out, 1, 201);
-    out.extend_from_slice(&SENDER_SSRC.to_be_bytes());
-    out.extend_from_slice(&ssrc.to_be_bytes());
-    let lost = (r.lost as u32) & 0x00ff_ffff;
-    out.push(r.fraction);
-    out.extend_from_slice(&[(lost >> 16) as u8, (lost >> 8) as u8, lost as u8]);
-    out.extend_from_slice(&r.extended_max.to_be_bytes());
-    out.extend_from_slice(&r.jitter.to_be_bytes());
-    out.extend_from_slice(&lsr.to_be_bytes());
-    out.extend_from_slice(&dlsr.to_be_bytes());
-    finish(&mut out, 0);
-    out
+    let block = ReceptionReport { ssrc, fraction_lost: r.fraction, total_lost: (r.lost as u32) & 0x00ff_ffff, last_sequence_number: r.extended_max, jitter: r.jitter, last_sender_report: lsr, delay: dlsr };
+    bytes(&ReceiverReport { ssrc: SENDER_SSRC, reports: vec![block], profile_extensions: Bytes::new() })
 }
 
 pub fn encode_nack(media: u32, pairs: &[(u16, u16)]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(12 + pairs.len() * 4);
-    head(&mut out, 1, 205);
-    out.extend_from_slice(&SENDER_SSRC.to_be_bytes());
-    out.extend_from_slice(&media.to_be_bytes());
-    for (p, b) in pairs {
-        out.extend_from_slice(&p.to_be_bytes());
-        out.extend_from_slice(&b.to_be_bytes());
-    }
-    finish(&mut out, 0);
-    out
+    let nacks = pairs.iter().map(|&(packet_id, lost_packets)| NackPair { packet_id, lost_packets }).collect();
+    bytes(&TransportLayerNack { sender_ssrc: SENDER_SSRC, media_ssrc: media, nacks })
 }
 
 pub fn encode_pli(media: u32) -> Vec<u8> {
-    let mut out = Vec::with_capacity(12);
-    head(&mut out, 1, 206);
-    out.extend_from_slice(&SENDER_SSRC.to_be_bytes());
-    out.extend_from_slice(&media.to_be_bytes());
-    finish(&mut out, 0);
-    out
+    bytes(&PictureLossIndication { sender_ssrc: SENDER_SSRC, media_ssrc: media })
 }
 
 pub fn encode_remb(bps: u64, ssrcs: &[u32]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(24 + ssrcs.len() * 4);
-    head(&mut out, 15, 206);
-    out.extend_from_slice(&SENDER_SSRC.to_be_bytes());
-    out.extend_from_slice(&0u32.to_be_bytes());
-    out.extend_from_slice(b"REMB");
-    let mut exp = 0u32;
-    let mut m = bps;
-    while m > 0x3ffff {
-        m >>= 1;
-        exp += 1;
-    }
-    out.push(ssrcs.len() as u8);
-    let v = (exp << 18) | m as u32;
-    out.extend_from_slice(&[(v >> 16) as u8, (v >> 8) as u8, v as u8]);
-    for s in ssrcs {
-        out.extend_from_slice(&s.to_be_bytes());
-    }
-    finish(&mut out, 0);
-    out
+    bytes(&ReceiverEstimatedMaximumBitrate { sender_ssrc: SENDER_SSRC, bitrate: bps as f32, ssrcs: ssrcs.to_vec() })
 }
 
 pub fn encode_sr(ssrc: u32, ntp: u64, rtp_ts: u32, packets: u32, octets: u32) -> Vec<u8> {
-    let mut out = Vec::with_capacity(28);
-    head(&mut out, 0, 200);
-    out.extend_from_slice(&ssrc.to_be_bytes());
-    out.extend_from_slice(&ntp.to_be_bytes());
-    out.extend_from_slice(&rtp_ts.to_be_bytes());
-    out.extend_from_slice(&packets.to_be_bytes());
-    out.extend_from_slice(&octets.to_be_bytes());
-    finish(&mut out, 0);
-    out
+    bytes(&SenderReport { ssrc, ntp_time: ntp, rtp_time: rtp_ts, packet_count: packets, octet_count: octets, reports: Vec::new(), profile_extensions: Bytes::new() })
+}
+
+pub fn sr(raw: &[u8]) -> Option<(u32, u64, u32)> {
+    let p = SenderReport::unmarshal(&mut &raw[..]).ok()?;
+    Some((p.ssrc, p.ntp_time, p.rtp_time))
+}
+
+pub fn rr_blocks(raw: &[u8]) -> Vec<(u32, u8)> {
+    ReceiverReport::unmarshal(&mut &raw[..]).map(|p| p.reports.iter().map(|r| (r.ssrc, r.fraction_lost)).collect()).unwrap_or_default()
+}
+
+pub fn nack_lost(raw: &[u8]) -> Option<(u32, Vec<u16>)> {
+    let p = TransportLayerNack::unmarshal(&mut &raw[..]).ok()?;
+    Some((p.media_ssrc, p.nacks.iter().flat_map(|n| n.packet_list()).collect()))
+}
+
+pub fn key_media(raw: &[u8], fir: bool) -> Option<u32> {
+    if fir {
+        FullIntraRequest::unmarshal(&mut &raw[..]).ok()?.fir.first().map(|e| e.ssrc)
+    } else {
+        Some(PictureLossIndication::unmarshal(&mut &raw[..]).ok()?.media_ssrc)
+    }
+}
+
+pub fn remb_bps(raw: &[u8]) -> Option<u64> {
+    Some(ReceiverEstimatedMaximumBitrate::unmarshal(&mut &raw[..]).ok()?.bitrate as u64)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Pkt<'a> {
     pub count: u8,
     pub pt: u8,
-    pub body: &'a [u8],
+    pub raw: &'a [u8],
 }
 
 pub fn split(b: &[u8]) -> Vec<Pkt<'_>> {
@@ -496,24 +429,10 @@ pub fn split(b: &[u8]) -> Vec<Pkt<'_>> {
         if end > b.len() {
             break;
         }
-        let mut body = &b[i + 4..end];
-        if b[i] & 0x20 != 0
-            && let Some(&n) = body.last() {
-                body = &body[..body.len().saturating_sub(n as usize)];
-            }
-        out.push(Pkt { count: b[i] & 0x1f, pt: b[i + 1], body });
+        out.push(Pkt { count: b[i] & 0x1f, pt: b[i + 1], raw: &b[i..end] });
         i = end;
     }
     out
-}
-
-pub fn remb_bps(fci: &[u8]) -> Option<u64> {
-    if fci.len() < 8 || &fci[0..4] != b"REMB" {
-        return None;
-    }
-    let exp = (fci[5] >> 2) as u32;
-    let m = (((fci[5] & 0x03) as u64) << 16) | ((fci[6] as u64) << 8) | fci[7] as u64;
-    Some(m << exp)
 }
 
 #[cfg(test)]
@@ -527,8 +446,7 @@ mod tests {
         assert_eq!(b.len() % 4, 0);
         let p = split(&b);
         assert_eq!(p.len(), 1);
-        let fci = &p[0].body[8..];
-        let got = parse_twcc(fci).unwrap_or_default();
+        let got = parse_twcc(p[0].raw).unwrap_or_default();
         assert_eq!(got.iter().map(|x| x.0).collect::<Vec<_>>(), vec![10, 12, 13]);
         assert_eq!(got[0].1, 5 * 64_000 + 1000);
     }
@@ -537,7 +455,17 @@ mod tests {
     fn remb_mantissa_round_trip() {
         let b = encode_remb(800_000, &[7]);
         let p = split(&b);
-        assert_eq!(remb_bps(&p[0].body[8..]), Some(800_000));
+        assert_eq!(remb_bps(p[0].raw), Some(800_000));
+    }
+
+    #[test]
+    fn nack_and_key_round_trip() {
+        let b = encode_nack(9, &nack_pairs(&[11, 12, 14]));
+        assert_eq!(nack_lost(split(&b)[0].raw), Some((9, vec![11, 12, 14])));
+        assert_eq!(key_media(split(&encode_pli(5))[0].raw, false), Some(5));
+        let rr = encode_rr(4, &Report { fraction: 7, lost: 1, extended_max: 9, jitter: 2 }, 0, 0);
+        assert_eq!(rr_blocks(split(&rr)[0].raw), vec![(4, 7)]);
+        assert_eq!(sr(split(&encode_sr(3, 1 << 40, 8, 1, 2))[0].raw), Some((3, 1 << 40, 8)));
     }
 
     #[test]

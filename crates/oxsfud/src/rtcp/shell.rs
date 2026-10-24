@@ -26,13 +26,13 @@ pub fn ingress(t: &Arc<Transport>, b: &[u8]) {
     let Some(peer) = t.peer.upgrade() else { return };
     for p in rc::split(b) {
         match (p.pt, p.count) {
-            (200, _) => on_sr(t, p.body),
-            (201, _) => on_rr(t, &peer, p.body, p.count),
-            (205, 1) => on_nack(&peer, p.body),
-            (205, 15) => on_twcc(t, p.body),
-            (206, 1) | (206, 4) => on_pli(&peer, p.body, p.pt == 206 && p.count == 4),
+            (200, _) => on_sr(t, p.raw),
+            (201, _) => on_rr(t, &peer, p.raw),
+            (205, 1) => on_nack(&peer, p.raw),
+            (205, 15) => on_twcc(t, p.raw),
+            (206, 1) | (206, 4) => on_pli(&peer, p.raw, p.count == 4),
             (206, 15) => {
-                if let Some(bps) = p.body.get(8..).and_then(rc::remb_bps) {
+                if let Some(bps) = rc::remb_bps(p.raw) {
                     lock(&t.sim).remb = Some((bps as f64, now_ms()));
                 }
             }
@@ -41,14 +41,10 @@ pub fn ingress(t: &Arc<Transport>, b: &[u8]) {
     }
 }
 
-fn u32_at(b: &[u8], i: usize) -> Option<u32> {
-    Some(u32::from_be_bytes([*b.get(i)?, *b.get(i + 1)?, *b.get(i + 2)?, *b.get(i + 3)?]))
-}
-
-fn on_sr(t: &Arc<Transport>, body: &[u8]) {
-    let (Some(ssrc), Some(hi), Some(lo), Some(ts)) = (u32_at(body, 0), u32_at(body, 4), u32_at(body, 8), u32_at(body, 12)) else { return };
+fn on_sr(t: &Arc<Transport>, raw: &[u8]) {
+    let Some((ssrc, ntp, rtp_ts)) = rc::sr(raw) else { return };
     let Some(phys) = t.ingress.get(&ssrc).map(|p| p.clone()) else { return };
-    let sr = Sr { ssrc, ntp: ((hi as u64) << 32) | lo as u64, rtp_ts: ts };
+    let sr = Sr { ssrc, ntp, rtp_ts };
     lock(&phys.sr).replace((sr, now_ms()));
     let Some(stream) = phys.stream.upgrade() else { return };
     for w in stream.subs.load().iter() {
@@ -82,12 +78,9 @@ fn send_sr(d: &Arc<Down>, phys: &Arc<PubTrack>, sr: Sr) {
     p.sub_transport().send_rtcp(&pkt);
 }
 
-fn on_rr(t: &Arc<Transport>, peer: &Arc<Peer>, body: &[u8], count: u8) {
+fn on_rr(t: &Arc<Transport>, peer: &Arc<Peer>, raw: &[u8]) {
     let mut worst: Option<f64> = None;
-    for k in 0..count as usize {
-        let i = 4 + k * 24;
-        let Some(ssrc) = u32_at(body, i) else { break };
-        let Some(&frac) = body.get(i + 4) else { break };
+    for (ssrc, frac) in rc::rr_blocks(raw) {
         if lock(&peer.table).row_by_ssrc(ssrc).is_some() {
             let f = frac as f64 / 256.0;
             worst = Some(worst.map(|w: f64| w.max(f)).unwrap_or(f));
@@ -107,23 +100,10 @@ fn down_of(peer: &Arc<Peer>, ssrc: u32) -> Option<(Arc<Down>, bool)> {
     Some((peer.down(mid)?, rtx))
 }
 
-fn on_nack(peer: &Arc<Peer>, body: &[u8]) {
-    let Some(media) = u32_at(body, 4) else { return };
+fn on_nack(peer: &Arc<Peer>, raw: &[u8]) {
+    let Some((media, lost)) = rc::nack_lost(raw) else { return };
     let Some((d, _)) = down_of(peer, media) else { return };
     let Some(ctx) = crate::cfg::get() else { return };
-    let mut lost: Vec<u16> = Vec::new();
-    let mut i = 8;
-    while i + 4 <= body.len() {
-        let pid = u16::from_be_bytes([body[i], body[i + 1]]);
-        let blp = u16::from_be_bytes([body[i + 2], body[i + 3]]);
-        lost.push(pid);
-        for b in 0..16 {
-            if blp & (1 << b) != 0 {
-                lost.push(pid.wrapping_add(b + 1));
-            }
-        }
-        i += 4;
-    }
     lock(&peer.sub_transport().sim).nack(lost.len() as u32, now_ms());
     for out_seq in lost {
         let (src, phys, ts_off) = {
@@ -184,15 +164,13 @@ fn rtx(d: &Arc<Down>, peer: &Arc<Peer>, pkt: &[u8], out_seq: u16, ts_off: u32) {
     }
 }
 
-fn on_twcc(t: &Arc<Transport>, body: &[u8]) {
-    let Some(fci) = body.get(8..) else { return };
-    let Some(acks) = rc::parse_twcc(fci) else { return };
+fn on_twcc(t: &Arc<Transport>, raw: &[u8]) {
+    let Some(acks) = rc::parse_twcc(raw) else { return };
     lock(&t.sim).feedback(&acks, now_ms());
 }
 
-fn on_pli(peer: &Arc<Peer>, body: &[u8], fir: bool) {
-    let media = if fir { u32_at(body, 8) } else { u32_at(body, 4) };
-    let Some(media) = media else { return };
+fn on_pli(peer: &Arc<Peer>, raw: &[u8], fir: bool) {
+    let Some(media) = rc::key_media(raw, fir) else { return };
     let Some((d, _)) = down_of(peer, media) else { return };
     if d.class == Class::Slot {
         crate::fwd::shell::key_for(&d);

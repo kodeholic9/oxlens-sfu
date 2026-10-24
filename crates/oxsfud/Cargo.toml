@@ -34,6 +34,7 @@ dtls = { workspace = true }
 webrtc-srtp = { workspace = true }
 webrtc-util = { workspace = true, features = ["conn"] }
 sctp-proto = { workspace = true }
+rtcp = { workspace = true }
 
 [lints]
 workspace = true
