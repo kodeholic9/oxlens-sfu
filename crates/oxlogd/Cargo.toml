@@ -6,10 +6,9 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
-common = { workspace = true }
-chrono = { workspace = true }
-tracing = { workspace = true }
-nix = { version = "0.26", features = ["signal", "socket"] }
+common.workspace = true
+chrono.workspace = true
+nix = { workspace = true, features = ["socket"] }
 
 [lints]
 workspace = true
