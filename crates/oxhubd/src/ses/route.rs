@@ -38,8 +38,7 @@ fn reply_bytes(ctx: &Ctx, f: &Frame, r: Reply) -> Vec<u8> {
     }
 }
 
-fn call_of(ctx: &Ctx, s: &Session, op: Op, body: serde_json::Value) -> Call {
-    let _ = ctx;
+fn call_of(s: &Session, op: Op, body: serde_json::Value) -> Call {
     Call::Op {
         op: op.as_u16(),
         body,
@@ -223,7 +222,7 @@ async fn scoped(ctx: &Arc<Ctx>, s: &Arc<Session>, f: &Frame, op: Op, reconcile: 
         }
         return fail_code(ctx, f, Code::RoomNotFound);
     };
-    let r = ctx.bus.call(&node, &call_of(ctx, s, op, v)).await;
+    let r = ctx.bus.call(&node, &call_of(s, op, v)).await;
     if reconcile
         && let Reply::Ok(rv) = &r
         && let Some(rooms) = super::affiliation_rooms(rv)
@@ -239,6 +238,16 @@ async fn scoped(ctx: &Arc<Ctx>, s: &Arc<Session>, f: &Frame, op: Op, reconcile: 
     reply_bytes(ctx, f, r)
 }
 
+fn aff_target(req: &oxsig::AffiliationReq) -> Result<String, Failure> {
+    let Some(room) = req.pub_select.clone().or(req.pub_deselect.clone()) else {
+        return Err(Code::MissingField.failure_with("pub_select · pub_deselect 가 둘 다 없다", None));
+    };
+    if !oxsig::room_id_ok(&room) {
+        return Err(Code::InvalidPayload.failure());
+    }
+    Ok(room)
+}
+
 async fn affiliation(ctx: &Arc<Ctx>, s: &Arc<Session>, f: &Frame) -> Vec<u8> {
     let v = match parse::json_value(&f.body) {
         Ok(v) => v,
@@ -248,14 +257,12 @@ async fn affiliation(ctx: &Arc<Ctx>, s: &Arc<Session>, f: &Frame) -> Vec<u8> {
         Ok(r) => r,
         Err(e) => return body_fail(ctx, f, e),
     };
-    let Some(room) = req.pub_select.clone().or(req.pub_deselect.clone()) else {
-        return fail(ctx, f, Code::MissingField.failure_with("pub_select · pub_deselect 가 둘 다 없다", None));
+    let room = match aff_target(&req) {
+        Ok(r) => r,
+        Err(failure) => return fail(ctx, f, failure),
     };
-    if !oxsig::room_id_ok(&room) {
-        return fail_code(ctx, f, Code::InvalidPayload);
-    }
     let Some(node) = node_for(ctx, s, &room) else { return fail_code(ctx, f, Code::RoomNotFound) };
-    let r = ctx.bus.call(&node, &call_of(ctx, s, Op::Affiliation, v)).await;
+    let r = ctx.bus.call(&node, &call_of(s, Op::Affiliation, v)).await;
     if let Reply::Ok(rv) = &r
         && let Some(rooms) = super::affiliation_rooms(rv)
     {
@@ -278,7 +285,7 @@ async fn ice_restart(ctx: &Arc<Ctx>, s: &Arc<Session>, f: &Frame) -> Vec<u8> {
         tracing::info!(kind = "ev", spec = "LINK.S.restart_3010", session = %s.fp, sfu_id = %req.sfu_id, "ICE_RESTART for a start identity that is gone");
         return fail_code(ctx, f, Code::PeerNotFound);
     };
-    let r = ctx.bus.call(&node, &call_of(ctx, s, Op::IceRestart, v)).await;
+    let r = ctx.bus.call(&node, &call_of(s, Op::IceRestart, v)).await;
     reply_bytes(ctx, f, r)
 }
 
@@ -309,7 +316,7 @@ async fn join(ctx: &Arc<Ctx>, s: &Arc<Session>, f: &Frame, out: &mpsc::Unbounded
     let Some(node) = ctx.bus.room_node(&req.room_id) else { return Some(fail_code(ctx, f, Code::RoomNotFound)) };
     ctx.bus.interest_room(&req.room_id).await;
     s.lock().pending.insert(req.room_id.clone(), Vec::new());
-    let r = ctx.bus.call(&node, &call_of(ctx, s, Op::RoomJoin, v)).await;
+    let r = ctx.bus.call(&node, &call_of(s, Op::RoomJoin, v)).await;
     match r {
         Reply::Ok(rv) => {
             if let Some(rooms) = super::affiliation_rooms(&rv) {
@@ -378,5 +385,34 @@ pub async fn on_room_event(ctx: &Arc<Ctx>, user: &str, n: &common::bus::envelope
         if let Some(node) = node {
             super::reconcile(ctx, &s, &node, &rooms).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session(sid: &str) -> Session {
+        let id = Identity { user: "u".into(), participant_type: 0, hidden: false, metadata: None, permission: None };
+        Session::new(sid.into(), id, PcMode::V2pc, common::bus::envelope::Home { node: "n".into(), inst: "i".into() }, super::super::State::default())
+    }
+
+    #[test]
+    fn affiliation_without_target_is_missing_field() {
+        let none = oxsig::AffiliationReq { pub_select: None, pub_deselect: None, change_id: None };
+        assert_eq!(aff_target(&none).map_err(|f| f.code), Err(Code::MissingField.number()), "연:RULE-AFF-RES-FORM 대상 없는 AFFILIATION 은 미디어 서버에 묻지 않고 거절");
+        let bad = oxsig::AffiliationReq { pub_select: Some("a/b".into()), pub_deselect: None, change_id: None };
+        assert_eq!(aff_target(&bad).map_err(|f| f.code), Err(Code::InvalidPayload.number()));
+        let off = oxsig::AffiliationReq { pub_select: None, pub_deselect: Some("r1".into()), change_id: None };
+        assert_eq!(aff_target(&off).ok().as_deref(), Some("r1"));
+    }
+
+    #[test]
+    fn media_server_sees_only_the_fingerprint() {
+        let s = session("abc");
+        assert_eq!(s.fp, common::identity::fingerprint("abc"));
+        let Call::Op { session, .. } = call_of(&s, Op::RoomJoin, serde_json::Value::Null) else { panic!("op") };
+        assert_eq!(session, "ba7816bf", "연:DEV-TRN-SESSION-SECRET 미디어 서버로는 지문만 간다");
+        assert_ne!(session, s.sid);
     }
 }

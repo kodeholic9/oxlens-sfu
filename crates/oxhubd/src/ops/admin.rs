@@ -179,9 +179,13 @@ async fn users(State(app): State<Arc<App>>, ConnectInfo(peer): ConnectInfo<Socke
         .sessions
         .all()
         .iter()
-        .map(|s| serde_json::json!({"session": s.fp, "user_id": s.id.user, "participant_type": s.id.participant_type, "hidden": s.id.hidden, "links": links.get(&s.id.user).cloned().unwrap_or_default()}))
+        .map(|s| user_row(s, links.get(&s.id.user).cloned().unwrap_or_default()))
         .collect();
     ok(serde_json::json!({"total": rows.len(), "users": rows}))
+}
+
+fn user_row(s: &crate::ses::Session, links: Vec<serde_json::Value>) -> serde_json::Value {
+    serde_json::json!({"session": s.fp, "user_id": s.id.user, "participant_type": s.id.participant_type, "hidden": s.id.hidden, "links": links})
 }
 
 async fn user_media(State(app): State<Arc<App>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, h: HeaderMap, Path(user): Path<String>) -> Response {
@@ -379,4 +383,19 @@ async fn log_level(State(app): State<Arc<App>>, ConnectInfo(peer): ConnectInfo<S
     }
     tracing::info!(kind = "ev", spec = "OP-PATH-ADMIN-LOG-LEVEL", from = from.as_str(), to = to.as_str(), "log level overridden");
     ok(serde_json::json!({"from": from.as_str(), "to": to.as_str(), "until": until, "units": units}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_rows_carry_the_fingerprint_not_the_session_id() {
+        let sid = "0123456789abcdef0123456789abcdef";
+        let id = crate::ses::Identity { user: "u".into(), participant_type: 0, hidden: false, metadata: None, permission: None };
+        let s = crate::ses::Session::new(sid.into(), id, oxsig::PcMode::V2pc, common::bus::envelope::Home { node: "n".into(), inst: "i".into() }, crate::ses::State::default());
+        let row = user_row(&s, Vec::new());
+        assert_eq!(row["session"], common::identity::fingerprint(sid), "연:DEV-TRN-SESSION-SECRET /admin/users 의 session 은 지문");
+        assert!(!row.to_string().contains(sid), "원값이 어디에도 실리지 않는다");
+    }
 }

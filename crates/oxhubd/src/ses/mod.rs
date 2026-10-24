@@ -80,6 +80,10 @@ pub struct Session {
 }
 
 impl Session {
+    pub fn new(sid: String, id: Identity, pc_mode: PcMode, home: Home, st: State) -> Session {
+        Session { fp: common::identity::fingerprint(&sid), sid, id, pc_mode, home, st: Mutex::new(st) }
+    }
+
     pub fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.st.lock().unwrap_or_else(|p| p.into_inner())
     }
@@ -152,14 +156,7 @@ pub fn new_sid() -> String {
 }
 
 pub async fn create(ctx: &Ctx, sid: String, id: Identity, pc_mode: PcMode, servers: BTreeMap<String, BTreeSet<String>>, resumed: bool) -> Arc<Session> {
-    let s = Arc::new(Session {
-        fp: common::identity::fingerprint(&sid),
-        sid,
-        id,
-        pc_mode,
-        home: ctx.home(),
-        st: Mutex::new(State { resumed, servers: servers.clone(), ..State::default() }),
-    });
+    let s = Arc::new(Session::new(sid, id, pc_mode, ctx.home(), State { resumed, servers: servers.clone(), ..State::default() }));
     ctx.sessions.insert(s.clone());
     ctx.bus.declare_sess(&s.id.user, &s.sid).await;
     ctx.bus.interest_user(&s.id.user).await;
