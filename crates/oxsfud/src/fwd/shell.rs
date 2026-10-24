@@ -1,467 +1,318 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @8a0d8cf · 정:RULE-FWD-STEPS · 정:RULE-FWD-BRANCH-AUTHORITY · 정:IMPL-FWD-ROOM · 정:IMPL-FWD-SOURCE-SWITCH · 정:IMPL-FLR-MEDIA-BIND · 정:IMPL-FLR-RTP-OBSERVE · 정:IMPL-SUB-READY-GATE · 정:IMPL-SIM-SWITCH · 정:IMPL-PUB-ACCEPT · 정:RULE-CONC-SIX · 정:RULE-CONC-PERF-AXES · model: claude-opus-5-5
-//! 전달 핫패스 — 업링크 스트림 찾기(시뮬캐스트는 rid 로 첫 RTP 에 붙인다) · 방은 매 패킷 `pub_room` · 반이중은 prefan 게이트(화자 = 발행자) · 줄 검사(확인된 차례) · 재기록 · 확장 다시 짓기 · 예열 CN · PLI burst.
+// spec: v1.2 @36d1dfd · 정:IMPL-RTCP-TERMINATE · 정:RULE-RTCP-NACK-UP · 정:RULE-SIM-TICK · 정:IMPL-ROOM-STALL · 정:IMPL-SUB-READY-GATE · 정:IMPL-FLR-RTP-OBSERVE · 정:IMPL-FLR-MEDIA-BIND · 정:RULE-LINK-PAIR-LIVENESS · 정:CAND-RTCP-REMB-ESTIMATE · 정:RULE-GC-FOUR · 연:ROOM.S.sync_required · 연:ROOM.S.TStall · model: claude-opus-5-5
+//! 주기 고리 — 상향 NACK · 예열/무음 20ms · TWCC 피드백 100ms · RR · REMB · 레이어 판단 · 쌍별 생존 · 게이트 시한 1,000ms · 정체 감지 5,000ms · 방마다 발언권 타이머(가장 이른 만료 시각).
 
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
-use oxsig::trk::MediaKind;
+use rtcp::packet::Packet;
 
-use super::core::{self as fc, Egress, Rtp};
-use crate::link::table::Class;
-use crate::link::{lock, Down, Peer, Transport};
-use crate::r#pub::{PubStream, PubTrack};
-use crate::sub::ext::{self as ext, ExtTable, ExtValues, InIds};
+use super::{floor_out, link_suspect, pli, send_prime, RoomHot, SENDER_SSRC};
+use crate::link::{lock, Transport};
+use crate::ops::Sfu;
+use crate::sim::core::Verdict;
 
-pub const PRIME_FRAMES: u32 = 250;
-pub const PRIME_GAP_MS: u64 = 20;
-pub const OPUS_SILENCE: [u8; 3] = [0xf8, 0xff, 0xfe];
-pub const PLI_BURST_MS: [u64; 3] = [0, 500, 1500];
-const PRIME_BASE: u64 = 0xffff_0000_0000_0000;
-static PRIME_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+pub const STALL_MS: u64 = 5_000;
+pub const T_STALL_MS: u64 = 30_000;
 
-fn prime_key() -> u64 {
-    PRIME_BASE | PRIME_SEQ.fetch_add(1, Ordering::Relaxed)
-}
-const GATE_MS: u64 = 5000;
-const PROBE_PAD: usize = 224;
+type Boxed = Box<dyn Packet + Send + Sync>;
 
-fn now_ms() -> u64 {
-    common::clock::wall_ms()
-}
-
-fn in_ids(s: &PubStream) -> InIds {
-    InIds { mid: s.ext.mid, rid: s.ext.rid, rrid: s.ext.rrid, audio_level: s.ext.audio_level, twcc: s.ext.twcc }
-}
-
-fn src_key(p: &PubTrack) -> u64 {
-    p.ssrc as u64
-}
-
-fn learn(t: &Arc<Transport>, r: &Rtp<'_>) -> Option<(Arc<PubTrack>, bool)> {
-    let peer = t.peer.upgrade()?;
-    let pubs: Vec<Arc<PubStream>> = lock(&peer.pubs).iter().filter(|p| p.simulcast && !p.gone.load(Ordering::Acquire)).cloned().collect();
-    let first = pubs.first()?;
-    let px = ext::parse(r.profile, r.ext, &in_ids(first));
-    let mid = px.mid.as_ref().map(|m| String::from_utf8_lossy(m).to_string());
-    let s = pubs.iter().find(|p| Some(&p.mid) == mid.as_ref()).or(if pubs.len() == 1 { pubs.first() } else { None })?;
-    if let Some(rr) = px.rrid {
-        let rid = String::from_utf8_lossy(&rr).to_string();
-        let phys = s.track_of_rid(&rid)?;
-        phys.rtx_ssrc.store(r.ssrc as u64, Ordering::Release);
-        t.rtx_in.insert(r.ssrc, phys.clone());
-        return Some((phys, true));
-    }
-    let rid = String::from_utf8_lossy(&px.rid?).to_string();
-    if let Some(p) = s.track_of_rid(&rid) {
-        t.ingress.insert(r.ssrc, p.clone());
-        return Some((p, false));
-    }
-    let p = Arc::new(PubTrack::new(r.ssrc, Some(rid.clone()), s));
-    s.add_phys(p.clone());
-    t.ingress.insert(r.ssrc, p.clone());
-    tracing::info!(kind = "ev", spec = "SV-STATE-PUBLISH-STATE", user = %peer.user_id, track = %s.track_id, ssrc = r.ssrc, rid = %rid, "업링크 스트림 학습");
-    Some((p, false))
-}
-
-pub fn ingress(t: &Arc<Transport>, pkt: Bytes) {
-    let Some(r) = fc::parse(&pkt) else { return };
-    let found = match t.ingress.get(&r.ssrc) {
-        Some(p) => Some((p.clone(), false)),
-        None => match t.rtx_in.get(&r.ssrc) {
-            Some(p) => Some((p.clone(), true)),
-            None => learn(t, &r),
-        },
-    };
-    let Some((phys, rtx)) = found else {
-        if let Some(c) = crate::cfg::get() {
-            c.drops.unknown_ssrc.fetch_add(1, Ordering::Relaxed);
-        }
-        return;
-    };
-    let Some(stream) = phys.stream.upgrade() else { return };
-    if rtx {
-        if r.payload.len() < 2 {
-            return;
-        }
-        let osn = u16::from_be_bytes([r.payload[0], r.payload[1]]);
-        let mut orig = Vec::with_capacity(pkt.len());
-        fc::build(&Egress { byte1: pkt[1], pt: stream.pt, seq: osn, ts: r.ts, ssrc: phys.ssrc, csrc: r.csrc, ext: ext_block(&pkt, &r), payload: &r.payload[2..], padding: &[] }, &mut orig);
-        let orig = Bytes::from(orig);
-        let Some(o) = fc::parse(&orig) else { return };
-        lock(&phys.nack).on_packet(o.seq, now_ms());
-        lock(&phys.cache).put(o.seq, orig.clone());
-        dispatch(t, &phys, &stream, &o, true);
+fn send(t: &Transport, pkts: Vec<Boxed>) {
+    if pkts.is_empty() {
         return;
     }
-    let now = now_ms();
-    let fresh = lock(&phys.stats).update(r.seq, r.ts, now, phys.clock);
-    if !fresh
-        && let Some(c) = crate::cfg::get() {
-            c.drops.probation.fetch_add(1, Ordering::Relaxed);
-        }
-    lock(&phys.nack).on_packet(r.seq, now);
-    lock(&phys.cache).put(r.seq, pkt.clone());
-    phys.packets.fetch_add(1, Ordering::Relaxed);
-    phys.bytes.fetch_add(pkt.len() as u64, Ordering::Relaxed);
-    phys.last_rtp_ms.store(now, Ordering::Release);
-    let px = ext::parse(r.profile, r.ext, &in_ids(&stream));
-    if let Some(seq) = px.twcc {
-        t.twcc_id.store(stream.ext.twcc.unwrap_or(0), Ordering::Release);
-        lock(&t.twcc_in).record(seq, common::clock::wall_us());
+    if let Ok(b) = rtcp::packet::marshal(&pkts) {
+        t.send_rtcp(&b);
     }
-    if stream.kind == MediaKind::Audio
-        && let Some(l) = px.audio_level
-            && (l & 0x7f) < 50 {
-                stream.last_talk_ms.store(now, Ordering::Release);
+}
+
+pub fn spawn_loops(sfu: &Arc<Sfu>) {
+    tokio::spawn(fast(sfu.clone()));
+    tokio::spawn(twcc(sfu.clone()));
+    tokio::spawn(second(sfu.clone()));
+    tokio::spawn(stall(sfu.clone()));
+    tokio::spawn(floors(sfu.clone()));
+}
+
+async fn fast(sfu: Arc<Sfu>) {
+    let mut iv = tokio::time::interval(Duration::from_millis(20));
+    iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        iv.tick().await;
+        let now = Sfu::now();
+        for t in sfu.net.transports().into_iter().filter(|t| t.role.publishes() && t.dtls_up.load(Ordering::Relaxed)) {
+            let ing = t.ingress.load();
+            let mut out: Vec<Boxed> = Vec::new();
+            let mut seen = Vec::new();
+            for (ssrc, (_, phys, rtx)) in ing.by_ssrc.iter() {
+                if *rtx || seen.contains(ssrc) {
+                    continue;
+                }
+                seen.push(*ssrc);
+                let due = lock(&phys.nack).due(now);
+                if due.is_empty() {
+                    continue;
+                }
+                let nacks = crate::rtcp::core::nack_pairs(&due).into_iter().map(|(pid, blp)| rtcp::transport_feedbacks::transport_layer_nack::NackPair { packet_id: pid, lost_packets: blp }).collect();
+                out.push(Box::new(rtcp::transport_feedbacks::transport_layer_nack::TransportLayerNack { sender_ssrc: SENDER_SSRC, media_ssrc: phys.ssrc, nacks }));
+                sfu.counters.add("publisher_nack_sent", due.len() as u64);
             }
-    if r.pt != stream.pt && Some(r.pt) != stream.rtx_pt && !stream.pt_warned.swap(true, Ordering::AcqRel) {
-        tracing::warn!(kind = "diag", user = %stream.user_id, track = %stream.track_id, declared = stream.pt, actual = r.pt, "[PT:MISMATCH]");
-    }
-    if stream.first_rtp_at.compare_exchange(0, now, Ordering::AcqRel, Ordering::Acquire).is_ok() {
-        crate::ops::first_rtp(&stream);
-    }
-    dispatch(t, &phys, &stream, &r, false);
-}
-
-fn ext_block<'a>(pkt: &'a [u8], r: &Rtp<'a>) -> &'a [u8] {
-    if r.ext.is_empty() {
-        return &[];
-    }
-    let start = 12 + r.csrc.len();
-    &pkt[start..start + 4 + r.ext.len()]
-}
-
-fn dispatch(t: &Arc<Transport>, phys: &Arc<PubTrack>, stream: &Arc<PubStream>, r: &Rtp<'_>, rtx: bool) {
-    let Some(ctx) = crate::cfg::get() else { return };
-    let Some(peer) = t.peer.upgrade() else { return };
-    let Some(room_id) = peer.pub_room() else {
-        ctx.drops.no_pub_room.fetch_add(1, Ordering::Relaxed);
-        return;
-    };
-    let Some(room) = ctx.rooms.get(&room_id) else { return };
-    let codec = stream.codec.clone().unwrap_or_else(|| if stream.kind == MediaKind::Audio { room.media.audio().to_string() } else { room.media.video().to_string() });
-    let key = stream.kind == MediaKind::Video && fc::keyframe(&codec, r.payload);
-    if key {
-        phys.last_key_ms.store(now_ms(), Ordering::Release);
-    }
-    let al = if stream.kind == MediaKind::Audio { ext::parse(r.profile, r.ext, &in_ids(stream)).audio_level } else { None };
-    let src = Src { key: src_key(phys), phys: Some(phys), ssrc: phys.ssrc, user: &stream.user_id, track: &stream.track_id, clock: phys.clock, audio_level: al };
-    if stream.half.load(Ordering::Acquire) {
-        let holder = room.floor.holder();
-        if holder.as_deref() != Some(peer.user_id.as_str()) {
-            if !rtx {
-                room.floor.on_rtp(&peer.user_id, false);
+            drop(ing);
+            send(&t, out);
+        }
+        for h in sfu.hot.load().values() {
+            let a = h.slot(oxsig::types::Kind::Audio);
+            if a.priming.load(Ordering::Acquire) > 0 {
+                a.priming.fetch_sub(1, Ordering::AcqRel);
+                send_prime(&sfu, a, now);
+            } else if a.silence.load(Ordering::Acquire) > 0 {
+                a.silence.fetch_sub(1, Ordering::AcqRel);
+                send_prime(&sfu, a, now);
             }
-            ctx.drops.floor_gate.fetch_add(1, Ordering::Relaxed);
-            return;
         }
-        if !rtx {
-            room.floor.on_rtp(&peer.user_id, true);
-        }
-        let slot = room.slot(stream.kind);
-        if stream.kind == MediaKind::Audio {
-            slot.priming.store(0, Ordering::Release);
-        }
-        if slot.speaker().as_deref() != Some(peer.user_id.as_str()) {
-            ctx.drops.slot_unbound.fetch_add(1, Ordering::Relaxed);
-            return;
-        }
-        for w in slot.subs.load().iter() {
-            let Some(d) = w.upgrade() else { continue };
-            let Some(dp) = d.peer.upgrade() else { continue };
-            if dp.user_id == peer.user_id || !sendable(&d, &dp) {
+    }
+}
+
+async fn twcc(sfu: Arc<Sfu>) {
+    let mut iv = tokio::time::interval(Duration::from_millis(100));
+    iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        iv.tick().await;
+        for t in sfu.net.transports().into_iter().filter(|t| t.role.publishes() && t.dtls_up.load(Ordering::Relaxed)) {
+            let ing = t.ingress.load();
+            if ing.twcc_id == 0 {
                 continue;
             }
-            if !send_down(&d, &dp, &src, r, key) && stream.kind == MediaKind::Video {
-                crate::rtcp::shell::pli(phys, false);
-            }
-        }
-        return;
-    }
-    if stream.room_id() != room_id {
-        ctx.drops.room_moved.fetch_add(1, Ordering::Relaxed);
-        return;
-    }
-    let now = now_ms();
-    let layer = phys.layer.load(Ordering::Acquire);
-    for w in stream.subs.load().iter() {
-        let Some(d) = w.upgrade() else { continue };
-        let Some(dp) = d.peer.upgrade() else { continue };
-        if !sendable(&d, &dp) || d.loaded().map(|l| l.track_id != stream.track_id).unwrap_or(true) {
-            continue;
-        }
-        if stream.kind == MediaKind::Video {
-            if let Some(at) = dp.gate_closed.load().get(&room_id).copied() {
-                if now.saturating_sub(at) < GATE_MS {
-                    ctx.drops.gate.fetch_add(1, Ordering::Relaxed);
+            let media = ing.by_ssrc.keys().next().copied().unwrap_or(0);
+            drop(ing);
+            let fbs = {
+                let mut rx = lock(&t.twcc_rx);
+                if !rx.pending() {
                     continue;
                 }
-                crate::sub::gate_timeout(&dp, &room_id);
-            }
-            if stream.simulcast {
-                let ok = lock(&d.st).sel.accept(layer, key);
-                if !ok {
-                    continue;
-                }
-            }
-        }
-        if !send_down(&d, &dp, &src, r, key) && stream.kind == MediaKind::Video {
-            crate::rtcp::shell::pli(phys, false);
+                rx.build()
+            };
+            let pkts: Vec<Boxed> = fbs.into_iter().map(|fb| Box::new(twcc_packet(&fb, media)) as Boxed).collect();
+            send(&t, pkts);
         }
     }
 }
 
-pub struct Src<'a> {
-    pub key: u64,
-    pub phys: Option<&'a Arc<PubTrack>>,
-    pub ssrc: u32,
-    pub user: &'a str,
-    pub track: &'a str,
-    pub clock: u32,
-    pub audio_level: Option<u8>,
-}
-
-pub fn sendable(d: &Down, p: &Peer) -> bool {
-    !p.reaped.load(Ordering::Acquire) && d.loaded().is_some() && d.since.load(Ordering::Acquire) <= p.ack.load(Ordering::Acquire)
-}
-
-pub fn ext_table(p: &Peer) -> ExtTable {
-    ExtTable { mid: p.ext.mid, audio_level: p.ext.audio_level, abs_send_time: p.ext.abs_send_time, twcc: p.ext.twcc }
-}
-
-pub fn send_down(d: &Arc<Down>, p: &Peer, src: &Src<'_>, r: &Rtp<'_>, key: bool) -> bool {
-    let now = now_ms();
-    let (seq, ts) = {
-        let mut st = lock(&d.st);
-        let changed = st.src_ssrc != src.ssrc;
-        if changed && d.kind == MediaKind::Video && !key && src.key < PRIME_BASE {
-            return false;
+pub fn twcc_packet(fb: &crate::rtcp::core::Feedback, media: u32) -> rtcp::transport_feedbacks::transport_layer_cc::TransportLayerCc {
+    use crate::rtcp::core::Sym;
+    use rtcp::transport_feedbacks::transport_layer_cc::{PacketStatusChunk, RecvDelta, RunLengthChunk, StatusChunkTypeTcc, SymbolTypeTcc, TransportLayerCc};
+    let mut chunks = Vec::new();
+    let mut i = 0;
+    while i < fb.symbols.len() {
+        let s = fb.symbols[i];
+        let mut n = 1;
+        while i + n < fb.symbols.len() && fb.symbols[i + n] == s && n < 0x1fff {
+            n += 1;
         }
-        let m = st.rw.map(src.key, r.seq, r.ts, src.clock, now);
-        if changed {
-            st.nack_closed = false;
-            st.src_ssrc = src.ssrc;
-            st.src_user = Some(src.user.to_string());
-            st.src_track = Some(src.track.to_string());
-            st.src_phys = src.phys.map(Arc::downgrade);
-        }
-        (m.seq, m.ts)
-    };
-    let t = p.sub_transport();
-    let table = ext_table(p);
-    let use_twcc = table.twcc.is_some();
-    let twcc_seq = if use_twcc { t.twcc_out.fetch_add(1, Ordering::AcqRel) } else { 0 };
-    let mid = d.mid.to_string();
-    let vals = ExtValues { mid: Some(&mid), audio_level: if d.kind == MediaKind::Audio { src.audio_level } else { None }, t_us: common::clock::wall_us(), twcc_seq };
-    let tb = if d.kind == MediaKind::Video { ExtTable { audio_level: None, ..table } } else { table };
-    let mut eb = Vec::with_capacity(32);
-    ext::build(&tb, tb.form(), &vals, &mut eb);
-    let mut out = Vec::with_capacity(r.payload.len() + 64);
-    let pt = d.pt.load(Ordering::Acquire);
-    let byte1 = if src.key >= PRIME_BASE { 0 } else { r.marker as u8 * 0x80 };
-    fc::build(&Egress { byte1, pt, seq, ts, ssrc: d.ssrc, csrc: r.csrc, ext: &eb, payload: r.payload, padding: r.padding }, &mut out);
-    let ok = t.send_rtp(&out);
-    if ok {
-        d.sent.fetch_add(1, Ordering::Relaxed);
-        d.bytes.fetch_add(out.len() as u64, Ordering::Relaxed);
-        d.last_at.store(now, Ordering::Release);
-        if use_twcc {
-            lock(&t.sim).sent_packet(twcc_seq, common::clock::wall_us(), out.len());
-        }
-    }
-    true
-}
-
-pub fn probe_send(p: &Arc<Peer>, bytes: usize) -> Vec<(u16, usize)> {
-    let mut out = Vec::new();
-    let t = p.sub_transport();
-    let downs: Vec<Arc<Down>> = lock(&p.downs).values().filter(|d| d.kind == MediaKind::Video && d.class == Class::Full && d.rtx_ssrc.is_some() && d.loaded().is_some()).cloned().collect();
-    let Some(d) = downs.into_iter().find(|d| sendable(d, p) && lock(&d.st).rw.last.is_some()) else { return out };
-    let (Some(rs), rpt) = (d.rtx_ssrc, d.rtx_pt.load(Ordering::Acquire)) else { return out };
-    let table = ext_table(p);
-    let tb = ExtTable { audio_level: None, ..table };
-    let Some(_) = tb.twcc else { return out };
-    let mid = d.mid.to_string();
-    let mut sent = 0;
-    while sent < bytes {
-        let (seq, ts, osn) = {
-            let mut st = lock(&d.st);
-            st.rtx_seq = st.rtx_seq.wrapping_add(1);
-            let l = st.rw.last.unwrap_or(crate::fwd::core::Last { seq: 0, ts: 0, at_ms: 0 });
-            (st.rtx_seq, l.ts, l.seq)
+        let sym = match s {
+            Sym::NotReceived => SymbolTypeTcc::PacketNotReceived,
+            Sym::Small => SymbolTypeTcc::PacketReceivedSmallDelta,
+            Sym::Large => SymbolTypeTcc::PacketReceivedLargeDelta,
         };
-        let twcc_seq = t.twcc_out.fetch_add(1, Ordering::AcqRel);
-        let mut eb = Vec::with_capacity(24);
-        ext::build(&tb, tb.form(), &ExtValues { mid: Some(&mid), audio_level: None, t_us: common::clock::wall_us(), twcc_seq }, &mut eb);
-        let mut pad = vec![0u8; PROBE_PAD - 1];
-        pad.push(PROBE_PAD as u8);
-        let mut pkt = Vec::with_capacity(PROBE_PAD + 40);
-        fc::build(&Egress { byte1: 0, pt: rpt, seq, ts, ssrc: rs, csrc: &[], ext: &eb, payload: &osn.to_be_bytes(), padding: &pad }, &mut pkt);
-        if !t.send_rtp(&pkt) {
-            break;
-        }
-        lock(&t.sim).sent_packet(twcc_seq, common::clock::wall_us(), pkt.len());
-        out.push((twcc_seq, pkt.len()));
-        sent += pkt.len();
+        chunks.push(PacketStatusChunk::RunLengthChunk(RunLengthChunk { type_tcc: StatusChunkTypeTcc::RunLengthChunk, packet_status_symbol: sym, run_length: n as u16 }));
+        i += n;
     }
-    out
+    let mut deltas = Vec::new();
+    let mut di = 0;
+    for s in &fb.symbols {
+        let sym = match s {
+            Sym::NotReceived => continue,
+            Sym::Small => SymbolTypeTcc::PacketReceivedSmallDelta,
+            Sym::Large => SymbolTypeTcc::PacketReceivedLargeDelta,
+        };
+        let d = fb.deltas.get(di).copied().unwrap_or(0) as i64;
+        di += 1;
+        deltas.push(RecvDelta { type_tcc_packet: sym, delta: d * 250 });
+    }
+    TransportLayerCc { sender_ssrc: SENDER_SSRC, media_ssrc: media, base_sequence_number: fb.base_seq, packet_status_count: fb.status_count, reference_time: fb.reference_time, fb_pkt_count: fb.fb_count, packet_chunks: chunks, recv_deltas: deltas }
 }
 
-pub fn on_connected(t: &Arc<Transport>) {
-    let Some(p) = t.peer.upgrade() else { return };
-    if t.role == crate::link::Role::Publish {
-        return;
-    }
-    let downs: Vec<Arc<Down>> = lock(&p.downs).values().cloned().collect();
-    for d in downs.iter().filter(|d| d.kind == MediaKind::Video) {
-        key_for(d);
-    }
-}
-
-pub fn key_for(d: &Arc<Down>) {
-    let Some(ctx) = crate::cfg::get() else { return };
-    let Some(l) = d.loaded() else { return };
-    if d.class == Class::Slot {
-        let Some(room) = ctx.rooms.get(&l.room_id) else { return };
-        if let Some(u) = room.video.speaker() {
-            pli_user(&u, true);
-        }
-        return;
-    }
-    for p in ctx.links.all() {
-        if let Some(s) = p.pub_by_id(&l.track_id) {
-            for ph in s.phys.load().iter() {
-                crate::rtcp::shell::pli(ph, true);
-            }
-        }
-    }
-}
-
-pub fn pli_user(user: &str, infra: bool) {
-    let Some(ctx) = crate::cfg::get() else { return };
-    let Some(p) = ctx.links.peer(user) else { return };
-    let pubs: Vec<Arc<PubStream>> = lock(&p.pubs).iter().filter(|s| s.kind == MediaKind::Video && s.half.load(Ordering::Acquire)).cloned().collect();
-    for s in pubs {
-        for ph in s.phys.load().iter() {
-            crate::rtcp::shell::pli(ph, infra);
-        }
-    }
-}
-
-fn video_codec_ok(user: &str, room_video: &str) -> bool {
-    let Some(ctx) = crate::cfg::get() else { return false };
-    let Some(p) = ctx.links.peer(user) else { return false };
-    let g = lock(&p.pubs);
-    let v: Vec<&Arc<PubStream>> = g.iter().filter(|s| s.kind == MediaKind::Video && s.half.load(Ordering::Acquire)).collect();
-    v.is_empty() || v.iter().any(|s| s.codec.as_deref().map(|c| c.eq_ignore_ascii_case(room_video)).unwrap_or(false))
-}
-
-fn close_nack(slot: &crate::room::Slot) {
-    for w in slot.subs.load().iter() {
-        if let Some(d) = w.upgrade() {
-            lock(&d.st).nack_closed = true;
-        }
-    }
-}
-
-pub fn floor_bind(room_id: &str, user: &str, prime: bool) {
-    let Some(ctx) = crate::cfg::get() else { return };
-    let Some(room) = ctx.rooms.get(room_id) else { return };
-    close_nack(&room.video);
-    let now = now_ms();
-    room.audio.speaker.store(Some(Arc::new(user.to_string())));
-    room.audio.bound_at.store(now, Ordering::Release);
-    if video_codec_ok(user, room.media.video()) {
-        room.video.speaker.store(Some(Arc::new(user.to_string())));
-        room.video.bound_at.store(now, Ordering::Release);
-    } else {
-        room.video.speaker.store(None);
-        tracing::warn!(kind = "diag", room = %room_id, user = %user, "video 슬롯 미결합 — 코덱 불일치");
-    }
-    tracing::info!(kind = "ev", spec = "SV-STATE-FLOOR-BIND", room = %room_id, user = %user, epoch = %ctx.boot.epoch, prime, "슬롯 결합");
-    if prime && room.media.audio().eq_ignore_ascii_case("opus") {
-        let token = common::ident::random_u64() | 1;
-        room.audio.priming.store(token, Ordering::Release);
-        let r = Arc::downgrade(&room);
-        let u = user.to_string();
-        tokio::spawn(async move { prime_run(r, u, token).await });
-    }
-    let r = Arc::downgrade(&room);
-    let u = user.to_string();
-    tokio::spawn(async move {
-        let mut at = 0;
-        for ms in PLI_BURST_MS {
-            tokio::time::sleep(Duration::from_millis(ms - at)).await;
-            at = ms;
-            let Some(room) = r.upgrade() else { return };
-            if room.video.speaker().as_deref() != Some(u.as_str()) {
-                return;
-            }
-            pli_user(&u, true);
-        }
-    });
-}
-
-async fn prime_run(room: Weak<crate::room::Room>, speaker: String, token: u64) {
-    let mut seq: u16 = (common::ident::random_u32() & 0x7fff) as u16;
-    let mut ts: u32 = common::ident::random_u32();
-    let mut iv = tokio::time::interval(Duration::from_millis(PRIME_GAP_MS));
-    let key = prime_key();
-    for _ in 0..PRIME_FRAMES {
+async fn second(sfu: Arc<Sfu>) {
+    let mut iv = tokio::time::interval(Duration::from_millis(1000));
+    iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
         iv.tick().await;
-        let Some(r) = room.upgrade() else { return };
-        if r.audio.priming.load(Ordering::Acquire) != token {
-            return;
+        let now = Sfu::now();
+        let max_bps = sfu.boot.policy.media.max_bitrate_bps as f32;
+        for t in sfu.net.transports() {
+            if t.closed.load(Ordering::Relaxed) {
+                continue;
+            }
+            if t.tick(now) {
+                link_suspect(&sfu, &t);
+            }
+            for room in crate::sub::gate_expired(&t, now) {
+                if crate::sub::gate_open(&t, &room) {
+                    tracing::warn!(kind = "diag", spec = "IMPL-SUB-READY-GATE", user = %t.user, room = %room, "T-gate expired — gate opened without READY (no keyframe request) · READY 미수신 의심");
+                }
+            }
+            if !t.dtls_up.load(Ordering::Relaxed) {
+                continue;
+            }
+            if t.role.publishes() {
+                let ing = t.ingress.load();
+                let mut reports = Vec::new();
+                let mut ssrcs = Vec::new();
+                for (ssrc, (_, phys, rtx)) in ing.by_ssrc.iter() {
+                    if *rtx || ssrcs.contains(ssrc) {
+                        continue;
+                    }
+                    ssrcs.push(*ssrc);
+                    let mut st = lock(&phys.stats);
+                    if !st.started() {
+                        continue;
+                    }
+                    let r = st.report();
+                    let (lsr, dlsr) = if st.last_sr_at_ms > 0 { (st.last_sr_ntp_mid, ((now.saturating_sub(st.last_sr_at_ms)) * 65_536 / 1000) as u32) } else { (0, 0) };
+                    reports.push(rtcp::reception_report::ReceptionReport { ssrc: *ssrc, fraction_lost: r.fraction, total_lost: (r.lost as u32) & 0x00ff_ffff, last_sequence_number: r.extended_max, jitter: r.jitter, last_sender_report: lsr, delay: dlsr });
+                }
+                drop(ing);
+                let mut out: Vec<Boxed> = Vec::new();
+                if !reports.is_empty() {
+                    out.push(Box::new(rtcp::receiver_report::ReceiverReport { ssrc: SENDER_SSRC, reports, profile_extensions: bytes::Bytes::new() }));
+                }
+                if !ssrcs.is_empty() {
+                    out.push(Box::new(rtcp::payload_feedbacks::receiver_estimated_maximum_bitrate::ReceiverEstimatedMaximumBitrate { sender_ssrc: SENDER_SSRC, bitrate: max_bps, ssrcs }));
+                }
+                send(&t, out);
+            }
+            if t.role.subscribes() && sfu.auto_on() {
+                layer_tick(&sfu, &t, now);
+            }
         }
-        silence(&r, &speaker, key, seq, ts);
-        seq = seq.wrapping_add(1);
-        ts = ts.wrapping_add(960);
     }
 }
 
-fn silence(r: &crate::room::Room, skip: &str, key: u64, seq: u16, ts: u32) {
-    let pkt = Rtp { marker: false, pt: 111, seq, ts, ssrc: 0, csrc: &[], profile: 0, ext: &[], payload: &OPUS_SILENCE, padding: &[] };
-    let src = Src { key, phys: None, ssrc: (key & 0xffff_ffff) as u32, user: "", track: "", clock: 48_000, audio_level: None };
-    for w in r.audio.subs.load().iter() {
-        let Some(d) = w.upgrade() else { continue };
-        let Some(dp) = d.peer.upgrade() else { continue };
-        if dp.user_id == skip || !sendable(&d, &dp) {
-            continue;
-        }
-        send_down(&d, &dp, &src, &pkt, false);
+fn layer_tick(sfu: &Sfu, t: &Arc<Transport>, now: u64) {
+    let downs: Vec<_> = t.all_downs().into_iter().filter(|d| Option::clone(&d.track.load()).map(|tr| tr.simulcast).unwrap_or(false)).collect();
+    if downs.is_empty() {
+        return;
     }
-}
-
-pub fn floor_release(room_id: &str, prev: Option<&str>) {
-    let Some(ctx) = crate::cfg::get() else { return };
-    let Some(room) = ctx.rooms.get(room_id) else { return };
-    close_nack(&room.video);
-    room.audio.priming.store(0, Ordering::Release);
-    room.audio.speaker.store(None);
-    room.video.speaker.store(None);
-    tracing::info!(kind = "ev", spec = "SV-STATE-FLOOR-BIND", room = %room_id, epoch = %ctx.boot.epoch, prev = prev.unwrap_or(""), "슬롯 해제");
-    if room.media.audio().eq_ignore_ascii_case("opus") {
-        let mut seq: u16 = (common::ident::random_u32() & 0x7fff) as u16;
-        let mut ts: u32 = common::ident::random_u32();
-        let key = prime_key();
-        for _ in 0..3 {
-            silence(&room, prev.unwrap_or(""), key, seq, ts);
-            seq = seq.wrapping_add(1);
-            ts = ts.wrapping_add(960);
+    let verdict = {
+        let mut b = lock(&t.bwe);
+        let s = b.signals(now, sfu.v2(), downs.len() as u32);
+        let v = b.policy.tick(now, &s);
+        b.nacks = 0;
+        b.drops = 0;
+        v
+    };
+    if verdict == Verdict::Stay {
+        return;
+    }
+    tracing::info!(kind = "ev", spec = "RULE-SIM-TICK", user = %t.user, verdict = ?verdict, "auto layer decision");
+    for d in downs {
+        let want = crate::ops::subs::target_layer(&d, sfu, t);
+        if lock(&d.sel).retarget(want, now)
+            && let Some(tr) = Option::clone(&d.track.load())
+            && let Some(p) = want.spatial().and_then(|s| tr.phys_by_spatial(s))
+        {
+            pli(sfu, &p, now, false);
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+async fn stall(sfu: Arc<Sfu>) {
+    let mut iv = tokio::time::interval(Duration::from_millis(STALL_MS));
+    iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        iv.tick().await;
+        let now = Sfu::now();
+        let mut w = sfu.world.lock().await;
+        let mut hits: Vec<(String, String)> = Vec::new();
+        for r in w.rooms.values() {
+            let Some(hot) = sfu.room_hot(&r.id) else { continue };
+            for m in r.members.iter().filter(|m| m.ready_at > 0) {
+                let Some(p) = w.peers.get(&m.user) else { continue };
+                let t = &p.subt;
+                if t.peer_state() != crate::link::core::PeerState::Alive || !t.dtls_up.load(Ordering::Relaxed) {
+                    continue;
+                }
+                let mut stalled = false;
+                for d in t.all_downs().into_iter().filter(|d| d.room().as_deref() == Some(r.id.as_str())) {
+                    let egress = d.egress.load(Ordering::Relaxed);
+                    let mark = d.stall_mark.swap(egress, Ordering::AcqRel);
+                    let moved = egress != mark;
+                    if lock(&d.prefs).paused || !d.acked() || moved {
+                        continue;
+                    }
+                    let window_start = now.saturating_sub(STALL_MS);
+                    let eligible = if d.slot {
+                        let s = hot.slot(d.kind);
+                        let holder = Option::clone(&s.holder.load());
+                        let bound = s.speaker.load().is_some();
+                        let since = s.bound_at.load(Ordering::Relaxed).max(m.ready_at);
+                        holder.as_deref() != Some(m.user.as_str()) && bound && since <= window_start && s.last_rtp_ms.load(Ordering::Relaxed) > window_start
+                    } else {
+                        let Some(tr) = Option::clone(&d.track.load()) else { continue };
+                        let start = if tr.kind == oxsig::types::Kind::Video { m.ready_at.max(tr.first_rtp_ms.load(Ordering::Relaxed)) } else { m.ready_at };
+                        let recent = tr.phys.load().iter().any(|ph| ph.last_rtp_ms.load(Ordering::Relaxed) > window_start);
+                        tr.first_rtp_ms.load(Ordering::Relaxed) > 0 && start > 0 && start <= window_start && (recent || tr.kind == oxsig::types::Kind::Audio) && !crate::sub::gate_closed(t, &r.id)
+                    };
+                    if eligible && mark != 0 {
+                        stalled = true;
+                    }
+                }
+                if stalled {
+                    hits.push((r.id.clone(), m.user.clone()));
+                }
+            }
+        }
+        for (room, user) in hits {
+            let Some(r) = w.rooms.get_mut(&room) else { continue };
+            let last = r.stall_cool.get(&user).copied().unwrap_or(0);
+            if last != 0 && now.saturating_sub(last) < T_STALL_MS {
+                continue;
+            }
+            r.stall_cool.insert(user.clone(), now);
+            let body = oxsig::RoomEventBody::SyncRequired { room_id: room.clone(), reason: "stall".into() };
+            sfu.to_user(&user, oxsig::Op::RoomEvent, serde_json::to_value(body).unwrap_or_default(), Some(&room));
+            tracing::info!(kind = "ev", spec = "ROOM.S.sync_required", room = %room, user = %user, "delivery stall — sync_required");
+        }
+    }
+}
 
-    #[test]
-    fn each_prime_burst_is_its_own_source() {
-        let (a, b) = (prime_key(), prime_key());
-        assert!(a >= PRIME_BASE && b >= PRIME_BASE && a != b, "S-sym-IMPL-FWD-SOURCE-SWITCH-2 예열 · 해제 무음은 매번 새 출처 — 같은 키면 새 seq 시작이 구멍이 된다");
+async fn floors(sfu: Arc<Sfu>) {
+    let mut running: std::collections::HashMap<String, tokio::task::JoinHandle<()>> = std::collections::HashMap::new();
+    let mut iv = tokio::time::interval(Duration::from_millis(250));
+    loop {
+        iv.tick().await;
+        let hot = sfu.hot.load();
+        running.retain(|id, h| {
+            let keep = hot.contains_key(id);
+            if !keep {
+                h.abort();
+            }
+            keep
+        });
+        for (id, h) in hot.iter() {
+            if !running.contains_key(id) {
+                running.insert(id.clone(), tokio::spawn(floor_task(Arc::downgrade(&sfu), h.clone())));
+            }
+        }
+    }
+}
+
+async fn floor_task(sfu: std::sync::Weak<Sfu>, hot: Arc<RoomHot>) {
+    loop {
+        let due = hot.floor.next_due();
+        let wait = match due {
+            Some(d) => Duration::from_millis(d.saturating_sub(Sfu::now())),
+            None => Duration::from_secs(3600),
+        };
+        tokio::select! {
+            _ = tokio::time::sleep(wait) => {}
+            _ = hot.floor.wake.notified() => continue,
+        }
+        let Some(s) = sfu.upgrade() else { return };
+        let now = Sfu::now();
+        for o in hot.floor.fire(now) {
+            floor_out(&s, &hot, o);
+        }
     }
 }

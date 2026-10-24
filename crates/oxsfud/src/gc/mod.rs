@@ -1,307 +1,302 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @8a0d8cf · 정:RULE-GC-FOUR · 정:RULE-GC-LEAVE-SEVEN · 정:IMPL-GC-PEER-REAP · 정:RULE-GC-EDGES · 정:IMPL-BUS-HOME-LOST · 정:IMPL-ROOM-LIFE · 정:IMPL-ROOM-STALL · 정:IMPL-AFF-FORCED · model: claude-opus-5-5
-//! GC — 퇴장 정리 일곱 단계(세 경로가 한 절차로) · 마지막 방이면 Peer 를 거둔다(태스크 종료까지) · 홈을 잃은 Peer · 빈 방 TTL sweep 5s · 정체 감지 5s.
+// spec: v1.2 @36d1dfd · 정:RULE-GC-FOUR · 정:RULE-GC-LEAVE-SEVEN · 정:IMPL-GC-PEER-REAP · 정:RULE-GC-EDGES · 정:IMPL-BUS-HOME-LOST · 정:IMPL-ROOM-LIFE · 정:IMPL-AFF-FORCED · 연:RULE-LINK-SERVER-REAP · 연:LINK.S.peer_reaped · 연:LINK.S.room_gone_other · 연:ROOM.S.leave · 연:ROOM.S.leave_hidden · 연:ROOM.S.session_gone · 연:ROOM.S.session_gone_hidden · 연:ROOM.S.peer_evicted · 연:ROOM.S.kick · 연:ROOM.S.close_notify · 연:PUB.S.room_gone · 연:PUB.S.room_gone_other · 연:PUB.S.peer_gone · 연:SUB.S.drop · model: claude-opus-5-5
+//! 회수 — 퇴장 · 강제 퇴장 · 세션 폐기가 한 절차(일곱 단계)로 수렴 · Peer 를 없애는 사건은 셋(세션 폐기 · 마지막 방 · 홈 잃음) · 빈 방 sweep 5,000ms · 홈 판정.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::bus::Notice;
-use oxsig::aff::Affiliation;
-use oxsig::room::{AffiliationCause, ParticipantEvent, ParticipantEventType, RoomEvent};
-use oxsig::trk::{MediaKind, TrackType};
+use oxsig::{Affiliation, Op, ParticipantEventBody, ParticipantEventBodyType, PublishTracksReqAddAction, RoomEventBody, RoomEventBodyAffiliationCause, TrackEventBody};
 
-use crate::cfg::Ctx;
-use crate::flr::core::{Msg, T};
-use crate::link::{lock, Peer};
-use crate::ops::wire;
-use crate::room::Room;
+use crate::bus::core::Verdict;
+use crate::link::lock;
+use crate::ops::{subs, Sfu, World};
+use crate::room::core::{sweep, Sweep};
 
-pub const SWEEP_MS: u64 = 5000;
-pub const STALL_MS: u64 = 5000;
-pub const STALL_COOL_MS: u64 = 30_000;
+pub const SWEEP_MS: u64 = 5_000;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Path {
     Leave,
     Kick,
-    Close,
-    Evict,
+    Destroy,
     Session,
+    Evict,
+    LastRoom,
     HomeLost,
 }
 
 impl Path {
-    pub fn name(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Path::Leave => "leave",
             Path::Kick => "kick",
-            Path::Close => "room_closed",
-            Path::Evict => "evict",
+            Path::Destroy => "destroy",
             Path::Session => "session",
+            Path::Evict => "evict",
+            Path::LastRoom => "last_room",
             Path::HomeLost => "home_lost",
         }
     }
-}
 
-fn now() -> u64 {
-    common::clock::wall_ms()
-}
-
-pub fn affiliation(p: &Peer) -> Affiliation {
-    Affiliation { sub_rooms: p.room_list(), pub_room: p.pub_room() }
-}
-
-pub fn release_floor(room: &Room, user: &str) {
-    if room.floor.holder().as_deref() == Some(user) {
-        let u = user.to_string();
-        let m = Msg::new(T::Release, None, 0, 0);
-        room.floor.apply("RELEASE", move |s| s.server_rx(&u, &m));
+    fn label(self, hidden: bool) -> &'static str {
+        match (self, hidden) {
+            (Path::Leave, false) => "ROOM.S.leave",
+            (Path::Leave, true) => "ROOM.S.leave_hidden",
+            (Path::Kick, false) => "ROOM.S.kick",
+            (Path::Kick, true) => "ROOM.S.kick_hidden",
+            (Path::Destroy, _) => "ROOM.S.close_notify",
+            (Path::Evict, false) => "ROOM.S.peer_evicted",
+            (Path::Evict, true) => "ROOM.S.peer_evicted_hidden",
+            (_, false) => "ROOM.S.session_gone",
+            (_, true) => "ROOM.S.session_gone_hidden",
+        }
     }
 }
 
-pub fn leave_seven(ctx: &Ctx, room: &Arc<Room>, p: &Arc<Peer>, path: Path) -> bool {
-    let user = p.user_id.clone();
-    let u1 = user.clone();
-    room.floor.apply(path.name(), move |s| s.ws_leave(&u1));
-    let removed = lock(&room.inner).members.remove(&user);
-    let Some(m) = removed else {
-        tracing::warn!(kind = "diag", room = %room.id, user = %user, path = path.name(), "회수 대상 미발견");
+pub fn track_event(sfu: &Sfu, w: &mut World, room: &str, action: PublishTracksReqAddAction, tracks: Vec<oxsig::TrackEntry>) {
+    if tracks.is_empty() {
+        return;
+    }
+    let Some(r) = w.rooms.get_mut(room) else { return };
+    r.bump();
+    let body = TrackEventBody { action, room_id: room.to_string(), tracks, version: r.version(&sfu.epoch) };
+    let label = match action {
+        PublishTracksReqAddAction::Add => "CP-OP-TRACK-EVENT",
+        PublishTracksReqAddAction::Remove => "CP-OP-TRACK-EVENT",
+    };
+    tracing::info!(kind = "ev", spec = label, room = %room, seq = r.seq, action = ?action, n = body.tracks.len(), "track event");
+    sfu.to_room(room, Op::TrackEvent, serde_json::to_value(body).unwrap_or_default(), Vec::new());
+}
+
+pub fn leave_seven(sfu: &Sfu, w: &mut World, room_id: &str, user: &str, path: Path, keep_member: bool) -> bool {
+    let now = Sfu::now();
+    let Some(member) = w.rooms.get(room_id).and_then(|r| r.member(user).cloned()) else {
+        tracing::warn!(kind = "diag", room = %room_id, user = %user, path = path.as_str(), "reclaim target not found");
         return false;
     };
-    lock(&p.rooms).remove(&room.id);
-    crate::sub::gate_drop(p, &room.id);
-    if p.pub_room().as_deref() == Some(room.id.as_str()) {
-        p.pub_room.store(None);
+    let hidden = member.hidden;
+    let peer = w.peers.get(user).cloned();
+    let hot = sfu.room_hot(room_id);
+    if let Some(h) = &hot {
+        let o = h.floor.leave(user, now);
+        crate::fwd::floor_out(sfu, h, o);
+        for s in h.slots.iter() {
+            s.detach_user(user);
+        }
     }
-    let rows = wire::drop_room_rows(ctx, p, &room.id);
-    let last = lock(&p.rooms).is_empty();
-    let mine: Vec<Arc<crate::r#pub::PubStream>> = lock(&p.pubs).iter().filter(|s| !s.gone.load(Ordering::Acquire)).cloned().collect();
-    for s in &mine {
-        let full_here = !s.half.load(Ordering::Acquire) && s.room_id() == room.id;
-        let resting_here = s.half.load(Ordering::Acquire) && s.room_id() == room.id && ctx.tracks.has(&room.id, &s.track_id);
-        if full_here || resting_here || last {
-            s.gone.store(true, Ordering::Release);
-            for ph in s.phys.load().iter() {
-                p.pub_t.ingress.remove(&ph.ssrc);
+    if !keep_member && let Some(r) = w.rooms.get_mut(room_id) {
+        r.members.retain(|m| m.user != user);
+        r.stall_cool.remove(user);
+    }
+    if let Some(p) = &peer {
+        let t = p.subt.clone();
+        let cleared = lock(&t.table).clear_room(room_id);
+        for d in t.all_downs().into_iter().filter(|d| d.room().as_deref() == Some(room_id)) {
+            if let Some(tr) = Option::clone(&d.track.load()) {
+                tr.detach(&d);
             }
-            if ctx.tracks.entry(&s.room_id(), &s.track_id).map(|t| t.kind_of == TrackType::Individual).unwrap_or(false)
-                && let Some(r) = ctx.rooms.get(&s.room_id()) {
-                    ctx.tracks.remove(&r, &s.track_id);
+        }
+        crate::sub::gate_drop(&t, room_id);
+        if !keep_member {
+            lock(&p.rooms).remove(room_id);
+            if p.pub_room().as_deref() == Some(room_id) {
+                p.set_pub_room(None);
+                tracing::info!(kind = "ev", spec = "AFF.S.left", user = %user, room = %room_id, "publish room left");
+            }
+        }
+        if !cleared.is_empty() && !keep_member {
+            subs::sync(sfu, w, p, false);
+        }
+    }
+    let mut removed = Vec::new();
+    if let Some(p) = &peer {
+        let room_video = w.rooms.get(room_id).map(|r| r.video_codec());
+        for tr in p.tracks().into_iter() {
+            let listed = w.rooms.get(room_id).map(|r| r.listed(&tr.track_id).is_some()).unwrap_or(false);
+            let half = tr.half.load(Ordering::Relaxed);
+            let drop_pub = keep_member || (!half && tr.room() == room_id);
+            if listed {
+                if let Some(r) = w.rooms.get_mut(room_id) {
+                    r.unlist(&tr.track_id);
                 }
-            wire::track_off(ctx, &s.track_id);
-        }
-    }
-    if last {
-        ctx.links.reap(p);
-        tracing::info!(kind = "ev", spec = "LINK.S.peer_reaped", user = %user, session = %p.session(), epoch = %ctx.boot.epoch, path = path.name(), state = p.pub_t.peer_state().name(), area = "LINK", key = %user, cause = path.name(), "Peer 회수");
-    } else {
-        lock(&p.pubs).retain(|s| !s.gone.load(Ordering::Acquire));
-        let half = lock(&p.pubs).iter().any(|s| s.half.load(Ordering::Acquire));
-        for r in p.room_list() {
-            if let Some(room) = ctx.rooms.get(&r) {
-                let u = user.clone();
-                room.floor.apply("reg_half", move |s| s.ws_reg_half(&u, half));
+                removed.push(crate::trk::entry_of(&tr, room_id, !half, room_video.as_deref()));
+                subs::track_off(sfu, w, room_id, &tr.track_id, true);
+            }
+            if drop_pub {
+                crate::ops::pubs::unpublish(sfu, p, &tr);
+                tracing::info!(kind = "ev", spec = if keep_member { "PUB.S.peer_gone" } else { "PUB.S.room_gone" }, user = %user, track = %tr.track_id, room = %room_id, "publication cleared");
             }
         }
-        if rows {
-            wire::emit_table(p);
-        }
     }
-    if !m.hidden && path != Path::Close {
-        room.change(|_, v| {
-            let body = ParticipantEvent { kind: ParticipantEventType::Left, room_id: room.id.clone(), user_id: user.clone(), role: None, select: None, participant_type: None, metadata: None, permission: None, version: v };
-            Some(Notice { op: oxsig::op::PARTICIPANT_EVENT, body: serde_json::to_value(body).ok()?, exclude: vec![user.clone()], room_id: Some(room.id.clone()), sfu_id: None, control: None })
-        });
+    track_event(sfu, w, room_id, PublishTracksReqAddAction::Remove, removed);
+    if !hidden && !keep_member && let Some(r) = w.rooms.get_mut(room_id) {
+        r.bump();
+        let body = ParticipantEventBody { type_: ParticipantEventBodyType::Left, room_id: room_id.to_string(), user_id: user.to_string(), role: None, select: None, participant_type: None, metadata: None, permission: None, version: r.version(&sfu.epoch) };
+        sfu.to_room(room_id, Op::ParticipantEvent, serde_json::to_value(body).unwrap_or_default(), vec![user.to_string()]);
     }
-    tracing::info!(kind = "ev", spec = "CP-OP-ROOM-LEAVE", room = %room.id, user = %user, session = %p.session(), epoch = %ctx.boot.epoch, path = path.name(), "퇴장 정리");
+    if let Some(p) = &peer
+        && !keep_member
+        && matches!(path, Path::Kick | Path::Destroy)
+    {
+        let cause = if path == Path::Kick { RoomEventBodyAffiliationCause::Kick } else { RoomEventBodyAffiliationCause::RoomClosed };
+        let body = RoomEventBody::Affiliation { room_id: room_id.to_string(), affiliation: p.affiliation(), cause };
+        sfu.to_user(user, Op::RoomEvent, serde_json::to_value(body).unwrap_or_default(), Some(room_id));
+    }
+    if let Some(r) = w.rooms.get_mut(room_id)
+        && r.members.is_empty()
+        && r.ever_joined
+    {
+        r.empty_since = 0;
+    }
+    let peer_state = peer.as_ref().map(|p| p.pubt.peer_state().as_str()).unwrap_or("-");
+    tracing::info!(kind = "ev", spec = path.label(hidden), room = %room_id, user = %user, path = path.as_str(), peer_state, "left room");
+    if let Some(p) = &peer
+        && !keep_member
+        && p.rooms().is_empty()
+        && !matches!(path, Path::Session | Path::Evict | Path::HomeLost)
+    {
+        reap_peer_now(sfu, w, user, Path::LastRoom);
+    } else if peer.is_some() && !keep_member {
+        tracing::debug!(kind = "ev", spec = "LINK.S.room_gone_other", user = %user, room = %room_id, "peer keeps other rooms");
+    }
     true
 }
 
-pub fn forced(ctx: &Ctx, room: &Arc<Room>, p: &Arc<Peer>, cause: AffiliationCause) {
-    let path = if cause == AffiliationCause::Kick { Path::Kick } else { Path::Close };
-    let mut aff = affiliation(p);
-    aff.sub_rooms.retain(|r| r != &room.id);
-    if aff.pub_room.as_deref() == Some(room.id.as_str()) {
-        aff.pub_room = None;
+fn reap_peer_now(sfu: &Sfu, w: &mut World, user: &str, path: Path) {
+    let Some(p) = w.peers.remove(user) else { return };
+    for tr in p.tracks() {
+        crate::ops::pubs::unpublish(sfu, &p, &tr);
     }
-    let ev = RoomEvent::Affiliation { room_id: room.id.clone(), affiliation: aff, cause };
-    room.emit_user(&p.user_id, Notice { op: oxsig::op::ROOM_EVENT, body: serde_json::to_value(ev).unwrap_or_default(), exclude: Vec::new(), room_id: Some(room.id.clone()), sfu_id: Some(ctx.boot.epoch.clone()), control: None });
-    leave_seven(ctx, room, p, path);
+    let state = p.pubt.peer_state().as_str();
+    p.close();
+    sfu.sync_peers(w);
+    tracing::info!(kind = "ev", spec = "LINK.S.peer_reaped", user = %user, session = %p.session, path = path.as_str(), peer_state = state, "peer reaped — transports and tasks closed");
 }
 
-pub fn drop_peer(ctx: &Ctx, p: &Arc<Peer>, path: Path) {
-    let rooms = p.room_list();
-    for r in rooms {
-        if let Some(room) = ctx.rooms.get(&r) {
-            leave_seven(ctx, &room, p, path);
-        }
+pub fn reap_peer(sfu: &Sfu, w: &mut World, user: &str, path: Path) -> bool {
+    let Some(p) = w.peers.get(user).cloned() else { return false };
+    for room in p.rooms() {
+        leave_seven(sfu, w, &room, user, path, false);
     }
-    if !p.reaped.load(Ordering::Acquire) {
-        for s in lock(&p.pubs).iter() {
-            if !s.gone.swap(true, Ordering::AcqRel) {
-                wire::track_off(ctx, &s.track_id);
-            }
-        }
-        ctx.links.reap(p);
-    }
-}
-
-pub fn session_gone(ctx: &Ctx, session: &str, user: &str, path: &str) -> bool {
-    let Some(p) = ctx.links.peer(user) else { return false };
-    if p.session() != session {
-        return false;
-    }
-    tracing::info!(kind = "ev", spec = "CP-OP-LEAVE", user = %user, session = %session, epoch = %ctx.boot.epoch, path = %path, "세션 폐기 — Peer 회수");
-    drop_peer(ctx, &p, Path::Session);
+    reap_peer_now(sfu, w, user, path);
     true
 }
 
-pub fn home_lost(ctx: &Ctx, node: &str, inst: &str, new: Option<&str>) {
-    for p in ctx.links.all() {
-        let mine = {
-            let h = lock(&p.home);
-            h.0 == node && h.1 == inst
-        };
-        if !mine {
-            continue;
-        }
-        match new {
-            Some(n) => {
-                lock(&p.home).1 = n.to_string();
-                tracing::info!(kind = "diag", user = %p.user_id, node = %node, from = %inst, to = %n, "홈 옮겨 달기");
-            }
-            None => {
-                tracing::info!(kind = "ev", spec = "LINK.S.peer_reaped", user = %p.user_id, node = %node, inst = %inst, path = "home_lost", "홈을 잃은 Peer");
-                drop_peer(ctx, &p, Path::HomeLost);
-            }
-        }
-    }
+pub fn affiliation_after(p: Option<&crate::aff::Peer>) -> Affiliation {
+    p.map(|p| p.affiliation()).unwrap_or(Affiliation { sub_rooms: Vec::new(), pub_room: None })
 }
 
-pub fn destroy(ctx: &Ctx, room: &Arc<Room>) -> usize {
-    let users = room.member_ids();
-    let mut n = 0;
+pub fn destroy_room(sfu: &Sfu, w: &mut World, room_id: &str) -> usize {
+    let users: Vec<String> = w.rooms.get(room_id).map(|r| r.members.iter().map(|m| m.user.clone()).collect()).unwrap_or_default();
+    let n = users.len();
     for u in &users {
-        if let Some(p) = ctx.links.peer(u) {
-            forced(ctx, room, &p, AffiliationCause::RoomClosed);
-            n += 1;
-        }
+        leave_seven_destroy(sfu, w, room_id, u);
     }
-    remove_room(ctx, room);
+    w.rooms.remove(room_id);
+    sfu.drop_hot(room_id);
     n
 }
 
-pub fn remove_room(ctx: &Ctx, room: &Arc<Room>) {
-    room.floor.dead.store(true, Ordering::Release);
-    ctx.tracks.drop_room(&room.id);
-    ctx.rooms.remove(&room.id);
-    ctx.bus.undeclare_room(&room.id);
-    tracing::info!(kind = "ev", spec = "SV-STATE-ROOM-LIFE", room = %room.id, epoch = %ctx.boot.epoch, "방 소멸 · room 토큰 철회");
+fn leave_seven_destroy(sfu: &Sfu, w: &mut World, room_id: &str, user: &str) {
+    let now = Sfu::now();
+    let peer = w.peers.get(user).cloned();
+    if let Some(h) = sfu.room_hot(room_id) {
+        let o = h.floor.leave(user, now);
+        crate::fwd::floor_out(sfu, &h, o);
+        for s in h.slots.iter() {
+            s.detach_user(user);
+        }
+    }
+    if let Some(r) = w.rooms.get_mut(room_id) {
+        r.members.retain(|m| m.user != user);
+    }
+    if let Some(p) = &peer {
+        let t = p.subt.clone();
+        lock(&t.table).clear_room(room_id);
+        for d in t.all_downs().into_iter().filter(|d| d.room().as_deref() == Some(room_id)) {
+            if let Some(tr) = Option::clone(&d.track.load()) {
+                tr.detach(&d);
+            }
+        }
+        crate::sub::gate_drop(&t, room_id);
+        lock(&p.rooms).remove(room_id);
+        if p.pub_room().as_deref() == Some(room_id) {
+            p.set_pub_room(None);
+        }
+        for tr in p.tracks() {
+            if !tr.half.load(Ordering::Relaxed) && tr.room() == room_id {
+                if let Some(r) = w.rooms.get_mut(room_id) {
+                    r.unlist(&tr.track_id);
+                }
+                crate::ops::pubs::unpublish(sfu, p, &tr);
+            } else if let Some(r) = w.rooms.get_mut(room_id) {
+                r.unlist(&tr.track_id);
+            }
+        }
+        subs::sync(sfu, w, p, true);
+        let body = RoomEventBody::Affiliation { room_id: room_id.to_string(), affiliation: p.affiliation(), cause: RoomEventBodyAffiliationCause::RoomClosed };
+        sfu.to_user(user, Op::RoomEvent, serde_json::to_value(body).unwrap_or_default(), Some(room_id));
+        tracing::info!(kind = "ev", spec = "ROOM.S.close_notify", room = %room_id, user = %user, "room closed — member notified");
+        if p.rooms().is_empty() {
+            reap_peer_now(sfu, w, user, Path::LastRoom);
+        }
+    }
 }
 
-fn stall_one(ctx: &Ctx, room: &Arc<Room>, p: &Arc<Peer>, now: u64) {
-    if p.sub_transport().peer_state() != crate::link::core::PeerState::Alive || !p.sub_transport().has_dtls() {
-        return;
-    }
-    let ready = crate::sub::ready_at(p, &room.id);
-    if ready == 0 {
-        return;
-    }
-    let downs: Vec<Arc<crate::link::Down>> = lock(&p.downs).values().cloned().collect();
-    let mut stalled = false;
-    for d in downs {
-        let Some(l) = d.loaded() else { continue };
-        if l.room_id != room.id || !crate::fwd::shell::sendable(&d, p) {
-            continue;
-        }
-        let last = d.last_at.load(Ordering::Acquire);
-        let start = if d.class == crate::link::table::Class::Slot {
-            let slot = room.slot(d.kind);
-            let Some(sp) = slot.speaker() else { continue };
-            if sp == p.user_id {
-                continue;
-            }
-            let lr = ctx
-                .links
-                .peer(&sp)
-                .map(|q| lock(&q.pubs).iter().filter(|s| s.half.load(Ordering::Acquire) && s.kind == d.kind && !s.gone.load(Ordering::Acquire)).flat_map(|s| s.phys.load().iter().map(|ph| ph.last_rtp_ms.load(Ordering::Acquire)).collect::<Vec<_>>()).max().unwrap_or(0))
-                .unwrap_or(0);
-            let bound = slot.bound_at.load(Ordering::Acquire);
-            if lr == 0 || lr < bound.max(ready) || now.saturating_sub(lr) > STALL_MS {
-                continue;
-            }
-            ready.max(bound)
-        } else {
-            let Some(s) = wire::stream_of(ctx, &l.track_id) else { continue };
-            if s.half.load(Ordering::Acquire) || s.muted.load(Ordering::Acquire) {
-                continue;
-            }
-            if d.kind == MediaKind::Video {
-                let sel = lock(&d.st).sel;
-                if crate::sub::pref(p, &l.track_id).paused || (s.simulcast && (sel.paused || sel.target.is_none())) {
-                    continue;
+pub async fn sweep_loop(sfu: Arc<Sfu>) {
+    let mut iv = tokio::time::interval(Duration::from_millis(SWEEP_MS));
+    loop {
+        iv.tick().await;
+        let now = Sfu::now();
+        let mut expired = Vec::new();
+        {
+            let mut w = sfu.world.lock().await;
+            for r in w.rooms.values_mut() {
+                match sweep(r.members.len(), r.ever_joined, r.empty_since, r.unused_ttl_secs, r.departure_ttl_secs, now) {
+                    Sweep::Keep => {}
+                    Sweep::MarkEmpty => r.empty_since = now.max(1),
+                    Sweep::Expire => expired.push(r.id.clone()),
                 }
-                let f = s.first_rtp_at.load(Ordering::Acquire);
-                if f == 0 {
-                    continue;
-                }
-                ready.max(f)
-            } else {
-                ready
             }
-        };
-        if now.saturating_sub(start) < STALL_MS {
-            continue;
+            for id in &expired {
+                w.rooms.remove(id);
+                sfu.drop_hot(id);
+                tracing::info!(kind = "ev", spec = "IMPL-ROOM-LIFE", room = %id, "empty room expired — removed");
+            }
         }
-        if now.saturating_sub(last.max(start)) > STALL_MS {
-            stalled = true;
+        for id in expired {
+            sfu.bus.undeclare_room(&id).await;
         }
     }
-    if !stalled {
-        return;
-    }
-    {
-        let mut g = lock(&room.inner);
-        let cool = g.stall_cool.get(&p.user_id).copied().unwrap_or(0);
-        if cool > 0 && now.saturating_sub(cool) < STALL_COOL_MS {
-            return;
-        }
-        g.stall_cool.insert(p.user_id.clone(), now);
-    }
-    tracing::info!(kind = "ev", spec = "ROOM.S.sync_required", room = %room.id, user = %p.user_id, epoch = %ctx.boot.epoch, area = "ROOM", key = %room.id, cause = "stall", "정체 감지");
-    let ev = RoomEvent::SyncRequired { room_id: room.id.clone(), reason: "no_media_flow".to_string() };
-    room.emit_user(&p.user_id, Notice { op: oxsig::op::ROOM_EVENT, body: serde_json::to_value(ev).unwrap_or_default(), exclude: Vec::new(), room_id: Some(room.id.clone()), sfu_id: None, control: None });
 }
 
-pub fn spawn_sweeps() {
-    tokio::spawn(async move {
-        let mut iv = tokio::time::interval(Duration::from_millis(SWEEP_MS));
-        loop {
-            iv.tick().await;
-            let Some(ctx) = crate::cfg::get() else { continue };
-            let now = now();
-            for room in ctx.rooms.all() {
-                if crate::room::Rooms::tick_empty(&room, now) {
-                    tracing::info!(kind = "ev", spec = "SV-STATE-ROOM-LIFE", room = %room.id, epoch = %ctx.boot.epoch, "빈 방 TTL 만료");
-                    remove_room(ctx, &room);
-                    continue;
-                }
-                for u in room.member_ids() {
-                    if let Some(p) = ctx.links.peer(&u) {
-                        stall_one(ctx, &room, &p, now);
+pub async fn home_loop(sfu: Arc<Sfu>, mut rx: tokio::sync::mpsc::UnboundedReceiver<Verdict>) {
+    while let Some(v) = rx.recv().await {
+        let mut w = sfu.world.lock().await;
+        match v {
+            Verdict::Rehome { node, from, to } => {
+                for p in w.peers.values() {
+                    let h = p.home();
+                    if h.node == node && h.inst == from {
+                        p.set_home(&common::bus::envelope::Home { node: node.clone(), inst: to.clone() });
                     }
                 }
+                tracing::info!(kind = "ev", spec = "CAND-BUS-HOME-INST", node = %node, from = %from, to = %to, "home moved to the new node instance");
+            }
+            Verdict::Reap { node, inst } => {
+                let users: Vec<String> = w.peers.values().filter(|p| {
+                    let h = p.home();
+                    h.node == node && h.inst == inst
+                }).map(|p| p.user.clone()).collect();
+                for u in users {
+                    reap_peer(&sfu, &mut w, &u, Path::HomeLost);
+                }
+                tracing::info!(kind = "ev", spec = "IMPL-BUS-HOME-LOST", node = %node, inst = %inst, "home lost — peers reclaimed");
+            }
+            Verdict::Keep { node, inst, why } => {
+                tracing::info!(kind = "ev", spec = "IMPL-BUS-HOME-LOST", node = %node, inst = %inst, why, "home lost — not reclaimed");
             }
         }
-    });
-    tokio::spawn(async move {
-        let mut iv = tokio::time::interval(Duration::from_millis(1000));
-        loop {
-            iv.tick().await;
-            if let Some(ctx) = crate::cfg::get() {
-                wire::reassign_tick(ctx);
-            }
-        }
-    });
+    }
 }

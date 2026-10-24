@@ -1,138 +1,115 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @8a0d8cf · 정:RULE-CFG-THREE-PLACES · 정:RULE-CFG-INDEX · 정:IMPL-ROOM-VERSION-ISSUE · 정:RULE-LINK-TRANSPORT · model: claude-opus-5-5
-//! CFG — sfud 기동 값(인자 > 정책 파일 > 기본) · 기동 신원(epoch = sfu_id = inst) · public-ip(`auto` = 기본 인터페이스) · 해석된 최종값 배너 · 프로세스 맥락 하나.
+// spec: v1.2 @36d1dfd · 정:RULE-CFG-THREE-PLACES · 정:RULE-CFG-INDEX · 정:CAND-BUS-NO-ZENOH-BOOT · 운영 규격서 §8-1 · 운영 규격서 §8-2 · model: claude-opus-5-5
+//! 기동 값 — 인자 > 정책 파일 > 코드 기본값. 포트에 기본값이 없다(없으면 기동 실패) · `--public-ip auto` 는 기본 경로의 출발 주소 · 해석된 최종값을 배너 한 줄로.
 
-use std::net::{IpAddr, Ipv4Addr};
-use std::sync::atomic::AtomicU32;
-use std::sync::{Arc, OnceLock};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::path::PathBuf;
 
 use common::args::Args;
 use common::policy::Policy;
 
-use crate::bus::Bus;
-use crate::link::Links;
-use crate::room::Rooms;
-use crate::trk::Tracks;
+pub const VALUED: &[&str] = &["grpc-listen", "udp-port", "tcp-port", "policy", "public-ip", "id", "build", "zenoh-namespace", "zenoh-connect", "log-dir", "log-socket"];
+pub const SWITCHES: &[&str] = &["version"];
 
-pub const VALUED: [&str; 11] = ["grpc-listen", "udp-port", "tcp-port", "policy", "public-ip", "id", "build", "zenoh-connect", "zenoh-namespace", "log-dir", "log-socket"];
-pub const FLAGS: [&str; 1] = ["version"];
-
+#[derive(Debug, Clone)]
 pub struct Boot {
-    pub node: String,
-    pub build: String,
-    pub policy: Arc<Policy>,
-    pub policy_path: String,
-    pub grpc_listen: String,
+    pub args: Args,
+    pub policy: Policy,
+    pub node_id: String,
+    pub grpc_listen: SocketAddr,
     pub udp_port: u16,
     pub tcp_port: Option<u16>,
     pub public_ip: IpAddr,
-    pub zenoh_ns: String,
-    pub zenoh_connect: Option<String>,
-    pub log_dir: Option<String>,
-    pub log_socket: Option<String>,
-    pub epoch: String,
+    pub bind_ip: IpAddr,
+    pub namespace: String,
+    pub zenoh_connect: String,
+    pub log_dir: Option<PathBuf>,
+    pub log_socket: Option<PathBuf>,
+    pub build: String,
 }
 
-fn auto_ip() -> IpAddr {
-    let probe = std::net::UdpSocket::bind("0.0.0.0:0").and_then(|s| {
-        s.connect("8.8.8.8:80")?;
-        s.local_addr()
-    });
-    match probe {
-        Ok(a) if !a.ip().is_unspecified() => a.ip(),
-        _ => IpAddr::V4(Ipv4Addr::LOCALHOST),
-    }
+fn local_ip() -> IpAddr {
+    UdpSocket::bind("0.0.0.0:0")
+        .and_then(|s| {
+            s.connect("192.0.2.1:9")?;
+            s.local_addr()
+        })
+        .map(|a| a.ip())
+        .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
 }
 
-fn port(args: &Args, k: &str, d: Option<u16>) -> Result<Option<u16>, String> {
-    match args.get(k) {
-        Some(v) => v.parse::<u16>().map(Some).map_err(|_| format!("--{k} {v}")),
-        None => Ok(d),
-    }
+fn is_local(ip: IpAddr) -> bool {
+    UdpSocket::bind(SocketAddr::new(ip, 0)).is_ok()
 }
 
 impl Boot {
-    pub fn load(args: &Args, raw_build: &str) -> Result<Boot, String> {
-        let policy_path = args.get("policy").unwrap_or("policy.toml").to_string();
-        let policy = match std::fs::read_to_string(&policy_path) {
-            Ok(t) => Policy::parse(&t).map_err(|e| e.to_string())?,
-            Err(e) if args.get("policy").is_some() => return Err(format!("policy {policy_path}: {e}")),
-            Err(_) => Policy::default(),
+    pub fn from_args(argv: &[String]) -> Result<Boot, String> {
+        let args = Args::parse(argv, VALUED, SWITCHES)?;
+        let build = common::identity::build(args.get("build"));
+        if args.has("version") {
+            return Err(format!("version:{build}"));
+        }
+        let policy = match args.get("policy") {
+            Some(p) => Policy::load(&PathBuf::from(p)).map_err(|e| e.to_string())?,
+            None => Policy::default(),
+        };
+        let node_id = args.require("id")?.to_string();
+        if !common::bus::keys::chunk_ok(&node_id) {
+            return Err(format!("node_id {node_id:?} 는 키 조각이 될 수 없다"));
+        }
+        let grpc_listen: SocketAddr = args.require("grpc-listen")?.parse().map_err(|e| format!("--grpc-listen: {e}"))?;
+        let udp_port: u16 = args.require("udp-port")?.parse().map_err(|e| format!("--udp-port: {e}"))?;
+        let tcp_port: Option<u16> = match args.get("tcp-port") {
+            Some(v) => Some(v.parse().map_err(|e| format!("--tcp-port: {e}"))?),
+            None => None,
         };
         let public_ip = match args.get("public-ip") {
-            None => IpAddr::V4(Ipv4Addr::LOCALHOST),
-            Some("auto") => auto_ip(),
-            Some(v) => v.parse::<IpAddr>().map_err(|_| format!("--public-ip {v}"))?,
+            None | Some("auto") => local_ip(),
+            Some(v) => v.parse().map_err(|e| format!("--public-ip: {e}"))?,
         };
+        let bind_ip = if is_local(public_ip) { public_ip } else { IpAddr::V4(Ipv4Addr::UNSPECIFIED) };
+        let zenoh_connect = args.require("zenoh-connect")?.to_string();
+        let namespace = args.get("zenoh-namespace").unwrap_or("oxlens").to_string();
         Ok(Boot {
-            node: args.get("id").unwrap_or("node").to_string(),
-            build: common::ident::build_identity(raw_build, args.get("build")),
-            policy: Arc::new(policy),
-            policy_path,
-            grpc_listen: args.get("grpc-listen").unwrap_or("127.0.0.1:50061").to_string(),
-            udp_port: port(args, "udp-port", Some(20000))?.unwrap_or(20000),
-            tcp_port: port(args, "tcp-port", None)?,
+            policy,
+            node_id,
+            grpc_listen,
+            udp_port,
+            tcp_port,
             public_ip,
-            zenoh_ns: args.get("zenoh-namespace").unwrap_or("ox").to_string(),
-            zenoh_connect: args.get("zenoh-connect").map(str::to_string),
-            log_dir: args.get("log-dir").map(str::to_string),
-            log_socket: args.get("log-socket").map(str::to_string),
-            epoch: common::ident::new_epoch("sfu"),
+            bind_ip,
+            namespace,
+            zenoh_connect,
+            log_dir: args.get("log-dir").map(PathBuf::from),
+            log_socket: args.get("log-socket").map(PathBuf::from),
+            build,
+            args,
         })
     }
 
-    pub fn banner(&self) -> String {
+    pub fn banner(&self, epoch: &str) -> String {
+        let p = &self.policy;
         format!(
-            "node={} epoch={} build={} grpc_listen={} public_ip={} udp_port={} tcp_port={:?} zenoh.namespace={} zenoh.connect={:?} log_dir={:?} log_socket={:?} policy={} media.max_bitrate_bps={} media.slot_mid_reserve={} media.auto_layer={:?} media.bwe_mode={:?} floor.queue_max={} floor.t2_stop_talking_secs={} logging.level={:?}",
-            self.node,
-            self.epoch,
-            self.build,
+            "node={} epoch={} grpc={} udp={}:{} tcp={} advertise={} zenoh.connect={} zenoh.namespace={} media.auto_layer={:?} media.bwe_mode={:?} media.max_bitrate_bps={} media.slot_mid_reserve={} floor.queue_max={} floor.t2_stop_talking_secs={} hub.room_unused_ttl_secs={} hub.room_departure_ttl_secs={} logging.level={} args=[{}]",
+            self.node_id,
+            epoch,
             self.grpc_listen,
-            self.public_ip,
+            self.bind_ip,
             self.udp_port,
-            self.tcp_port,
-            self.zenoh_ns,
+            self.tcp_port.map(|p| p.to_string()).unwrap_or_else(|| "-".into()),
+            self.public_ip,
             self.zenoh_connect,
-            self.log_dir,
-            self.log_socket,
-            self.policy_path,
-            self.policy.media.max_bitrate_bps,
-            self.policy.media.slot_mid_reserve,
-            self.policy.media.auto_layer,
-            self.policy.media.bwe_mode,
-            self.policy.floor.queue_max,
-            self.policy.floor.t2_stop_talking_secs,
-            self.policy.logging.level,
+            self.namespace,
+            p.media.auto_layer,
+            p.media.bwe_mode,
+            p.media.max_bitrate_bps,
+            p.media.slot_mid_reserve,
+            p.floor.queue_max,
+            p.floor.t2_stop_talking_secs,
+            p.hub.room_unused_ttl_secs,
+            p.hub.room_departure_ttl_secs,
+            p.logging.level.as_str(),
+            self.args.banner(),
         )
-    }
-}
-
-pub struct Ctx {
-    pub boot: Boot,
-    pub rooms: Rooms,
-    pub links: Arc<Links>,
-    pub tracks: Tracks,
-    pub bus: Arc<Bus>,
-    pub drops: crate::ops::Drops,
-    pub task_seq: AtomicU32,
-}
-
-static CTX: OnceLock<Arc<Ctx>> = OnceLock::new();
-
-pub fn install(c: Arc<Ctx>) {
-    let _ = CTX.set(c);
-}
-
-pub fn get() -> Option<&'static Arc<Ctx>> {
-    CTX.get()
-}
-
-impl Ctx {
-    pub fn v2(&self) -> bool {
-        format!("{:?}", self.boot.policy.media.auto_layer).eq_ignore_ascii_case("v2")
-    }
-
-    pub fn auto(&self) -> bool {
-        !format!("{:?}", self.boot.policy.media.auto_layer).eq_ignore_ascii_case("off")
     }
 }

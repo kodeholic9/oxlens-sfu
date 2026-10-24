@@ -1,56 +1,80 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @8a0d8cf · 정:IMPL-ROOM-JOIN · 정:IMPL-ROOM-PERMISSION · 연:RULE-ROOM-MAX-100 · 연:RULE-ROOM-PERMISSION-MAP · 연:RULE-ROOM-BITS-OUTLIVE · 정:RULE-CONC-SANS-IO · model: claude-opus-5-5
-//! 방 판정(순수) — 정원(이상) · 서버별 입장 방 수 · 권한 비트(오버라이드가 토큰값보다 앞선다 · 기본과 같으면 지운다) · 회수 대상.
+// spec: v1.2 @36d1dfd · 정:IMPL-ROOM-LIFE · 정:IMPL-ROOM-JOIN · 정:IMPL-ROOM-PERMISSION · 정:RULE-GC-FOUR · 연:RULE-ROOM-JOIN-PROC · 연:RULE-ROOM-JOIN-FAIL · 연:RULE-ROOM-MAX-100 · 연:RULE-ROOM-PERMISSION-MAP · 연:ROOM.S.join · 연:ROOM.S.join_again · 연:ROOM.S.join_hidden · 연:ROOM.S.join_3001 · 연:ROOM.S.join_4001 · 연:ROOM.S.perm_absent · model: claude-opus-5-5
+//! 방 판정(순수) — 입장 차례(재입장 축출 뒤 값으로 정원 · 서버당 방 수) · 빈 방 TTL(생성 시각 기준 · 최초 관측 tick 은 판정 안 함 · 이상) · 권한 오버라이드(멱등 · 기본값이면 항목을 지운다).
 
-use oxsig::err::{ErrCode, Failure};
-use oxsig::room::Permission;
+use std::collections::HashMap;
+
+use oxsig::{Code, Failure, Permission};
 use serde_json::json;
 
-pub const MAX_ROOMS: usize = 100;
+use super::MAX_ROOMS_PER_SERVER;
 
-pub fn capacity(hidden: bool, user_count: u32, capacity: u32) -> Result<(), Failure> {
+pub fn check_capacity(user_count: u32, capacity: u32, hidden: bool) -> Result<(), Failure> {
     if !hidden && user_count >= capacity {
-        return Err(Failure::new(ErrCode::RoomFull));
+        return Err(Code::RoomFull.failure_with("정원", Some(json!({"capacity": capacity}))));
     }
     Ok(())
 }
 
-pub fn listen_limit(current: usize) -> Result<(), Failure> {
-    if current >= MAX_ROOMS {
-        return Err(Failure::new(ErrCode::ListenLimit).details(json!({"limit": MAX_ROOMS, "current": current})));
+pub fn check_rooms(current: usize) -> Result<(), Failure> {
+    if current >= MAX_ROOMS_PER_SERVER {
+        return Err(Code::ListenLimit.failure_with("서버당 방 수", Some(json!({"limit": MAX_ROOMS_PER_SERVER, "current": current}))));
     }
     Ok(())
 }
 
-pub fn initial(token: Permission, over: Option<Permission>) -> Permission {
-    over.unwrap_or(token)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sweep {
+    Keep,
+    MarkEmpty,
+    Expire,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub struct Lowered {
-    pub audio: bool,
-    pub video: bool,
-    pub screen: bool,
-    pub floor: bool,
+pub fn sweep(registered: usize, ever_joined: bool, empty_since: u64, unused_ttl_secs: u32, departure_ttl_secs: u32, now_ms: u64) -> Sweep {
+    if registered > 0 {
+        return Sweep::Keep;
+    }
+    if empty_since == 0 {
+        return Sweep::MarkEmpty;
+    }
+    let ttl = if ever_joined { departure_ttl_secs } else { unused_ttl_secs };
+    if ttl == 0 {
+        return Sweep::Keep;
+    }
+    if now_ms.saturating_sub(empty_since) >= ttl as u64 * 1000 {
+        return Sweep::Expire;
+    }
+    Sweep::Keep
 }
 
-impl Lowered {
-    pub fn any(&self) -> bool {
-        self.audio || self.video || self.screen || self.floor
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PermChange {
+    pub before: Permission,
+    pub after: Permission,
+}
+
+impl PermChange {
+    pub fn lowered(&self) -> Vec<crate::r#pub::core::Bit> {
+        use crate::r#pub::core::Bit;
+        [Bit::Audio, Bit::Video, Bit::Screen, Bit::Floor].into_iter().filter(|b| Bit::of(&self.before, *b) && !Bit::of(&self.after, *b)).collect()
+    }
+
+    pub fn raised(&self) -> Vec<crate::r#pub::core::Bit> {
+        use crate::r#pub::core::Bit;
+        [Bit::Audio, Bit::Video, Bit::Screen, Bit::Floor].into_iter().filter(|b| !Bit::of(&self.before, *b) && Bit::of(&self.after, *b)).collect()
     }
 }
 
-pub fn lowered(old: &Permission, new: &Permission) -> Lowered {
-    Lowered {
-        audio: old.publish_audio && !new.publish_audio,
-        video: old.publish_video && !new.publish_video,
-        screen: old.publish_screen && !new.publish_screen,
-        floor: old.floor_request && !new.floor_request,
+pub fn set_override(overrides: &mut HashMap<String, Permission>, user: &str, current: Permission, next: Permission) -> Option<PermChange> {
+    if current == next {
+        return None;
     }
-}
-
-pub fn store(over: Option<Permission>) -> Option<Permission> {
-    over.filter(|p| !p.is_default())
+    if next.is_default() {
+        overrides.remove(user);
+    } else {
+        overrides.insert(user.to_string(), next);
+    }
+    Some(PermChange { before: current, after: next })
 }
 
 #[cfg(test)]
@@ -58,17 +82,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn capacity_is_at_least_and_hidden_free() {
-        assert!(capacity(false, 2, 2).is_err());
-        assert!(capacity(true, 2, 2).is_ok(), "정:IMPL-ROOM-JOIN ③");
-        assert!(capacity(false, 1, 2).is_ok());
+    fn ttl_rules() {
+        assert_eq!(sweep(1, true, 5, 0, 0, 10), Sweep::Keep, "등록 기준 — hidden 도 사람");
+        assert_eq!(sweep(0, true, 0, 30, 5, 100), Sweep::MarkEmpty, "S-sym-IMPL-ROOM-LIFE-1 최초 관측 tick 은 만료 판정을 안 한다");
+        assert_eq!(sweep(0, true, 100, 30, 5, 5099), Sweep::Keep);
+        assert_eq!(sweep(0, true, 100, 30, 5, 5100), Sweep::Expire, "이상");
+        assert_eq!(sweep(0, false, 100, 30, 5, 5100), Sweep::Keep, "unused 는 생성 시각 기준 30s");
+        assert_eq!(sweep(0, false, 100, 0, 0, u64::MAX), Sweep::Keep, "정책값 0 = 영구");
     }
 
     #[test]
-    fn override_wins_and_default_is_dropped() {
-        let low = Permission { floor_request: false, ..Permission::default() };
-        assert_eq!(initial(Permission::default(), Some(low)), low);
-        assert_eq!(store(Some(Permission::default())), None, "정:IMPL-ROOM-PERMISSION 기본값 되돌림");
-        assert!(lowered(&Permission::default(), &low).floor);
+    fn override_idempotent_and_default_erases() {
+        let mut m = HashMap::new();
+        let low = Permission { floor_request: false, ..Permission::ALL };
+        assert!(set_override(&mut m, "u", Permission::ALL, Permission::ALL).is_none(), "S-sym-IMPL-ROOM-PERMISSION-1 지금 값과 같으면 아무것도 안 한다");
+        let c = set_override(&mut m, "u", Permission::ALL, low).expect("change");
+        assert_eq!(c.lowered().len(), 1);
+        assert!(m.contains_key("u"));
+        set_override(&mut m, "u", low, Permission::ALL);
+        assert!(!m.contains_key("u"), "S-sym-IMPL-ROOM-PERMISSION-2 기본과 같은 값은 보관하지 않는다");
+    }
+
+    #[test]
+    fn join_limits() {
+        assert_eq!(check_capacity(2, 2, false).map_err(|f| f.code), Err(Code::RoomFull.number()));
+        assert!(check_capacity(2, 2, true).is_ok(), "투명에는 상한 축이 없다");
+        assert_eq!(check_rooms(100).map_err(|f| f.code), Err(Code::ListenLimit.number()));
     }
 }

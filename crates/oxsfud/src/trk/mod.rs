@@ -1,115 +1,175 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @8a0d8cf · 정:IMPL-TRK-FROM-PUB · 정:IMPL-ROOM-EMIT · 연:RULE-TRK-PUB-TO-TRACK · 연:RULE-TRK-SLOT-LIFE · 연:TRK.op.TRACK_EVENT · 연:TRK.op.TRACK_STATE · 연:RULE-TRK-TRACK-EVENT-ONE-ROOM · model: claude-opus-5-5
-//! TRK — 방마다 트랙 목록(슬롯 둘은 방과 수명이 같다 · 전이중 개인 트랙 · 쉬는 항목) · 바뀌면 그 방 `seq++` 와 `TRACK_EVENT` / `TRACK_STATE` 를 한 임계 구역에서.
+// spec: v1.2 @36d1dfd · 정:IMPL-TRK-FROM-PUB · 정:IMPL-FLR-MEDIA-BIND · 정:CAND-FWD-PRIME-SOURCE · 연:RULE-TRK-PUB-TO-TRACK · 연:RULE-TRK-SLOT-LIFE · 연:TRK.type.TrackEntry · 연:RULE-TRK-TRACK-STATE-TO-ALL · 연:R-TRK-MUTED-IN-SNAPSHOT · 연:RULE-TRK-THREE-TIERS · 연:RULE-TRK-TRACK-EVENT-ONE-ROOM · 연:TRK.S.pub_full · 연:TRK.S.half_to_full · 연:TRK.S.full_to_half · 연:TRK.S.unpub_full · 연:TRK.S.unpub_resting · 연:TRK.S.rest_in · 연:TRK.S.mute · model: claude-opus-5-5
+//! 영역 TRK — 트랙 목록 항목(individual · slot) · 슬롯 둘(방이 생길 때 · 방 것 · 화자 결합 · 예열 · 구독 줄 목록).
 
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use common::bus::Notice;
-use dashmap::DashMap;
-use oxsig::op;
-use oxsig::trk::{slot_track_id, MediaKind, TrackAction, TrackEntry, TrackEvent, TrackState, TrackType};
+use arc_swap::ArcSwap;
+use oxsig::types::Kind;
+use oxsig::{MediaCodecs, TrackEntry, TrackEntryType};
 
-use crate::link::lock;
-use crate::room::Room;
+use crate::link::Down;
+use crate::r#pub::PubTrack;
 
-#[derive(Default)]
-pub struct Tracks {
-    map: DashMap<String, Arc<Mutex<Vec<TrackEntry>>>>,
+pub const PRIME_FRAMES: u32 = 250;
+pub const SILENCE_FRAMES: u32 = 3;
+pub const OPUS_SILENCE: [u8; 3] = [0xf8, 0xff, 0xfe];
+pub const PRIME_SRC: u64 = 0xffff_0000_0000_0001;
+
+pub fn slot_id(room: &str, kind: Kind) -> String {
+    format!("ptt-{room}-{}", kind.as_str())
 }
 
-fn notice(op_code: u16, body: impl serde::Serialize) -> Option<Notice> {
-    let body = serde_json::to_value(body).ok()?;
-    Some(Notice { op: op_code, body, exclude: Vec::new(), room_id: None, sfu_id: None, control: None })
+pub struct Slot {
+    pub room: String,
+    pub kind: Kind,
+    pub track_id: String,
+    pub codec: String,
+    pub fmtp: Option<String>,
+    pub speaker: ArcSwap<Option<(String, Arc<PubTrack>)>>,
+    pub holder: ArcSwap<Option<String>>,
+    pub downs: ArcSwap<Vec<Arc<Down>>>,
+    pub priming: AtomicU32,
+    pub silence: AtomicU32,
+    pub prime: Mutex<(u16, u32)>,
+    pub bound_at: AtomicU64,
+    pub first_rtp: AtomicBool,
+    pub last_rtp_ms: AtomicU64,
+    pub rtx_gate: AtomicBool,
 }
 
-impl Tracks {
-    fn of(&self, room: &str) -> Arc<Mutex<Vec<TrackEntry>>> {
-        self.map.entry(room.to_string()).or_default().clone()
+impl Slot {
+    pub fn new(room: &str, kind: Kind, media: &MediaCodecs) -> Arc<Slot> {
+        let codec = match kind {
+            Kind::Audio => media.audio.clone().unwrap_or_else(|| "opus".into()),
+            Kind::Video => media.video.clone().unwrap_or_else(|| "H264".into()),
+        };
+        let fmtp = (kind == Kind::Video && codec.eq_ignore_ascii_case("H264")).then(|| "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f".to_string());
+        Arc::new(Slot {
+            room: room.to_string(),
+            kind,
+            track_id: slot_id(room, kind),
+            codec,
+            fmtp,
+            speaker: ArcSwap::from_pointee(None),
+            holder: ArcSwap::from_pointee(None),
+            downs: ArcSwap::from_pointee(Vec::new()),
+            priming: AtomicU32::new(0),
+            silence: AtomicU32::new(0),
+            prime: Mutex::new((0, 0)),
+            bound_at: AtomicU64::new(0),
+            first_rtp: AtomicBool::new(false),
+            last_rtp_ms: AtomicU64::new(0),
+            rtx_gate: AtomicBool::new(false),
+        })
     }
 
-    pub fn create_slots(&self, room: &Room) {
-        let l = self.of(&room.id);
-        let mut g = lock(&l);
-        if g.iter().any(|t| t.kind_of == TrackType::Slot) {
-            return;
+    pub fn entry(&self) -> TrackEntry {
+        TrackEntry {
+            type_: TrackEntryType::Slot,
+            room_id: self.room.clone(),
+            track_id: self.track_id.clone(),
+            kind: self.kind,
+            codec: (self.kind == Kind::Video).then(|| self.codec.clone()),
+            fmtp: if self.kind == Kind::Video { self.fmtp.clone() } else { None },
+            user_id: None,
+            source: None,
+            active: None,
+            muted: None,
+            simulcast: None,
+            scalability: None,
         }
-        for kind in [MediaKind::Audio, MediaKind::Video] {
-            let video = kind == MediaKind::Video;
-            g.push(TrackEntry {
-                kind_of: TrackType::Slot,
-                room_id: room.id.clone(),
-                track_id: slot_track_id(&room.id, kind),
-                kind,
-                codec: video.then(|| room.media.video().to_string()),
-                fmtp: if video { crate::r#pub::core::room_fmtp(&room.media, kind).map(str::to_string) } else { None },
-                user_id: None,
-                source: None,
-                active: None,
-                muted: None,
-                simulcast: None,
-                scalability: None,
-            });
+    }
+
+    pub fn speaker_user(&self) -> Option<String> {
+        self.speaker.load().as_ref().as_ref().map(|(u, _)| u.clone())
+    }
+
+    pub fn bind(&self, user: &str, track: Option<Arc<PubTrack>>, prime: bool, now_ms: u64) {
+        self.holder.store(Arc::new(Some(user.to_string())));
+        match track {
+            Some(t) => self.speaker.store(Arc::new(Some((user.to_string(), t)))),
+            None => self.speaker.store(Arc::new(None)),
+        }
+        self.bound_at.store(now_ms, Ordering::Release);
+        self.first_rtp.store(false, Ordering::Release);
+        self.silence.store(0, Ordering::Release);
+        self.priming.store(if prime && self.kind == Kind::Audio && self.codec.eq_ignore_ascii_case("opus") { PRIME_FRAMES } else { 0 }, Ordering::Release);
+        self.rtx_gate.store(true, Ordering::Release);
+    }
+
+    pub fn release(&self) {
+        let was_audio_opus = self.kind == Kind::Audio && self.codec.eq_ignore_ascii_case("opus");
+        self.speaker.store(Arc::new(None));
+        self.holder.store(Arc::new(None));
+        self.priming.store(0, Ordering::Release);
+        self.rtx_gate.store(true, Ordering::Release);
+        if was_audio_opus {
+            self.silence.store(SILENCE_FRAMES, Ordering::Release);
         }
     }
 
-    pub fn list(&self, room: &str) -> Vec<TrackEntry> {
-        self.map.get(room).map(|l| lock(&l).clone()).unwrap_or_default()
-    }
-
-    pub fn snapshot(&self, room: &Room) -> (Vec<TrackEntry>, oxsig::room::Version) {
-        let g = lock(&room.inner);
-        (self.list(&room.id), room.ver(g.seq))
-    }
-
-    pub fn put(&self, room: &Room, entry: TrackEntry) -> Option<u64> {
-        let l = self.of(&room.id);
-        room.change(|_, v| {
-            let mut g = lock(&l);
-            match g.iter_mut().find(|t| t.track_id == entry.track_id) {
-                Some(t) if *t == entry => return None,
-                Some(t) => t.clone_from(&entry),
-                None => g.push(entry.clone()),
+    pub fn attach(&self, d: &Arc<Down>) {
+        self.downs.rcu(|v| {
+            let mut v = Vec::clone(v);
+            if !v.iter().any(|x| Arc::ptr_eq(x, d)) {
+                v.push(d.clone());
             }
-            notice(op::TRACK_EVENT, TrackEvent { action: TrackAction::Add, room_id: room.id.clone(), tracks: vec![entry.clone()], version: v })
-        })
+            v
+        });
     }
 
-    pub fn remove(&self, room: &Room, track_id: &str) -> Option<u64> {
-        let l = self.of(&room.id);
-        room.change(|_, v| {
-            let mut g = lock(&l);
-            let i = g.iter().position(|t| t.track_id == track_id && t.kind_of == TrackType::Individual)?;
-            let t = g.remove(i);
-            notice(op::TRACK_EVENT, TrackEvent { action: TrackAction::Remove, room_id: room.id.clone(), tracks: vec![t.removal()], version: v })
-        })
+    pub fn detach(&self, d: &Arc<Down>) {
+        self.downs.rcu(|v| {
+            let mut v = Vec::clone(v);
+            v.retain(|x| !Arc::ptr_eq(x, d));
+            v
+        });
     }
 
-    pub fn has(&self, room: &str, track_id: &str) -> bool {
-        self.map.get(room).map(|l| lock(&l).iter().any(|t| t.track_id == track_id)).unwrap_or(false)
+    pub fn detach_user(&self, user: &str) -> Vec<Arc<Down>> {
+        let mut gone = Vec::new();
+        self.downs.rcu(|v| {
+            let mut v = Vec::clone(v);
+            gone = v.iter().filter(|d| d.user == user).cloned().collect();
+            v.retain(|d| d.user != user);
+            v
+        });
+        gone
     }
+}
 
-    pub fn entry(&self, room: &str, track_id: &str) -> Option<TrackEntry> {
-        self.map.get(room).and_then(|l| lock(&l).iter().find(|t| t.track_id == track_id).cloned())
+pub fn entry_of(t: &PubTrack, room: &str, active: bool, room_video: Option<&str>) -> TrackEntry {
+    let video = t.kind == Kind::Video;
+    TrackEntry {
+        type_: TrackEntryType::Individual,
+        room_id: room.to_string(),
+        track_id: t.track_id.clone(),
+        kind: t.kind,
+        codec: if video { room_video.map(str::to_string).or_else(|| t.codec.clone()) } else { None },
+        fmtp: t.fmtp.clone(),
+        user_id: Some(t.user.clone()),
+        source: if video { t.source.or(Some(oxsig::Source::Camera)) } else { None },
+        active: Some(active),
+        muted: Some(t.muted.load(Ordering::Relaxed)),
+        simulcast: if video { Some(t.simulcast) } else { None },
+        scalability: if video && t.simulcast { Some("L2T1".to_string()) } else { None },
     }
+}
 
-    pub fn mute(&self, room: &Room, track_id: &str, user: &str, kind: MediaKind, muted: bool) -> Option<u64> {
-        let l = self.of(&room.id);
-        room.change(|_, v| {
-            let mut g = lock(&l);
-            let t = g.iter_mut().find(|t| t.track_id == track_id)?;
-            if t.muted == Some(muted) {
-                return None;
-            }
-            t.muted = Some(muted);
-            notice(op::TRACK_STATE, TrackState { kind_of: "muted".to_string(), user_id: user.to_string(), track_id: track_id.to_string(), kind, room_id: room.id.clone(), version: v, muted })
-        })
-    }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    pub fn drop_room(&self, room: &str) {
-        self.map.remove(room);
-    }
-
-    pub fn of_user(&self, room: &str, user: &str) -> Vec<TrackEntry> {
-        self.list(room).into_iter().filter(|t| t.user_id.as_deref() == Some(user)).collect()
+    #[test]
+    fn slot_entry_shape() {
+        let s = Slot::new("r1", Kind::Video, &MediaCodecs { audio: Some("opus".into()), video: Some("H264".into()) });
+        let e = s.entry();
+        assert_eq!(e.track_id, "ptt-r1-video");
+        assert!(e.user_id.is_none() && e.active.is_none() && e.muted.is_none());
+        assert_eq!(e.codec.as_deref(), Some("H264"));
+        let a = Slot::new("r1", Kind::Audio, &MediaCodecs { audio: None, video: None });
+        assert!(a.entry().codec.is_none() && a.entry().fmtp.is_none());
     }
 }

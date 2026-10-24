@@ -1,269 +1,239 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @8a0d8cf · 정:RULE-LINK-TRANSPORT · 정:RULE-LINK-PAIR-LIVENESS · 정:IMPL-LINK-PEER-STATE · 정:IMPL-LINK-ICE-RESTART · 정:RULE-GC-LEAVE-SEVEN · 연:RULE-LINK-SDP-DC-OPENER · 연:TRN.frame.DC · 정:RULE-DOC-FIXED-PARTS · model: claude-opus-5-5
-//! 연결 I/O — UDP 하나 · TCP passive(RFC 4571) · STUN 은 무결성 검증 뒤에만 · DTLS passive → SRTP 키 · SCTP/DCEP `"unreliable"` 하나 · 쌍별 생존 tick.
+// spec: v1.2 @36d1dfd · 정:RULE-LINK-TRANSPORT · 정:RULE-LINK-PAIR-LIVENESS · 정:CAND-LINK-DTLS-VALUES · 정:RULE-GC-LEAVE-SEVEN · 연:RULE-LINK-SDP-DC-OPENER · model: claude-opus-5-5
+//! LINK 쉘 — UDP 수신 고리 · ICE-TCP passive(RFC 4571 · 신원 확인 10s · keepalive 20s) · 첫 바이트 demux · DTLS passive · SRTP 키 · SCTP/DCEP(`unreliable` 하나 · 재전송 한도 없음).
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use dtls::conn::DTLSConn;
-use dtls::crypto::{Certificate, CryptoPrivateKey};
-use dtls::extension::extension_use_srtp::SrtpProtectionProfile;
 use sctp_proto::{Association, AssociationHandle, DatagramEvent, Endpoint, EndpointConfig, Event, Payload, PayloadProtocolIdentifier, ReliabilityType, ServerConfig, StreamEvent};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, UdpSocket};
-use tokio::sync::mpsc;
-use webrtc_srtp::context::Context;
-use webrtc_srtp::protection_profile::ProtectionProfile;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
-use super::core::{self as lc, Edge, Kind, PeerState, Proto};
-use super::{lock, Cert, Links, Transport};
+use super::core::{Deframer, Frame, PathKey, TCP_IDENTIFY_MS, TCP_KEEPALIVE_MS};
+use super::stun::{self, Class};
+use super::{lock, Net, Transport};
 
-pub fn make_cert() -> Result<Cert, String> {
-    let mut params = rcgen::CertificateParams::new(vec!["oxlens-sfu".to_string()]).map_err(|e| e.to_string())?;
+pub const DTLS_HANDSHAKE_SECS: u64 = 30;
+pub const DTLS_MTU: usize = 1200;
+pub const CERT_NAME: &str = "ox-sfu";
+const DCEP_OPEN: u8 = 0x03;
+const DCEP_ACK: u8 = 0x02;
+
+pub fn make_cert() -> Result<(dtls::crypto::Certificate, String), String> {
+    let mut params = rcgen::CertificateParams::new(vec![CERT_NAME.to_string()]).map_err(|e| e.to_string())?;
     let mut dn = rcgen::DistinguishedName::new();
-    dn.push(rcgen::DnType::CommonName, "oxlens-sfu");
+    dn.push(rcgen::DnType::CommonName, CERT_NAME);
     params.distinguished_name = dn;
-    let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).map_err(|e| e.to_string())?;
-    let cert = params.self_signed(&kp).map_err(|e| e.to_string())?;
-    let der = cert.der().to_vec();
-    let digest = Sha256::digest(&der);
-    let hex: Vec<String> = digest.iter().map(|b| format!("{b:02X}")).collect();
-    let private_key = CryptoPrivateKey::from_key_pair(&kp).map_err(|e| e.to_string())?;
-    Ok(Cert { dtls: Certificate { certificate: vec![cert.der().to_owned()], private_key }, fingerprint: format!("sha-256 {}", hex.join(":")) })
+    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).map_err(|e| e.to_string())?;
+    let cert = params.self_signed(&key).map_err(|e| e.to_string())?;
+    let der = cert.der().clone();
+    let digest = Sha256::digest(der.as_ref());
+    let fp = digest.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(":");
+    let private_key = dtls::crypto::CryptoPrivateKey::from_key_pair(&key).map_err(|e| e.to_string())?;
+    Ok((dtls::crypto::Certificate { certificate: vec![der], private_key }, format!("sha-256 {fp}")))
 }
 
-pub async fn bind_udp(ip: IpAddr, port: u16) -> Result<UdpSocket, String> {
-    match UdpSocket::bind(SocketAddr::new(ip, port)).await {
-        Ok(s) => Ok(s),
-        Err(_) => UdpSocket::bind(SocketAddr::new(IpAddr::from([0, 0, 0, 0]), port)).await.map_err(|e| format!("udp {port}: {e}")),
+pub async fn udp_loop(net: Arc<Net>) {
+    let mut buf = vec![0u8; 2048];
+    loop {
+        match net.udp.recv_from(&mut buf).await {
+            Ok((n, from)) => on_packet(&net, PathKey::Udp(from), &buf[..n], Some(from)),
+            Err(e) => {
+                tracing::warn!(kind = "diag", "udp recv: {e}");
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
     }
 }
 
-pub fn spawn_udp(links: Arc<Links>) {
-    tokio::spawn(async move {
-        let sock = links.udp.clone();
-        let mut buf = vec![0u8; 2048];
-        loop {
-            match sock.recv_from(&mut buf).await {
-                Ok((n, from)) => on_datagram(&links, &buf[..n], from, Proto::Udp, None),
-                Err(e) => {
-                    tracing::warn!(kind = "diag", err = %e, "udp recv");
-                    tokio::time::sleep(Duration::from_millis(5)).await;
+pub fn on_packet(net: &Arc<Net>, k: PathKey, b: &[u8], from: Option<SocketAddr>) {
+    match stun::classify(b) {
+        Class::Stun => on_stun(net, k, b, from),
+        Class::Dtls => match net.by_path(&k) {
+            Some(t) => {
+                if t.dtls_in.try_send(b.to_vec()).is_err() {
+                    net.counters.unknown_path.fetch_add(1, Ordering::Relaxed);
                 }
             }
+            None => {
+                net.counters.unknown_path.fetch_add(1, Ordering::Relaxed);
+            }
+        },
+        Class::Rtp => {
+            let Some(t) = net.by_path(&k) else {
+                net.counters.unknown_path.fetch_add(1, Ordering::Relaxed);
+                return;
+            };
+            let rtcp = stun::is_rtcp(b);
+            let plain = {
+                let mut g = lock(&t.srtp_rx);
+                let Some(ctx) = g.as_mut() else { return };
+                let r = if rtcp { ctx.decrypt_rtcp(b) } else { ctx.decrypt_rtp(b) };
+                match r {
+                    Ok(p) => p,
+                    Err(_) => {
+                        net.counters.srtp_fail.fetch_add(1, Ordering::Relaxed);
+                        return;
+                    }
+                }
+            };
+            if let Some(up) = net.up() {
+                up.media(&t, &plain, rtcp);
+            }
         }
-    });
+        Class::Other => {
+            net.counters.demux_unknown.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
-pub fn spawn_tcp(links: Arc<Links>, l: TcpListener) {
-    tokio::spawn(async move {
-        loop {
-            let Ok((s, from)) = l.accept().await else { continue };
-            let _ = s.set_nodelay(true);
-            let lk = links.clone();
-            tokio::spawn(async move { tcp_conn(lk, s, from).await });
-        }
-    });
+fn on_stun(net: &Arc<Net>, k: PathKey, b: &[u8], from: Option<SocketAddr>) {
+    let Some(req) = stun::parse_request(b) else {
+        net.counters.stun_malformed.fetch_add(1, Ordering::Relaxed);
+        return;
+    };
+    let ufrag = req.local_ufrag().to_string();
+    let Some(t) = net.by_ufrag(&ufrag) else {
+        net.counters.stun_unknown_ufrag.fetch_add(1, Ordering::Relaxed);
+        return;
+    };
+    let Some(pwd) = lock(&t.creds).pwd_of(&ufrag).map(str::to_string) else {
+        net.counters.stun_unknown_ufrag.fetch_add(1, Ordering::Relaxed);
+        return;
+    };
+    if !stun::integrity_ok(b, &req, &pwd) || !stun::fingerprint_ok(b) {
+        net.counters.stun_integrity_fail.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    let now = common::time::mono_ms();
+    t.on_check(net, k, &ufrag, req.use_candidate, now);
+    let mapped = from.unwrap_or_else(|| SocketAddr::new(net.ip, net.port));
+    let res = stun::success(&req, mapped, &pwd);
+    net.send_to(k, &res);
 }
 
-async fn tcp_conn(links: Arc<Links>, s: tokio::net::TcpStream, from: SocketAddr) {
-    let (mut r, mut w) = s.into_split();
-    let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+pub async fn tcp_loop(net: Arc<Net>, l: TcpListener) {
+    loop {
+        match l.accept().await {
+            Ok((s, from)) => {
+                let _ = s.set_nodelay(true);
+                let id = net.next_id();
+                tokio::spawn(tcp_conn(net.clone(), s, from, id));
+            }
+            Err(e) => {
+                tracing::warn!(kind = "diag", "tcp accept: {e}");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    }
+}
+
+async fn tcp_conn(net: Arc<Net>, s: TcpStream, from: SocketAddr, id: u64) {
+    let (mut rd, mut wr) = s.into_split();
+    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(1024);
+    net.add_tcp(id, tx);
     let writer = tokio::spawn(async move {
-        while let Some(f) = rx.recv().await {
-            if w.write_all(&f).await.is_err() {
+        while let Some(b) = rx.recv().await {
+            if wr.write_all(&b).await.is_err() {
                 break;
             }
         }
     });
-    let mut d = lc::Deframer::default();
+    let k = PathKey::Tcp(id);
+    let mut d = Deframer::default();
     let mut buf = vec![0u8; 8192];
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(lc::TCP_UNVERIFIED_MS);
-    let mut known = false;
+    let started = Instant::now();
     loop {
-        let n = if known {
-            r.read(&mut buf).await
-        } else {
-            match tokio::time::timeout_at(deadline, r.read(&mut buf)).await {
-                Ok(x) => x,
-                Err(_) => break,
+        let identified = net.by_path(&k).is_some();
+        let wait = if identified { Duration::from_secs(3600) } else { Duration::from_millis(TCP_IDENTIFY_MS).saturating_sub(started.elapsed()) };
+        let n = match tokio::time::timeout(wait, rd.read(&mut buf)).await {
+            Err(_) if !identified => {
+                net.counters.tcp_unidentified.fetch_add(1, Ordering::Relaxed);
+                break;
             }
+            Err(_) => continue,
+            Ok(Ok(0)) | Ok(Err(_)) => break,
+            Ok(Ok(n)) => n,
         };
-        let n = match n {
-            Ok(0) | Err(_) => break,
-            Ok(n) => n,
-        };
-        for f in d.push(&buf[..n]) {
-            if f.is_empty() {
-                continue;
+        d.push(&buf[..n]);
+        let mut bad = false;
+        while let Some(f) = d.next_frame() {
+            match f {
+                Frame::Keepalive => {}
+                Frame::Packet(p) => {
+                    if stun::classify(&p) == Class::Other {
+                        net.counters.tcp_bad_frame.fetch_add(1, Ordering::Relaxed);
+                        bad = true;
+                        break;
+                    }
+                    on_packet(&net, k, &p, Some(from));
+                }
             }
-            on_datagram(&links, &f, from, Proto::Tcp, Some(&tx));
-            known = known || links.by_addr(&from).is_some();
+        }
+        if bad {
+            break;
         }
     }
-    if let Some(t) = links.by_addr(&from) {
-        t.tcp.remove(&from);
-        lock(&t.pairs).tcp_gone(&from);
+    if let Some(t) = net.by_path(&k) {
+        lock(&t.pairs).tcp_closed(id);
     }
+    net.drop_tcp(id);
     writer.abort();
 }
 
-fn reply(links: &Links, data: &[u8], to: SocketAddr, proto: Proto, w: Option<&mpsc::UnboundedSender<Vec<u8>>>) {
-    match (proto, w) {
-        (Proto::Tcp, Some(w)) => {
-            if let Some(f) = lc::frame(data) {
-                let _ = w.send(f);
+pub async fn keepalive_loop(net: Arc<Net>) {
+    let mut iv = tokio::time::interval(Duration::from_millis(TCP_KEEPALIVE_MS));
+    loop {
+        iv.tick().await;
+        for id in net.tcp_ids() {
+            if net.by_path(&PathKey::Tcp(id)).is_some() {
+                net.send_to(PathKey::Tcp(id), &[]);
             }
         }
-        _ => {
-            let _ = links.udp.try_send_to(data, to);
-        }
     }
 }
 
-fn on_datagram(links: &Arc<Links>, data: &[u8], from: SocketAddr, proto: Proto, w: Option<&mpsc::UnboundedSender<Vec<u8>>>) {
-    match lc::classify(data) {
-        Kind::Stun => on_stun(links, data, from, proto, w),
-        Kind::Dtls => {
-            let Some(t) = links.by_addr(&from) else {
-                links.unknown_addr.fetch_add(1, Ordering::Relaxed);
-                return;
-            };
-            on_dtls(links, &t, data, from);
-        }
-        Kind::Rtp => {
-            let Some(t) = links.by_addr(&from) else {
-                links.unknown_addr.fetch_add(1, Ordering::Relaxed);
-                return;
-            };
-            let plain = {
-                let mut g = lock(&t.srtp_in);
-                match g.as_mut() {
-                    Some(c) => c.decrypt_rtp(data).ok(),
-                    None => None,
-                }
-            };
-            if let Some(p) = plain {
-                t.rx_packets.fetch_add(1, Ordering::Relaxed);
-                crate::fwd::shell::ingress(&t, p);
-            }
-        }
-        Kind::Rtcp => {
-            let Some(t) = links.by_addr(&from) else { return };
-            let plain = {
-                let mut g = lock(&t.srtp_in);
-                match g.as_mut() {
-                    Some(c) => c.decrypt_rtcp(data).ok(),
-                    None => None,
-                }
-            };
-            if let Some(p) = plain {
-                crate::rtcp::shell::ingress(&t, &p);
-            }
-        }
-        Kind::Other => {}
-    }
-}
-
-fn on_stun(links: &Arc<Links>, data: &[u8], from: SocketAddr, proto: Proto, w: Option<&mpsc::UnboundedSender<Vec<u8>>>) {
-    let Some(b) = lc::parse_binding(data) else { return };
-    let ufrag = b.local_ufrag().to_string();
-    let Some(t) = links.by_ufrag(&ufrag) else {
-        links.stun_bad.fetch_add(1, Ordering::Relaxed);
-        return;
-    };
-    let Some(pwd) = lock(&t.creds).pwd_of(&ufrag).map(str::to_string) else {
-        links.stun_bad.fetch_add(1, Ordering::Relaxed);
-        return;
-    };
-    if !b.verify(&pwd) {
-        links.stun_bad.fetch_add(1, Ordering::Relaxed);
-        return;
-    }
-    let resp = lc::success(&b.tid, from, &pwd);
-    if proto == Proto::Tcp
-        && let Some(w) = w {
-            t.tcp.insert(from, w.clone());
-        }
-    reply(links, &resp, from, proto, w);
-    links.addrs.insert(from, Arc::downgrade(&t));
-    let now = common::clock::mono_ms();
-    let swapped = lock(&t.creds).checked(&ufrag);
-    if let Some(old) = &swapped {
-        links.ufrags.remove(old);
-        tracing::info!(kind = "ev", spec = "CP-OP-ICE-RESTART", user = %t.user_id, epoch = %links.sfu_id, from = %old, to = %ufrag, label = "LINK.S.checked_new", "ufrag 교체");
-    }
-    let prev_route = lock(&t.pairs).route;
-    let edge = lock(&t.pairs).checked(from, proto, b.use_candidate, now, t.peer_state());
-    if edge == Edge::Alive || (swapped.is_some() && b.use_candidate) {
-        let was = t.set_state(PeerState::Alive);
-        let since = t.suspect_since.swap(0, Ordering::AcqRel);
-        if was == PeerState::Suspect {
-            tracing::info!(kind = "ev", spec = "SV-STATE-PEER-STATE", user = %t.user_id, epoch = %links.sfu_id, from = "suspect", to = "alive", pair = %from, proto = ?proto, suspect_ms = now.saturating_sub(since), "PeerState");
-        }
-    }
-    if b.use_candidate && prev_route != Some(from) {
-        tracing::info!(kind = "ev", spec = "SV-STATE-PEER-STATE", user = %t.user_id, epoch = %links.sfu_id, from = t.peer_state().name(), to = t.peer_state().name(), pair = %from, proto = ?proto, "경로 쌍 지명");
-    }
-}
-
-fn on_dtls(links: &Arc<Links>, t: &Arc<Transport>, data: &[u8], from: SocketAddr) {
-    lock(&t.dtls_from).replace(from);
-    let tx = {
-        let mut g = lock(&t.dtls_tx);
-        if g.is_none() && !t.closed.load(Ordering::Acquire) {
-            let (tx, rx) = mpsc::channel::<Bytes>(256);
-            g.replace(tx);
-            let tt = t.clone();
-            let cert = Certificate { certificate: links.cert.dtls.certificate.clone(), private_key: links.cert.dtls.private_key.clone() };
-            let sfu = links.sfu_id.clone();
-            let h = tokio::spawn(async move { dtls_run(tt, rx, cert, sfu).await });
-            lock(&t.tasks).push(h);
-        }
-        g.clone()
-    };
-    if let Some(tx) = tx {
-        let _ = tx.try_send(Bytes::copy_from_slice(data));
-    }
-}
-
-struct DtlsIo {
-    rx: tokio::sync::Mutex<mpsc::Receiver<Bytes>>,
+struct ChanConn {
+    rx: AsyncMutex<mpsc::Receiver<Vec<u8>>>,
     t: Weak<Transport>,
+    local: SocketAddr,
 }
 
 #[async_trait::async_trait]
-impl webrtc_util::Conn for DtlsIo {
+impl webrtc_util::Conn for ChanConn {
     async fn connect(&self, _addr: SocketAddr) -> webrtc_util::Result<()> {
         Ok(())
     }
 
     async fn recv(&self, buf: &mut [u8]) -> webrtc_util::Result<usize> {
-        let mut rx = self.rx.lock().await;
-        match rx.recv().await {
-            Some(b) => {
-                let n = b.len().min(buf.len());
-                buf[..n].copy_from_slice(&b[..n]);
+        let mut g = self.rx.lock().await;
+        match g.recv().await {
+            Some(p) => {
+                let n = p.len().min(buf.len());
+                buf[..n].copy_from_slice(&p[..n]);
                 Ok(n)
             }
-            None => Err(webrtc_util::Error::Other("closed".to_string())),
+            None => Err(webrtc_util::Error::ErrClosedListener),
         }
     }
 
     async fn recv_from(&self, buf: &mut [u8]) -> webrtc_util::Result<(usize, SocketAddr)> {
         let n = self.recv(buf).await?;
-        Ok((n, SocketAddr::from(([0, 0, 0, 0], 0))))
+        Ok((n, self.local))
     }
 
     async fn send(&self, buf: &[u8]) -> webrtc_util::Result<usize> {
         match self.t.upgrade() {
-            Some(t) if t.send_raw(buf) => Ok(buf.len()),
-            Some(_) => Ok(buf.len()),
-            None => Err(webrtc_util::Error::Other("gone".to_string())),
+            Some(t) => {
+                t.send_raw(buf);
+                Ok(buf.len())
+            }
+            None => Err(webrtc_util::Error::ErrClosedListener),
         }
     }
 
@@ -272,7 +242,7 @@ impl webrtc_util::Conn for DtlsIo {
     }
 
     fn local_addr(&self) -> webrtc_util::Result<SocketAddr> {
-        Ok(SocketAddr::from(([0, 0, 0, 0], 0)))
+        Ok(self.local)
     }
 
     fn remote_addr(&self) -> Option<SocketAddr> {
@@ -288,219 +258,209 @@ impl webrtc_util::Conn for DtlsIo {
     }
 }
 
-async fn dtls_run(t: Arc<Transport>, rx: mpsc::Receiver<Bytes>, cert: Certificate, sfu: String) {
-    let io = Arc::new(DtlsIo { rx: tokio::sync::Mutex::new(rx), t: Arc::downgrade(&t) });
+pub async fn dtls_task(t: Weak<Transport>, rx: mpsc::Receiver<Vec<u8>>, net: Arc<Net>) {
+    let conn = Arc::new(ChanConn { rx: AsyncMutex::new(rx), t: t.clone(), local: SocketAddr::new(net.ip, net.port) });
     let cfg = dtls::config::Config {
-        certificates: vec![cert],
-        srtp_protection_profiles: vec![SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80],
+        certificates: vec![net.cert.clone()],
+        srtp_protection_profiles: vec![dtls::extension::extension_use_srtp::SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80],
         client_auth: dtls::config::ClientAuthType::RequireAnyClientCert,
         insecure_skip_verify: true,
-        mtu: 1200,
+        extended_master_secret: dtls::config::ExtendedMasterSecretType::Request,
+        mtu: DTLS_MTU,
         ..Default::default()
     };
-    let conn = match tokio::time::timeout(Duration::from_secs(30), DTLSConn::new(io, cfg, false, None)).await {
-        Ok(Ok(c)) => c,
+    let started = tokio::time::timeout(Duration::from_secs(DTLS_HANDSHAKE_SECS), dtls::conn::DTLSConn::new(conn, cfg, false, None)).await;
+    let Some(tr) = t.upgrade() else { return };
+    let dc = match started {
+        Ok(Ok(c)) => Arc::new(c),
         Ok(Err(e)) => {
-            tracing::warn!(kind = "diag", user = %t.user_id, epoch = %sfu, err = %e, "DTLS 실패");
-            lock(&t.dtls_tx).take();
+            tracing::warn!(kind = "diag", user = %tr.user, session = %tr.session, role = tr.role.as_str(), "dtls handshake failed: {e}");
             return;
         }
         Err(_) => {
-            tracing::warn!(kind = "diag", user = %t.user_id, epoch = %sfu, "DTLS 시한");
-            lock(&t.dtls_tx).take();
+            tracing::warn!(kind = "diag", user = %tr.user, session = %tr.session, role = tr.role.as_str(), "dtls handshake timed out ({DTLS_HANDSHAKE_SECS}s)");
             return;
         }
     };
-    let state = conn.connection_state().await;
-    let mut sc = webrtc_srtp::config::Config { profile: ProtectionProfile::Aes128CmHmacSha1_80, ..Default::default() };
-    if let Err(e) = sc.extract_session_keys_from_dtls(state, false).await {
-        tracing::warn!(kind = "diag", user = %t.user_id, err = %e, "SRTP 키");
+    let mut keys = webrtc_srtp::config::Config { profile: webrtc_srtp::protection_profile::ProtectionProfile::Aes128CmHmacSha1_80, ..Default::default() };
+    let state = dc.connection_state().await;
+    if let Err(e) = keys.extract_session_keys_from_dtls(state, false).await {
+        tracing::warn!(kind = "diag", user = %tr.user, "srtp keys: {e}");
         return;
     }
-    let k = &sc.keys;
-    let inn = Context::new(&k.remote_master_key, &k.remote_master_salt, ProtectionProfile::Aes128CmHmacSha1_80, None, None);
-    let out = Context::new(&k.local_master_key, &k.local_master_salt, ProtectionProfile::Aes128CmHmacSha1_80, None, None);
-    match (inn, out) {
-        (Ok(i), Ok(o)) => {
-            lock(&t.srtp_in).replace(i);
-            lock(&t.srtp_out).replace(o);
+    let profile = keys.profile;
+    let rx_ctx = webrtc_srtp::context::Context::new(&keys.keys.remote_master_key, &keys.keys.remote_master_salt, profile, None, None);
+    let tx_ctx = webrtc_srtp::context::Context::new(&keys.keys.local_master_key, &keys.keys.local_master_salt, profile, None, None);
+    match (rx_ctx, tx_ctx) {
+        (Ok(r), Ok(x)) => {
+            let _ = lock(&tr.srtp_rx).replace(r);
+            let _ = lock(&tr.srtp_tx).replace(x);
         }
         _ => {
-            tracing::warn!(kind = "diag", user = %t.user_id, "SRTP 맥락");
+            tracing::warn!(kind = "diag", user = %tr.user, "srtp context build failed");
             return;
         }
     }
-    t.connected_at.store(common::clock::wall_ms(), Ordering::Release);
-    tracing::info!(kind = "ev", spec = "SV-STATE-PEER-STATE", user = %t.user_id, epoch = %sfu, role = ?t.role, "DTLS 수립 · SRTP 준비");
-    crate::fwd::shell::on_connected(&t);
-    sctp_run(t, Arc::new(conn)).await;
+    tr.dtls_up.store(true, Ordering::Release);
+    tracing::info!(kind = "ev", spec = "RULE-LINK-TRANSPORT", user = %tr.user, session = %tr.session, role = tr.role.as_str(), "dtls up — srtp keys exported");
+    let (app_tx, app_rx) = mpsc::channel::<Vec<u8>>(1024);
+    let reader = {
+        let dc = dc.clone();
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 65_536];
+            while let Ok(n) = dc.read(&mut buf, None).await {
+                if app_tx.send(buf[..n].to_vec()).await.is_err() {
+                    break;
+                }
+            }
+        })
+    };
+    tr.add_task(reader);
+    let stop = tr.stop.subscribe();
+    drop(tr);
+    sctp_loop(t, dc, app_rx, stop).await;
 }
 
-fn dcep_ack() -> Bytes {
-    Bytes::from_static(&[0x02])
+fn dcep_open(b: &[u8]) -> Option<(u8, String)> {
+    if b.len() < 12 || b[0] != DCEP_OPEN {
+        return None;
+    }
+    let chan_type = b[1];
+    let label_len = u16::from_be_bytes([b[8], b[9]]) as usize;
+    let label = b.get(12..12 + label_len).map(|l| String::from_utf8_lossy(l).into_owned())?;
+    Some((chan_type, label))
 }
 
-async fn sctp_run(t: Arc<Transport>, conn: Arc<DTLSConn>) {
-    let (in_tx, mut in_rx) = mpsc::channel::<Bytes>(512);
-    let c2 = conn.clone();
-    let reader = tokio::spawn(async move {
-        let mut buf = vec![0u8; 16384];
-        while let Ok(n) = c2.read(&mut buf, None).await {
-            if in_tx.send(Bytes::copy_from_slice(&buf[..n])).await.is_err() {
-                break;
+fn reliability(chan_type: u8) -> (bool, ReliabilityType) {
+    let unordered = chan_type & 0x80 != 0;
+    let rel = match chan_type & 0x7f {
+        0x01 => ReliabilityType::Rexmit,
+        0x02 => ReliabilityType::Timed,
+        _ => ReliabilityType::Reliable,
+    };
+    (unordered, rel)
+}
+
+async fn flush(assoc: &mut Association, dc: &dtls::conn::DTLSConn) {
+    let now = Instant::now();
+    while let Some(tx) = assoc.poll_transmit(now) {
+        if let Payload::RawEncode(chunks) = tx.payload {
+            for c in chunks {
+                let _ = dc.write(&c, None).await;
             }
         }
-    });
-    lock(&t.tasks).push(reader);
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    lock(&t.dc).tx.replace(out_tx);
-    let remote = SocketAddr::from(([127, 0, 0, 1], 5000));
+    }
+}
+
+async fn sctp_loop(t: Weak<Transport>, dc: Arc<dtls::conn::DTLSConn>, mut app_rx: mpsc::Receiver<Vec<u8>>, mut stop: tokio::sync::watch::Receiver<bool>) {
     let mut ep = Endpoint::new(Arc::new(EndpointConfig::new()), Some(Arc::new(ServerConfig::new())));
+    let remote: SocketAddr = SocketAddr::from(([0, 0, 0, 0], 5000));
     let mut assoc: Option<(AssociationHandle, Association)> = None;
-    let mut sid: Option<u16> = None;
+    let mut chan: Option<u16> = None;
+    let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(1024);
+    let mut buf = vec![0u8; 65_536];
     loop {
-        let wake = assoc.as_ref().and_then(|(_, a)| a.poll_timeout());
-        let sleep_until = wake.map(tokio::time::Instant::from_std).unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(3600));
+        let deadline = assoc.as_ref().and_then(|(_, a)| a.poll_timeout());
+        let sleep = async {
+            match deadline {
+                Some(d) => tokio::time::sleep_until(tokio::time::Instant::from_std(d)).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
         tokio::select! {
-            pkt = in_rx.recv() => {
-                let Some(pkt) = pkt else { break };
-                if let Some((h, ev)) = ep.handle(Instant::now(), remote, None, None, pkt) {
-                    match ev {
-                        DatagramEvent::NewAssociation(a) => assoc = Some((h, a)),
-                        DatagramEvent::AssociationEvent(e) => {
-                            if let Some((_, a)) = assoc.as_mut() {
-                                a.handle_event(e);
-                            }
+            _ = stop.changed() => break,
+            got = app_rx.recv() => {
+                let Some(pkt) = got else { break };
+                let Some((ch, ev)) = ep.handle(Instant::now(), remote, None, None, Bytes::from(pkt)) else { continue };
+                match ev {
+                    DatagramEvent::NewAssociation(a) => assoc = Some((ch, a)),
+                    DatagramEvent::AssociationEvent(e) => {
+                        if let Some((_, a)) = assoc.as_mut() {
+                            a.handle_event(e);
                         }
                     }
                 }
             }
-            msg = out_rx.recv() => {
-                let Some(msg) = msg else { break };
-                if let (Some((_, a)), Some(id)) = (assoc.as_mut(), sid)
-                    && let Ok(mut s) = a.stream(id) {
-                        let _ = s.write_sctp(&Bytes::from(msg), PayloadProtocolIdentifier::Binary);
-                    }
+            got = out_rx.recv() => {
+                let Some(frame) = got else { continue };
+                if let (Some((_, a)), Some(id)) = (assoc.as_mut(), chan)
+                    && let Ok(mut s) = a.stream(id)
+                {
+                    let _ = s.write_with_ppi(&frame, PayloadProtocolIdentifier::Binary);
+                }
             }
-            _ = tokio::time::sleep_until(sleep_until) => {
+            _ = sleep => {
                 if let Some((_, a)) = assoc.as_mut() {
                     a.handle_timeout(Instant::now());
                 }
             }
         }
-        while let Some(tr) = ep.poll_transmit() {
-            if let Payload::RawEncode(v) = tr.payload {
-                for b in v {
-                    let _ = conn.write(&b, None).await;
-                }
-            }
-        }
-        let Some((h, a)) = assoc.as_mut() else { continue };
+        let Some((ch, a)) = assoc.as_mut() else { continue };
         while let Some(ev) = a.poll_endpoint_event() {
-            if let Some(ae) = ep.handle_event(*h, ev) {
-                a.handle_event(ae);
+            if let Some(back) = ep.handle_event(*ch, ev) {
+                a.handle_event(back);
             }
         }
-        let mut inbound: Vec<(u16, PayloadProtocolIdentifier, Vec<u8>)> = Vec::new();
         while let Some(ev) = a.poll() {
             match ev {
-                Event::Stream(StreamEvent::Opened { .. }) => {
+                Event::Stream(StreamEvent::Readable { id }) | Event::Stream(StreamEvent::Opened { id }) => {
                     while a.accept_stream().is_some() {}
-                }
-                Event::Stream(StreamEvent::Readable { id }) => {
-                    if let Ok(mut s) = a.stream(id) {
-                        while let Ok(Some(ch)) = s.read_sctp() {
-                            let mut buf = vec![0u8; ch.len()];
-                            if ch.read(&mut buf).is_ok() {
-                                inbound.push((id, ch.ppi, buf));
-                            }
-                        }
-                    }
-                }
-                Event::AssociationLost { .. } => {
-                    tracing::info!(kind = "diag", user = %t.user_id, "SCTP 연관 끊김");
-                }
-                _ => {}
-            }
-        }
-        for (id, ppi, data) in inbound {
-            match ppi {
-                PayloadProtocolIdentifier::Dcep => {
-                    if data.first() == Some(&0x03) && data.len() >= 12 {
-                        let ct = data[1];
-                        let rel = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-                        let ll = u16::from_be_bytes([data[8], data[9]]) as usize;
-                        let label = data.get(12..12 + ll).map(|l| String::from_utf8_lossy(l).to_string()).unwrap_or_default();
-                        if let Ok(mut s) = a.stream(id) {
-                            if label != "unreliable" {
-                                tracing::warn!(kind = "diag", user = %t.user_id, label = %label, "DC 라벨 거부");
-                                let _ = s.close();
-                                continue;
-                            }
-                            let rt = match ct & 0x7f {
-                                1 => ReliabilityType::Rexmit,
-                                2 => ReliabilityType::Timed,
-                                _ => ReliabilityType::Reliable,
-                            };
-                            let _ = s.set_reliability_params(ct & 0x80 != 0, rt, rel);
-                            let _ = s.write_sctp(&dcep_ack(), PayloadProtocolIdentifier::Dcep);
-                        }
-                        sid = Some(id);
-                        let pending: Vec<Vec<u8>> = {
-                            let mut d = lock(&t.dc);
-                            d.open = true;
-                            d.buf.drain(..).collect()
+                    loop {
+                        let chunks = match a.stream(id).and_then(|mut s| s.read_sctp()) {
+                            Ok(Some(c)) => c,
+                            _ => break,
                         };
-                        if let Ok(mut s) = a.stream(id) {
-                            for m in pending {
-                                let _ = s.write_sctp(&Bytes::from(m), PayloadProtocolIdentifier::Binary);
+                        let n = chunks.read(&mut buf).unwrap_or(0);
+                        let data = buf[..n].to_vec();
+                        match chunks.ppi {
+                            PayloadProtocolIdentifier::Dcep => {
+                                if let Some((chan_type, label)) = dcep_open(&data) {
+                                    let Some(tr) = t.upgrade() else { break };
+                                    if label == oxsig::dc::CHANNEL_LABEL {
+                                        if let Ok(mut s) = a.stream(id) {
+                                            let (unordered, rel) = reliability(chan_type);
+                                            let val = if data.len() >= 8 { u32::from_be_bytes([data[4], data[5], data[6], data[7]]) } else { 0 };
+                                            let _ = s.set_reliability_params(unordered, rel, val);
+                                            let _ = s.write_with_ppi(&[DCEP_ACK], PayloadProtocolIdentifier::Dcep);
+                                        }
+                                        chan = Some(id);
+                                        tr.dc.opened(out_tx.clone());
+                                        tracing::info!(kind = "ev", spec = "RULE-LINK-TRANSPORT", user = %tr.user, session = %tr.session, label = %label, chan_type, "data channel open");
+                                        if let Some(net) = tr.net.upgrade()
+                                            && let Some(up) = net.up()
+                                        {
+                                            up.dc_open(&tr);
+                                        }
+                                    } else {
+                                        tracing::warn!(kind = "diag", user = %tr.user, label = %label, "data channel label rejected");
+                                        if let Ok(mut s) = a.stream(id) {
+                                            let _ = s.close();
+                                        }
+                                    }
+                                }
                             }
+                            PayloadProtocolIdentifier::Binary | PayloadProtocolIdentifier::String => {
+                                if Some(id) == chan
+                                    && let Some(tr) = t.upgrade()
+                                    && let Some(net) = tr.net.upgrade()
+                                    && let Some(up) = net.up()
+                                {
+                                    up.dc(&tr, &data);
+                                }
+                            }
+                            _ => {}
                         }
-                        tracing::info!(kind = "diag", user = %t.user_id, stream = id, "DC open");
                     }
                 }
-                PayloadProtocolIdentifier::Binary | PayloadProtocolIdentifier::String => crate::aux::on_dc(&t, &data),
+                Event::Connected => {
+                    if let Some(tr) = t.upgrade() {
+                        tracing::info!(kind = "ev", spec = "RULE-LINK-TRANSPORT", user = %tr.user, session = %tr.session, "sctp association up");
+                    }
+                }
                 _ => {}
             }
         }
-        let now = Instant::now();
-        while let Some(tr) = a.poll_transmit(now) {
-            if let Payload::RawEncode(v) = tr.payload {
-                for b in v {
-                    let _ = conn.write(&b, None).await;
-                }
-            }
-        }
+        flush(a, &dc).await;
     }
-    lock(&t.dc).open = false;
-    let _ = conn.close().await;
-}
-
-pub fn spawn_tick(links: Arc<Links>) {
-    tokio::spawn(async move {
-        let mut iv = tokio::time::interval(Duration::from_millis(1000));
-        let mut n: u64 = 0;
-        loop {
-            iv.tick().await;
-            n += 1;
-            let now = common::clock::mono_ms();
-            for p in links.all() {
-                for t in p.transports() {
-                    let edge = lock(&t.pairs).sweep(now, t.peer_state());
-                    if edge == Edge::Suspect {
-                        t.set_state(PeerState::Suspect);
-                        let _ = t.suspect_since.compare_exchange(0, now, Ordering::AcqRel, Ordering::Acquire);
-                        let ufrag = t.ufrag();
-                        tracing::info!(kind = "ev", spec = "SV-STATE-PEER-STATE", user = %p.user_id, session = %p.session(), epoch = %links.sfu_id, from = "alive", to = "suspect", ufrag = %ufrag, "PeerState");
-                        crate::ops::link_suspect(&p, &ufrag);
-                    }
-                    if n.is_multiple_of(lc::TCP_KEEPALIVE_MS / 1000) {
-                        for w in t.tcp.iter() {
-                            let _ = w.value().send(vec![0, 0]);
-                        }
-                    }
-                }
-            }
-        }
-    });
+    let _ = dc.close().await;
 }

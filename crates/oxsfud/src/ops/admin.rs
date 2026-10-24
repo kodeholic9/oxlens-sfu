@@ -1,115 +1,194 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @8a0d8cf · 정:RULE-OPS-SURFACE · 정:RULE-OPS-OBSERVE · 정:IMPL-OPS-DESTROY-REAP · 정:RULE-FLR-SNAPSHOT · 정:IMPL-ROOM-DERIVED · model: claude-opus-5-5
-//! C 평면의 sfud 쪽 — 방 목록 · 방 상세(정본 · `hidden_count` · 발언권 타이머) · 사용자 미디어 연결(배정표 줄 · 재기록기) · 버림 계수 · `reap` · `destroy`(판 값 확인).
+// spec: v1.2 @36d1dfd · 정:RULE-OPS-SURFACE · 정:RULE-OPS-OBSERVE · 정:IMPL-OPS-DESTROY-REAP · 정:IMPL-ROOM-PERMISSION · 정:RULE-FLR-SNAPSHOT · 운영 규격서 §3-2 · 운영 규격서 §3-3 · 운영 규격서 §3-5 · 운영 규격서 §3-6 · 운영 규격서 §3-9 · 운영 규격서 §4-3 · 연:ROOM.S.perm_floor_down · 연:ROOM.S.perm_floor_up · 연:ROOM.S.perm_pub_down · 연:ROOM.S.perm_pub_up · 연:ROOM.S.perm_absent · 연:PUB.S.perm_down_revoke · 연:PUB.S.perm_down · 연:PUB.S.perm_up · 연:DEV-ROOM-HIDDEN-SELF-PSTATE · 연:RULE-ROOM-PSTATE-ORDER · model: claude-opus-5-5
+//! 운영 물음 — 방 · 방 상세(정본 · hidden 은 수만) · 사용자 연결 · 사용자 미디어(배정표 줄 + 재기록기) · 버림 계수 · 폭파(확인값 `version`) · 한 사람 퇴장 · 권한 비트(적용 → 회수 → 통지).
 
-use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
-use common::handle::Reply;
-use oxsig::err::{ErrCode, Failure};
-use oxsig::room::AffiliationCause;
+use common::bus::envelope::{Admin, Reply};
+use oxsig::{Code, Op, ParticipantStateBody, ParticipantStateBodyType, Permission};
 use serde_json::{json, Value};
 
-use crate::cfg::Ctx;
-use crate::link::{lock, Peer};
+use super::{rooms, Sfu, World};
+use crate::gc::{destroy_room, leave_seven, Path};
+use crate::link::lock;
+use crate::r#pub::core::{bit_for, Bit};
+use crate::room::core::set_override;
 
-fn not_found() -> Reply {
-    Reply::Http { status: 404, body: json!({"error": "not found"}) }
-}
-
-pub fn admin(ctx: &Ctx, method: &str, path: &str, query: &BTreeMap<String, String>, _body: &Value) -> Reply {
-    let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
-    match (method, parts.as_slice()) {
-        ("GET", ["admin", "rooms"]) => {
-            let rooms: Vec<Value> = ctx.rooms.all().iter().map(|r| json!({"room_id": r.id, "members": r.summary().user_count, "member_ids": r.member_ids()})).collect();
-            let total = rooms.len();
-            Reply::ok(json!({"rooms": rooms, "total": total}))
+pub async fn admin(sfu: &Arc<Sfu>, what: Admin) -> Reply {
+    match what {
+        Admin::Rooms => {
+            let w = sfu.world.lock().await;
+            let rows: Vec<Value> = w.rooms.values().map(|r| json!({"room_id": r.id, "members": r.members.len(), "member_ids": r.members.iter().map(|m| m.user.clone()).collect::<Vec<_>>(), "user_count": r.user_count()})).collect();
+            Reply::Ok(json!({"rooms": rows, "total": w.rooms.len()}))
         }
-        ("GET", ["admin", "rooms", id, "snapshot"]) => room_snapshot(ctx, id),
-        ("GET", ["admin", "users", user, "media"]) => match ctx.links.peer(user) {
-            Some(p) => Reply::ok(json!({"links": [media(ctx, &p)]})),
-            None => Reply::fail(Failure::new(ErrCode::PeerNotFound)),
-        },
-        ("GET", ["admin", "links", user]) => match ctx.links.peer(user) {
-            Some(p) => Reply::ok(json!({"links": brief(ctx, &p)})),
-            None => Reply::ok(json!({"links": []})),
-        },
-        ("GET", ["admin", "drops"]) => Reply::ok(ctx.drops.view()),
-        ("POST", ["admin", "rooms", id, "reap", user]) => reap(ctx, id, user),
-        ("POST", ["admin", "rooms", id, "destroy"]) => destroy(ctx, id, query),
-        _ => not_found(),
+        Admin::RoomSnapshot { room_id } => room_snapshot(sfu, &room_id).await,
+        Admin::Users => {
+            let w = sfu.world.lock().await;
+            let rows: Vec<Value> = w.peers.values().map(|p| json!({"user_id": p.user, "session": p.session, "links": links(sfu, p)})).collect();
+            Reply::Ok(json!({"users": rows}))
+        }
+        Admin::UserMedia { user_id } => user_media(sfu, &user_id).await,
+        Admin::Drops => {
+            let mut m = sfu.counters.snapshot();
+            let c = &sfu.net.counters;
+            for (k, v) in [
+                ("stun_integrity_fail", &c.stun_integrity_fail),
+                ("stun_unknown_ufrag", &c.stun_unknown_ufrag),
+                ("stun_malformed", &c.stun_malformed),
+                ("demux_unknown", &c.demux_unknown),
+                ("unknown_path", &c.unknown_path),
+                ("srtp_fail", &c.srtp_fail),
+                ("tcp_unidentified", &c.tcp_unidentified),
+                ("tcp_bad_frame", &c.tcp_bad_frame),
+                ("send_fail", &c.send_fail),
+            ] {
+                m.insert(k.to_string(), Value::from(v.load(Ordering::Relaxed)));
+            }
+            m.insert("bus_put_dropped".into(), Value::from(sfu.bus.dropped.load(Ordering::Relaxed)));
+            m.insert("unit".into(), Value::from(sfu.node.clone()));
+            m.insert("sfu_id".into(), Value::from(sfu.epoch.clone()));
+            Reply::Ok(Value::Object(m))
+        }
+        Admin::Destroy { room_id, if_version } => {
+            let Some(want) = if_version else { return sfu.fail(Code::MissingField.failure_with("if_version", None)) };
+            let n = {
+                let mut w = sfu.world.lock().await;
+                let Some(r) = w.rooms.get(&room_id) else { return sfu.fail(Code::RoomNotFound.failure()) };
+                let cur = format!("{}:{}", sfu.epoch, r.seq);
+                if want != cur {
+                    return sfu.fail(Code::PreconditionFailed.failure_with("if_version 불일치", Some(json!({"current": cur}))));
+                }
+                destroy_room(sfu, &mut w, &room_id)
+            };
+            sfu.bus.undeclare_room(&room_id).await;
+            tracing::info!(kind = "ev", spec = "OP-PATH-ADMIN-ROOMS-ROOM-ID-DESTROY", room = %room_id, notified = n, "room destroyed");
+            Reply::Ok(json!({"room_id": room_id, "destroyed": true, "notified": n}))
+        }
+        Admin::Reap { room_id, user_id } => {
+            let mut w = sfu.world.lock().await;
+            if !w.rooms.contains_key(&room_id) {
+                return sfu.fail(Code::RoomNotFound.failure());
+            }
+            if !w.rooms.get(&room_id).map(|r| r.has(&user_id)).unwrap_or(false) {
+                return sfu.fail(Code::NotInRoom.failure());
+            }
+            leave_seven(sfu, &mut w, &room_id, &user_id, Path::Kick, false);
+            let version = w.rooms.get(&room_id).map(|r| r.version(&sfu.epoch));
+            tracing::info!(kind = "ev", spec = "OP-PATH-ADMIN-ROOMS-ROOM-ID-REAP-USER-ID", room = %room_id, user = %user_id, "user reaped from room");
+            Reply::Ok(json!({"room_id": room_id, "user_id": user_id, "left": true, "version": version}))
+        }
+        Admin::SetPermission { room_id, user_id, permission } => set_permission(sfu, &room_id, &user_id, permission).await,
     }
 }
 
-fn room_snapshot(ctx: &Ctx, id: &str) -> Reply {
-    let Some(r) = ctx.rooms.get(id) else { return Reply::fail(Failure::new(ErrCode::RoomNotFound)) };
-    let (participants, user_count, rec, hidden) = {
-        let g = lock(&r.inner);
-        (g.participants(), g.user_count(), g.rec(), g.members.values().filter(|m| m.hidden).count())
-    };
-    let (tracks, version) = ctx.tracks.snapshot(&r);
-    Reply::ok(json!({"room": {
-        "room_id": r.id, "name": r.name, "capacity": r.capacity,
-        "user_count": user_count, "rec": rec, "version": version,
-        "participants": participants, "hidden_count": hidden, "tracks": tracks,
-        "floor": r.floor.snapshot(),
-        "slots": {"audio": r.audio.speaker(), "video": r.video.speaker()},
-    }}))
-}
-
-fn media(ctx: &Ctx, p: &Peer) -> Value {
-    let t = lock(&p.table);
-    let downs = lock(&p.downs);
-    let mut rows: Vec<&crate::link::table::Row> = t.rows.iter().collect();
-    rows.sort_by_key(|r| r.mid);
-    let mlines: Vec<Value> = rows
-        .iter()
-        .map(|r| {
-            let rw = downs.get(&r.mid).and_then(|d| {
-                let st = lock(&d.st);
-                let last = st.rw.last?;
-                Some(json!({
-                    "src": st.src_user.as_ref().map(|u| json!({"user_id": u, "track_id": st.src_track})),
-                    "seq_off": st.rw.seq_off, "ts_off": st.rw.ts_off,
-                    "last_seq": last.seq, "last_ts": last.ts, "last_at": d.last_at.load(Ordering::Acquire),
-                    "switches": st.rw.switches,
-                }))
-            });
-            json!({"entry": r.entry(), "since": r.since_ms, "rewrite": rw})
-        })
-        .collect();
-    json!({"sfu_id": ctx.boot.epoch, "ufrag": p.sub_transport().ufrag(), "arev": t.arev, "acked": t.ack, "mlines": mlines})
-}
-
-fn brief(ctx: &Ctx, p: &Peer) -> Vec<Value> {
+fn links(sfu: &Sfu, p: &crate::aff::Peer) -> Vec<Value> {
     p.transports()
         .iter()
         .map(|t| {
-            json!({
-                "sfu_id": ctx.boot.epoch, "role": format!("{:?}", t.role).to_lowercase(), "ufrag": t.ufrag(),
-                "state": t.peer_state().name(), "dtls": t.has_dtls(), "dc": lock(&t.dc).open,
-                "rx": t.rx_packets.load(Ordering::Relaxed), "tx": t.tx_packets.load(Ordering::Relaxed),
-                "rooms": p.room_list(), "pub_room": p.pub_room(),
-            })
+            let since = t.suspect_since.load(Ordering::Relaxed);
+            json!({"sfu_id": sfu.epoch, "role": t.role.as_str(), "ufrag": t.cred().ufrag, "state": if t.peer_state() == crate::link::core::PeerState::Alive { "Alive" } else { "Suspect" }, "since": if since > 0 { since } else { t.created_ms }, "dtls": t.dtls_up.load(Ordering::Relaxed), "dc": t.dc.open.load(Ordering::Relaxed)})
         })
         .collect()
 }
 
-fn reap(ctx: &Ctx, id: &str, user: &str) -> Reply {
-    let Some(r) = ctx.rooms.get(id) else { return Reply::fail(Failure::new(ErrCode::RoomNotFound)) };
-    let Some(p) = ctx.links.peer(user).filter(|p| p.in_room(id)) else { return Reply::Http { status: 404, body: json!({"room_id": id, "user_id": user, "left": false}) } };
-    crate::gc::forced(ctx, &r, &p, AffiliationCause::Kick);
-    Reply::ok(json!({"room_id": id, "user_id": user, "left": true, "version": r.version()}))
+async fn room_snapshot(sfu: &Arc<Sfu>, room_id: &str) -> Reply {
+    let w = sfu.world.lock().await;
+    let Some(r) = w.rooms.get(room_id) else { return sfu.fail(Code::RoomNotFound.failure()) };
+    let hot = sfu.room_hot(room_id);
+    let floor = hot.as_ref().map(|h| {
+        let mut f = h.floor.snapshot();
+        let last = h.floor.last_rtp_ms.load(Ordering::Relaxed);
+        f["last_rtp_at"] = if last > 0 { json!(last) } else { Value::Null };
+        f
+    });
+    let slots = hot.as_ref().map(|h| json!({"audio": h.slots[0].speaker_user(), "video": h.slots[1].speaker_user()}));
+    Reply::Ok(json!({"room": {
+        "room_id": r.id, "name": r.name, "capacity": r.capacity, "user_count": r.user_count(), "rec": r.rec(),
+        "version": r.version(&sfu.epoch), "participants": r.participants(), "hidden_count": r.hidden_count(),
+        "tracks": rooms::tracks_of(r, hot.as_deref()), "floor": floor, "slots": slots,
+    }}))
 }
 
-fn destroy(ctx: &Ctx, id: &str, q: &BTreeMap<String, String>) -> Reply {
-    let Some(r) = ctx.rooms.get(id) else { return Reply::fail(Failure::new(ErrCode::RoomNotFound)) };
-    let Some(want) = q.get("if_version") else { return Reply::fail(Failure::new(ErrCode::MissingField).msg("if_version")) };
-    let v = r.version();
-    let have = format!("{}:{}", v.epoch, v.seq);
-    if want != &have {
-        return Reply::fail(Failure::new(ErrCode::PreconditionFailed).details(json!({"expected": want, "actual": have})));
+async fn user_media(sfu: &Arc<Sfu>, user: &str) -> Reply {
+    let w = sfu.world.lock().await;
+    let Some(p) = w.peers.get(user).cloned() else { return Reply::Ok(json!({"links": []})) };
+    let t = p.subt.clone();
+    let table = lock(&t.table).clone();
+    let mlines: Vec<Value> = table
+        .rows
+        .iter()
+        .map(|row| {
+            let d = t.down(row.ssrc);
+            let rewrite = d.as_ref().and_then(|d| {
+                let rw = lock(&d.rw);
+                rw.last_out().map(|(ls, lt)| {
+                    let src = Option::clone(&d.track.load()).map(|tr| json!({"user_id": tr.user, "track_id": tr.track_id}));
+                    json!({"src": src, "seq_off": rw.seq_off(), "ts_off": rw.ts_off(), "last_seq": ls, "last_ts": lt, "last_at": d.last_egress_ms.load(Ordering::Relaxed), "egress": d.egress.load(Ordering::Relaxed)})
+                })
+            });
+            json!({"entry": table.entry(row), "since": row.loaded_at, "rewrite": rewrite})
+        })
+        .collect();
+    Reply::Ok(json!({"links": [{"sfu_id": sfu.epoch, "ufrag": t.cred().ufrag, "arev": table.arev, "acked": t.ack.load(Ordering::Relaxed), "mlines": mlines}]}))
+}
+
+async fn set_permission(sfu: &Arc<Sfu>, room_id: &str, user: &str, next: Permission) -> Reply {
+    let mut w = sfu.world.lock().await;
+    let Some(r) = w.rooms.get_mut(room_id) else { return sfu.fail(Code::RoomNotFound.failure()) };
+    let Some(m) = r.member(user).cloned() else {
+        tracing::info!(kind = "ev", spec = "ROOM.S.perm_absent", room = %room_id, user = %user, "permission for a non-member refused");
+        return sfu.fail(Code::NotInRoom.failure());
+    };
+    let Some(change) = set_override(&mut r.overrides, user, m.permission, next) else {
+        return Reply::Ok(json!({"room_id": room_id, "user_id": user, "changed": false, "permission": next}));
+    };
+    if let Some(mm) = r.member_mut(user) {
+        mm.permission = next;
     }
-    let n = crate::gc::destroy(ctx, &r);
-    Reply::ok(json!({"room_id": id, "destroyed": true, "notified": n}))
+    revoke(sfu, &mut w, room_id, user, &change);
+    let hidden = m.hidden;
+    let now = Sfu::now();
+    if let Some(h) = sfu.room_hot(room_id) {
+        let lowered_floor = change.lowered().contains(&Bit::Floor);
+        let raised_floor = change.raised().contains(&Bit::Floor);
+        if lowered_floor || raised_floor {
+            let o = h.floor.perm(user, raised_floor, now);
+            crate::fwd::floor_out(sfu, &h, o);
+        }
+    }
+    let label = match (change.lowered().is_empty(), change.lowered().contains(&Bit::Floor) || change.raised().contains(&Bit::Floor)) {
+        (false, true) => "ROOM.S.perm_floor_down",
+        (true, true) => "ROOM.S.perm_floor_up",
+        (false, false) => "ROOM.S.perm_pub_down",
+        (true, false) => "ROOM.S.perm_pub_up",
+    };
+    let Some(r) = w.rooms.get_mut(room_id) else { return sfu.fail(Code::RoomNotFound.failure()) };
+    if hidden {
+        let body = ParticipantStateBody { type_: ParticipantStateBodyType::Permission, user_id: user.to_string(), room_id: room_id.to_string(), version: None, permission: next };
+        sfu.to_user(user, Op::ParticipantState, serde_json::to_value(body).unwrap_or_default(), Some(room_id));
+    } else {
+        r.bump();
+        let body = ParticipantStateBody { type_: ParticipantStateBodyType::Permission, user_id: user.to_string(), room_id: room_id.to_string(), version: Some(r.version(&sfu.epoch)), permission: next };
+        sfu.to_room(room_id, Op::ParticipantState, serde_json::to_value(body).unwrap_or_default(), Vec::new());
+    }
+    tracing::info!(kind = "ev", spec = label, room = %room_id, user = %user, hidden, seq = r.seq, "permission changed — enforced before notify");
+    Reply::Ok(json!({"room_id": room_id, "user_id": user, "changed": true, "permission": next, "version": r.version(&sfu.epoch)}))
+}
+
+fn revoke(sfu: &Sfu, w: &mut World, room_id: &str, user: &str, change: &crate::room::core::PermChange) {
+    let lowered = change.lowered();
+    if lowered.is_empty() {
+        return;
+    }
+    let Some(peer) = w.peers.get(user).cloned() else { return };
+    let victims: Vec<_> = peer.tracks().into_iter().filter(|t| !t.half.load(Ordering::Relaxed) && t.room() == room_id && lowered.contains(&bit_for(t.kind, t.source))).collect();
+    for t in &victims {
+        super::pubs::unlist_tracks(sfu, w, room_id, std::slice::from_ref(t));
+        super::pubs::unpublish(sfu, &peer, t);
+        tracing::info!(kind = "ev", spec = "PUB.S.perm_down_revoke", room = %room_id, user = %user, track = %t.track_id, "publication revoked by permission");
+    }
+    if victims.is_empty() {
+        tracing::debug!(kind = "ev", spec = "PUB.S.perm_down", room = %room_id, user = %user, "permission lowered — nothing to revoke");
+    }
 }

@@ -1,117 +1,155 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @8a0d8cf · 정:RULE-AFF-ONE-SET · 정:IMPL-AFF-PUB-ROOM · 정:IMPL-AFF-PUB-MOVE · 연:RULE-AFF-PROC · 연:RULE-AFF-RES-FORM · 연:RULE-AFF-PUB-SELECT-CODEC-RECHECK · 연:AFF.S.reject · 연:AFF.S.reject_perm · 연:AFF.S.select_moved · 정:RULE-AFF-SERVER-SCOPE · model: claude-opus-5-5
-//! AFF — `pub_room` 은 RCU 값(매 패킷 이 값으로 방을 정한다) · 적용 순서 deselect → select · 옮길 때 재검사 둘(코덱 · 권한) 하나라도 걸리면 아무것도 안 옮긴다 · 전이중(쉬는 것 포함)이 따라간다.
+// spec: v1.2 @36d1dfd · 정:RULE-AFF-SERVER-SCOPE · 정:RULE-AFF-ONE-SET · 정:IMPL-AFF-PUB-ROOM · 정:IMPL-BUS-HOME-LOST · 정:IMPL-GC-PEER-REAP · 연:AFF.type.Affiliation · 연:RULE-AFF-PROC · 연:RULE-AFF-RES-FORM · 연:RULE-AFF-CAUSE-USER · 연:RULE-AFF-SINGLE-SPEAK-ROOM · 연:AFF.S.select · 연:AFF.S.select_moved · 연:AFF.S.away · 연:AFF.S.same · 연:AFF.S.join_select · 연:AFF.S.join_select_moved · 연:AFF.S.join_listen · 연:AFF.S.left · 연:AFF.S.left_other · model: claude-opus-5-5
+//! 영역 AFF — 그 서버가 아는 그 세션(Peer): 관계 둘뿐(입장 방 집합 = 구독 집합 · `pub_room` RCU 값) · 홈(node, inst) · 전송 객체 · 발행 트랙(세션 것).
 
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex};
 
-use oxsig::aff::{AffiliationReq, AffiliationRes};
-use oxsig::err::{ErrCode, Failure};
-use oxsig::trk::TrackType;
-use serde_json::json;
+use arc_swap::ArcSwap;
+use common::bus::envelope::Home;
+use oxsig::{Affiliation, PcMode, Permission};
 
-use crate::cfg::Ctx;
-use crate::link::{lock, Peer};
-use crate::r#pub::core::{allowed, codec_matches, room_fmtp};
+use crate::link::{lock, Transport};
+use crate::r#pub::PubTrack;
+use crate::rtcp::core::Budget;
 
-fn away(ctx: &Ctx, p: &Arc<Peer>, room_id: &str) {
-    if let Some(r) = ctx.rooms.get(room_id) {
-        let u = p.user_id.clone();
-        r.floor.apply("pub_away", move |s| s.ws_pub_away(&u));
+pub struct Peer {
+    pub user: String,
+    pub session: String,
+    pub home: Mutex<Home>,
+    pub pc_mode: PcMode,
+    pub participant_type: u8,
+    pub hidden: bool,
+    pub metadata: Option<serde_json::Value>,
+    pub token_permission: Option<Permission>,
+    pub rooms: Mutex<BTreeSet<String>>,
+    pub pub_room: Arc<ArcSwap<Option<String>>>,
+    pub pubt: Arc<Transport>,
+    pub subt: Arc<Transport>,
+    pub tracks: ArcSwap<Vec<Arc<PubTrack>>>,
+    pub budget: Arc<Mutex<Budget>>,
+    pub ext_tags: Mutex<Option<Vec<oxsig::ExtMap>>>,
+    pub created_ms: u64,
+}
+
+impl Peer {
+    pub fn affiliation(&self) -> Affiliation {
+        Affiliation { sub_rooms: self.rooms().into_iter().collect(), pub_room: self.pub_room() }
+    }
+
+    pub fn rooms(&self) -> BTreeSet<String> {
+        lock(&self.rooms).clone()
+    }
+
+    pub fn in_room(&self, r: &str) -> bool {
+        lock(&self.rooms).contains(r)
+    }
+
+    pub fn pub_room(&self) -> Option<String> {
+        Option::clone(&self.pub_room.load())
+    }
+
+    pub fn set_pub_room(&self, r: Option<String>) {
+        self.pub_room.store(Arc::new(r));
+    }
+
+    pub fn transports(&self) -> Vec<Arc<Transport>> {
+        if Arc::ptr_eq(&self.pubt, &self.subt) { vec![self.pubt.clone()] } else { vec![self.pubt.clone(), self.subt.clone()] }
+    }
+
+    pub fn tracks(&self) -> Vec<Arc<PubTrack>> {
+        Vec::clone(&self.tracks.load())
+    }
+
+    pub fn has_half(&self) -> bool {
+        self.tracks.load().iter().any(|t| t.half.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    pub fn track(&self, id: &str) -> Option<Arc<PubTrack>> {
+        self.tracks.load().iter().find(|t| t.track_id == id).cloned()
+    }
+
+    pub fn track_by_ssrc(&self, ssrc: u32) -> Option<Arc<PubTrack>> {
+        self.tracks.load().iter().find(|t| t.decl_ssrc == ssrc || t.phys.load().iter().any(|p| p.ssrc == ssrc)).cloned()
+    }
+
+    pub fn add_track(&self, t: Arc<PubTrack>) {
+        self.tracks.rcu(|v| {
+            let mut v = Vec::clone(v);
+            v.push(t.clone());
+            v
+        });
+    }
+
+    pub fn drop_track(&self, id: &str) -> Option<Arc<PubTrack>> {
+        let found = self.track(id);
+        self.tracks.rcu(|v| {
+            let mut v = Vec::clone(v);
+            v.retain(|t| t.track_id != id);
+            v
+        });
+        found
+    }
+
+    pub fn home(&self) -> Home {
+        lock(&self.home).clone()
+    }
+
+    pub fn set_home(&self, h: &Home) {
+        let slot: &mut Home = &mut lock(&self.home);
+        if slot != h {
+            let _ = std::mem::replace(slot, h.clone());
+        }
+    }
+
+    pub fn close(&self) {
+        for t in self.transports() {
+            t.close();
+        }
     }
 }
 
-fn select(ctx: &Ctx, p: &Arc<Peer>, room_id: &str) {
-    if let Some(r) = ctx.rooms.get(room_id) {
-        let u = p.user_id.clone();
-        r.floor.apply("pub_select", move |s| s.ws_pub_select(&u));
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Move {
+    Same,
+    Select,
+    Moved,
+    Away,
+}
+
+impl Move {
+    pub fn label(self, join: bool) -> &'static str {
+        match (self, join) {
+            (Move::Same, false) => "AFF.S.same",
+            (Move::Select, false) => "AFF.S.select",
+            (Move::Moved, false) => "AFF.S.select_moved",
+            (Move::Away, _) => "AFF.S.away",
+            (Move::Same, true) => "AFF.S.join_listen",
+            (Move::Select, true) => "AFF.S.join_select",
+            (Move::Moved, true) => "AFF.S.join_select_moved",
+        }
     }
 }
 
-pub fn recheck(ctx: &Ctx, p: &Arc<Peer>, to: &str) -> Result<(), Failure> {
-    let Some(room) = ctx.rooms.get(to) else { return Err(Failure::new(ErrCode::RoomNotFound)) };
-    let perm = room.member(&p.user_id).map(|m| m.permission).unwrap_or_default();
-    let pubs: Vec<Arc<crate::r#pub::PubStream>> = lock(&p.pubs).iter().filter(|s| !s.gone.load(Ordering::Acquire)).cloned().collect();
-    for s in &pubs {
-        let name = s.codec.clone().unwrap_or_else(|| room.media.audio().to_string());
-        if !codec_matches(s.kind, &name, s.fmtp.as_deref(), &room.media) {
-            let codec = if s.kind == oxsig::trk::MediaKind::Audio { room.media.audio() } else { room.media.video() };
-            return Err(Failure::new(ErrCode::CodecMismatch).details(json!({"codec": codec, "fmtp": room_fmtp(&room.media, s.kind)})));
-        }
-    }
-    let denied: Vec<&str> = pubs.iter().filter(|s| !allowed(&perm, s.kind, s.source)).map(|s| if s.kind == oxsig::trk::MediaKind::Audio { "publish_audio" } else if s.source == Some(oxsig::trk::Source::Screen) { "publish_screen" } else { "publish_video" }).collect();
-    if !denied.is_empty() {
-        return Err(Failure::new(ErrCode::NotAuthorized).details(json!({"denied": denied})));
-    }
-    Ok(())
-}
-
-pub fn move_tracks(ctx: &Ctx, p: &Arc<Peer>, from: Option<&str>, to: &str) {
-    let Some(dst) = ctx.rooms.get(to) else { return };
-    let pubs: Vec<Arc<crate::r#pub::PubStream>> = lock(&p.pubs).iter().filter(|s| !s.gone.load(Ordering::Acquire)).cloned().collect();
-    for s in pubs {
-        let old = s.room_id();
-        let listed_old = ctx.tracks.entry(&old, &s.track_id).map(|t| t.kind_of == TrackType::Individual).unwrap_or(false);
-        let half = s.half.load(Ordering::Acquire);
-        if half && !listed_old {
-            if let Ok(mut r) = s.room.lock() {
-                r.clone_from(&to.to_string());
-            }
-            continue;
-        }
-        if old == to {
-            continue;
-        }
-        if listed_old
-            && let Some(src) = ctx.rooms.get(&old) {
-                ctx.tracks.remove(&src, &s.track_id);
-            }
-        if let Ok(mut r) = s.room.lock() {
-            r.clone_from(&to.to_string());
-        }
-        if listed_old || (!half && s.listed.load(Ordering::Acquire)) {
-            let e = s.entry(dst.media.video());
-            ctx.tracks.put(&dst, e.clone());
-            if !half {
-                crate::ops::wire::move_track(ctx, &e, &dst);
-            }
-        }
-        tracing::info!(kind = "ev", spec = "AFF.S.select_moved", user = %p.user_id, track = %s.track_id, from = ?from, to = %to, area = "AFF", key = %p.user_id, cause = "AFFILIATION", "발행 트랙 따라감");
+pub fn judge(current: Option<&str>, select: Option<&str>, deselect: Option<&str>) -> (Move, Option<String>) {
+    match (select, deselect) {
+        (Some(s), _) if current.is_none() => (Move::Select, Some(s.to_string())),
+        (Some(s), _) if current != Some(s) => (Move::Moved, Some(s.to_string())),
+        (None, Some(d)) if current == Some(d) => (Move::Away, None),
+        _ => (Move::Same, current.map(str::to_string)),
     }
 }
 
-pub fn apply(ctx: &Ctx, p: &Arc<Peer>, req: &AffiliationReq) -> Result<AffiliationRes, Failure> {
-    let sel_ok = req.pub_select.as_ref().is_some_and(|s| p.in_room(s));
-    if let Some(d) = &req.pub_deselect
-        && p.pub_room().as_deref() == Some(d.as_str()) && !sel_ok {
-            away(ctx, p, d);
-            p.pub_room.store(None);
-            tracing::info!(kind = "ev", spec = "AFF.S.away", user = %p.user_id, room = %d, area = "AFF", key = %p.user_id, cause = "AFFILIATION", "발행 방 해제");
-        }
-    if let Some(s) = &req.pub_select
-        && p.in_room(s) && p.pub_room().as_deref() != Some(s.as_str()) {
-            recheck(ctx, p, s)?;
-            let old = p.pub_room();
-            if let Some(o) = &old {
-                away(ctx, p, o);
-            }
-            p.pub_room.store(Some(Arc::new(s.clone())));
-            select(ctx, p, s);
-            move_tracks(ctx, p, old.as_deref(), s);
-            tracing::info!(kind = "ev", spec = if old.is_some() { "AFF.S.select_moved" } else { "AFF.S.select" }, user = %p.user_id, room = %s, area = "AFF", key = %p.user_id, cause = "AFFILIATION", "발행 방 선택");
-        }
-    Ok(AffiliationRes { sub_rooms: p.room_list(), pub_room: p.pub_room(), cause: "user".to_string(), change_id: req.change_id.clone() })
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-pub fn join_select(ctx: &Ctx, p: &Arc<Peer>, room: &str) {
-    if p.pub_room().as_deref() == Some(room) {
-        return;
+    #[test]
+    fn judge_orders_deselect_then_select() {
+        assert_eq!(judge(None, Some("r1"), None), (Move::Select, Some("r1".into())));
+        assert_eq!(judge(Some("r1"), Some("r3"), Some("r1")), (Move::Moved, Some("r3".into())), "S-sym-IMPL-AFF-PUB-ROOM-1 pub_select 단독도 옛 방을 묵시로 내린다");
+        assert_eq!(judge(Some("r1"), None, Some("r1")), (Move::Away, None));
+        assert_eq!(judge(Some("r1"), None, Some("r9")), (Move::Same, Some("r1".into())), "S-sym-IMPL-AFF-PUB-ROOM-2 모르는 방의 해제는 건너뛴다");
+        assert_eq!(judge(Some("r1"), Some("r1"), None), (Move::Same, Some("r1".into())));
     }
-    let old = p.pub_room();
-    if let Some(o) = &old {
-        away(ctx, p, o);
-    }
-    p.pub_room.store(Some(Arc::new(room.to_string())));
-    select(ctx, p, room);
-    move_tracks(ctx, p, old.as_deref(), room);
 }
