@@ -1,174 +1,122 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @8a0d8cf · 정:RULE-BUS-PLACEMENT · 정:RULE-BUS-PRESENCE · 정:IMPL-BUS-FAULTS · 정:RULE-BUS-EVENTS · model: claude-opus-5-5
-//! BUS 판정(순수) — 배치 해시(FNV-1a 64 → splitmix64) · HRW · 노드 집합(grace) · 방 → node 맵 · 관심 선언 참조계수 · 고립 판정.
+// spec: v1.2 @36d1dfd · 정:RULE-BUS-PRESENCE · 정:RULE-BUS-PLACEMENT · 정:IMPL-BUS-FAULTS · 정:RULE-OPS-SURFACE · model: claude-opus-5-5
+//! 버스 판정(순수) — node 집합(소멸은 grace 동안 후보에 남는다) · 방 → node 지도(토큰이 유일한 입력) · 방 중복 · 자기 고립.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-pub fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in bytes {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h
+pub const BULK_WINDOW_MS: u64 = 1_000;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeEntry {
+    pub inst: String,
+    pub alive: bool,
+    pub gone_at_ms: u64,
 }
 
-pub fn splitmix64(z: u64) -> u64 {
-    let mut z = z.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    z ^= z >> 30;
-    z = z.wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z ^= z >> 27;
-    z = z.wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^= z >> 31;
-    z
-}
-
-pub fn score(node_id: &str, room_id: &str) -> u64 {
-    let mut b = Vec::with_capacity(node_id.len() + 1 + room_id.len());
-    b.extend_from_slice(node_id.as_bytes());
-    b.push(0);
-    b.extend_from_slice(room_id.as_bytes());
-    splitmix64(fnv1a64(&b))
-}
-
-pub fn place<'a>(nodes: impl IntoIterator<Item = &'a String>, room_id: &str) -> Option<String> {
-    let mut best: Option<(u64, &String)> = None;
-    for n in nodes {
-        let s = score(n, room_id);
-        best = match best {
-            None => Some((s, n)),
-            Some((bs, bn)) if s > bs || (s == bs && n < bn) => Some((s, n)),
-            keep => keep,
-        };
-    }
-    best.map(|(_, n)| n.clone())
-}
-
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct NodeSet {
-    live: BTreeMap<String, String>,
-    gone_at: BTreeMap<String, u64>,
+    pub me: String,
+    pub nodes: BTreeMap<String, NodeEntry>,
+    recent_gone: Vec<(String, u64)>,
+    pub isolated: bool,
+    pub last_event: Option<(u64, String, String)>,
 }
 
 impl NodeSet {
-    pub fn put(&mut self, node: &str, inst: &str) {
-        self.live.insert(node.to_string(), inst.to_string());
-        self.gone_at.remove(node);
+    pub fn new(me: &str) -> NodeSet {
+        NodeSet { me: me.to_string(), ..NodeSet::default() }
     }
 
-    pub fn delete(&mut self, node: &str, inst: &str, now_ms: u64) {
-        if self.live.get(node).map(|i| i == inst).unwrap_or(false) {
-            self.live.remove(node);
-            self.gone_at.insert(node.to_string(), now_ms);
+    pub fn put(&mut self, node: &str, inst: &str, now_ms: u64) {
+        self.nodes.insert(node.to_string(), NodeEntry { inst: inst.to_string(), alive: true, gone_at_ms: 0 });
+        if node != self.me {
+            self.isolated = false;
         }
+        self.last_event = Some((now_ms, "put".into(), format!("{node}/{inst}")));
     }
 
-    pub fn candidates(&mut self, now_ms: u64, grace_ms: u64) -> BTreeSet<String> {
-        self.gone_at.retain(|_, at| now_ms.saturating_sub(*at) < grace_ms);
-        self.live.keys().chain(self.gone_at.keys()).cloned().collect()
+    pub fn delete(&mut self, node: &str, inst: &str, now_ms: u64) -> bool {
+        self.last_event = Some((now_ms, "delete".into(), format!("{node}/{inst}")));
+        let Some(e) = self.nodes.get_mut(node) else { return false };
+        if e.inst != inst || !e.alive {
+            return false;
+        }
+        e.alive = false;
+        e.gone_at_ms = now_ms;
+        if node != self.me {
+            self.recent_gone.retain(|(_, t)| now_ms.saturating_sub(*t) <= BULK_WINDOW_MS);
+            self.recent_gone.push((node.to_string(), now_ms));
+            let others_alive = self.nodes.iter().any(|(n, e)| n != &self.me && e.alive);
+            if !others_alive && self.recent_gone.len() >= 2 {
+                self.isolated = true;
+            }
+        }
+        true
     }
 
-    pub fn is_live(&self, node: &str) -> bool {
-        self.live.contains_key(node)
+    pub fn live(&self, node: &str) -> bool {
+        self.nodes.get(node).map(|e| e.alive).unwrap_or(false)
+    }
+
+    pub fn inst_of(&self, node: &str) -> Option<&str> {
+        self.nodes.get(node).filter(|e| e.alive).map(|e| e.inst.as_str())
     }
 
     pub fn node_of_inst(&self, inst: &str) -> Option<&str> {
-        self.live.iter().find(|(_, i)| i.as_str() == inst).map(|(n, _)| n.as_str())
+        self.nodes.iter().find(|(_, e)| e.alive && e.inst == inst).map(|(n, _)| n.as_str())
     }
 
-    pub fn live(&self) -> &BTreeMap<String, String> {
-        &self.live
+    pub fn candidates(&self, now_ms: u64, grace_ms: u64) -> Vec<&str> {
+        self.nodes.iter().filter(|(_, e)| e.alive || now_ms.saturating_sub(e.gone_at_ms) < grace_ms).map(|(n, _)| n.as_str()).collect()
+    }
+
+    pub fn alive_nodes(&self) -> Vec<String> {
+        self.nodes.iter().filter(|(_, e)| e.alive).map(|(n, _)| n.clone()).collect()
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Placed {
-    pub node: String,
-    pub inst: String,
-}
-
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct RoomMap {
-    rooms: BTreeMap<String, BTreeMap<String, String>>,
-    pub duplicates: u64,
+    pub rooms: BTreeMap<String, BTreeSet<(String, String)>>,
+    pub duplicates_seen: u64,
 }
 
 impl RoomMap {
     pub fn put(&mut self, room: &str, node: &str, inst: &str) -> bool {
-        let e = self.rooms.entry(room.to_string()).or_default();
-        e.insert(node.to_string(), inst.to_string());
-        let dup = e.len() > 1;
-        if dup {
-            self.duplicates += 1;
+        let set = self.rooms.entry(room.to_string()).or_default();
+        set.insert((node.to_string(), inst.to_string()));
+        let nodes: BTreeSet<&String> = set.iter().map(|(n, _)| n).collect();
+        if nodes.len() > 1 {
+            self.duplicates_seen += 1;
+            return true;
         }
-        dup
+        false
     }
 
     pub fn delete(&mut self, room: &str, node: &str, inst: &str) {
-        if let Some(e) = self.rooms.get_mut(room) {
-            if e.get(node).map(|i| i == inst).unwrap_or(false) {
-                e.remove(node);
-            }
-            if e.is_empty() {
+        if let Some(set) = self.rooms.get_mut(room) {
+            set.remove(&(node.to_string(), inst.to_string()));
+            if set.is_empty() {
                 self.rooms.remove(room);
             }
         }
     }
 
-    pub fn get(&self, room: &str) -> Option<Placed> {
-        self.rooms.get(room).and_then(|e| e.iter().next()).map(|(n, i)| Placed { node: n.clone(), inst: i.clone() })
+    pub fn node_of(&self, room: &str) -> Option<&str> {
+        self.rooms.get(room).and_then(|s| s.iter().next()).map(|(n, _)| n.as_str())
     }
 
-    pub fn all(&self) -> Vec<(String, Placed)> {
+    pub fn duplicates_now(&self) -> Vec<String> {
         self.rooms
             .iter()
-            .filter_map(|(r, e)| e.iter().next().map(|(n, i)| (r.clone(), Placed { node: n.clone(), inst: i.clone() })))
+            .filter(|(_, s)| s.iter().map(|(n, _)| n).collect::<BTreeSet<_>>().len() > 1)
+            .map(|(r, _)| r.clone())
             .collect()
     }
 
-    pub fn of_node(&self, node: &str) -> Vec<String> {
-        self.rooms.iter().filter(|(_, e)| e.contains_key(node)).map(|(r, _)| r.clone()).collect()
+    pub fn len(&self) -> usize {
+        self.rooms.len()
     }
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct Interest {
-    count: BTreeMap<String, u32>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Edge {
-    Declare,
-    Undeclare,
-    Same,
-}
-
-impl Interest {
-    pub fn add(&mut self, key: &str) -> Edge {
-        let c = self.count.entry(key.to_string()).or_insert(0);
-        let next = c.saturating_add(1);
-        c.clone_from(&next);
-        if next == 1 { Edge::Declare } else { Edge::Same }
-    }
-
-    pub fn remove(&mut self, key: &str) -> Edge {
-        let cur = self.count.get(key).copied();
-        match cur {
-            Some(1) => {
-                self.count.remove(key);
-                Edge::Undeclare
-            }
-            Some(n) => {
-                self.count.insert(key.to_string(), n.saturating_sub(1));
-                Edge::Same
-            }
-            None => Edge::Same,
-        }
-    }
-}
-
-pub fn isolated(remote_before: usize, remote_after: usize, deletes_in_burst: usize) -> bool {
-    remote_before > 0 && remote_after == 0 && deletes_in_burst >= remote_before && remote_before >= 1
 }
 
 #[cfg(test)]
@@ -176,46 +124,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hash_is_fnv_then_splitmix_step() {
-        assert_eq!(fnv1a64(b""), 0xcbf2_9ce4_8422_2325);
-        assert_eq!(fnv1a64(b"a"), 0xaf63_dc4c_8601_ec8c);
-        assert_eq!(splitmix64(0), 0xe220_a839_7b1d_cdaf);
+    fn grace_keeps_candidate_and_delete_never_relocates() {
+        let mut s = NodeSet::new("a");
+        s.put("a", "ia", 0);
+        s.put("b", "ib", 0);
+        assert!(s.delete("b", "ib", 100));
+        assert!(!s.live("b"));
+        assert_eq!(s.candidates(200, 30_000), vec!["a", "b"], "S-sym-RULE-BUS-PLACEMENT-1 소멸한 노드도 grace 동안 후보");
+        assert_eq!(s.candidates(40_000, 30_000), vec!["a"], "S-sym-RULE-BUS-PLACEMENT-3 grace 뒤에만 빠진다");
+        assert!(!s.isolated, "노드 하나의 소멸은 고립이 아니다");
     }
 
     #[test]
-    fn hrw_ties_go_to_lexicographically_smaller() {
-        let nodes: Vec<String> = vec!["node-a".into(), "node-b".into(), "node-c".into()];
-        let r = place(&nodes, "r1");
-        assert!(r.is_some());
-        let one: Vec<String> = vec!["node-b".into()];
-        assert_eq!(place(&one, "anything"), Some("node-b".into()));
-        let moved = (0..200).filter(|i| {
-            let room = format!("room-{i}");
-            place(&nodes, &room) != place(&nodes[..2], &room) && place(&nodes, &room) != Some("node-c".into())
-        });
-        assert_eq!(moved.count(), 0);
+    fn bulk_loss_is_isolation_and_old_inst_delete_is_ignored() {
+        let mut s = NodeSet::new("a");
+        s.put("a", "ia", 0);
+        s.put("b", "ib", 0);
+        s.put("c", "ic", 0);
+        s.put("b", "ib2", 5);
+        assert!(!s.delete("b", "ib", 10), "S-sym-RULE-BUS-KEYSPACE-1 옛 소멸이 새 선언을 덮지 않는다");
+        s.delete("b", "ib2", 20);
+        s.delete("c", "ic", 30);
+        assert!(s.isolated);
+        s.put("b", "ib3", 40);
+        assert!(!s.isolated);
     }
 
     #[test]
-    fn deleted_node_stays_candidate_during_grace() {
-        let mut s = NodeSet::default();
-        s.put("n1", "i1");
-        s.delete("n1", "i1", 1_000);
-        assert!(!s.is_live("n1"));
-        assert!(s.candidates(5_000, 30_000).contains("n1"));
-        assert!(!s.candidates(40_000, 30_000).contains("n1"));
-        s.put("n1", "i2");
-        s.delete("n1", "i1", 50_000);
-        assert!(s.is_live("n1"));
-    }
-
-    #[test]
-    fn interest_declares_once_and_undeclares_last() {
-        let mut i = Interest::default();
-        assert_eq!(i.add("r"), Edge::Declare);
-        assert_eq!(i.add("r"), Edge::Same);
-        assert_eq!(i.remove("r"), Edge::Same);
-        assert_eq!(i.remove("r"), Edge::Undeclare);
-        assert_eq!(i.remove("r"), Edge::Same);
+    fn room_duplicates_are_counted() {
+        let mut m = RoomMap::default();
+        assert!(!m.put("r", "a", "1"));
+        assert!(m.put("r", "b", "2"), "S-sym-RULE-BUS-PLACEMENT-5 방 하나에 node 둘을 탐지한다");
+        assert_eq!(m.duplicates_now(), vec!["r".to_string()]);
+        m.delete("r", "b", "2");
+        assert_eq!(m.node_of("r"), Some("a"));
     }
 }

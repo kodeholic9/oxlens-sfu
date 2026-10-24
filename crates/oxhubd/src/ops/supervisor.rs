@@ -1,521 +1,409 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @8a0d8cf · 정:RULE-OPS-SUPERVISOR · 정:RULE-OPS-SURFACE · 정:RULE-OPS-LOGGER · 정:RULE-BUS-FATE · 정:IMPL-BUS-FAULTS · 정:IMPL-CFG-SYSTEM-FILE · model: claude-opus-5-5
-//! supervisor — 유닛 상태 여덟 · 종류 셋(process · remote · inproc) · 순서(로거 → zenoh → sfu · 정지는 역순) · 준비 신호(로거 stdout 한 줄 · sfu Hello) · backoff · 폭주 창.
+// spec: v1.2 @36d1dfd · 정:RULE-OPS-SUPERVISOR · 정:RULE-OPS-SURFACE · 정:RULE-OPS-LOGGER · 정:RULE-BUS-FATE · 정:IMPL-BUS-FAULTS · 정:IMPL-CFG-SYSTEM-FILE · 정:CAND-BUS-HANDLE-SHAPE · 정:CAND-OPS-SHUTDOWN-NO-RESTART · 운영 규격서 §4-1 · model: claude-opus-5-5
+//! supervisor — 유닛 셋 종류(process · remote · inproc). 준비 = 로거는 stdout `ready epoch=` · sfu 는 gRPC Hello · zenoh 는 세션 열림. 부모 생존 채널은 자식 stdin.
 
-use std::collections::VecDeque;
-use std::future::Future;
-use std::pin::Pin;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common::system::{SystemFile, Unit, UnitKind, UnitRole};
-use serde::Serialize;
-use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use common::bus::grpc::handle_client::HandleClient;
+use common::bus::grpc::HelloReq;
+use common::system::{Unit as UnitCfg, UnitKind, UnitRole};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
-use tokio::sync::Notify;
+use tokio::sync::{mpsc, oneshot};
+use tonic::transport::Channel;
 
-use crate::bus::Bus;
+use super::sup_core::{Core, Effect, Event, Limits, UnitState};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-pub enum UState {
-    Disabled,
-    Inactive,
-    Starting,
-    Running,
-    Stopping,
-    Stopped,
-    Down,
-    Blocked,
+pub const STOP_GRACE: Duration = Duration::from_secs(5);
+const PROBE_EVERY: Duration = Duration::from_millis(200);
+pub const ZENOH_UNIT: &str = "zenoh";
+
+#[derive(Debug, Clone)]
+pub enum UnitEvent {
+    Ready { id: String, role: UnitRole, epoch: String, client: Option<Box<HandleClient<Channel>>> },
+    Down { id: String, role: UnitRole },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Event {
-    Start,
-    Ready,
-    Exited,
-    Stop,
-    Load,
-    BackoffDue,
-    Blocked,
+pub enum Ctl {
+    Boot,
+    Stop(oneshot::Sender<(String, String)>),
+    Load(oneshot::Sender<Result<(String, String), String>>),
+    Kill(oneshot::Sender<(String, String)>),
 }
 
-pub fn step(s: UState, e: &Event) -> Option<UState> {
-    use UState::*;
-    match (s, e) {
-        (Disabled, _) => None,
-        (Inactive, Event::Start) => Some(Starting),
-        (Starting, Event::Ready) => Some(Running),
-        (Starting, Event::Exited) => Some(Down),
-        (Running, Event::Exited) => Some(Down),
-        (Running, Event::Stop) | (Starting, Event::Stop) => Some(Stopping),
-        (Stopping, Event::Exited) => Some(Stopped),
-        (Stopped, Event::Load) => Some(Starting),
-        (Down, Event::BackoffDue) => Some(Starting),
-        (Down, Event::Blocked) => Some(Blocked),
-        (Down, Event::Stop) => Some(Stopped),
-        (Blocked, Event::Load) => Some(Starting),
-        _ => None,
+pub struct Unit {
+    pub cfg: UnitCfg,
+    pub core: Mutex<Core>,
+    pub epoch: Mutex<Option<String>>,
+    pub pid: AtomicU32,
+    ctl: mpsc::UnboundedSender<Ctl>,
+}
+
+impl Unit {
+    pub fn state(&self) -> UnitState {
+        self.core.lock().map(|c| c.state).unwrap_or(UnitState::Down)
+    }
+
+    pub fn epoch(&self) -> Option<String> {
+        self.epoch.lock().ok().and_then(|e| e.clone())
+    }
+
+    pub fn status(&self, now_ms: u64) -> serde_json::Value {
+        let c = self.core.lock().map(|c| c.clone()).unwrap_or_else(|_| Core::new(true));
+        let mut v = serde_json::json!({
+            "id": self.cfg.id, "kind": kind_name(self.cfg.kind), "order": self.cfg.order, "role": role_name(self.cfg.role),
+            "state": c.state.name(), "restarts": c.restarts,
+            "next_retry_ms": c.next_retry_at.map(|t| t.saturating_sub(now_ms)).unwrap_or(0),
+        });
+        if let Some(e) = self.epoch() {
+            v["epoch"] = serde_json::Value::String(e);
+        }
+        v
+    }
+
+    pub fn send(&self, c: Ctl) {
+        let _ = self.ctl.send(c);
     }
 }
 
-pub fn intensity_exceeded(starts: &VecDeque<u64>, now_ms: u64, window_ms: u64, max: u32) -> bool {
-    starts.iter().filter(|t| now_ms.saturating_sub(**t) < window_ms).count() as u32 > max
+pub fn kind_name(k: UnitKind) -> &'static str {
+    match k {
+        UnitKind::Process => "process",
+        UnitKind::Remote => "remote",
+        UnitKind::Inproc => "inproc",
+    }
 }
 
-pub struct Slot {
-    pub conf: Unit,
-    pub state: UState,
-    pub restarts: u32,
-    pub next_retry_ms: Option<u64>,
-    pub epoch: Option<String>,
-    pub build: Option<String>,
-    pub starts: VecDeque<u64>,
-    pub since: u64,
-    pid: Option<u32>,
-    stdin: Option<ChildStdin>,
-    run: u64,
+pub fn role_name(r: UnitRole) -> &'static str {
+    match r {
+        UnitRole::Sfu => "sfu",
+        UnitRole::Log => "log",
+    }
+}
+
+pub struct Shared {
+    pub node: String,
+    pub hub_inst: String,
+    pub extra: Vec<String>,
+    pub limits: Limits,
+    pub hello_timeout: Duration,
+    pub shutting: Arc<AtomicBool>,
+    pub events: mpsc::UnboundedSender<UnitEvent>,
 }
 
 pub struct Supervisor {
-    pub sys: Arc<SystemFile>,
-    pub bus: Arc<Bus>,
-    pub extra: Vec<String>,
-    pub slots: Mutex<Vec<Slot>>,
-    changed: Notify,
-    closing: std::sync::atomic::AtomicBool,
-}
-
-fn now() -> u64 {
-    common::clock::wall_ms()
-}
-
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    match m.lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    }
-}
-
-fn rank(u: &Unit) -> (u32, u32) {
-    let r = match u.role {
-        UnitRole::Log => 0,
-        UnitRole::Bus => 1,
-        UnitRole::Sfu => 2,
-        UnitRole::Other => 3,
-    };
-    (r, u.order)
+    pub units: Vec<Arc<Unit>>,
+    pub zenoh_state: Mutex<UnitState>,
 }
 
 impl Supervisor {
-    pub fn new(sys: Arc<SystemFile>, bus: Arc<Bus>, extra: Vec<String>) -> Arc<Supervisor> {
-        let mut units: Vec<Unit> = sys.unit.clone();
-        units.sort_by_key(rank);
-        let slots = units
-            .into_iter()
-            .map(|u| Slot {
-                state: if u.enabled { UState::Inactive } else { UState::Disabled },
-                conf: u,
-                restarts: 0,
-                next_retry_ms: None,
-                epoch: None,
-                build: None,
-                starts: VecDeque::new(),
-                since: now(),
-                pid: None,
-                stdin: None,
-                run: 0,
-            })
-            .collect();
-        Arc::new(Supervisor { sys, bus, extra, slots: Mutex::new(slots), changed: Notify::new(), closing: std::sync::atomic::AtomicBool::new(false) })
-    }
-
-    pub fn ids(&self, role: Option<UnitRole>) -> Vec<String> {
-        lock(&self.slots).iter().filter(|s| role.map(|r| s.conf.role == r).unwrap_or(true)).map(|s| s.conf.id.clone()).collect()
-    }
-
-    pub fn state_of(&self, id: &str) -> Option<UState> {
-        lock(&self.slots).iter().find(|s| s.conf.id == id).map(|s| s.state)
-    }
-
-    pub fn all_running(&self) -> (bool, Vec<String>) {
-        let g = lock(&self.slots);
-        let down: Vec<String> = g.iter().filter(|s| s.state != UState::Disabled && s.state != UState::Running).map(|s| s.conf.id.clone()).collect();
-        (down.is_empty(), down)
-    }
-
-    pub fn status(&self) -> Value {
-        let g = lock(&self.slots);
-        let mut units: Vec<Value> = vec![json!({"id": "zenoh", "kind": "inproc", "order": 0, "state": "Running", "restarts": 0, "next_retry_ms": null, "epoch": self.bus.session.zid().to_string()})];
-        for s in g.iter() {
-            units.push(json!({
-                "id": s.conf.id,
-                "kind": match s.conf.kind { UnitKind::Process => "process", UnitKind::Remote => "remote", UnitKind::Inproc => "inproc" },
-                "role": format!("{:?}", s.conf.role).to_lowercase(),
-                "order": s.conf.order,
-                "state": s.state,
-                "restarts": s.restarts,
-                "next_retry_ms": s.next_retry_ms.map(|t| t.saturating_sub(now())),
-                "epoch": s.epoch,
-                "addr": s.conf.addr,
-            }));
+    pub fn new(cfgs: &[UnitCfg], shared: Shared) -> Supervisor {
+        let shared = Arc::new(shared);
+        let mut units = Vec::new();
+        let mut sorted: Vec<UnitCfg> = cfgs.to_vec();
+        sorted.sort_by_key(|u| (u.role != UnitRole::Log, u.order));
+        for cfg in sorted {
+            let (tx, rx) = mpsc::unbounded_channel();
+            let unit = Arc::new(Unit { core: Mutex::new(Core::new(cfg.enabled)), epoch: Mutex::new(None), pid: AtomicU32::new(0), ctl: tx, cfg });
+            tokio::spawn(run(unit.clone(), shared.clone(), rx));
+            units.push(unit);
         }
-        json!({"units": units, "supervising": !g.is_empty()})
+        Supervisor { units, zenoh_state: Mutex::new(UnitState::Inactive) }
     }
 
-    fn set(&self, id: &str, e: Event) -> Option<(UState, UState)> {
-        let mut g = lock(&self.slots);
-        let s = g.iter_mut().find(|s| s.conf.id == id)?;
-        let to = step(s.state, &e)?;
-        let from = s.state;
-        s.state = to;
-        s.since = now();
-        drop(g);
-        tracing::info!(kind = "diag", unit = %id, from = ?from, to = ?to, cause = ?e, "unit state");
-        self.changed.notify_waiters();
-        Some((from, to))
+    pub fn find(&self, id: &str) -> Option<Arc<Unit>> {
+        self.units.iter().find(|u| u.cfg.id == id).cloned()
     }
 
-    pub async fn start_all(self: &Arc<Self>) {
-        let ids = self.ids(None);
-        for id in ids {
-            if self.state_of(&id) == Some(UState::Disabled) {
-                continue;
-            }
-            self.clone().launch(&id).await;
-            let deadline = now() + self.sys.supervisor.hello_timeout_ms;
-            while now() < deadline && self.state_of(&id) == Some(UState::Starting) {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
+    pub fn of_role(&self, role: UnitRole) -> Vec<Arc<Unit>> {
+        self.units.iter().filter(|u| u.cfg.role == role).cloned().collect()
+    }
+
+    pub fn boot(&self, role: UnitRole) {
+        for u in self.of_role(role) {
+            u.send(Ctl::Boot);
         }
     }
 
-    fn launch(self: Arc<Self>, id: &str) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        let id = id.to_string();
-        Box::pin(async move { self.launch_inner(&id).await })
-    }
-
-    async fn launch_inner(self: Arc<Self>, id: &str) {
-        let conf = match lock(&self.slots).iter().find(|s| s.conf.id == id) {
-            Some(s) => s.conf.clone(),
-            None => return,
-        };
-        {
-            let mut g = lock(&self.slots);
-            if let Some(s) = g.iter_mut().find(|s| s.conf.id == id) {
-                s.starts.push_back(now());
-                while s.starts.len() > 64 {
-                    s.starts.pop_front();
-                }
-            }
-        }
-        if self.state_of(id).map(|s| s != UState::Starting).unwrap_or(true) {
-            let e = match self.state_of(id) {
-                Some(UState::Inactive) => Event::Start,
-                Some(UState::Stopped) | Some(UState::Blocked) => Event::Load,
-                _ => Event::BackoffDue,
-            };
-            self.set(id, e);
-        }
-        match conf.kind {
-            UnitKind::Process => self.spawn_process(conf).await,
-            UnitKind::Remote => self.attach_remote(conf).await,
-            UnitKind::Inproc => {
-                self.set(id, Event::Ready);
-            }
-        }
-    }
-
-    async fn spawn_process(self: Arc<Self>, conf: Unit) {
-        let id = conf.id.clone();
-        let Some((prog, args)) = conf.cmd.split_first() else {
-            self.exited(&id, 0).await;
-            return;
-        };
-        let mut cmd = Command::new(prog);
-        cmd.args(args).args(&self.extra).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
-        let child = cmd.spawn();
-        let mut child: Child = match child {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(kind = "diag", unit = %id, err = %e, "exec failed — counted as a start");
-                self.exited(&id, 0).await;
+    pub async fn wait_running(&self, role: UnitRole, timeout: Duration) {
+        let deadline = tokio::time::Instant::now() + timeout;
+        while tokio::time::Instant::now() < deadline {
+            if self.of_role(role).iter().all(|u| !matches!(u.state(), UnitState::Inactive | UnitState::Starting)) {
                 return;
             }
-        };
-        let run = {
-            let mut g = lock(&self.slots);
-            let Some(s) = g.iter_mut().find(|s| s.conf.id == id) else { return };
-            s.run += 1;
-            s.pid = child.id();
-            s.stdin = child.stdin.take();
-            s.epoch = None;
-            s.run
-        };
-        if let Some(err) = child.stderr.take() {
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(err).lines();
-                while let Ok(Some(l)) = lines.next_line().await {
-                    eprintln!("{l}");
-                }
-            });
-        }
-        let is_log = conf.role == UnitRole::Log;
-        if let Some(out) = child.stdout.take() {
-            let me = self.clone();
-            let id2 = id.clone();
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(out).lines();
-                while let Ok(Some(l)) = lines.next_line().await {
-                    if is_log
-                        && let Some(ep) = l.strip_prefix("ready epoch=") {
-                            me.ready(&id2, run, ep.trim().to_string(), None).await;
-                            continue;
-                        }
-                    println!("{l}");
-                }
-            });
-        }
-        if conf.role == UnitRole::Sfu {
-            let me = self.clone();
-            let addr = conf.addr.clone().unwrap_or_default();
-            let id2 = id.clone();
-            let timeout = self.sys.supervisor.hello_timeout_ms;
-            tokio::spawn(async move {
-                let deadline = now() + timeout;
-                while now() < deadline {
-                    if me.run_of(&id2) != Some(run) {
-                        return;
-                    }
-                    match me.bus.set_local(&addr).await {
-                        Ok((epoch, build)) => {
-                            me.ready(&id2, run, epoch, Some(build)).await;
-                            return;
-                        }
-                        Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
-                    }
-                }
-                tracing::warn!(kind = "diag", unit = %id2, "hello timeout — killing");
-                me.kill_pid(&id2);
-            });
-        }
-        let me = self.clone();
-        tokio::spawn(async move {
-            let _ = child.wait().await;
-            me.exited(&id, run).await;
-        });
-    }
-
-    async fn attach_remote(self: Arc<Self>, conf: Unit) {
-        let addr = conf.addr.clone().unwrap_or_default();
-        let run = {
-            let mut g = lock(&self.slots);
-            let Some(s) = g.iter_mut().find(|s| s.conf.id == conf.id) else { return };
-            s.run += 1;
-            s.run
-        };
-        let deadline = now() + self.sys.supervisor.hello_timeout_ms;
-        while now() < deadline {
-            if let Ok((epoch, build)) = self.bus.set_local(&addr).await {
-                self.ready(&conf.id, run, epoch, Some(build)).await;
-                let me = self.clone();
-                let id = conf.id.clone();
-                tokio::spawn(async move {
-                    loop {
-                        tokio::time::sleep(Duration::from_millis(1000)).await;
-                        if me.run_of(&id) != Some(run) {
-                            return;
-                        }
-                        if me.bus.local_hello().await.is_none() {
-                            me.exited(&id, run).await;
-                            return;
-                        }
-                    }
-                });
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-        self.exited(&conf.id, run).await;
-    }
-
-    fn run_of(&self, id: &str) -> Option<u64> {
-        lock(&self.slots).iter().find(|s| s.conf.id == id).map(|s| s.run)
-    }
-
-    async fn ready(&self, id: &str, run: u64, epoch: String, build: Option<String>) {
-        let role = {
-            let mut g = lock(&self.slots);
-            let Some(s) = g.iter_mut().find(|s| s.conf.id == id) else { return };
-            if s.run != run {
-                return;
-            }
-            s.epoch = Some(epoch.clone());
-            s.build = build;
-            s.conf.role
-        };
-        if self.set(id, Event::Ready).is_none() {
-            return;
-        }
-        if role == UnitRole::Sfu
-            && let Err(e) = self.bus.declare_node(&epoch).await {
-                tracing::warn!(kind = "diag", unit = %id, err = %e, "node token declare failed");
-            }
-    }
-
-    async fn exited(self: &Arc<Self>, id: &str, run: u64) {
-        let (role, state) = {
-            let mut g = lock(&self.slots);
-            let Some(s) = g.iter_mut().find(|s| s.conf.id == id) else { return };
-            if run != 0 && s.run != run {
-                return;
-            }
-            s.pid = None;
-            s.stdin = None;
-            (s.conf.role, s.state)
-        };
-        if role == UnitRole::Sfu {
-            self.bus.clear_local().await;
-            self.bus.undeclare_node();
-        }
-        let moved = self.set(id, Event::Exited);
-        if state == UState::Stopping || moved.map(|(_, to)| to == UState::Stopped).unwrap_or(false) || self.closing.load(std::sync::atomic::Ordering::Acquire) {
-            return;
-        }
-        let (exceeded, wait) = {
-            let mut g = lock(&self.slots);
-            let Some(s) = g.iter_mut().find(|s| s.conf.id == id) else { return };
-            let sup = &self.sys.supervisor;
-            let exceeded = intensity_exceeded(&s.starts, now(), sup.intensity_window_secs * 1000, sup.intensity_max);
-            let idx = (s.restarts as usize).min(sup.backoff_ms.len().saturating_sub(1));
-            let wait = sup.backoff_ms.get(idx).copied().unwrap_or(1000);
-            s.restarts += 1;
-            s.next_retry_ms = if exceeded { None } else { Some(now() + wait) };
-            (exceeded, wait)
-        };
-        if exceeded {
-            self.set(id, Event::Blocked);
-            tracing::error!(kind = "diag", unit = %id, "backoff storm — blocked");
-            return;
-        }
-        let me = self.clone();
-        let id2 = id.to_string();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(wait)).await;
-            if me.state_of(&id2) == Some(UState::Down) {
-                me.clone().launch(&id2).await;
-            }
-        });
-    }
-
-    fn kill_pid(&self, id: &str) {
-        let pid = lock(&self.slots).iter().find(|s| s.conf.id == id).and_then(|s| s.pid);
-        if let Some(p) = pid {
-            let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(p as i32), nix::sys::signal::Signal::SIGKILL);
-        }
-    }
-
-    pub async fn kill(self: &Arc<Self>, id: &str) -> Option<(UState, UState)> {
-        let from = self.state_of(id)?;
-        self.kill_pid(id);
-        Some((from, UState::Down))
-    }
-
-    pub async fn stop(self: &Arc<Self>, id: &str) -> Option<(UState, UState)> {
-        let from = self.state_of(id)?;
-        if from == UState::Down || from == UState::Blocked {
-            let mut g = lock(&self.slots);
-            if let Some(s) = g.iter_mut().find(|s| s.conf.id == id) {
-                s.state = UState::Stopped;
-            }
-            return Some((from, UState::Stopped));
-        }
-        self.set(id, Event::Stop)?;
-        let (pid, stdin) = {
-            let mut g = lock(&self.slots);
-            let s = g.iter_mut().find(|s| s.conf.id == id)?;
-            (s.pid, s.stdin.take())
-        };
-        if let Some(mut si) = stdin {
-            let _ = si.shutdown().await;
-        }
-        if let Some(p) = pid {
-            let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(p as i32), nix::sys::signal::Signal::SIGTERM);
-        } else if self.state_of(id) == Some(UState::Stopping) {
-            self.exited(id, 0).await;
-        }
-        let deadline = now() + 5_000;
-        while now() < deadline && self.state_of(id) == Some(UState::Stopping) {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        if self.state_of(id) == Some(UState::Stopping) {
-            self.kill_pid(id);
-        }
-        Some((from, UState::Stopped))
     }
 
-    pub async fn load(self: &Arc<Self>, id: &str) -> Option<(UState, UState)> {
-        let from = self.state_of(id)?;
-        if from != UState::Stopped && from != UState::Blocked {
-            return None;
-        }
-        {
-            let mut g = lock(&self.slots);
-            if let Some(s) = g.iter_mut().find(|s| s.conf.id == id) {
-                s.starts.clear();
-                s.restarts = 0;
-            }
-        }
-        self.clone().launch(id).await;
-        Some((from, UState::Starting))
-    }
-
-    pub fn begin_close(&self) {
-        self.closing.store(true, std::sync::atomic::Ordering::Release);
-    }
-
-    pub async fn stop_all(self: &Arc<Self>) {
-        self.begin_close();
-        let mut ids = self.ids(None);
-        ids.reverse();
-        for id in ids {
-            if matches!(self.state_of(&id), Some(UState::Running) | Some(UState::Starting)) {
-                self.stop(&id).await;
-            }
+    pub fn set_zenoh(&self, s: UnitState) {
+        if let Ok(mut g) = self.zenoh_state.lock() {
+            let slot: &mut UnitState = &mut g;
+            let _ = std::mem::replace(slot, s);
         }
     }
 
-    pub fn epoch_of(&self, id: &str) -> Option<String> {
-        lock(&self.slots).iter().find(|s| s.conf.id == id).and_then(|s| s.epoch.clone())
+    pub fn zenoh(&self) -> UnitState {
+        self.zenoh_state.lock().map(|g| g.to_owned()).unwrap_or(UnitState::Down)
     }
 
-    pub fn sfu_units(&self) -> Vec<(String, Option<String>, UState, Option<String>)> {
-        lock(&self.slots).iter().filter(|s| s.conf.role == UnitRole::Sfu).map(|s| (s.conf.id.clone(), s.epoch.clone(), s.state, s.conf.addr.clone())).collect()
+    pub fn down_units(&self) -> Vec<String> {
+        let mut d: Vec<String> = self.units.iter().filter(|u| u.cfg.enabled && u.state() != UnitState::Running).map(|u| u.cfg.id.clone()).collect();
+        if self.zenoh() != UnitState::Running {
+            d.push(ZENOH_UNIT.to_string());
+        }
+        d
+    }
+
+    pub fn status(&self) -> serde_json::Value {
+        let now = common::time::wall_ms();
+        let mut units: Vec<serde_json::Value> = self.units.iter().map(|u| u.status(now)).collect();
+        units.insert(
+            units.iter().position(|u| u["role"] != "log").unwrap_or(units.len()),
+            serde_json::json!({"id": ZENOH_UNIT, "kind": "inproc", "order": 0, "role": "zenoh", "state": self.zenoh().name(), "restarts": 0, "next_retry_ms": 0}),
+        );
+        serde_json::json!({"units": units, "supervising": !self.units.is_empty()})
+    }
+
+    pub async fn stop_role(&self, role: UnitRole) {
+        let mut waits = Vec::new();
+        for u in self.of_role(role).into_iter().rev() {
+            let (tx, rx) = oneshot::channel();
+            u.send(Ctl::Stop(tx));
+            waits.push(rx);
+        }
+        for w in waits {
+            let _ = tokio::time::timeout(STOP_GRACE + Duration::from_secs(1), w).await;
+        }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+fn now_ms() -> u64 {
+    common::time::wall_ms()
+}
 
-    #[test]
-    fn eight_states_down_and_stopped_differ() {
-        use UState::*;
-        assert_eq!(step(Inactive, &Event::Start), Some(Starting));
-        assert_eq!(step(Inactive, &Event::Ready), None, "띄운 적 없는 것이 Running 으로 직행하지 않는다");
-        assert_eq!(step(Running, &Event::Exited), Some(Down));
-        assert_eq!(step(Stopping, &Event::Exited), Some(Stopped));
-        assert_eq!(step(Stopped, &Event::BackoffDue), None, "Stopped 는 되살리지 않는다");
-        assert_eq!(step(Down, &Event::BackoffDue), Some(Starting));
-        assert_eq!(step(Disabled, &Event::Start), None);
+fn transition(unit: &Unit, ev: Event, lim: &Limits) -> (UnitState, Effect, UnitState) {
+    let mut c = unit.core.lock().unwrap_or_else(|p| p.into_inner());
+    let from = c.state;
+    let eff = c.on(ev, now_ms(), lim);
+    let to = c.state;
+    if from != to {
+        tracing::info!(kind = "ev", spec = "RULE-OPS-SUPERVISOR", unit = %unit.cfg.id, from = from.name(), to = to.name(), "unit state");
     }
+    (from, eff, to)
+}
 
-    #[test]
-    fn intensity_counts_failed_execs_in_window() {
-        let starts: VecDeque<u64> = [1000, 2000, 3000, 4000].into_iter().collect();
-        assert!(intensity_exceeded(&starts, 5000, 60_000, 3));
-        assert!(!intensity_exceeded(&starts, 5000, 60_000, 4));
-        assert!(!intensity_exceeded(&starts, 100_000, 60_000, 3));
+struct Running {
+    child: Child,
+    stdin: Option<ChildStdin>,
+}
+
+async fn spawn(unit: &Arc<Unit>, sh: &Arc<Shared>, generation: u64, ready: &mpsc::UnboundedSender<(u64, String, Option<HandleClient<Channel>>)>) -> Option<Running> {
+    match unit.cfg.kind {
+        UnitKind::Process => {
+            let mut cmd = Command::new(&unit.cfg.cmd[0]);
+            cmd.args(&unit.cfg.cmd[1..]).args(&sh.extra).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit()).kill_on_drop(true);
+            let mut child = match cmd.spawn() {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(kind = "ev", spec = "RULE-OPS-SUPERVISOR", unit = %unit.cfg.id, "exec failed: {e}");
+                    return None;
+                }
+            };
+            unit.pid.store(child.id().unwrap_or(0), Ordering::Relaxed);
+            let stdin = child.stdin.take();
+            if let Some(out) = child.stdout.take() {
+                let role = unit.cfg.role;
+                let ready = ready.clone();
+                tokio::spawn(async move {
+                    let mut lines = BufReader::new(out).lines();
+                    while let Ok(Some(l)) = lines.next_line().await {
+                        if role == UnitRole::Log {
+                            if let Some(e) = l.strip_prefix("ready epoch=") {
+                                let _ = ready.send((generation, e.trim().to_string(), None));
+                            }
+                        } else {
+                            println!("{l}");
+                        }
+                    }
+                });
+            }
+            if unit.cfg.role == UnitRole::Sfu {
+                probe(unit.clone(), sh.clone(), generation, ready.clone());
+            }
+            Some(Running { child, stdin })
+        }
+        UnitKind::Remote | UnitKind::Inproc => {
+            probe(unit.clone(), sh.clone(), generation, ready.clone());
+            None
+        }
+    }
+}
+
+fn probe(unit: Arc<Unit>, sh: Arc<Shared>, generation: u64, ready: mpsc::UnboundedSender<(u64, String, Option<HandleClient<Channel>>)>) {
+    let Some(addr) = unit.cfg.addr.clone() else { return };
+    tokio::spawn(async move {
+        let deadline = tokio::time::Instant::now() + sh.hello_timeout;
+        let url = format!("http://{addr}");
+        while tokio::time::Instant::now() < deadline {
+            if let Ok(ep) = Channel::from_shared(url.clone())
+                && let Ok(ch) = ep.connect_timeout(Duration::from_millis(500)).connect().await
+            {
+                let mut c = HandleClient::new(ch);
+                if let Ok(r) = c.hello(HelloReq { node: sh.node.clone(), hub_inst: sh.hub_inst.clone() }).await {
+                    let r = r.into_inner();
+                    tracing::info!(kind = "ev", spec = "CAND-BUS-HANDLE-SHAPE", unit = %unit.cfg.id, epoch = %r.epoch, build = %r.build, "Hello ok");
+                    let _ = ready.send((generation, r.epoch, Some(c)));
+                    return;
+                }
+            }
+            tokio::time::sleep(PROBE_EVERY).await;
+        }
+        tracing::warn!(kind = "diag", unit = %unit.cfg.id, "Hello timed out");
+        let _ = ready.send((generation, String::new(), None));
+    });
+}
+
+fn signal(pid: u32, sig: nix::sys::signal::Signal) {
+    if pid > 0 {
+        let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), sig);
+    }
+}
+
+async fn terminate(r: &mut Option<Running>, unit: &Unit) {
+    if let Some(run) = r.as_mut() {
+        run.stdin = None;
+        signal(unit.pid.load(Ordering::Relaxed), nix::sys::signal::Signal::SIGTERM);
+        if tokio::time::timeout(STOP_GRACE, run.child.wait()).await.is_err() {
+            let _ = run.child.start_kill();
+            let _ = run.child.wait().await;
+        }
+    }
+    let _ = r.take();
+}
+
+async fn run(unit: Arc<Unit>, sh: Arc<Shared>, mut rx: mpsc::UnboundedReceiver<Ctl>) {
+    let (ready_tx, mut ready_rx) = mpsc::unbounded_channel::<(u64, String, Option<HandleClient<Channel>>)>();
+    let mut cur: Option<Running> = None;
+    let mut generation: u64 = 0;
+    let lim = sh.limits.clone();
+    loop {
+        let retry_at = unit.core.lock().ok().and_then(|c| c.next_retry_at);
+        let has_child = cur.is_some();
+        let state = unit.state();
+        tokio::select! {
+            c = rx.recv() => {
+                let Some(c) = c else { break };
+                match c {
+                    Ctl::Boot => {
+                        let (_, eff, _) = transition(&unit, Event::Boot, &lim);
+                        if eff == Effect::Spawn {
+                            generation += 1;
+                            cur = spawn(&unit, &sh, generation, &ready_tx).await;
+                            if cur.is_none() && unit.cfg.kind == UnitKind::Process {
+                                transition(&unit, Event::Exited, &lim);
+                            }
+                        }
+                    }
+                    Ctl::Load(reply) => {
+                        let (from, eff, to) = transition(&unit, Event::Load, &lim);
+                        match eff {
+                            Effect::Refuse(why) => { let _ = reply.send(Err(why.to_string())); }
+                            Effect::Spawn => {
+                                let _ = reply.send(Ok((from.name().to_string(), to.name().to_string())));
+                                generation += 1;
+                                cur = spawn(&unit, &sh, generation, &ready_tx).await;
+                                if cur.is_none() && unit.cfg.kind == UnitKind::Process {
+                                    transition(&unit, Event::Exited, &lim);
+                                }
+                            }
+                            _ => { let _ = reply.send(Ok((from.name().to_string(), to.name().to_string()))); }
+                        }
+                    }
+                    Ctl::Stop(reply) => {
+                        let (from, eff, _) = transition(&unit, Event::Stop, &lim);
+                        if eff == Effect::Terminate {
+                            terminate(&mut cur, &unit).await;
+                            transition(&unit, Event::StopDone, &lim);
+                            let _ = sh.events.send(UnitEvent::Down { id: unit.cfg.id.clone(), role: unit.cfg.role });
+                        }
+                        let _ = reply.send((from.name().to_string(), unit.state().name().to_string()));
+                    }
+                    Ctl::Kill(reply) => {
+                        let from = unit.state();
+                        if let Some(run) = cur.as_mut() {
+                            let _ = run.child.start_kill();
+                            let _ = run.child.wait().await;
+                        }
+                        cur = None;
+                        transition(&unit, Event::Exited, &lim);
+                        let _ = sh.events.send(UnitEvent::Down { id: unit.cfg.id.clone(), role: unit.cfg.role });
+                        let _ = reply.send((from.name().to_string(), unit.state().name().to_string()));
+                    }
+                }
+            }
+            st = async { match cur.as_mut() { Some(r) => r.child.wait().await, None => std::future::pending().await } }, if has_child => {
+                let _ = st;
+                cur = None;
+                unit.pid.store(0, Ordering::Relaxed);
+                if state == UnitState::Stopping {
+                    transition(&unit, Event::StopDone, &lim);
+                } else {
+                    transition(&unit, Event::Exited, &lim);
+                }
+                if let Ok(mut e) = unit.epoch.lock() {
+                    let _ = e.take();
+                }
+                let _ = sh.events.send(UnitEvent::Down { id: unit.cfg.id.clone(), role: unit.cfg.role });
+            }
+            r = ready_rx.recv() => {
+                let Some((g, epoch, client)) = r else { continue };
+                if g != generation {
+                    continue;
+                }
+                if epoch.is_empty() {
+                    if let Some(run) = cur.as_mut() {
+                        let _ = run.child.start_kill();
+                    } else {
+                        transition(&unit, Event::Exited, &lim);
+                    }
+                    continue;
+                }
+                let (_, _, to) = transition(&unit, Event::Ready, &lim);
+                if to == UnitState::Running {
+                    if let Ok(mut e) = unit.epoch.lock() {
+                        let _ = e.insert(epoch.clone());
+                    }
+                    let _ = sh.events.send(UnitEvent::Ready { id: unit.cfg.id.clone(), role: unit.cfg.role, epoch, client: client.map(Box::new) });
+                }
+            }
+            _ = async { match retry_at { Some(t) => tokio::time::sleep(Duration::from_millis(t.saturating_sub(now_ms()))).await, None => std::future::pending().await } } => {
+                if sh.shutting.load(Ordering::Relaxed) {
+                    if let Ok(mut c) = unit.core.lock() {
+                        c.shutting = true;
+                        c.next_retry_at = None;
+                    }
+                    continue;
+                }
+                let (_, eff, _) = transition(&unit, Event::BackoffDue, &lim);
+                if eff == Effect::Spawn {
+                    generation += 1;
+                    cur = spawn(&unit, &sh, generation, &ready_tx).await;
+                    if cur.is_none() && unit.cfg.kind == UnitKind::Process {
+                        transition(&unit, Event::Exited, &lim);
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub fn shutting_mark(sup: &Supervisor) {
+    for u in &sup.units {
+        if let Ok(mut c) = u.core.lock() {
+            c.shutting = true;
+        }
     }
 }
