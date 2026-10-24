@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @8a0d8cf · 연:FLR.wire · 연:RULE-FLR-HEADER · 연:RULE-FLR-MSG-TYPES · 연:RULE-FLR-ACK-BIT · 연:RULE-FLR-TLV · 연:RULE-FLR-TLV-EXT-RULES · 연:RULE-FLR-SEQ · 연:RULE-FLR-TIMERS · model: claude-opus-5-5
-//! 발언권 wire — DC 위 MBCP(머리 2바이트 + TLV) · 메시지 종류 · TLV 번호 · 사유 · 타이머 원장.
+// spec: v1.2 @36d1dfd · 연:FLR.wire · 연:RULE-FLR-HEADER · 연:RULE-FLR-TLV · 연:RULE-FLR-TIMERS · 연:DEV-FLR-TLV-EXT · 연:DEV-FLR-CAUSE-U8 · 연:DEV-FLR-ACK-SEQ · 연:DEV-FLR-GRANTED-SEQ · model: claude-opus-5-5
+//! MBCP — DC 위 발언권 메시지(머리 V·R·A·Type + TLV 개수 · TLV id·len·값) · 원장 상수.
 
 pub const REQUEST: u8 = 0;
 pub const GRANTED: u8 = 1;
@@ -26,6 +26,22 @@ pub mod tlv {
     pub const ROOM: u8 = 29;
 }
 
+pub mod timers {
+    pub const T1_MS: u64 = 4000;
+    pub const T1MAX_MS: u64 = 6000;
+    pub const T2_MS: u64 = 30000;
+    pub const T3_MS: u64 = 3000;
+    pub const T7_MS: u64 = 1000;
+    pub const T8_MS: u64 = 1000;
+    pub const T20_MS: u64 = 1000;
+    pub const T9_MS: u64 = 3000;
+    pub const T21_MS: u64 = 1000;
+    pub const C7: u8 = 10;
+    pub const C8: u8 = 3;
+    pub const C20: u8 = 3;
+    pub const C21: u8 = 3;
+}
+
 pub mod deny {
     pub const ONLY_ONE: u8 = 3;
     pub const RETRY_AFTER: u8 = 4;
@@ -47,24 +63,9 @@ pub mod qpos {
     pub const UNKNOWN: u8 = 255;
 }
 
-pub mod timers {
-    pub const T1_MS: u64 = 4000;
-    pub const T2_MS: u64 = 30000;
-    pub const T3_MS: u64 = 3000;
-    pub const T7_MS: u64 = 1000;
-    pub const T8_MS: u64 = 1000;
-    pub const T20_MS: u64 = 1000;
-    pub const T9_MS: u64 = 3000;
-    pub const T21_MS: u64 = 1000;
-    pub const C7: u32 = 10;
-    pub const C8: u32 = 3;
-    pub const C20: u32 = 3;
-    pub const C21: u32 = 3;
-}
-
+pub const SEQ_WRAP: u32 = 65536;
 pub const RETIRED: &[u8] = &[7, 28, 30];
 pub const MAX_VALUE: usize = 255;
-pub const SEQ_WRAP: u32 = 65536;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Msg {
@@ -79,10 +80,6 @@ pub fn adopted(t: u8) -> bool {
 
 pub fn ack_allowed(t: u8) -> bool {
     matches!(t, GRANTED | TAKEN | DENY | RELEASE | IDLE | QINFO)
-}
-
-pub fn ack_default(t: u8) -> bool {
-    matches!(t, GRANTED | TAKEN | DENY)
 }
 
 pub fn name(t: u8) -> &'static str {
@@ -112,7 +109,7 @@ pub fn encode(m: &Msg) -> Option<Vec<u8>> {
     out.push((m.msg_type & 0x0f) | if m.ack { 0x10 } else { 0 });
     out.push(m.tlvs.len() as u8);
     for (id, v) in &m.tlvs {
-        out.push(*id);
+        out.push(id.to_owned());
         out.push(v.len() as u8);
         out.extend_from_slice(v);
     }
@@ -149,59 +146,67 @@ pub fn decode(b: &[u8]) -> Option<Msg> {
 
 impl Msg {
     pub fn new(msg_type: u8) -> Msg {
-        Msg { msg_type, ack: ack_default(msg_type), tlvs: Vec::new() }
+        Msg { msg_type, ack: false, tlvs: Vec::new() }
     }
 
-    pub fn get(&self, id: u8) -> Option<&[u8]> {
-        self.tlvs.iter().find(|(i, _)| *i == id).map(|(_, v)| v.as_slice())
+    pub fn with_ack(mut self, ack: bool) -> Msg {
+        self.ack = ack;
+        self
     }
 
-    pub fn room(&self) -> Option<String> {
-        self.get(tlv::ROOM).and_then(|v| std::str::from_utf8(v).ok()).map(str::to_string)
-    }
-
-    pub fn priority(&self) -> u8 {
-        self.get(tlv::PRIORITY).and_then(|v| v.first().copied()).unwrap_or(0)
-    }
-
-    pub fn ack_of(&self) -> Option<u8> {
-        self.get(tlv::ACKTYPE).and_then(|v| v.first().copied())
-    }
-
-    pub fn seq(&self) -> Option<u16> {
-        self.get(tlv::SEQ).filter(|v| v.len() == 2).map(|v| u16::from_be_bytes([v[0], v[1]]))
-    }
-
-    pub fn with_u8spare(mut self, id: u8, v: u8) -> Msg {
+    pub fn put_u8spare(mut self, id: u8, v: u8) -> Msg {
         self.tlvs.push((id, vec![v, 0]));
         self
     }
 
-    pub fn with_u8(mut self, id: u8, v: u8) -> Msg {
+    pub fn put_u8(mut self, id: u8, v: u8) -> Msg {
         self.tlvs.push((id, vec![v]));
         self
     }
 
-    pub fn with_u16(mut self, id: u8, v: u16) -> Msg {
+    pub fn put_u16(mut self, id: u8, v: u16) -> Msg {
         self.tlvs.push((id, v.to_be_bytes().to_vec()));
         self
     }
 
-    pub fn with_str(mut self, id: u8, v: &str) -> Msg {
-        let b = v.as_bytes();
-        let n = b.len().min(MAX_VALUE);
-        self.tlvs.push((id, b[..n].to_vec()));
+    pub fn put_pair(mut self, id: u8, a: u8, b: u8) -> Msg {
+        self.tlvs.push((id, vec![a, b]));
         self
     }
 
-    pub fn with_pair(mut self, id: u8, a: u8, b: u8) -> Msg {
-        self.tlvs.push((id, vec![a, b]));
+    pub fn put_str(mut self, id: u8, v: &str) -> Msg {
+        let b = v.as_bytes();
+        self.tlvs.push((id, b[..b.len().min(MAX_VALUE)].to_vec()));
         self
+    }
+
+    pub fn get(&self, id: u8) -> Option<&[u8]> {
+        self.tlvs.iter().find(|(i, _)| i == &id).map(|(_, v)| v.as_slice())
+    }
+
+    pub fn get_u8spare(&self, id: u8) -> Option<u8> {
+        self.get(id).filter(|v| v.len() == 2).map(|v| v[0])
+    }
+
+    pub fn get_u8(&self, id: u8) -> Option<u8> {
+        self.get(id).filter(|v| !v.is_empty()).map(|v| v[0])
+    }
+
+    pub fn get_u16(&self, id: u8) -> Option<u16> {
+        self.get(id).filter(|v| v.len() == 2).map(|v| u16::from_be_bytes([v[0], v[1]]))
+    }
+
+    pub fn get_str(&self, id: u8) -> Option<String> {
+        self.get(id).and_then(|v| std::str::from_utf8(v).ok()).map(str::to_string)
+    }
+
+    pub fn room(&self) -> Option<String> {
+        self.get_str(tlv::ROOM)
     }
 }
 
 pub fn newer(a: u16, b: u16) -> bool {
-    a != b && (a.wrapping_sub(b) as u32) < SEQ_WRAP / 2
+    a != b && (a.wrapping_sub(b) as i16) > 0
 }
 
 #[cfg(test)]
@@ -209,35 +214,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn header_bits_and_round_trip() {
-        let m = Msg::new(TAKEN).with_str(tlv::SPEAKER, "u2").with_u16(tlv::SEQ, 41).with_str(tlv::ROOM, "r1");
-        let b = encode(&m).unwrap_or_default();
+    fn taken_round_trip() {
+        let m = Msg::new(TAKEN).with_ack(true).put_str(tlv::SPEAKER, "u1").put_u16(tlv::SEQ, 41).put_str(tlv::ROOM, "r1");
+        let b = encode(&m).expect("enc");
         assert_eq!(b[0], 0x12);
-        assert_eq!(b[1], 3);
-        assert_eq!(decode(&b), Some(m));
+        let d = decode(&b).expect("dec");
+        assert_eq!(d, m);
+        assert_eq!(d.get_u16(tlv::SEQ), Some(41));
+        assert_eq!(d.room().as_deref(), Some("r1"));
     }
 
     #[test]
-    fn revoke_cannot_carry_ack_bit() {
-        let mut m = Msg::new(REVOKE);
-        assert!(!m.ack);
-        m.ack = true;
-        assert!(encode(&m).is_none());
-    }
-
-    #[test]
-    fn version_bits_and_unadopted_types_drop() {
+    fn rejects_version_and_unknown_and_bad_ack() {
         assert!(decode(&[0x40, 0]).is_none());
         assert!(decode(&[0x07, 0]).is_none());
-        let m = decode(&[0x00, 2, tlv::ROOM, 1, b'r', 99, 5]).unwrap_or(Msg::new(ACK));
-        assert_eq!(m.tlvs.len(), 1);
+        assert!(encode(&Msg::new(REVOKE).with_ack(true)).is_none());
+        let trunc = decode(&[0x05, 2, 8, 2, 0, 1, 29, 9, b'r']).expect("partial");
+        assert_eq!(trunc.tlvs.len(), 1);
     }
 
     #[test]
-    fn seq_newer_wraps() {
-        assert!(newer(1, 0));
+    fn serial_newer_wraps() {
         assert!(newer(0, 65535));
+        assert!(!newer(65535, 0));
         assert!(!newer(5, 5));
-        assert!(!newer(0, 1));
     }
 }
