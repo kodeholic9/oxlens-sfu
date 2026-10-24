@@ -1,166 +1,279 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @8a0d8cf · 정:RULE-DOC-CODE-MIRROR · 정:RULE-DOC-OWNERSHIP · model: claude-opus-5-5
-//! 구조 가드 — 코드 배치는 규격 영역의 거울이다: 영역 없는 최상위 모듈 · 디렉터리 없는 영역 · `may_use` 밖 호출(`server/out/deps.json`)을 센다.
+// spec: v1.2 @36d1dfd · 정:RULE-DOC-CODE-MIRROR · 정:CAND-DOC-GUARD-PLACE · 정:CAND-DOC-ORCHESTRATION-ASPECT · model: claude-opus-5-5
+//! 구조 가드 — 프로세스 크레이트의 최상위 모듈 ↔ 규격 영역 · 디렉터리 없는 개념 영역 · 개념 영역의 `may_use` 밖 호출을 센다. 규격을 못 읽으면 빨강.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
-
-fn spec_dir() -> PathBuf {
-    if let Ok(p) = std::env::var("OXLENS_SPEC") {
-        return PathBuf::from(p);
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../context/spec")
-}
-
-fn crates() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")
-}
+const PROCESS_CRATES: &[&str] = &["oxhubd", "oxsfud", "oxlogd"];
+const ROOT_FILES: &[&str] = &["main", "lib"];
 
 struct Deps {
     concepts: BTreeSet<String>,
     known: BTreeSet<String>,
-    may_use: BTreeMap<String, BTreeSet<String>>,
+    may: BTreeMap<String, BTreeSet<String>>,
+    raw: serde_json::Value,
 }
 
 fn deps() -> Deps {
-    let p = spec_dir().join("server/out/deps.json");
-    let t = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("deps.json {}: {e} — OXLENS_SPEC 로 규격 위치를 준다", p.display()));
-    let v: Value = serde_json::from_str(&t).unwrap_or_else(|e| panic!("deps.json: {e}"));
-    let list = |k: &str| -> BTreeSet<String> { v[k].as_array().cloned().unwrap_or_default().iter().filter_map(Value::as_str).map(str::to_lowercase).collect() };
+    let p = common::spec_root().join("server/out/deps.json");
+    let text = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("규격을 못 읽었다 {}: {e}", p.display()));
+    let raw: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("deps.json: {e}"));
+    let list = |k: &str| -> BTreeSet<String> {
+        raw[k].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).map(str::to_lowercase).collect()).unwrap_or_default()
+    };
     let concepts = list("concepts");
-    let mut known = concepts.clone();
-    known.extend(list("aspects"));
-    let mut may_use = BTreeMap::new();
-    if let Some(a) = v["areas"].as_object() {
-        for (k, x) in a {
-            let set: BTreeSet<String> = x["may_use"].as_array().cloned().unwrap_or_default().iter().filter_map(Value::as_str).map(str::to_lowercase).collect();
-            may_use.insert(k.to_lowercase(), set);
+    let known: BTreeSet<String> = concepts.union(&list("aspects")).cloned().collect();
+    let mut may = BTreeMap::new();
+    if let Some(areas) = raw["areas"].as_object() {
+        for (a, v) in areas {
+            let set = v["may_use"].as_array().map(|x| x.iter().filter_map(|y| y.as_str()).map(str::to_lowercase).collect()).unwrap_or_default();
+            may.insert(a.to_lowercase(), set);
         }
     }
-    Deps { concepts, known, may_use }
+    assert!(!concepts.is_empty(), "S-sym-RULE-DOC-CODE-MIRROR-1 deps.json 에 개념 영역이 없다");
+    Deps { concepts, known, may, raw }
 }
 
-fn modules(src: &Path) -> Vec<(String, bool)> {
-    let mut out = Vec::new();
-    for e in std::fs::read_dir(src).unwrap_or_else(|e| panic!("{}: {e}", src.display())).flatten() {
-        let name = e.file_name().to_string_lossy().to_string();
-        let dir = e.path().is_dir();
-        let m = if dir { name.clone() } else { name.trim_end_matches(".rs").to_string() };
-        if !dir && (m == "main" || m == "lib" || !name.ends_with(".rs")) {
+fn strip(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    let b: Vec<char> = src.chars().collect();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == '/' && i + 1 < b.len() && b[i + 1] == '/' {
+            while i < b.len() && b[i] != '\n' {
+                i += 1;
+            }
             continue;
         }
-        out.push((m, dir));
+        if b[i] == '/' && i + 1 < b.len() && b[i + 1] == '*' {
+            i += 2;
+            while i + 1 < b.len() && !(b[i] == '*' && b[i + 1] == '/') {
+                i += 1;
+            }
+            i += 2;
+            continue;
+        }
+        if b[i] == '"' {
+            out.push('"');
+            i += 1;
+            while i < b.len() && b[i] != '"' {
+                if b[i] == '\\' {
+                    i += 1;
+                }
+                if i < b.len() && b[i] == '\n' {
+                    out.push('\n');
+                }
+                i += 1;
+            }
+            out.push('"');
+            i += 1;
+            continue;
+        }
+        out.push(b[i]);
+        i += 1;
     }
-    out.sort();
     out
 }
 
-fn files(dir: &Path, out: &mut Vec<PathBuf>) {
-    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+fn use_tree(t: &str, pre: &[String], out: &mut Vec<Vec<String>>) {
+    let s = t.trim();
+    let Some(open) = s.find('{') else {
+        let s = s.split(" as ").next().unwrap_or(s);
+        let mut path = pre.to_vec();
+        path.extend(s.split("::").map(str::trim).filter(|p| !p.is_empty()).map(str::to_string));
+        if !path.is_empty() {
+            out.push(path);
+        }
+        return;
+    };
+    let mut head = pre.to_vec();
+    head.extend(s[..open].split("::").map(str::trim).filter(|p| !p.is_empty()).map(str::to_string));
+    let close = s.rfind('}').unwrap_or(s.len());
+    let body = &s[open + 1..close];
+    let (mut depth, mut cur) = (0i32, String::new());
+    for ch in body.chars() {
+        match ch {
+            '{' => {
+                depth += 1;
+                cur.push(ch);
+            }
+            '}' => {
+                depth -= 1;
+                cur.push(ch);
+            }
+            ',' if depth == 0 => {
+                use_tree(&cur, &head, out);
+                cur.clear();
+            }
+            _ => cur.push(ch),
+        }
+    }
+    if !cur.trim().is_empty() {
+        use_tree(&cur, &head, out);
+    }
+}
+
+fn resolve(module: &[String], path: &[String]) -> Option<Vec<String>> {
+    let first = path.first()?;
+    if first == "crate" {
+        return Some(path[1..].to_vec());
+    }
+    if first == "super" || first == "self" {
+        let mut cur = module.to_vec();
+        let mut rest = path;
+        while let Some(p) = rest.first() {
+            if p == "super" {
+                cur.pop()?;
+            } else if p != "self" {
+                break;
+            }
+            rest = &rest[1..];
+        }
+        cur.extend(rest.iter().cloned());
+        return Some(cur);
+    }
+    None
+}
+
+fn module_of(src: &Path, f: &Path) -> Vec<String> {
+    let rel = f.strip_prefix(src).unwrap_or(f).with_extension("");
+    let mut parts: Vec<String> = rel.iter().map(|p| p.to_string_lossy().to_string()).collect();
+    if parts.last().map(|l| l == "mod").unwrap_or(false) || (parts.len() == 1 && ROOT_FILES.contains(&parts[0].as_str())) {
+        parts.pop();
+    }
+    parts
+}
+
+fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
         let p = e.path();
         if p.is_dir() {
-            files(&p, out);
+            rs_files(&p, out);
         } else if p.extension().map(|x| x == "rs").unwrap_or(false) {
             out.push(p);
         }
     }
 }
 
-fn area_of(m: &str) -> String {
-    m.trim_start_matches("r#").to_string()
-}
-
-fn calls(text: &str, known: &BTreeSet<String>) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    let bytes = text.as_bytes();
+fn paths_in(text: &str) -> Vec<(usize, Vec<String>)> {
+    let mut found = Vec::new();
+    let mut spans = Vec::new();
     let mut i = 0;
-    while let Some(off) = text[i..].find("crate::") {
-        let s = i + off + "crate::".len();
-        let rest = &text[s..];
-        if let Some(inner) = rest.strip_prefix('{') {
-            let end = inner.find('}').unwrap_or(inner.len());
-            for part in inner[..end].split(',') {
-                let head = part.trim().split("::").next().unwrap_or("").trim();
-                let a = area_of(head);
-                if known.contains(&a) {
-                    out.insert(a);
-                }
-            }
-        } else {
-            let head: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '#').collect();
-            let a = area_of(&head);
-            if known.contains(&a) {
-                out.insert(a);
-            }
+    while let Some(off) = text[i..].find("use ") {
+        let at = i + off;
+        let before_ok = at == 0 || !text.as_bytes()[at - 1].is_ascii_alphanumeric() && text.as_bytes()[at - 1] != b'_';
+        let rest = &text[at + 4..];
+        let starts = ["crate", "super", "self"].iter().any(|k| rest.trim_start().starts_with(k));
+        if before_ok && starts && let Some(end) = rest.find(';') {
+            let line = text[..at].matches('\n').count() + 1;
+            let mut v = Vec::new();
+            use_tree(&rest[..end], &[], &mut v);
+            found.extend(v.into_iter().map(|p| (line, p)));
+            spans.push((at, at + 4 + end));
+            i = at + 4 + end;
+            continue;
         }
-        i = s;
-        if i >= bytes.len() {
-            break;
+        i = at + 4;
+    }
+    let bytes = text.as_bytes();
+    for kw in ["crate::", "super::", "self::"] {
+        let mut j = 0;
+        while let Some(off) = text[j..].find(kw) {
+            let at = j + off;
+            j = at + kw.len();
+            let prev = if at == 0 { b' ' } else { bytes[at - 1] };
+            if prev.is_ascii_alphanumeric() || prev == b'_' || prev == b':' {
+                continue;
+            }
+            if spans.iter().any(|(a, b)| *a <= at && at < *b) {
+                continue;
+            }
+            let mut k = at;
+            while k < bytes.len() && (bytes[k].is_ascii_alphanumeric() || bytes[k] == b'_' || bytes[k] == b':') {
+                k += 1;
+            }
+            let path: Vec<String> = text[at..k].split("::").filter(|p| !p.is_empty()).map(str::to_string).collect();
+            if path.len() >= 2 {
+                found.push((text[..at].matches('\n').count() + 1, path));
+            }
         }
     }
-    out
+    found
 }
 
 #[test]
-fn code_mirrors_spec_areas() {
+fn mirror_has_no_breaks() {
     let d = deps();
-    let owned: [(&str, &[&str]); 4] = [
-        ("oxsfud", &["link", "room", "aff", "pub", "trk", "sub", "flr", "bus", "fwd", "sim", "rtcp", "aux", "ops"]),
-        ("oxhubd", &["ses", "bus", "ops"]),
-        ("oxlogd", &["ops"]),
-        ("oxadmin", &["ops"]),
-    ];
-    let mut stray = Vec::new();
-    let mut missing = Vec::new();
-    let mut outside = Vec::new();
-    for (krate, must) in owned {
-        let src = crates().join(krate).join("src");
-        let mods = modules(&src);
-        for (m, _) in &mods {
-            if !d.known.contains(&area_of(m)) {
-                stray.push(format!("{krate}/src/{m}"));
-            }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let (mut stray, mut outside, mut seen) = (Vec::new(), Vec::new(), BTreeSet::new());
+    let mut any = false;
+    for c in PROCESS_CRATES {
+        let src = root.join("crates").join(c).join("src");
+        if !src.join("main.rs").exists() {
+            continue;
         }
-        for a in must {
-            if !mods.iter().any(|(m, dir)| *dir && area_of(m) == *a) {
-                missing.push(format!("{krate}/src/{a}/"));
-            }
-        }
-        for (m, _) in &mods {
-            let a = area_of(m);
-            if !d.concepts.contains(&a) {
+        any = true;
+        for e in std::fs::read_dir(&src).into_iter().flatten().flatten() {
+            let p = e.path();
+            let name = if p.is_dir() { p.file_name().map(|n| n.to_string_lossy().to_string()) } else { p.file_stem().map(|n| n.to_string_lossy().to_string()) };
+            let Some(name) = name else { continue };
+            if p.is_file() && (p.extension().map(|x| x != "rs").unwrap_or(true) || ROOT_FILES.contains(&name.as_str())) {
                 continue;
             }
-            let allowed = d.may_use.get(&a).cloned().unwrap_or_default();
-            let mut fs = Vec::new();
-            let p = src.join(m);
-            if p.is_dir() {
-                files(&p, &mut fs);
-            } else {
-                fs.push(src.join(format!("{m}.rs")));
+            seen.insert(name.clone());
+            if !d.known.contains(&name) {
+                stray.push(format!("{c}/src/{name}"));
             }
-            for f in fs {
-                let text = std::fs::read_to_string(&f).unwrap_or_default();
-                for c in calls(&text, &d.known) {
-                    if c != a && d.concepts.contains(&c) && !allowed.contains(&c) {
-                        outside.push(format!("{} → {c}", f.strip_prefix(crates()).unwrap_or(&f).display()));
-                    }
+        }
+        let mut files = Vec::new();
+        rs_files(&src, &mut files);
+        for f in files {
+            let module = module_of(&src, &f);
+            let Some(me) = module.first().cloned() else { continue };
+            if !d.concepts.contains(&me) {
+                continue;
+            }
+            let text = strip(&std::fs::read_to_string(&f).unwrap_or_default());
+            for (line, p) in paths_in(&text) {
+                let Some(r) = resolve(&module, &p) else { continue };
+                let Some(target) = r.first() else { continue };
+                if target == &me || !d.concepts.contains(target) {
+                    continue;
+                }
+                if !d.may.get(&me).map(|s| s.contains(target)).unwrap_or(false) {
+                    outside.push(format!("{}:{line} {} → {}", f.display(), me.to_uppercase(), target.to_uppercase()));
                 }
             }
         }
     }
+    assert!(any, "S-sym-RULE-DOC-CODE-MIRROR-1 프로세스 크레이트가 하나도 없다");
+    let missing: Vec<String> = if PROCESS_CRATES.iter().all(|c| root.join("crates").join(c).join("src/main.rs").exists()) {
+        d.concepts.iter().filter(|c| !seen.contains(*c)).map(|c| c.to_uppercase()).collect()
+    } else {
+        Vec::new()
+    };
     assert!(stray.is_empty(), "S-sym-RULE-DOC-CODE-MIRROR-1 영역 없는 최상위 모듈 {stray:?}");
-    assert!(missing.is_empty(), "S-sym-RULE-DOC-CODE-MIRROR-1 디렉터리 없는 영역 {missing:?}");
+    assert!(missing.is_empty(), "S-sym-RULE-DOC-CODE-MIRROR-1 디렉터리 없는 개념 영역 {missing:?}");
     assert!(outside.is_empty(), "S-sym-RULE-DOC-CODE-MIRROR-1 may_use 밖 호출 {outside:?}");
 }
 
 #[test]
-fn guard_counts_a_planted_violation() {
+fn may_use_is_direct_relation_and_seam_only() {
     let d = deps();
-    let c = calls("use crate::{room::Room, link::lock};\nfn f() { crate::r#pub::x(); }", &d.known);
-    assert_eq!(c, ["link", "pub", "room"].iter().map(|s| s.to_string()).collect::<BTreeSet<_>>(), "S-sym-RULE-DOC-CODE-MIRROR-1 가드가 호출을 센다");
-    let flr_may = d.may_use.get("flr").cloned().unwrap_or_default();
-    assert!(!flr_may.contains("link"), "S-sym-RULE-DOC-CODE-MIRROR-2 may_use 는 전이 닫힘이 아니다 — FLR → LINK 는 밖");
+    let areas = d.raw["areas"].as_object().unwrap_or_else(|| panic!("deps.json areas 없음"));
+    for (a, v) in areas {
+        let set = |k: &str| -> BTreeSet<String> { v[k].as_array().map(|x| x.iter().filter_map(|y| y.as_str()).map(str::to_string).collect()).unwrap_or_default() };
+        let direct: BTreeSet<String> = set("relation").union(&set("seam")).cloned().collect();
+        assert_eq!(set("may_use"), direct, "S-sym-RULE-DOC-CODE-MIRROR-2 {a} 의 may_use 는 관계 직접 ∪ 이음매 직접");
+    }
+}
+
+#[test]
+fn use_tree_flattens_nested_braces() {
+    let mut v = Vec::new();
+    use_tree("crate::a::{b, c::{d, e as f}}", &[], &mut v);
+    assert_eq!(v, vec![vec!["crate", "a", "b"], vec!["crate", "a", "c", "d"], vec!["crate", "a", "c", "e"]].into_iter().map(|x| x.into_iter().map(String::from).collect::<Vec<_>>()).collect::<Vec<_>>());
+    assert_eq!(resolve(&["sub".into(), "x".into()], &["super".into(), "super".into(), "flr".into()]), Some(vec!["flr".to_string()]));
 }

@@ -1,7 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @8a0d8cf · 정:RULE-CFG-THREE-PLACES · 정:RULE-CFG-INDEX · model: claude-opus-5-5
-//! 정책 파일 — 규격 정책 원천(spec/policy/keys.ts)이 지은 `out/policy.rs` 그대로. 모르는 키 · 범위 밖 · 교차 규칙 위반은 기동 실패.
-
+// spec: v1.2 @36d1dfd · 정:RULE-CFG-THREE-PLACES · 정:RULE-CFG-INDEX · 정:IMPL-ROOM-LIFE · 정:IMPL-SES-ADMISSION · 정:IMPL-FLR-POLICY · 정:RULE-SIM-MODES · 정책:hub.room_unused_ttl_secs · 정책:hub.room_departure_ttl_secs · model: claude-opus-5-5
+//! 정책 파일(hub · sfud 공통) — 형 · 기본값 · 범위 · 교차 규칙은 정책 원천(policy/keys.ts)의 생성 구조체 그대로다. 모르는 키 · 범위 밖은 기동 실패.
 use serde::Deserialize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,8 +130,8 @@ impl Default for Hub {
             heartbeat_timeout_ms: 30_000,
             resume_window_ms: 60_000,
             ws_flow_window: 8,
-            room_unused_ttl_secs: 300,
-            room_departure_ttl_secs: 60,
+            room_unused_ttl_secs: 0,
+            room_departure_ttl_secs: 0,
             room_default_capacity: 1_000,
             metadata_max_bytes: 2_048,
             join_admit_per_sec: 0,
@@ -197,5 +196,50 @@ impl Policy {
         if self.media.auto_layer == MediaAutolayer::V2 && self.media.bwe_mode != MediaBwemode::Twcc { return bad("v2-twcc: media.auto_layer = v2 면 media.bwe_mode = twcc(정:RULE-SIM-TICK v2 = TWCC send-side)".to_string()); }
         if self.hook.retry_max as usize > self.hook.retry_backoff_ms.len() { return bad("hook-retry: hook.retry_max ≤ hook.retry_backoff_ms 길이 — 넘으면 마지막 칸을 반복할지가 안 정해졌다".to_string()); }
         Ok(())
+    }
+}
+
+impl Policy {
+    pub fn load(path: &std::path::Path) -> Result<Policy, PolicyError> {
+        let text = std::fs::read_to_string(path).map_err(|e| PolicyError(format!("{}: {e}", path.display())))?;
+        Policy::parse(&text)
+    }
+}
+
+impl LoggingLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LoggingLevel::Trace => "trace",
+            LoggingLevel::Debug => "debug",
+            LoggingLevel::Info => "info",
+            LoggingLevel::Warn => "warn",
+            LoggingLevel::Error => "error",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<LoggingLevel> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "trace" => Some(LoggingLevel::Trace),
+            "debug" => Some(LoggingLevel::Debug),
+            "info" => Some(LoggingLevel::Info),
+            "warn" => Some(LoggingLevel::Warn),
+            "error" => Some(LoggingLevel::Error),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn product_defaults_are_policy_source() {
+        let p = Policy::parse("").expect("empty");
+        assert_eq!(p.hub.room_unused_ttl_secs, 0);
+        assert_eq!(p.hub.room_departure_ttl_secs, 0);
+        assert_eq!(p.media.auto_layer, MediaAutolayer::Off);
+        assert!(Policy::parse("[hub]\nnope = 1\n").is_err());
+        assert!(Policy::parse("[media]\nauto_layer = \"v2\"\nbwe_mode = \"remb\"\n").is_err());
     }
 }

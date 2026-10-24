@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package oxlens.handle.v1;
+package oxlens.b.v1;
 
 service Handle {
   rpc Hello(HelloReq) returns (HelloRes);
