@@ -61,6 +61,9 @@ async fn fast(sfu: Arc<Sfu>) {
             drop(ing);
             send(&t, out);
         }
+        for t in sfu.net.transports().into_iter().filter(|t| t.role.subscribes() && t.dtls_up.load(Ordering::Relaxed)) {
+            probe_tick(&t, now);
+        }
         for h in sfu.hot.load().values() {
             let a = h.slot(oxsig::types::Kind::Audio);
             if a.priming.load(Ordering::Acquire) > 0 {
@@ -71,6 +74,29 @@ async fn fast(sfu: Arc<Sfu>) {
                 send_prime(&sfu, a, now);
             }
         }
+    }
+}
+
+fn probe_tick(t: &Arc<Transport>, now: u64) {
+    let quota = {
+        let b = lock(&t.bwe);
+        let Some(p) = b.probe.as_ref() else { return };
+        if now.saturating_sub(p.started_ms) >= crate::sim::core::PROBE_RUN_MS {
+            return;
+        }
+        let extra = p.rate_bps.saturating_sub(crate::sim::core::LAYER_L_BPS);
+        (extra * crate::sim::core::PROBE_CHUNK_MS / 1000 / 8) as usize
+    };
+    let Some(d) = t.all_downs().into_iter().find(|d| d.rtx_ssrc.is_some() && Option::clone(&d.track.load()).map(|tr| tr.simulcast).unwrap_or(false)) else { return };
+    let mut sent = 0usize;
+    let mut n = 0u64;
+    while sent < quota && n < 64 {
+        let Some(len) = super::send_padding(t, &d) else { break };
+        sent += len;
+        n += 1;
+    }
+    if let Some(p) = lock(&t.bwe).probe.as_mut() {
+        p.sent += n;
     }
 }
 
@@ -173,14 +199,12 @@ async fn second(sfu: Arc<Sfu>) {
                     reports.push(rtcp::reception_report::ReceptionReport { ssrc: *ssrc, fraction_lost: r.fraction, total_lost: (r.lost as u32) & 0x00ff_ffff, last_sequence_number: r.extended_max, jitter: r.jitter, last_sender_report: lsr, delay: dlsr });
                 }
                 drop(ing);
-                let mut out: Vec<Boxed> = Vec::new();
-                if !reports.is_empty() {
-                    out.push(Box::new(rtcp::receiver_report::ReceiverReport { ssrc: SENDER_SSRC, reports, profile_extensions: bytes::Bytes::new() }));
+                for r in reports {
+                    send(&t, vec![Box::new(rtcp::receiver_report::ReceiverReport { ssrc: SENDER_SSRC, reports: vec![r], profile_extensions: bytes::Bytes::new() })]);
                 }
                 if !ssrcs.is_empty() {
-                    out.push(Box::new(rtcp::payload_feedbacks::receiver_estimated_maximum_bitrate::ReceiverEstimatedMaximumBitrate { sender_ssrc: SENDER_SSRC, bitrate: max_bps, ssrcs }));
+                    send(&t, vec![Box::new(rtcp::payload_feedbacks::receiver_estimated_maximum_bitrate::ReceiverEstimatedMaximumBitrate { sender_ssrc: SENDER_SSRC, bitrate: max_bps, ssrcs })]);
                 }
-                send(&t, out);
             }
             if t.role.subscribes() && sfu.auto_on() {
                 layer_tick(&sfu, &t, now);
@@ -196,7 +220,30 @@ fn layer_tick(sfu: &Sfu, t: &Arc<Transport>, now: u64) {
     }
     let verdict = {
         let mut b = lock(&t.bwe);
+        if let Some(p) = b.probe.clone()
+            && now.saturating_sub(p.started_ms) >= crate::sim::core::PROBE_JUDGE_MS
+        {
+            let measured = p.measured_bps();
+            match measured {
+                Some(m) if m >= p.need_bps => {
+                    b.aimd.reset_rate(m);
+                    tracing::info!(kind = "ev", spec = "CAND-SIM-PROBE-SHAPE", user = %t.user, measured_bps = m, need_bps = p.need_bps, sent = p.sent, "probe proved capacity");
+                }
+                _ => {
+                    b.policy.last_demote_ms = Some(now);
+                    tracing::info!(kind = "ev", spec = "CAND-SIM-PROBE-SHAPE", user = %t.user, measured_bps = ?measured, need_bps = p.need_bps, sent = p.sent, "probe did not prove capacity — clean window restarts");
+                }
+            }
+            b.probe = None;
+        }
         let s = b.signals(now, sfu.v2(), downs.len() as u32);
+        if b.probe.is_none()
+            && let Some(rate) = b.policy.probe_due(now, &s)
+        {
+            let need = (crate::sim::core::Policy::demand_bps(s.tracks, crate::sim::core::Layer::High) as f64 * crate::sim::core::HEADROOM) as u64;
+            b.probe = Some(crate::sim::Probe { started_ms: now, rate_bps: rate, need_bps: need, ..Default::default() });
+            tracing::info!(kind = "ev", spec = "CAND-SIM-PROBE-SHAPE", user = %t.user, rate_bps = rate, need_bps = need, "probe started");
+        }
         let v = b.policy.tick(now, &s);
         b.nacks = 0;
         b.drops = 0;
@@ -235,7 +282,7 @@ async fn stall(sfu: Arc<Sfu>) {
                 }
                 let mut stalled = false;
                 for d in t.all_downs().into_iter().filter(|d| d.room().as_deref() == Some(r.id.as_str())) {
-                    let egress = d.egress.load(Ordering::Relaxed);
+                    let egress = d.egress.load(Ordering::Relaxed) + 1;
                     let mark = d.stall_mark.swap(egress, Ordering::AcqRel);
                     let moved = egress != mark;
                     if lock(&d.prefs).paused || !d.acked() || moved {
@@ -252,7 +299,8 @@ async fn stall(sfu: Arc<Sfu>) {
                         let Some(tr) = Option::clone(&d.track.load()) else { continue };
                         let start = if tr.kind == oxsig::types::Kind::Video { m.ready_at.max(tr.first_rtp_ms.load(Ordering::Relaxed)) } else { m.ready_at };
                         let recent = tr.phys.load().iter().any(|ph| ph.last_rtp_ms.load(Ordering::Relaxed) > window_start);
-                        tr.first_rtp_ms.load(Ordering::Relaxed) > 0 && start > 0 && start <= window_start && (recent || tr.kind == oxsig::types::Kind::Audio) && !crate::sub::gate_closed(t, &r.id)
+                        let audio = tr.kind == oxsig::types::Kind::Audio;
+                        (audio || tr.first_rtp_ms.load(Ordering::Relaxed) > 0) && start > 0 && start <= window_start && (recent || audio) && !crate::sub::gate_closed(t, &r.id) && !tr.muted.load(Ordering::Relaxed)
                     };
                     if eligible && mark != 0 {
                         stalled = true;

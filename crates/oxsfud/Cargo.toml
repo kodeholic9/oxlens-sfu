@@ -35,6 +35,7 @@ webrtc-util.workspace = true
 sctp-proto.workspace = true
 rtcp.workspace = true
 async-trait.workspace = true
+nix = { workspace = true, features = ["socket"] }
 zenoh.workspace = true
 
 [lints]

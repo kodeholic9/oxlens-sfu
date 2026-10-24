@@ -131,6 +131,11 @@ impl Aimd {
         self.link.has()
     }
 
+    pub fn reset_rate(&mut self, bps: u64) {
+        self.rate = bps.max(FLOOR_BPS);
+        self.link.reset();
+    }
+
     fn near_max_increase_bps_per_s(&self) -> f64 {
         let frame_bytes = self.rate as f64 / 8.0 / FPS;
         let packets = (frame_bytes / PACKET_BYTES).ceil().max(1.0);
@@ -393,6 +398,18 @@ impl Policy {
             Layer::Low | Layer::Pause => LAYER_L_BPS,
         };
         per * tracks.max(1) as u64
+    }
+
+    pub fn probe_due(&self, now_ms: u64, s: &Signals) -> Option<u64> {
+        if self.layer != Layer::Low || !s.v2_fresh {
+            return None;
+        }
+        let fresh_loss = s.loss.filter(|_| now_ms.saturating_sub(s.loss_at_ms) <= FRESH_LOSS_MS);
+        let clean = fresh_loss.map(|l| l <= LOSS_CLEAN).unwrap_or(true) && s.drops == 0 && !s.overusing;
+        let waited = self.last_demote_ms.map(|t| now_ms.saturating_sub(t) >= self.backoff_ms).unwrap_or(true);
+        let need = (Policy::demand_bps(s.tracks, Layer::High) as f64 * HEADROOM) as u64;
+        let short = s.estimate_bps.map(|e| e < need).unwrap_or(true);
+        (clean && waited && short).then(|| ((need as f64 * PROBE_GAIN) as u64).min(PROBE_CAP_BPS))
     }
 
     pub fn tick(&mut self, now_ms: u64, s: &Signals) -> Verdict {

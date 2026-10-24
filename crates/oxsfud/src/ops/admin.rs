@@ -42,6 +42,8 @@ pub async fn admin(sfu: &Arc<Sfu>, what: Admin) -> Reply {
                 ("tcp_unidentified", &c.tcp_unidentified),
                 ("tcp_bad_frame", &c.tcp_bad_frame),
                 ("send_fail", &c.send_fail),
+                ("srtp_encrypt_fail", &c.srtp_encrypt_fail),
+                ("no_path", &c.no_path),
             ] {
                 m.insert(k.to_string(), Value::from(v.load(Ordering::Relaxed)));
             }

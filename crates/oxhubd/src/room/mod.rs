@@ -14,6 +14,12 @@ pub const CORS_MAX_AGE_SECS: u32 = 600;
 pub const CORS_HEADERS: &str = "authorization, content-type, x-oxlens-session";
 pub const CREATE_WAIT_MS: u64 = 1_000;
 
+pub const TTL_PERMANENT: u32 = u32::MAX;
+
+pub fn permanent_if_zero(v: u32) -> u32 {
+    if v == 0 { TTL_PERMANENT } else { v }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Prepared {
     pub room_id: String,
@@ -45,8 +51,8 @@ pub fn prepare_create(mut req: CreateRoomReq, policy: &Policy, fresh_id: impl Fn
     Ok(Prepared {
         room_id,
         capacity,
-        unused_ttl_secs: req.unused_ttl_secs.unwrap_or(policy.hub.room_unused_ttl_secs),
-        departure_ttl_secs: req.departure_ttl_secs.unwrap_or(policy.hub.room_departure_ttl_secs),
+        unused_ttl_secs: req.unused_ttl_secs.unwrap_or_else(|| permanent_if_zero(policy.hub.room_unused_ttl_secs)),
+        departure_ttl_secs: req.departure_ttl_secs.unwrap_or_else(|| permanent_if_zero(policy.hub.room_departure_ttl_secs)),
         req,
     })
 }
@@ -131,7 +137,7 @@ mod tests {
         let p = Policy::default();
         let ok = prepare_create(req("n"), &p, || "u-1".into()).expect("ok");
         assert_eq!(ok.room_id, "u-1");
-        assert_eq!((ok.unused_ttl_secs, ok.departure_ttl_secs), (0, 0), "정책값 0 = 영구(상용 기본)");
+        assert_eq!((ok.unused_ttl_secs, ok.departure_ttl_secs), (TTL_PERMANENT, TTL_PERMANENT), "정책값 0 = 영구(상용 기본) · 요청의 0 은 즉시");
         assert_eq!(ok.req.media_codecs.as_ref().and_then(|m| m.video.clone()).as_deref(), Some("H264"));
         assert_eq!(prepare_create(req(""), &p, String::new).map_err(|f| f.code), Err(1003));
         let big = CreateRoomReq { capacity: Some(1001), ..req("n") };

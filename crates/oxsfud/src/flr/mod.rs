@@ -343,7 +343,13 @@ pub fn encode(room: &str, m: &Msg) -> Option<Vec<u8>> {
     let out = match m.t {
         T::Granted => mbcp::Msg::new(mbcp::GRANTED).with_ack(true).put_u8spare(tlv::PRIORITY, m.n as u8).put_u16(tlv::DURATION, m.d as u16).put_u16(tlv::SEQ, m.q),
         T::Taken => mbcp::Msg::new(mbcp::TAKEN).with_ack(true).put_str(tlv::SPEAKER, m.a.as_deref().unwrap_or("")).put_u16(tlv::SEQ, m.q),
-        T::Deny => mbcp::Msg::new(mbcp::DENY).with_ack(true).put_u8(tlv::CAUSE, m.n as u8),
+        T::Deny => {
+            let x = mbcp::Msg::new(mbcp::DENY).with_ack(true).put_u8(tlv::CAUSE, m.n as u8);
+            match m.a.as_deref() {
+                Some(r) => x.put_str(tlv::REASON, r),
+                None => x,
+            }
+        }
         T::Idle => {
             let mut x = mbcp::Msg::new(mbcp::IDLE);
             if let Some(p) = m.a.as_deref() {

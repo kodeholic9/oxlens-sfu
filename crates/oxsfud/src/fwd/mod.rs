@@ -17,7 +17,7 @@ use crate::link::{lock, Down, Transport, Upcall};
 use crate::ops::Sfu;
 use crate::r#pub::{Phys, PubTrack};
 use crate::sim::core::{Layer, Step};
-use crate::trk::{Slot, OPUS_SILENCE, PRIME_SRC};
+use crate::trk::{Slot, OPUS_SILENCE};
 
 pub mod core;
 
@@ -197,6 +197,10 @@ pub fn on_rtp(sfu: &Arc<Sfu>, t: &Arc<Transport>, raw: &[u8]) {
     if !is_rtx {
         let valid = lock(&phys.stats).on_packet(v.seq, v.ts, now, phys.clock);
         let _ = valid;
+        let prev = phys.last_seq.swap(v.seq as u32 | 0x1_0000, std::sync::atomic::Ordering::AcqRel);
+        if prev & 0x1_0000 != 0 && v.seq.wrapping_sub(prev as u16) > 1 && v.seq.wrapping_sub(prev as u16) < 1000 {
+            tracing::debug!(kind = "diag", user = %track.user, ssrc = phys.ssrc, from = prev & 0xffff, to = v.seq, "ingress seq gap");
+        }
         lock(&phys.nack).on_packet(v.seq, now);
         phys.on_bytes(raw.len(), now);
         if ing.twcc_id != 0
@@ -336,8 +340,31 @@ pub fn send_down(sfu: &Sfu, d: &Arc<Down>, phys: &Arc<Phys>, src: u64, b: &[u8],
     false
 }
 
+pub const PADDING_BYTES: usize = 224;
+
+pub fn send_padding(t: &Arc<Transport>, d: &Arc<Down>) -> Option<usize> {
+    let rtx_ssrc = d.rtx_ssrc?;
+    let pt = d.rtx_pt.load(Ordering::Relaxed);
+    let ts = lock(&d.rw).last_out().map(|(_, ts)| ts).unwrap_or(0);
+    let ext = d.ext.load();
+    let twcc = ext.twcc.map(|_| (t.twcc_seq.fetch_add(1, Ordering::Relaxed) & 0xffff) as u16)?;
+    let block = ext_block(&ext, &ExtValues { mid: Some(d.mid.to_string()), audio_level: None, t_us: common::time::wall_us(), twcc: Some(twcc) });
+    let seq = d.rtx_seq.fetch_add(1, Ordering::Relaxed);
+    let mut pkt = Vec::with_capacity(12 + block.len() + PADDING_BYTES);
+    pkt.push(0x80 | 0x20 | if block.is_empty() { 0 } else { 0x10 });
+    pkt.push(pt & 0x7f);
+    pkt.extend_from_slice(&seq.to_be_bytes());
+    pkt.extend_from_slice(&ts.to_be_bytes());
+    pkt.extend_from_slice(&rtx_ssrc.to_be_bytes());
+    pkt.extend_from_slice(&block);
+    pkt.extend(std::iter::repeat_n(0u8, PADDING_BYTES - 1));
+    pkt.push(PADDING_BYTES as u8);
+    lock(&t.sent).record(twcc, common::time::mono_us(), pkt.len(), true);
+    t.send_rtp(&pkt).then_some(pkt.len())
+}
+
 pub fn send_prime(sfu: &Sfu, slot: &Slot, now: u64) {
-    let holder = Option::clone(&slot.holder.load());
+    let holder = Option::clone(&slot.holder.load()).or_else(|| Option::clone(&slot.last_holder.load()));
     let (seq, ts) = {
         let mut p = lock(&slot.prime);
         p.0 = p.0.wrapping_add(1);
@@ -350,11 +377,12 @@ pub fn send_prime(sfu: &Sfu, slot: &Slot, now: u64) {
     pkt.extend_from_slice(&OPUS_SILENCE);
     let Some(v) = parse_rtp(&pkt) else { return };
     let dummy = Phys::new(0, None, None, None, 48_000);
+    let src = slot.prime_src();
     for d in slot.downs.load().iter() {
         if holder.as_deref() == Some(d.user.as_str()) {
             continue;
         }
-        send_down(sfu, d, &dummy, PRIME_SRC, &pkt, &v, false, None, now, true);
+        send_down(sfu, d, &dummy, src, &pkt, &v, false, None, now, true);
     }
 }
 
@@ -383,6 +411,9 @@ pub fn floor_out(sfu: &Sfu, hot: &RoomHot, o: Outcome) {
             crate::flr::core::Fx::MediaRelease(prev) => {
                 for s in hot.slots.iter() {
                     s.release();
+                    for d in s.downs.load().iter() {
+                        d.rtx_gate.store(true, Ordering::Release);
+                    }
                 }
                 tracing::info!(kind = "ev", spec = "IMPL-FLR-MEDIA-BIND", room = %hot.id, prev = ?prev, "slots released — silence frames");
             }
@@ -401,6 +432,12 @@ fn bind(sfu: &Sfu, hot: &RoomHot, user: &str, now: u64) {
             tracing::warn!(kind = "diag", spec = "IMPL-FLR-MEDIA-BIND", room = %hot.id, user = %user, "speaker video codec differs from room — not bound");
         }
         s.bind(user, tr.clone(), was_idle, now);
+        for d in s.downs.load().iter() {
+            d.rtx_gate.store(true, Ordering::Release);
+            if d.kind == Kind::Video {
+                d.need_kf.store(true, Ordering::Release);
+            }
+        }
         if s.kind == Kind::Video
             && let Some(t) = tr
             && let Some(ph) = t.main_phys()
@@ -448,7 +485,7 @@ pub fn on_dc(sfu: &Arc<Sfu>, t: &Arc<Transport>, data: &[u8]) {
         }
         None => {
             if kind == crate::flr::core::T::Request
-                && let Some(frame) = crate::flr::encode(&room, &crate::flr::core::Msg::new(crate::flr::core::T::Deny, None, crate::flr::core::deny::OTHER_REASON as u32, 0))
+                && let Some(frame) = crate::flr::encode(&room, &crate::flr::core::Msg::new(crate::flr::core::T::Deny, Some(crate::flr::core::NOT_IN_ROOM.to_string()), crate::flr::core::deny::OTHER_REASON as u32, 0))
             {
                 t.dc.send(frame);
             }

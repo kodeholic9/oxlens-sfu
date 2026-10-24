@@ -7,7 +7,7 @@ use oxsig::{Code, Duplex, Failure, Permission, PublishTrack, Source};
 use serde_json::json;
 
 pub const TRACK_LIMIT_REQ: usize = 8;
-pub const TRACK_LIMIT_ACTIVE: usize = 8;
+pub const TRACK_LIMIT_ACTIVE: usize = 16;
 pub const SUPPORTED_VIDEO: &[&str] = &["VP8", "H264"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,11 +206,11 @@ mod tests {
         let no_video = Permission { publish_video: false, ..Permission::ALL };
         let taken = |_: u32| false;
         let neg = |_: Kind| true;
-        let ctx = AddCtx { permission: no_video, is_pub_room: true, active: 8, uplink_ssrcs_taken: &taken, room_video: "H264", room_video_fmtp: None, negotiated: &neg };
+        let ctx = AddCtx { permission: no_video, is_pub_room: true, active: 16, uplink_ssrcs_taken: &taken, room_video: "H264", room_video_fmtp: None, negotiated: &neg };
         let bad = vec![t(Kind::Video, Some(Source::Camera), None, Duplex::Full)];
         assert_eq!(check_add(&ctx, &bad).map_err(|f| f.code), Err(Code::NotAuthorized.number()), "S-sym-IMPL-PUB-ADD-1 자격이 먼저 — 코덱을 보기 전에");
         let ctx2 = AddCtx { permission: Permission::ALL, ..ctx.clone() };
-        assert_eq!(check_add(&ctx2, &bad).map_err(|f| f.code), Err(Code::TrackLimit.number()), "S-sym-IMPL-PUB-ADD-2 활성 수 8+1 은 TRACK_LIMIT");
+        assert_eq!(check_add(&ctx2, &bad).map_err(|f| f.code), Err(Code::TrackLimit.number()), "S-sym-IMPL-PUB-ADD-2 활성 수 16+1 은 TRACK_LIMIT(8+8 뒤 1 추가)");
         let ctx3 = AddCtx { active: 0, ..ctx2.clone() };
         assert_eq!(check_add(&ctx3, &bad).map_err(|f| f.code), Err(Code::CodecRequired.number()));
         let vp9 = vec![t(Kind::Video, Some(Source::Camera), Some("VP9"), Duplex::Full)];

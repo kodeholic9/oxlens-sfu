@@ -9,6 +9,8 @@ use serde_json::json;
 
 use super::MAX_ROOMS_PER_SERVER;
 
+pub const TTL_PERMANENT: u32 = u32::MAX;
+
 pub fn check_capacity(user_count: u32, capacity: u32, hidden: bool) -> Result<(), Failure> {
     if !hidden && user_count >= capacity {
         return Err(Code::RoomFull.failure_with("정원", Some(json!({"capacity": capacity}))));
@@ -38,7 +40,7 @@ pub fn sweep(registered: usize, ever_joined: bool, empty_since: u64, unused_ttl_
         return Sweep::MarkEmpty;
     }
     let ttl = if ever_joined { departure_ttl_secs } else { unused_ttl_secs };
-    if ttl == 0 {
+    if ttl == TTL_PERMANENT {
         return Sweep::Keep;
     }
     if now_ms.saturating_sub(empty_since) >= ttl as u64 * 1000 {
@@ -88,7 +90,8 @@ mod tests {
         assert_eq!(sweep(0, true, 100, 30, 5, 5099), Sweep::Keep);
         assert_eq!(sweep(0, true, 100, 30, 5, 5100), Sweep::Expire, "이상");
         assert_eq!(sweep(0, false, 100, 30, 5, 5100), Sweep::Keep, "unused 는 생성 시각 기준 30s");
-        assert_eq!(sweep(0, false, 100, 0, 0, u64::MAX), Sweep::Keep, "정책값 0 = 영구");
+        assert_eq!(sweep(0, false, 100, TTL_PERMANENT, TTL_PERMANENT, u64::MAX), Sweep::Keep, "정책값 0 = 영구(봉투에 영구 표지)");
+        assert_eq!(sweep(0, true, 100, 30, 0, 100), Sweep::Expire, "요청의 0초 TTL 은 다음 sweep 에서 즉시");
     }
 
     #[test]

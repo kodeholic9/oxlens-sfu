@@ -36,9 +36,22 @@ impl SendLog {
 pub struct Probe {
     pub started_ms: u64,
     pub rate_bps: u64,
+    pub need_bps: u64,
     pub bytes_acked: u64,
+    pub sent: u64,
     pub first_arrival_us: Option<i64>,
     pub last_arrival_us: Option<i64>,
+}
+
+impl Probe {
+    pub fn measured_bps(&self) -> Option<u64> {
+        let (a, b) = (self.first_arrival_us?, self.last_arrival_us?);
+        let span = (b - a).max(0) as u64;
+        if span < 100_000 || self.bytes_acked == 0 {
+            return None;
+        }
+        Some(self.bytes_acked * 8 * 1_000_000 / span)
+    }
 }
 
 #[derive(Debug, Clone)]

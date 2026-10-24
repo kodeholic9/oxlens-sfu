@@ -56,6 +56,9 @@ fn parse(argv: &[String]) -> Result<Opts, String> {
         (None, None) => o.hub = DEFAULT_HUB.to_string(),
     }
     o.hub = o.hub.trim_end_matches('/').to_string();
+    if !o.hub.contains("://") {
+        o.hub = format!("http://{}", o.hub);
+    }
     Ok(o)
 }
 
@@ -132,7 +135,20 @@ fn show(o: &Opts, code: u16, v: &Value, rows: Option<(&str, &[&str])>) -> i32 {
     } else {
         println!("{}", s(v));
     }
-    if (200..300).contains(&code) { 0 } else { 1 }
+    if (200..300).contains(&code) {
+        0
+    } else {
+        fail_line(code, v);
+        1
+    }
+}
+
+fn fail_line(code: u16, v: &Value) {
+    let reason = match v.get("code") {
+        Some(c) => format!("code={} name={}", s(c), s(&v["name"])),
+        None => format!("error={}", s(&v["error"])),
+    };
+    let _ = writeln!(std::io::stderr(), "oxadmin: HTTP {code} {reason}");
 }
 
 fn arg(o: &Opts, i: usize, what: &str) -> Result<String, String> {
@@ -195,6 +211,9 @@ fn run(o: &Opts) -> Result<i32, String> {
                     }
                 }
             }
+            if !(200..300).contains(&c2) {
+                fail_line(c2, &b);
+            }
             if (200..300).contains(&c1) && (200..300).contains(&c2) { 0 } else { 1 }
         }
         "snapshot" => {
@@ -245,10 +264,11 @@ fn run(o: &Opts) -> Result<i32, String> {
                 let u = v["units"].as_array().and_then(|l| l.iter().find(|x| x["id"] == Value::String(id.clone())).cloned()).unwrap_or(Value::Null);
                 show(o, c, &u, None)
             }
-            _ => {
+            Some("list") | None => {
                 let (c, v) = http(o, "GET", "/admin/supervisor/status", None)?;
                 show(o, c, &v, Some(("units", &["id", "kind", "order", "state", "restarts", "next_retry_ms", "epoch"])))
             }
+            Some(other) => return Err(format!("모르는 unit 명령 {other} (list|show)")),
         },
         "load" | "stop" => {
             let (c, v) = http(o, "POST", &format!("/admin/supervisor/{cmd}/{}", arg(o, 1, "unit id")?), None)?;

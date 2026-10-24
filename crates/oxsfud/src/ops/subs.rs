@@ -362,7 +362,13 @@ pub async fn subscribe_layer(sfu: &Arc<Sfu>, who: &Who, body: serde_json::Value)
         let changed = lock(&d.sel).retarget(want, now);
         let unpaused = was_paused && !lock(&d.prefs).paused;
         if changed || unpaused {
-            d.need_kf.store(true, Ordering::Release);
+            let simulcast = Option::clone(&d.track.load()).map(|t| t.simulcast).unwrap_or(false);
+            if unpaused {
+                lock(&d.rw).reset_source();
+                if !simulcast && d.kind == Kind::Video {
+                    d.need_kf.store(true, Ordering::Release);
+                }
+            }
             if let Some(tr) = Option::clone(&d.track.load()) {
                 let phys = want.spatial().and_then(|s| tr.phys_by_spatial(s)).or_else(|| tr.main_phys());
                 if let Some(p) = phys {

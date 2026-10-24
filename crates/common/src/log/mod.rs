@@ -124,6 +124,10 @@ impl Visit for Visitor<'_> {
     }
 }
 
+fn bus_target(target: &str) -> bool {
+    target == "zenoh" || target.starts_with("zenoh::")
+}
+
 fn own(target: &str) -> bool {
     OWN_TARGETS.iter().any(|t| target == *t || target.starts_with(&format!("{t}::")))
 }
@@ -140,7 +144,13 @@ where
         if m.is_span() {
             return true;
         }
-        let lim = if own(m.target()) { rank(level()) } else { rank(LoggingLevel::Warn) };
+        let lim = if own(m.target()) {
+            rank(level())
+        } else if bus_target(m.target()) {
+            rank(level()).min(rank(LoggingLevel::Info))
+        } else {
+            rank(LoggingLevel::Warn)
+        };
         level_rank(m.level()) <= lim
     }
 

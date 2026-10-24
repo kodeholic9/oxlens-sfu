@@ -52,7 +52,59 @@ pub fn unpublish(sfu: &Sfu, p: &Peer, tr: &Arc<PubTrack>) {
     }
 }
 
+fn precheck(w: &World, who: &Who, body: &serde_json::Value) -> Result<(), Failure> {
+    if body.get("action").and_then(|a| a.as_str()) == Some("remove") {
+        return Ok(());
+    }
+    let Some(room_id) = body.get("room_id").and_then(|r| r.as_str()) else { return Err(Code::MissingField.failure_with("room_id", None)) };
+    let Some(items) = body.get("tracks").and_then(|t| t.as_array()) else { return Err(Code::MissingField.failure_with("tracks", None)) };
+    let Some(room) = w.rooms.get(room_id) else { return Err(Code::RoomNotFound.failure()) };
+    let Some(member) = room.member(&who.user) else { return Err(Code::NotInRoom.failure()) };
+    let mut denied: Vec<&str> = Vec::new();
+    for it in items {
+        let kind = match it.get("kind").and_then(|k| k.as_str()) {
+            Some("video") => Kind::Video,
+            _ => Kind::Audio,
+        };
+        let source = match it.get("source").and_then(|k| k.as_str()) {
+            Some("screen") => Some(oxsig::Source::Screen),
+            Some("camera") => Some(oxsig::Source::Camera),
+            _ => None,
+        };
+        let b = bit_for(kind, source);
+        if !Bit::of(&member.permission, b) && !denied.contains(&b.name()) {
+            denied.push(b.name());
+        }
+    }
+    if !denied.is_empty() {
+        return Err(Code::NotAuthorized.failure_with("권한 비트가 막는다", Some(json!({"denied": denied}))));
+    }
+    let peer = w.peers.get(&who.user);
+    let is_pub = peer.and_then(|p| p.pub_room()).as_deref() == Some(room_id);
+    if !is_pub && items.iter().any(|it| it.get("duplex").and_then(|d| d.as_str()) != Some("half")) {
+        return Err(Code::NotPubRoom.failure());
+    }
+    let active = peer.map(|p| p.tracks().len()).unwrap_or(0);
+    let limit = crate::r#pub::core::TRACK_LIMIT_ACTIVE;
+    if items.len() > crate::r#pub::core::TRACK_LIMIT_REQ || active + items.len() > limit {
+        return Err(Code::TrackLimit.failure_with("트랙 상한", Some(json!({"limit": limit, "current": active}))));
+    }
+    for (i, it) in items.iter().enumerate() {
+        if let Err(e) = parse::typed::<oxsig::PublishTrack>(it.clone()) {
+            return Err(e.code().failure_with(format!("tracks[{i}]: {}", e.message()), None));
+        }
+    }
+    Ok(())
+}
+
 pub async fn publish(sfu: &Arc<Sfu>, who: &Who, body: serde_json::Value) -> Reply {
+    {
+        let w = sfu.world.lock().await;
+        if let Err(f) = precheck(&w, who, &body) {
+            tracing::info!(kind = "ev", spec = "IMPL-PUB-ADD", user = %who.user, code = f.code, "PUBLISH_TRACKS refused before field checks");
+            return sfu.fail(f);
+        }
+    }
     let req: PublishTracksReq = match parse::typed(body) {
         Ok(r) => r,
         Err(e) => return body_fail(sfu, e),

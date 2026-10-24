@@ -103,6 +103,12 @@ impl Rewriter {
         Some(out_seq.wrapping_sub(self.seq_off))
     }
 
+    pub fn reset_source(&mut self) {
+        if self.src.is_some() {
+            self.src = Some(u64::MAX);
+        }
+    }
+
     pub fn sr_ts(&self, rtp_ts: u32) -> u32 {
         rtp_ts.wrapping_add(self.ts_off)
     }

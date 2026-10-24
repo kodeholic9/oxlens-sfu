@@ -29,7 +29,7 @@ pub fn ext_table(pc: PcMode, tags: Option<&[ExtMap]>, audio: bool) -> ExtTable {
         let tagged = if pc == PcMode::V1pc { tags.and_then(|t| t.iter().find(|e| e.uri == uri)).map(|e| e.id) } else { None };
         tagged.or_else(|| server.iter().find(|e| e.uri == uri).map(|e| e.id))
     };
-    ExtTable { mid: id_of(URI_MID), audio_level: if audio { id_of(URI_LEVEL) } else { None }, abs_send_time: if audio { None } else { id_of(URI_ABS) }, twcc: id_of(URI_TWCC) }
+    ExtTable { mid: id_of(URI_MID), audio_level: if audio { id_of(URI_LEVEL) } else { None }, abs_send_time: id_of(URI_ABS), twcc: id_of(URI_TWCC) }
 }
 
 pub fn gate_lock(t: &Arc<Transport>, room: &str, now_ms: u64) {
@@ -77,7 +77,7 @@ mod tests {
     #[test]
     fn ext_tables() {
         let t2 = ext_table(PcMode::V2pc, None, true);
-        assert_eq!((t2.mid, t2.audio_level, t2.abs_send_time, t2.twcc), (Some(1), Some(4), None, Some(6)));
+        assert_eq!((t2.mid, t2.audio_level, t2.abs_send_time, t2.twcc), (Some(1), Some(4), Some(5), Some(6)), "abs-send-time 은 양쪽 · 음량은 오디오");
         let tags = vec![ExtMap { id: 3, uri: URI_MID.into() }, ExtMap { id: 9, uri: URI_TWCC.into() }];
         let t1 = ext_table(PcMode::V1pc, Some(&tags), false);
         assert_eq!((t1.mid, t1.abs_send_time, t1.twcc), (Some(3), Some(5), Some(9)), "1pc 는 번호표 · 그 밖은 서버 선언 번호");

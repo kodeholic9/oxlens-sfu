@@ -232,7 +232,7 @@ pub async fn join(sfu: &Arc<Sfu>, who: &Who, body: serde_json::Value) -> Reply {
         sfu.sync_peers(&w);
     }
     lock(&peer.rooms).insert(req.room_id.clone());
-    let select = req.select.unwrap_or(false);
+    let select = req.select.unwrap_or(true);
     let (seq_label, version) = {
         let Some(r) = w.rooms.get_mut(&req.room_id) else { return sfu.fail(Code::RoomNotFound.failure()) };
         let permission = r.effective_permission(&who.user, who.permission);

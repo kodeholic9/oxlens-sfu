@@ -65,6 +65,7 @@ pub async fn serve(ctx: Arc<Ctx>, ws: WebSocket) {
     let worker = tokio::spawn(work_loop(ctx.clone(), conn.clone(), job_rx, out_tx.clone()));
     while let Some(msg) = stream.next().await {
         let Ok(msg) = msg else { break };
+        conn.last_rx.store(common::time::wall_ms(), Ordering::Relaxed);
         let raw = match msg {
             Message::Binary(b) => b,
             Message::Close(_) => break,

@@ -29,6 +29,7 @@ pub struct Slot {
     pub fmtp: Option<String>,
     pub speaker: ArcSwap<Option<(String, Arc<PubTrack>)>>,
     pub holder: ArcSwap<Option<String>>,
+    pub last_holder: ArcSwap<Option<String>>,
     pub downs: ArcSwap<Vec<Arc<Down>>>,
     pub priming: AtomicU32,
     pub silence: AtomicU32,
@@ -37,6 +38,7 @@ pub struct Slot {
     pub first_rtp: AtomicBool,
     pub last_rtp_ms: AtomicU64,
     pub rtx_gate: AtomicBool,
+    pub prime_epoch: AtomicU64,
 }
 
 impl Slot {
@@ -54,6 +56,7 @@ impl Slot {
             fmtp,
             speaker: ArcSwap::from_pointee(None),
             holder: ArcSwap::from_pointee(None),
+            last_holder: ArcSwap::from_pointee(None),
             downs: ArcSwap::from_pointee(Vec::new()),
             priming: AtomicU32::new(0),
             silence: AtomicU32::new(0),
@@ -62,7 +65,12 @@ impl Slot {
             first_rtp: AtomicBool::new(false),
             last_rtp_ms: AtomicU64::new(0),
             rtx_gate: AtomicBool::new(false),
+            prime_epoch: AtomicU64::new(0),
         })
+    }
+
+    pub fn prime_src(&self) -> u64 {
+        PRIME_SRC.wrapping_add(self.prime_epoch.load(Ordering::Acquire) << 8)
     }
 
     pub fn entry(&self) -> TrackEntry {
@@ -93,6 +101,7 @@ impl Slot {
             None => self.speaker.store(Arc::new(None)),
         }
         self.bound_at.store(now_ms, Ordering::Release);
+        self.prime_epoch.fetch_add(1, Ordering::AcqRel);
         self.first_rtp.store(false, Ordering::Release);
         self.silence.store(0, Ordering::Release);
         self.priming.store(if prime && self.kind == Kind::Audio && self.codec.eq_ignore_ascii_case("opus") { PRIME_FRAMES } else { 0 }, Ordering::Release);
@@ -102,7 +111,9 @@ impl Slot {
     pub fn release(&self) {
         let was_audio_opus = self.kind == Kind::Audio && self.codec.eq_ignore_ascii_case("opus");
         self.speaker.store(Arc::new(None));
-        self.holder.store(Arc::new(None));
+        self.prime_epoch.fetch_add(1, Ordering::AcqRel);
+        let prev = self.holder.swap(Arc::new(None));
+        self.last_holder.store(prev);
         self.priming.store(0, Ordering::Release);
         self.rtx_gate.store(true, Ordering::Release);
         if was_audio_opus {

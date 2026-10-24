@@ -49,6 +49,8 @@ pub struct NetCounters {
     pub tcp_bad_frame: AtomicU64,
     pub dc_dropped: AtomicU64,
     pub send_fail: AtomicU64,
+    pub srtp_encrypt_fail: AtomicU64,
+    pub no_path: AtomicU64,
 }
 
 pub struct Net {
@@ -167,13 +169,24 @@ impl Net {
 
     pub fn send_to(&self, k: PathKey, b: &[u8]) -> bool {
         let ok = match k {
-            PathKey::Udp(a) => self.udp.try_send_to(b, a).is_ok(),
+            PathKey::Udp(a) => self.udp_send(b, a),
             PathKey::Tcp(id) => lock(&self.tcp).get(&id).map(|tx| tx.try_send(core::frame(b)).is_ok()).unwrap_or(false),
         };
         if !ok {
             self.counters.send_fail.fetch_add(1, Ordering::Relaxed);
         }
         ok
+    }
+
+    fn udp_send(&self, b: &[u8], a: SocketAddr) -> bool {
+        for _ in 0..4 {
+            match self.udp.try_send_to(b, a) {
+                Ok(_) => return true,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::yield_now(),
+                Err(_) => return false,
+            }
+        }
+        false
     }
 
     pub fn tcp_ids(&self) -> Vec<u64> {
@@ -375,8 +388,20 @@ impl Transport {
     }
 
     pub fn send_raw(&self, b: &[u8]) -> bool {
-        let (Some(p), Some(net)) = (self.path(), self.net.upgrade()) else { return false };
+        let Some(net) = self.net.upgrade() else { return false };
+        let Some(p) = self.path() else {
+            net.counters.no_path.fetch_add(1, Ordering::Relaxed);
+            return false;
+        };
         net.send_to(p, b)
+    }
+
+    fn encrypt_fail(&self, e: &webrtc_srtp::Error) {
+        if let Some(net) = self.net.upgrade()
+            && net.counters.srtp_encrypt_fail.fetch_add(1, Ordering::Relaxed) < 5
+        {
+            tracing::warn!(kind = "diag", user = %self.user, "srtp encrypt: {e}");
+        }
     }
 
     pub fn send_rtp(&self, plain: &[u8]) -> bool {
@@ -385,7 +410,11 @@ impl Transport {
             let Some(ctx) = g.as_mut() else { return false };
             match ctx.encrypt_rtp(plain) {
                 Ok(b) => b,
-                Err(_) => return false,
+                Err(e) => {
+                    drop(g);
+                    self.encrypt_fail(&e);
+                    return false;
+                }
             }
         };
         self.send_raw(&enc)
@@ -397,7 +426,11 @@ impl Transport {
             let Some(ctx) = g.as_mut() else { return false };
             match ctx.encrypt_rtcp(plain) {
                 Ok(b) => b,
-                Err(_) => return false,
+                Err(e) => {
+                    drop(g);
+                    self.encrypt_fail(&e);
+                    return false;
+                }
             }
         };
         self.send_raw(&enc)

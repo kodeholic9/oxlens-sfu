@@ -25,6 +25,8 @@ use crate::fwd::RoomHot;
 use crate::link::Net;
 use crate::room::Room;
 
+pub const UDP_BUF: usize = 4 * 1024 * 1024;
+
 pub struct World {
     pub rooms: BTreeMap<String, Room>,
     pub peers: HashMap<String, Arc<Peer>>,
@@ -160,6 +162,9 @@ pub async fn run(boot: Boot) -> i32 {
         },
         None => None,
     };
+    let fd = std::os::fd::AsRawFd::as_raw_fd(udp.as_ref());
+    let _ = nix::sys::socket::setsockopt(fd, nix::sys::socket::sockopt::SndBuf, &UDP_BUF);
+    let _ = nix::sys::socket::setsockopt(fd, nix::sys::socket::sockopt::RcvBuf, &UDP_BUF);
     let net = Net::new(udp, boot.public_ip, boot.udp_port, boot.tcp_port, cert, fingerprint);
     let bus = match Bus::open(&boot.zenoh_connect, &boot.namespace, &boot.node_id, &epoch).await {
         Ok(b) => b,

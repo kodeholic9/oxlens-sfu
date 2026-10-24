@@ -64,6 +64,7 @@ pub struct Phys {
     pub last_rtp_ms: AtomicU64,
     pub last_kf_ms: AtomicU64,
     pub rate_bps: AtomicU64,
+    pub last_seq: AtomicU32,
     rate_win: Mutex<(u64, u64)>,
 }
 
@@ -86,6 +87,7 @@ impl Phys {
             last_rtp_ms: AtomicU64::new(0),
             last_kf_ms: AtomicU64::new(0),
             rate_bps: AtomicU64::new(0),
+            last_seq: AtomicU32::new(0),
             rate_win: Mutex::new((0, 0)),
         })
     }

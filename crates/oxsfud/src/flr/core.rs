@@ -21,6 +21,7 @@ pub mod revoke {
 }
 
 pub const QPOS_NOT_IN_QUEUE: u8 = 254;
+pub const NOT_IN_ROOM: &str = "not_in_room";
 pub const SEQ_WRAP: u32 = 65_536;
 pub const C7: u32 = 10;
 pub const C8: u32 = 3;
@@ -404,7 +405,7 @@ impl<'a> Step<'a> {
         }
         if !member && m.t == T::Request {
             self.l("FLR.S.gate.not_in_room");
-            self.send(u, T::Deny, None, deny::OTHER_REASON as u32, 0);
+            self.send(u, T::Deny, Some(NOT_IN_ROOM.to_string()), deny::OTHER_REASON as u32, 0);
             return;
         }
         if !member {
