@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @36d1dfd · 정:IMPL-ROOM-LIFE · 정:IMPL-ROOM-JOIN · 정:IMPL-ROOM-PERMISSION · 정:RULE-GC-FOUR · 연:RULE-ROOM-JOIN-PROC · 연:RULE-ROOM-JOIN-FAIL · 연:RULE-ROOM-MAX-100 · 연:RULE-ROOM-PERMISSION-MAP · 연:ROOM.S.join · 연:ROOM.S.join_again · 연:ROOM.S.join_hidden · 연:ROOM.S.join_3001 · 연:ROOM.S.join_4001 · 연:ROOM.S.perm_absent · model: claude-opus-5-5
+// spec: v1.2 @36d1dfd · 정:IMPL-ROOM-LIFE · 정:IMPL-ROOM-JOIN · 정:IMPL-ROOM-PERMISSION · 정:RULE-GC-FOUR · 연:RULE-ROOM-JOIN-PROC · 연:RULE-ROOM-JOIN-FAIL · 연:RULE-ROOM-MAX-100 · 연:RULE-ROOM-PERMISSION-MAP · 연:ROOM.S.join · 연:ROOM.S.join_again · 연:ROOM.S.join_hidden · 연:ROOM.S.join_3001 · 연:ROOM.S.join_4001 · 연:ROOM.S.perm_absent · 정:CAND-ROOM-TTL-PERMANENT-MARK · model: claude-opus-5-5
 //! 방 판정(순수) — 입장 차례(재입장 축출 뒤 값으로 정원 · 서버당 방 수) · 빈 방 TTL(생성 시각 기준 · 최초 관측 tick 은 판정 안 함 · 이상) · 권한 오버라이드(멱등 · 기본값이면 항목을 지운다).
 
 use std::collections::HashMap;

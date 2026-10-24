@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @36d1dfd · 정:RULE-LINK-SERVER-SCOPE · 정:RULE-LINK-TRANSPORT · 정:RULE-LINK-PAIR-LIVENESS · 정:IMPL-LINK-PEER-STATE · 정:IMPL-LINK-ICE-RESTART · 정:IMPL-SUB-TABLE · 정:RULE-CONC-SIX · 정:IMPL-AUX-DC-SEND · 연:LINK.type.ServerConfig · 연:RULE-LINK-RECOVERY-UNIT · 연:RULE-LINK-EVENT-CONTRACT · model: claude-opus-5-5
+// spec: v1.2 @36d1dfd · 정:RULE-LINK-SERVER-SCOPE · 정:RULE-LINK-TRANSPORT · 정:RULE-LINK-PAIR-LIVENESS · 정:IMPL-LINK-PEER-STATE · 정:IMPL-LINK-ICE-RESTART · 정:IMPL-SUB-TABLE · 정:RULE-CONC-SIX · 정:IMPL-AUX-DC-SEND · 연:LINK.type.ServerConfig · 연:RULE-LINK-RECOVERY-UNIT · 연:RULE-LINK-EVENT-CONTRACT · 정:CAND-LINK-UDP-BUFFER · model: claude-opus-5-5
 //! 영역 LINK — 전송 객체(자격 한 벌 = 연결 하나 · 신원) · ufrag/주소는 조회 키 · 쌍별 생존 · 경로 · SRTP 문맥 · DC · 배정표 · 다운링크 줄(재기록기).
 
 pub mod core;

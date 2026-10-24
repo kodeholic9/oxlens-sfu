@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @36d1dfd · 정:RULE-OPS-LOGGER · 정:RULE-OPS-OBSERVE · 정:RULE-CONC-SIX · 운영 규격서 §7 · model: claude-opus-5-5
+// spec: v1.2 @36d1dfd · 정:RULE-OPS-LOGGER · 정:RULE-OPS-OBSERVE · 정:RULE-CONC-SIX · 운영 규격서 §7 · 정:CAND-OPS-LOG-ENV · 정:CAND-OPS-FOREIGN-LOG · model: claude-opus-5-5
 //! 로깅 — `tracing` Layer 하나가 줄을 짓고(§7-3) 보내는 쪽(§7-2)이 나른다. 수준은 정책값 · 기동 환경변수 · 운영 일시 덮기(§4-4).
 
 pub mod line;

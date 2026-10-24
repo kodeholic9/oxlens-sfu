@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @36d1dfd · 정:IMPL-ERR-ISSUERS · 연:ERR.type.Failure · 연:RULE-ERR-FAILURE-FORM · 연:RULE-ERR-UNKNOWN-BY-LEAD · 연:RULE-ERR-CLOSE-EMPTY · 연:RULE-ERR-FLOOR-OUTSIDE · 연:RULE-ERR-NOT-MIXED · model: claude-opus-5-5
+// spec: v1.2 @36d1dfd · 정:IMPL-ERR-ISSUERS · 연:ERR.type.Failure · 연:RULE-ERR-FAILURE-FORM · 연:RULE-ERR-UNKNOWN-BY-LEAD · 연:RULE-ERR-CLOSE-EMPTY · 연:RULE-ERR-FLOOR-OUTSIDE · 연:RULE-ERR-NOT-MIXED · 정:CAND-ERR-HTTP-MAP · model: claude-opus-5-5
 //! 오류 번호 공간 하나 — 번호 · 이름 · `permanent` · `Failure` · `LEAVE` 사유.
 
 use crate::body::LeaveBody;

@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @36d1dfd · 정:IMPL-TRK-FROM-PUB · 정:IMPL-FLR-MEDIA-BIND · 정:CAND-FWD-PRIME-SOURCE · 연:RULE-TRK-PUB-TO-TRACK · 연:RULE-TRK-SLOT-LIFE · 연:TRK.type.TrackEntry · 연:RULE-TRK-TRACK-STATE-TO-ALL · 연:R-TRK-MUTED-IN-SNAPSHOT · 연:RULE-TRK-THREE-TIERS · 연:RULE-TRK-TRACK-EVENT-ONE-ROOM · 연:TRK.S.pub_full · 연:TRK.S.half_to_full · 연:TRK.S.full_to_half · 연:TRK.S.unpub_full · 연:TRK.S.unpub_resting · 연:TRK.S.rest_in · 연:TRK.S.mute · model: claude-opus-5-5
+// spec: v1.2 @36d1dfd · 정:IMPL-TRK-FROM-PUB · 정:IMPL-FLR-MEDIA-BIND · 정:CAND-FWD-PRIME-SOURCE · 연:RULE-TRK-PUB-TO-TRACK · 연:RULE-TRK-SLOT-LIFE · 연:TRK.type.TrackEntry · 연:RULE-TRK-TRACK-STATE-TO-ALL · 연:R-TRK-MUTED-IN-SNAPSHOT · 연:RULE-TRK-THREE-TIERS · 연:RULE-TRK-TRACK-EVENT-ONE-ROOM · 연:TRK.S.pub_full · 연:TRK.S.half_to_full · 연:TRK.S.full_to_half · 연:TRK.S.unpub_full · 연:TRK.S.unpub_resting · 연:TRK.S.rest_in · 연:TRK.S.mute · 정:CAND-FWD-PRIME-EPISODE · model: claude-opus-5-5
 //! 영역 TRK — 트랙 목록 항목(individual · slot) · 슬롯 둘(방이 생길 때 · 방 것 · 화자 결합 · 예열 · 구독 줄 목록).
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};

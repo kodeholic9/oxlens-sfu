@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @36d1dfd · 정:IMPL-ROOM-LIFE · 정:IMPL-ROOM-JOIN · 정:IMPL-ROOM-RESYNC · 정:IMPL-ROOM-DERIVED · 정:IMPL-SES-ADMISSION · 정:RULE-BUS-PLACEMENT · 정:RULE-OPS-SURFACE · 정:CAND-ROOM-CREATE-WAITS-TOKEN · 정:CAND-ROOM-CORS-MAX-AGE · 연:ROOM.http.CREATE_ROOM · 연:RULE-ROOM-CREATE-PROC · 연:RULE-TRN-CORS · 연:RULE-ERR-FAILURE-FORM · model: claude-opus-5-5
+// spec: v1.2 @36d1dfd · 정:IMPL-ROOM-LIFE · 정:IMPL-ROOM-JOIN · 정:IMPL-ROOM-RESYNC · 정:IMPL-ROOM-DERIVED · 정:IMPL-SES-ADMISSION · 정:RULE-BUS-PLACEMENT · 정:RULE-OPS-SURFACE · 정:CAND-ROOM-CREATE-WAITS-TOKEN · 정:CAND-ROOM-CORS-MAX-AGE · 연:ROOM.http.CREATE_ROOM · 연:RULE-ROOM-CREATE-PROC · 연:RULE-TRN-CORS · 연:RULE-ERR-FAILURE-FORM · 정:CAND-ROOM-TTL-PERMANENT-MARK · model: claude-opus-5-5
 //! 영역 ROOM(게이트웨이 쪽) — 방 생성 검사 · 배치(HRW, 후보 = node 토큰 전량) · 입장 수용 한도 · 클라 경로의 CORS. 방 상태는 미디어 서버가 든다(그림자 금지).
 
 use std::sync::Mutex;

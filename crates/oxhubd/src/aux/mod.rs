@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @36d1dfd · 정:IMPL-AUX-TASK · 정:RULE-OPS-OBSERVE · 연:AUX.op.TASK · 연:RULE-AUX-TASK-PROC · 연:RULE-AUX-TASK-TYPES · 연:RULE-AUX-PROBE-RESULT · 연:RULE-AUX-PROBE-NO-INVENT · model: claude-opus-5-5
+// spec: v1.2 @36d1dfd · 정:IMPL-AUX-TASK · 정:RULE-OPS-OBSERVE · 연:AUX.op.TASK · 연:RULE-AUX-TASK-PROC · 연:RULE-AUX-TASK-TYPES · 연:RULE-AUX-PROBE-RESULT · 연:RULE-AUX-PROBE-NO-INVENT · 정:CAND-AUX-TASK-CLIENT-REQUEST · model: claude-opus-5-5
 //! 보조 — `TASK` 는 게이트웨이에서 끝난다(진단 수집은 미디어 서버를 거치지 않는다). 보고는 형(ProbeResult)으로 읽고, 모르는 `type` 은 실패로 답한다.
 
 use oxsig::{Frame, Kind, TaskReq};

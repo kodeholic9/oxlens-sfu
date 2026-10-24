@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @36d1dfd · 정:RULE-OPS-SUPERVISOR · 정:RULE-OPS-SURFACE · 정:RULE-OPS-LOGGER · 정:RULE-BUS-FATE · 정:IMPL-BUS-FAULTS · 정:IMPL-CFG-SYSTEM-FILE · 정:CAND-BUS-HANDLE-SHAPE · 정:CAND-OPS-SHUTDOWN-NO-RESTART · 운영 규격서 §4-1 · model: claude-opus-5-5
+// spec: v1.2 @36d1dfd · 정:RULE-OPS-SUPERVISOR · 정:RULE-OPS-SURFACE · 정:RULE-OPS-LOGGER · 정:RULE-BUS-FATE · 정:IMPL-BUS-FAULTS · 정:IMPL-CFG-SYSTEM-FILE · 정:CAND-BUS-HANDLE-SHAPE · 정:CAND-OPS-SHUTDOWN-NO-RESTART · 운영 규격서 §4-1 · 정:CAND-OPS-ZENOH-UNIT-DOWN · model: claude-opus-5-5
 //! supervisor — 유닛 셋 종류(process · remote · inproc). 준비 = 로거는 stdout `ready epoch=` · sfu 는 gRPC Hello · zenoh 는 세션 열림. 부모 생존 채널은 자식 stdin.
 
 use std::process::Stdio;

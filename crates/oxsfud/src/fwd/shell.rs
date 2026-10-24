@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @36d1dfd · 정:IMPL-RTCP-TERMINATE · 정:RULE-RTCP-NACK-UP · 정:RULE-SIM-TICK · 정:IMPL-ROOM-STALL · 정:IMPL-SUB-READY-GATE · 정:IMPL-FLR-RTP-OBSERVE · 정:IMPL-FLR-MEDIA-BIND · 정:RULE-LINK-PAIR-LIVENESS · 정:CAND-RTCP-REMB-ESTIMATE · 정:RULE-GC-FOUR · 연:ROOM.S.sync_required · 연:ROOM.S.TStall · model: claude-opus-5-5
+// spec: v1.2 @36d1dfd · 정:IMPL-RTCP-TERMINATE · 정:RULE-RTCP-NACK-UP · 정:RULE-SIM-TICK · 정:IMPL-ROOM-STALL · 정:IMPL-SUB-READY-GATE · 정:IMPL-FLR-RTP-OBSERVE · 정:IMPL-FLR-MEDIA-BIND · 정:RULE-LINK-PAIR-LIVENESS · 정:CAND-RTCP-REMB-ESTIMATE · 정:RULE-GC-FOUR · 연:ROOM.S.sync_required · 연:ROOM.S.TStall · 정:CAND-RTCP-RR-PER-STREAM · model: claude-opus-5-5
 //! 주기 고리 — 상향 NACK · 예열/무음 20ms · TWCC 피드백 100ms · RR · REMB · 레이어 판단 · 쌍별 생존 · 게이트 시한 1,000ms · 정체 감지 5,000ms · 방마다 발언권 타이머(가장 이른 만료 시각).
 
 use std::sync::atomic::Ordering;
