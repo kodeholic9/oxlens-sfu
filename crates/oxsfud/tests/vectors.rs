@@ -50,6 +50,10 @@ fn fwd_rewrite_vectors() {
             let (s, t) = r.map(u(st, "src"), u(st, "seq") as u16, u(st, "ts") as u32, u(st, "at_ms"), clock);
             assert_eq!((u64::from(s), u64::from(t)), (u(st, "out_seq"), u(st, "out_ts")), "{UNIT} rewrite {name} step {st}");
         }
+        for n in case.get("nack").and_then(Value::as_array).into_iter().flatten() {
+            let got = r.nack_to_source(u(n, "out_seq") as u16).map(u64::from);
+            assert_eq!(got, n.get("in_seq").and_then(Value::as_u64), "{UNIT} rewrite {name} nack {n}");
+        }
     }
 }
 
