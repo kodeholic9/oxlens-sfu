@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.3 @d4cc756 · 운영:RULE-TOOL-ONE 운영:RULE-TOOL-CONTRACT 운영:RULE-RISK-CONFIRM 운영:RULE-AUTH-THREE 운영:RULE-FMT-NO-INVENT 운영:RULE-READ-BUS-ALL 운영:RULE-READ-USER-MEDIA 운영:RULE-CTL-SUPERVISOR 운영:RULE-CTL-ROOM 운영:RULE-CTL-CUT 운영:RULE-CTL-LOG-LEVEL 운영:RULE-BOOT-PORTS 정:RULE-OPS-TOKEN · model: claude-opus-5-5
+// spec: v1.3 @d4cc756 · 운영:RULE-TOOL-ONE 운영:RULE-TOOL-CONTRACT 운영:RULE-RISK-CONFIRM 운영:RULE-AUTH-THREE 운영:RULE-FMT-NO-INVENT 운영:RULE-READ-BUS-ALL 운영:RULE-READ-USER-MEDIA 운영:RULE-CTL-SUPERVISOR 운영:RULE-CTL-ROOM 운영:RULE-CTL-CUT 운영:RULE-CTL-LOG-LEVEL 운영:RULE-BOOT-PORTS 정:RULE-OPS-TOKEN 정:CAND-OPS-ADMIN-OUTPUT · model: claude-opus-5-5
 //! oxadmin — 도구는 하나 · 사람이 읽는 표가 기본(`--json` raw) · 붙은 곳을 stderr 첫 줄에 · 확인값은 도구가 먼저 읽어 되싣는다 · 모르는 값은 `-`.
 
 use std::io::{Read, Write};
