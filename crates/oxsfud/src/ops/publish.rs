@@ -80,6 +80,7 @@ pub fn table_change(sfu: &Arc<Sfu>, peer: &Arc<Peer>, f: impl FnOnce(&mut Table)
     };
     super::sub::sync(sfu, peer);
     if let Some(t) = wire {
+        common::ev!(spec = "CP-OP-MLINE-EVENT", user = peer.user.as_str(), arev = t.arev, "mline_event mlines={}", t.mlines.len());
         sfu.emit_user(&peer.user, Op::MlineEvent, &oxsig::msg::MlineEventBody { table: t }, None);
     }
 }
