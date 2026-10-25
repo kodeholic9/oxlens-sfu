@@ -168,9 +168,22 @@ pub async fn ready(sfu: &Arc<Sfu>, ctx: &Ctx, body: &str) -> Reply {
         to: Some("ready"),
         cause: "READY",
         label: Some("SUB.S.ready"),
-        ins: &[("arev", arev.to_string()), ("ack", label.to_string())],
+        ins: &[],
         room: Some(&room_id),
         user: Some(&ctx.user_id),
+        arev: Some(arev),
+    });
+    common::log::transition(&common::log::Step {
+        area: "LINK",
+        key: &ctx.user_id,
+        from: "current",
+        to: Some("current"),
+        cause: "READY",
+        label: Some(label),
+        ins: &[("a", arev.to_string())],
+        room: Some(&room_id),
+        user: Some(&ctx.user_id),
+        arev: Some(arev),
     });
     keyframes_for_room(sfu, &room_id, &ctx.user_id);
     let step = room.floor.ready(&ctx.user_id, now);

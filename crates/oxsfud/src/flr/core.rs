@@ -63,6 +63,24 @@ pub enum T {
     Rtp,
 }
 
+impl T {
+    pub fn name(self) -> &'static str {
+        match self {
+            T::Request => "REQUEST",
+            T::Granted => "GRANTED",
+            T::Taken => "TAKEN",
+            T::Deny => "DENY",
+            T::Release => "RELEASE",
+            T::Idle => "IDLE",
+            T::Revoke => "REVOKE",
+            T::QposReq => "QPOS_REQ",
+            T::Qinfo => "QINFO",
+            T::Ack => "ACK",
+            T::Rtp => "RTP",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct M {
     pub t: T,
@@ -240,11 +258,13 @@ pub struct Cfg {
 
 pub const T2_SECS: u32 = (timers::T2_MS / 1000) as u32;
 
+pub type Lab = (&'static str, Vec<(&'static str, String)>);
+
 #[derive(Debug, Clone)]
 pub struct R {
     pub s: Srv,
     pub o: Vec<Out>,
-    pub l: Vec<&'static str>,
+    pub l: Vec<Lab>,
     pub fx: Vec<Fx>,
 }
 
@@ -252,8 +272,8 @@ pub fn r0(s: Srv) -> R {
     R { s, o: Vec::new(), l: Vec::new(), fx: Vec::new() }
 }
 
-fn tl(name: &'static str, mut r: R) -> R {
-    r.l.insert(0, name);
+fn tl(name: &'static str, args: Vec<(&'static str, String)>, mut r: R) -> R {
+    r.l.insert(0, (name, args));
     r
 }
 
@@ -349,7 +369,7 @@ pub fn enter_taken(s: Srv, c: &Cfg) -> R {
             fxr(Fx::Bind(who), r0(y3))
         })
     });
-    tl("FLR.S.G.TAKEN.enter", r)
+    tl("FLR.S.G.TAKEN.enter", Vec::new(), r)
 }
 
 pub fn idle_enter(s: Srv, c: &Cfg) -> R {
@@ -366,7 +386,7 @@ pub fn idle_enter(s: Srv, c: &Cfg) -> R {
             let p = y5.prev.clone();
             fxr(Fx::Release(p), r0(y5))
         });
-        return tl("FLR.S.G.IDLE.enter_empty", r);
+        return tl("FLR.S.G.IDLE.enter_empty", Vec::new(), r);
     }
     let mut x6 = s;
     let w = x6.queue.remove(0);
@@ -378,7 +398,7 @@ pub fn idle_enter(s: Srv, c: &Cfg) -> R {
     x6.rtp_seen = false;
     x6.first_rtp = false;
     x6.c20 = 1;
-    tl("FLR.S.G.IDLE.enter_succession", enter_taken(x6, c))
+    tl("FLR.S.G.IDLE.enter_succession", Vec::new(), enter_taken(x6, c))
 }
 
 pub fn prevoke_enter(s: Srv, u: &str, cause: u32, c: &Cfg) -> R {
@@ -388,18 +408,26 @@ pub fn prevoke_enter(s: Srv, u: &str, cause: u32, c: &Cfg) -> R {
     x7.rprio = x7.sprio;
     x7.rcause_g = cause;
     x7.speaker = None;
-    tl("FLR.S.G.PREVOKE.enter", part_a(x7, u, &M::new(T::Revoke, None, cause, 0), c))
+    tl("FLR.S.G.PREVOKE.enter", vec![("u", u.to_string()), ("cause", format!("{cause:?}"))], part_a(x7, u, &M::new(T::Revoke, None, cause, 0), c))
 }
 
 pub fn arb_req_idle(s: Srv, u: &str, p: u32, c: &Cfg) -> R {
     if s.g != G::Idle {
-        return tl("FLR.S.G.any.req_discard", r0(s));
+        return tl("FLR.S.G.any.req_discard", vec![("u", u.to_string()), ("p", format!("{p:?}"))], r0(s));
     }
     if s.alone() {
-        return tl("FLR.S.G.IDLE.req_alone", part_a(s, u, &M::new(T::Deny, None, u32::from(deny::ONLY_ONE), 0), c));
+        return tl(
+            "FLR.S.G.IDLE.req_alone",
+            vec![("u", u.to_string()), ("p", format!("{p:?}"))],
+            part_a(s, u, &M::new(T::Deny, None, u32::from(deny::ONLY_ONE), 0), c),
+        );
     }
     if b(&s.retry, u) {
-        return tl("FLR.S.G.IDLE.req_retry_after", part_a(s, u, &M::new(T::Deny, None, u32::from(deny::RETRY_AFTER), 0), c));
+        return tl(
+            "FLR.S.G.IDLE.req_retry_after",
+            vec![("u", u.to_string()), ("p", format!("{p:?}"))],
+            part_a(s, u, &M::new(T::Deny, None, u32::from(deny::RETRY_AFTER), 0), c),
+        );
     }
     let mut x8 = s;
     x8.g = G::Taken;
@@ -409,7 +437,7 @@ pub fn arb_req_idle(s: Srv, u: &str, p: u32, c: &Cfg) -> R {
     x8.rtp_seen = false;
     x8.first_rtp = false;
     x8.c20 = 0;
-    tl("FLR.S.G.IDLE.req_grant", enter_taken(x8, c))
+    tl("FLR.S.G.IDLE.req_grant", vec![("u", u.to_string()), ("p", format!("{p:?}"))], enter_taken(x8, c))
 }
 
 fn t2_left(s: &Srv, c: &Cfg) -> u32 {
@@ -419,9 +447,9 @@ fn t2_left(s: &Srv, c: &Cfg) -> u32 {
 pub fn arb_req_permitted(s: Srv, u: &str, c: &Cfg) -> R {
     if s.g == G::Taken && s.speaker.as_deref() == Some(u) {
         let g = granted(&s, t2_left(&s, c));
-        return tl("FLR.S.G.TAKEN.req_regrant", part_a(s, u, &g, c));
+        return tl("FLR.S.G.TAKEN.req_regrant", vec![("u", u.to_string())], part_a(s, u, &g, c));
     }
-    tl("FLR.S.G.any.regrant_discard", r0(s))
+    tl("FLR.S.G.any.regrant_discard", vec![("u", u.to_string())], r0(s))
 }
 
 pub fn arb_preempt(s: Srv, u: &str, p: u32, c: &Cfg) -> R {
@@ -431,23 +459,23 @@ pub fn arb_preempt(s: Srv, u: &str, p: u32, c: &Cfg) -> R {
         let sp = x9.speaker.clone().unwrap_or_default();
         let u2 = u.to_string();
         let r = then(prevoke_enter(x9, &sp, u32::from(revoke::PREEMPTED), c), move |y10| part_a(y10, &u2, &M::new(T::Qinfo, None, 1, p), c));
-        return tl("FLR.S.G.TAKEN.preempt", r);
+        return tl("FLR.S.G.TAKEN.preempt", vec![("u", u.to_string()), ("p", format!("{p:?}"))], r);
     }
-    tl("FLR.S.G.PREVOKE.preempt_discard", r0(s))
+    tl("FLR.S.G.PREVOKE.preempt_discard", vec![("u", u.to_string()), ("p", format!("{p:?}"))], r0(s))
 }
 
 pub fn arb_rel(s: Srv, u: &str, c: &Cfg) -> R {
     if s.g == G::Taken && s.speaker.as_deref() == Some(u) {
         let mut x11 = s;
         x11.prev = Some(u.to_string());
-        return tl("FLR.S.G.TAKEN.rel_speaker", idle_enter(x11, c));
+        return tl("FLR.S.G.TAKEN.rel_speaker", vec![("u", u.to_string())], idle_enter(x11, c));
     }
     if s.g == G::Prevoke && s.revoking.as_deref() == Some(u) {
         let mut x12 = s;
         x12.prev = Some(u.to_string());
-        return tl("FLR.S.G.PREVOKE.rel_revoked", idle_enter(x12, c));
+        return tl("FLR.S.G.PREVOKE.rel_revoked", vec![("u", u.to_string())], idle_enter(x12, c));
     }
-    tl("FLR.S.G.any.rel_discard", r0(s))
+    tl("FLR.S.G.any.rel_discard", vec![("u", u.to_string())], r0(s))
 }
 
 pub fn arb_rtp(s: Srv, u: &str) -> R {
@@ -455,32 +483,32 @@ pub fn arb_rtp(s: Srv, u: &str) -> R {
         let mut x13 = s;
         x13.rtp_seen = true;
         x13.first_rtp = true;
-        return tl("FLR.S.G.TAKEN.rtp", r0(x13));
+        return tl("FLR.S.G.TAKEN.rtp", vec![("u", u.to_string())], r0(x13));
     }
     if s.g == G::Prevoke && s.revoking.as_deref() == Some(u) {
-        return tl("FLR.S.G.PREVOKE.rtp", r0(s));
+        return tl("FLR.S.G.PREVOKE.rtp", vec![("u", u.to_string())], r0(s));
     }
-    tl("FLR.S.G.any.rtp_discard", r0(s))
+    tl("FLR.S.G.any.rtp_discard", vec![("u", u.to_string())], r0(s))
 }
 
 pub fn server_rx(s: Srv, u: &str, m: &M, c: &Cfg) -> R {
     if m.t == T::Ack && s.part(u) != P::NpTaken {
-        return tl("FLR.S.gate.ack_drop", r0(s));
+        return tl("FLR.S.gate.ack_drop", vec![("u", u.to_string())], r0(s));
     }
     if !s.members.contains(u) && m.t == T::Request {
-        return tl("FLR.S.gate.not_in_room", send(s, u, T::Deny, None, u32::from(deny::OTHER_REASON), 0));
+        return tl("FLR.S.gate.not_in_room", vec![("u", u.to_string())], send(s, u, T::Deny, None, u32::from(deny::OTHER_REASON), 0));
     }
     if !s.members.contains(u) {
-        return tl("FLR.S.gate.not_in_room_drop", r0(s));
+        return tl("FLR.S.gate.not_in_room_drop", vec![("u", u.to_string())], r0(s));
     }
     if m.t == T::Request && !b(&s.half, u) {
-        return tl("FLR.S.gate.recv_only", send(s, u, T::Deny, None, u32::from(deny::RECV_ONLY), 0));
+        return tl("FLR.S.gate.recv_only", vec![("u", u.to_string())], send(s, u, T::Deny, None, u32::from(deny::RECV_ONLY), 0));
     }
     if m.t == T::Request && !b(&s.pub_, u) {
-        return tl("FLR.S.gate.not_pubroom", send(s, u, T::Deny, None, u32::from(deny::NOT_PUBROOM), 0));
+        return tl("FLR.S.gate.not_pubroom", vec![("u", u.to_string())], send(s, u, T::Deny, None, u32::from(deny::NOT_PUBROOM), 0));
     }
     if m.t == T::Request && !s.perm_of(u) {
-        return tl("FLR.S.gate.no_permission", send(s, u, T::Deny, None, u32::from(deny::NO_PERMISSION), 0));
+        return tl("FLR.S.gate.no_permission", vec![("u", u.to_string())], send(s, u, T::Deny, None, u32::from(deny::NO_PERMISSION), 0));
     }
     part_c(s, u, m, c)
 }
@@ -488,69 +516,69 @@ pub fn server_rx(s: Srv, u: &str, m: &M, c: &Cfg) -> R {
 pub fn ready(s: Srv, u: &str) -> R {
     let h = s.holder();
     if h.as_deref() == Some(u) {
-        return tl("FLR.S.P.join.self", r0(s));
+        return tl("FLR.S.P.join.self", vec![("u", u.to_string())], r0(s));
     }
     if h.is_some() {
-        return tl("FLR.S.P.join.taken", send(s, u, T::Taken, h, 0, 0));
+        return tl("FLR.S.P.join.taken", vec![("u", u.to_string())], send(s, u, T::Taken, h, 0, 0));
     }
     let p = s.prev.clone();
-    tl("FLR.S.P.join.idle", send(s, u, T::Idle, p, 0, 0))
+    tl("FLR.S.P.join.idle", vec![("u", u.to_string())], send(s, u, T::Idle, p, 0, 0))
 }
 
 pub fn perm_down(s: Srv, u: &str, c: &Cfg) -> R {
     if s.g == G::Taken && s.speaker.as_deref() == Some(u) {
         let mut x14 = s;
         x14.perm.insert(u.to_string(), false);
-        return tl("FLR.S.perm.speaker", prevoke_enter(x14, u, u32::from(revoke::NO_PERMISSION), c));
+        return tl("FLR.S.perm.speaker", vec![("u", u.to_string())], prevoke_enter(x14, u, u32::from(revoke::NO_PERMISSION), c));
     }
     if s.in_q(u) {
         let mut x15 = s;
         x15.perm.insert(u.to_string(), false);
         let x16 = x15.dequeue(u);
-        return tl("FLR.S.perm.queued", part_a(x16, u, &M::new(T::Deny, None, u32::from(deny::NO_PERMISSION), 0), c));
+        return tl("FLR.S.perm.queued", vec![("u", u.to_string())], part_a(x16, u, &M::new(T::Deny, None, u32::from(deny::NO_PERMISSION), 0), c));
     }
     let mut x17 = s;
     x17.perm.insert(u.to_string(), false);
-    tl("FLR.S.perm.other", r0(x17))
+    tl("FLR.S.perm.other", vec![("u", u.to_string())], r0(x17))
 }
 
 pub fn perm_up(s: Srv, u: &str) -> R {
     let mut x18 = s;
     x18.perm.insert(u.to_string(), true);
-    tl("FLR.S.perm.up", r0(x18))
+    tl("FLR.S.perm.up", vec![("u", u.to_string())], r0(x18))
 }
 
 pub fn away(s: Srv, u: &str, c: &Cfg) -> R {
     if s.g == G::Taken && s.speaker.as_deref() == Some(u) {
         let mut x19 = s;
         x19.prev = Some(u.to_string());
-        return tl("FLR.S.G.TAKEN.client_release", idle_enter(x19, c));
+        return tl("FLR.S.G.TAKEN.client_release", vec![("u", u.to_string())], idle_enter(x19, c));
     }
     if s.g == G::Prevoke && s.revoking.as_deref() == Some(u) {
-        return tl("FLR.S.G.PREVOKE.client_release", r0(s));
+        return tl("FLR.S.G.PREVOKE.client_release", vec![("u", u.to_string())], r0(s));
     }
     if s.in_q(u) {
-        return tl("FLR.S.away.queued", r0(s.dequeue(u)));
+        return tl("FLR.S.away.queued", vec![("u", u.to_string())], r0(s.dequeue(u)));
     }
-    tl("FLR.S.away.other", r0(s))
+    tl("FLR.S.away.other", vec![("u", u.to_string())], r0(s))
 }
 
 pub fn ws_pub_select(s: Srv, u: &str) -> R {
     let mut x21 = s;
     x21.pub_.insert(u.to_string(), true);
-    tl("FLR.S.ws.pub_select", r0(x21))
+    tl("FLR.S.ws.pub_select", vec![("u", u.to_string())], r0(x21))
 }
 
 pub fn ws_reg_half(s: Srv, u: &str) -> R {
     let mut x22 = s;
     x22.half.insert(u.to_string(), true);
-    tl("FLR.S.ws.reg_half", r0(x22))
+    tl("FLR.S.ws.reg_half", vec![("u", u.to_string())], r0(x22))
 }
 
 pub fn ws_pub_away(s: Srv, u: &str, c: &Cfg) -> R {
     let mut x23 = s;
     x23.pub_.insert(u.to_string(), false);
-    tl("FLR.S.ws.pub_away", away(x23, u, c))
+    tl("FLR.S.ws.pub_away", vec![("u", u.to_string())], away(x23, u, c))
 }
 
 pub fn ws_leave(s: Srv, u: &str, c: &Cfg) -> R {
@@ -563,69 +591,93 @@ pub fn ws_leave(s: Srv, u: &str, c: &Cfg) -> R {
         y25.part.insert(u2, P::Releasing);
         r0(y25)
     });
-    tl("FLR.S.ws.leave", r)
+    tl("FLR.S.ws.leave", vec![("u", u.to_string())], r)
 }
 
 pub fn part_a(s: Srv, u: &str, ev: &M, c: &Cfg) -> R {
     let _ = c;
     let pu = s.part(u);
     if ev.t == T::Qinfo {
-        return tl("FLR.S.P.any.a_QINFO", send(s, u, T::Qinfo, None, ev.n, ev.d));
+        return tl("FLR.S.P.any.a_QINFO", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], send(s, u, T::Qinfo, None, ev.n, ev.d));
     }
     if ev.t == T::Deny {
-        return tl("FLR.S.P.any.a_DENY", send(s, u, T::Deny, None, ev.n, 0));
+        return tl("FLR.S.P.any.a_DENY", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], send(s, u, T::Deny, None, ev.n, 0));
     }
     let evq = || Ev { t: ev.t, a: None, n: ev.n, d: ev.d, q: ev.q };
     match (pu, ev.t) {
-        (P::NpIdle, T::Granted) => tl("FLR.S.P.NP_IDLE.a_GRANTED", send_eq(s, u, P::Permitted, evq())),
+        (P::NpIdle, T::Granted) => {
+            tl("FLR.S.P.NP_IDLE.a_GRANTED", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], send_eq(s, u, P::Permitted, evq()))
+        }
         (P::NpIdle, T::Taken) => {
             let mut x27 = s;
             x27.tq.insert(u.to_string(), ev.q);
-            tl("FLR.S.P.NP_IDLE.a_TAKEN", send_e(x27, u, P::NpTaken, T::Taken, ev.a.clone(), 0, ev.q))
+            tl(
+                "FLR.S.P.NP_IDLE.a_TAKEN",
+                vec![("u", u.to_string()), ("ev", ev.t.name().to_string())],
+                send_e(x27, u, P::NpTaken, T::Taken, ev.a.clone(), 0, ev.q),
+            )
         }
-        (P::NpIdle, T::Idle) => tl("FLR.S.P.NP_IDLE.a_IDLE", send(s, u, T::Idle, ev.a.clone(), 0, ev.q)),
-        (P::NpIdle, _) => tl("FLR.S.P.NP_IDLE.a_other", r0(s)),
-        (P::NpTaken, T::Granted) => tl("FLR.S.P.NP_TAKEN.a_GRANTED", send_eq(s, u, P::Permitted, evq())),
+        (P::NpIdle, T::Idle) => {
+            tl("FLR.S.P.NP_IDLE.a_IDLE", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], send(s, u, T::Idle, ev.a.clone(), 0, ev.q))
+        }
+        (P::NpIdle, _) => tl("FLR.S.P.NP_IDLE.a_other", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], r0(s)),
+        (P::NpTaken, T::Granted) => {
+            tl("FLR.S.P.NP_TAKEN.a_GRANTED", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], send_eq(s, u, P::Permitted, evq()))
+        }
         (P::NpTaken, T::Taken) => {
             let mut x28 = s;
             x28.tq.insert(u.to_string(), ev.q);
             x28.c21.insert(u.to_string(), 1);
-            tl("FLR.S.P.NP_TAKEN.a_TAKEN", send(x28, u, T::Taken, ev.a.clone(), 0, ev.q))
+            tl("FLR.S.P.NP_TAKEN.a_TAKEN", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], send(x28, u, T::Taken, ev.a.clone(), 0, ev.q))
         }
-        (P::NpTaken, T::Idle) => tl("FLR.S.P.NP_TAKEN.a_IDLE", send_e(s, u, P::NpIdle, T::Idle, ev.a.clone(), 0, ev.q)),
-        (P::NpTaken, _) => tl("FLR.S.P.NP_TAKEN.a_other", r0(s)),
-        (P::Permitted, T::Granted) => tl("FLR.S.P.PERMITTED.a_GRANTED", send_q(s, u, T::Granted, None, ev.n, ev.d, ev.q)),
-        (P::Permitted, T::Idle) => tl("FLR.S.P.PERMITTED.a_IDLE", enter_r(s, u, P::NpIdle)),
+        (P::NpTaken, T::Idle) => {
+            tl("FLR.S.P.NP_TAKEN.a_IDLE", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], send_e(s, u, P::NpIdle, T::Idle, ev.a.clone(), 0, ev.q))
+        }
+        (P::NpTaken, _) => tl("FLR.S.P.NP_TAKEN.a_other", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], r0(s)),
+        (P::Permitted, T::Granted) => {
+            tl("FLR.S.P.PERMITTED.a_GRANTED", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], send_q(s, u, T::Granted, None, ev.n, ev.d, ev.q))
+        }
+        (P::Permitted, T::Idle) => tl("FLR.S.P.PERMITTED.a_IDLE", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], enter_r(s, u, P::NpIdle)),
         (P::Permitted, T::Taken) => {
             let mut x29 = s;
             x29.tq.insert(u.to_string(), ev.q);
-            tl("FLR.S.P.PERMITTED.a_TAKEN", send_e(x29, u, P::NpTaken, T::Taken, ev.a.clone(), 0, ev.q))
+            tl(
+                "FLR.S.P.PERMITTED.a_TAKEN",
+                vec![("u", u.to_string()), ("ev", ev.t.name().to_string())],
+                send_e(x29, u, P::NpTaken, T::Taken, ev.a.clone(), 0, ev.q),
+            )
         }
         (P::Permitted, T::Revoke) => {
             let mut x30 = s;
             x30.rcause.insert(u.to_string(), ev.n);
-            tl("FLR.S.P.PERMITTED.a_REVOKE", send_e(x30, u, P::Prevoke, T::Revoke, None, ev.n, 0))
+            tl("FLR.S.P.PERMITTED.a_REVOKE", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], send_e(x30, u, P::Prevoke, T::Revoke, None, ev.n, 0))
         }
-        (P::Permitted, _) => tl("FLR.S.P.PERMITTED.a_other", r0(s)),
-        (P::Prevoke, T::Idle) => tl("FLR.S.P.PREVOKE.a_IDLE", send_e(s, u, P::NpIdle, T::Idle, ev.a.clone(), 0, ev.q)),
+        (P::Permitted, _) => tl("FLR.S.P.PERMITTED.a_other", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], r0(s)),
+        (P::Prevoke, T::Idle) => {
+            tl("FLR.S.P.PREVOKE.a_IDLE", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], send_e(s, u, P::NpIdle, T::Idle, ev.a.clone(), 0, ev.q))
+        }
         (P::Prevoke, T::Taken) => {
             let mut x31 = s;
             x31.tq.insert(u.to_string(), ev.q);
-            tl("FLR.S.P.PREVOKE.a_TAKEN", send_e(x31, u, P::NpTaken, T::Taken, ev.a.clone(), 0, ev.q))
+            tl(
+                "FLR.S.P.PREVOKE.a_TAKEN",
+                vec![("u", u.to_string()), ("ev", ev.t.name().to_string())],
+                send_e(x31, u, P::NpTaken, T::Taken, ev.a.clone(), 0, ev.q),
+            )
         }
-        (P::Prevoke, _) => tl("FLR.S.P.PREVOKE.a_other", r0(s)),
-        (P::Releasing, _) => tl("FLR.S.P.RELEASING.a_any", r0(s)),
+        (P::Prevoke, _) => tl("FLR.S.P.PREVOKE.a_other", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], r0(s)),
+        (P::Releasing, _) => tl("FLR.S.P.RELEASING.a_any", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], r0(s)),
         (P::NpSends, T::Idle) => {
             let mut x32 = s;
             x32.g_taken.insert(u.to_string(), false);
-            tl("FLR.S.P.NPSENDS.a_IDLE", r0(x32))
+            tl("FLR.S.P.NPSENDS.a_IDLE", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], r0(x32))
         }
         (P::NpSends, T::Taken) => {
             let mut x33 = s;
             x33.g_taken.insert(u.to_string(), true);
-            tl("FLR.S.P.NPSENDS.a_TAKEN", r0(x33))
+            tl("FLR.S.P.NPSENDS.a_TAKEN", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], r0(x33))
         }
-        (P::NpSends, _) => tl("FLR.S.P.NPSENDS.a_other", r0(s)),
+        (P::NpSends, _) => tl("FLR.S.P.NPSENDS.a_other", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], r0(s)),
     }
 }
 
@@ -636,16 +688,18 @@ fn next_seq(s: &Srv) -> u32 {
 pub fn part_c(s: Srv, u: &str, ev: &M, c: &Cfg) -> R {
     let pu = s.part(u);
     match (pu, ev.t) {
-        (P::NpIdle, T::Request) => tl("FLR.S.P.NP_IDLE.rx_REQUEST", arb_req_idle(s, u, ev.n, c)),
+        (P::NpIdle, T::Request) => tl("FLR.S.P.NP_IDLE.rx_REQUEST", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], arb_req_idle(s, u, ev.n, c)),
         (P::NpIdle, T::Release) => {
             let x34 = s.dequeue(u);
             let prev = x34.prev.clone();
-            tl("FLR.S.P.NP_IDLE.rx_RELEASE", send(x34, u, T::Idle, prev, 0, 0))
+            tl("FLR.S.P.NP_IDLE.rx_RELEASE", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], send(x34, u, T::Idle, prev, 0, 0))
         }
-        (P::NpIdle, T::Rtp) if b(&s.released, u) => tl("FLR.S.P.NP_IDLE.rx_RTP_after_release", revoke3(s, u)),
-        (P::NpIdle, T::Rtp) => tl("FLR.S.P.NP_IDLE.rx_RTP_drop", r0(s)),
-        (P::NpIdle, _) => tl("FLR.S.P.NP_IDLE.rx_other", r0(s)),
-        (P::NpTaken, T::Request) => tl("FLR.S.P.NP_TAKEN.rx_REQUEST", taken_req(s, u, ev.n, c)),
+        (P::NpIdle, T::Rtp) if b(&s.released, u) => {
+            tl("FLR.S.P.NP_IDLE.rx_RTP_after_release", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], revoke3(s, u))
+        }
+        (P::NpIdle, T::Rtp) => tl("FLR.S.P.NP_IDLE.rx_RTP_drop", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], r0(s)),
+        (P::NpIdle, _) => tl("FLR.S.P.NP_IDLE.rx_other", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], r0(s)),
+        (P::NpTaken, T::Request) => tl("FLR.S.P.NP_TAKEN.rx_REQUEST", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], taken_req(s, u, ev.n, c)),
         (P::NpTaken, T::Release) => {
             let mut x35 = s;
             let q = next_seq(&x35);
@@ -653,45 +707,47 @@ pub fn part_c(s: Srv, u: &str, ev: &M, c: &Cfg) -> R {
             x35.c21.insert(u.to_string(), 1);
             let x36 = x35.dequeue(u);
             let h = x36.holder();
-            tl("FLR.S.P.NP_TAKEN.rx_RELEASE", send(x36, u, T::Taken, h, 0, 0))
+            tl("FLR.S.P.NP_TAKEN.rx_RELEASE", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], send(x36, u, T::Taken, h, 0, 0))
         }
         (P::NpTaken, T::Ack) if ev.n == 2 && ev.q == n(&s.tq, u) => {
             let mut x37 = s;
             x37.c21.insert(u.to_string(), 0);
-            tl("FLR.S.P.NP_TAKEN.rx_ACK_taken", r0(x37))
+            tl("FLR.S.P.NP_TAKEN.rx_ACK_taken", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], r0(x37))
         }
-        (P::NpTaken, T::Ack) if ev.n == 2 => tl("FLR.S.P.NP_TAKEN.rx_ACK_taken_stale", r0(s)),
-        (P::NpTaken, T::Ack) => tl("FLR.S.P.NP_TAKEN.rx_ACK_other", r0(s)),
+        (P::NpTaken, T::Ack) if ev.n == 2 => tl("FLR.S.P.NP_TAKEN.rx_ACK_taken_stale", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], r0(s)),
+        (P::NpTaken, T::Ack) => tl("FLR.S.P.NP_TAKEN.rx_ACK_other", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], r0(s)),
         (P::NpTaken, T::QposReq) => {
             let (p, q) = (s.pos(u), s.q_prio(u));
-            tl("FLR.S.P.NP_TAKEN.rx_QPOS_REQ", send(s, u, T::Qinfo, None, p, q))
+            tl("FLR.S.P.NP_TAKEN.rx_QPOS_REQ", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], send(s, u, T::Qinfo, None, p, q))
         }
-        (P::NpTaken, T::Rtp) => tl("FLR.S.P.NP_TAKEN.rx_RTP", revoke3(s, u)),
-        (P::NpTaken, _) => tl("FLR.S.P.NP_TAKEN.rx_other", r0(s)),
+        (P::NpTaken, T::Rtp) => tl("FLR.S.P.NP_TAKEN.rx_RTP", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], revoke3(s, u)),
+        (P::NpTaken, _) => tl("FLR.S.P.NP_TAKEN.rx_other", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], r0(s)),
         (P::Permitted, T::Release) => {
             let mut x38 = s;
             x38.released.insert(u.to_string(), true);
-            tl("FLR.S.P.PERMITTED.rx_RELEASE", arb_rel(x38, u, c))
+            tl("FLR.S.P.PERMITTED.rx_RELEASE", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], arb_rel(x38, u, c))
         }
-        (P::Permitted, T::Request) => tl("FLR.S.P.PERMITTED.rx_REQUEST", arb_req_permitted(s, u, c)),
-        (P::Permitted, T::Rtp) => tl("FLR.S.P.PERMITTED.rx_RTP", arb_rtp(s, u)),
-        (P::Permitted, _) => tl("FLR.S.P.PERMITTED.rx_other", r0(s)),
-        (P::Prevoke, T::Release) => tl("FLR.S.P.PREVOKE.rx_RELEASE", arb_rel(s, u, c)),
-        (P::Prevoke, T::Rtp) => tl("FLR.S.P.PREVOKE.rx_RTP", arb_rtp(s, u)),
-        (P::Prevoke, _) => tl("FLR.S.P.PREVOKE.rx_other", r0(s)),
+        (P::Permitted, T::Request) => {
+            tl("FLR.S.P.PERMITTED.rx_REQUEST", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], arb_req_permitted(s, u, c))
+        }
+        (P::Permitted, T::Rtp) => tl("FLR.S.P.PERMITTED.rx_RTP", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], arb_rtp(s, u)),
+        (P::Permitted, _) => tl("FLR.S.P.PERMITTED.rx_other", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], r0(s)),
+        (P::Prevoke, T::Release) => tl("FLR.S.P.PREVOKE.rx_RELEASE", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], arb_rel(s, u, c)),
+        (P::Prevoke, T::Rtp) => tl("FLR.S.P.PREVOKE.rx_RTP", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], arb_rtp(s, u)),
+        (P::Prevoke, _) => tl("FLR.S.P.PREVOKE.rx_other", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], r0(s)),
         (_, T::Release) if b(&s.g_taken, u) => {
             let mut x39 = s;
             let q = next_seq(&x39);
             x39.tq.insert(u.to_string(), q);
             let h = x39.holder();
-            tl("FLR.S.P.NPSENDS.rx_RELEASE_taken", send_e(x39, u, P::NpTaken, T::Taken, h, 0, 0))
+            tl("FLR.S.P.NPSENDS.rx_RELEASE_taken", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], send_e(x39, u, P::NpTaken, T::Taken, h, 0, 0))
         }
         (_, T::Release) => {
             let prev = s.prev.clone();
-            tl("FLR.S.P.NPSENDS.rx_RELEASE_idle", send_e(s, u, P::NpIdle, T::Idle, prev, 0, 0))
+            tl("FLR.S.P.NPSENDS.rx_RELEASE_idle", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], send_e(s, u, P::NpIdle, T::Idle, prev, 0, 0))
         }
-        (_, T::Rtp) => tl("FLR.S.P.NPSENDS.rx_RTP", r0(s)),
-        _ => tl("FLR.S.P.NPSENDS.rx_other", r0(s)),
+        (_, T::Rtp) => tl("FLR.S.P.NPSENDS.rx_RTP", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], r0(s)),
+        _ => tl("FLR.S.P.NPSENDS.rx_other", vec![("u", u.to_string()), ("ev", ev.t.name().to_string())], r0(s)),
     }
 }
 
@@ -703,27 +759,27 @@ pub fn enter_r(s: Srv, u: &str, p: P) -> R {
         P::NpIdle => {
             x.g_taken.insert(k.clone(), false);
             x.c21.insert(k, 0);
-            tl("FLR.S.P.NP_IDLE.enter", r0(x))
+            tl("FLR.S.P.NP_IDLE.enter", vec![("u", u.to_string()), ("p", format!("{p:?}"))], r0(x))
         }
         P::NpTaken => {
             x.g_taken.insert(k.clone(), true);
             x.c21.insert(k, 1);
-            tl("FLR.S.P.NP_TAKEN.enter", r0(x))
+            tl("FLR.S.P.NP_TAKEN.enter", vec![("u", u.to_string()), ("p", format!("{p:?}"))], r0(x))
         }
         P::Permitted => {
             x.released.insert(k.clone(), false);
             x.c21.insert(k, 0);
-            tl("FLR.S.P.PERMITTED.enter", r0(x))
+            tl("FLR.S.P.PERMITTED.enter", vec![("u", u.to_string()), ("p", format!("{p:?}"))], r0(x))
         }
         P::Prevoke => {
             x.c8.insert(k.clone(), 1);
             x.c21.insert(k, 0);
-            tl("FLR.S.P.PREVOKE.enter", r0(x))
+            tl("FLR.S.P.PREVOKE.enter", vec![("u", u.to_string()), ("p", format!("{p:?}"))], r0(x))
         }
         _ => {
             x.c8.insert(k.clone(), 1);
             x.c21.insert(k, 0);
-            tl("FLR.S.P.NPSENDS.enter", r0(x))
+            tl("FLR.S.P.NPSENDS.enter", vec![("u", u.to_string()), ("p", format!("{p:?}"))], r0(x))
         }
     }
 }
@@ -737,56 +793,60 @@ pub fn revoke3(s: Srv, u: &str) -> R {
 
 pub fn taken_req(s: Srv, u: &str, p: u32, c: &Cfg) -> R {
     if b(&s.retry, u) {
-        return tl("FLR.S.P.NP_TAKEN.req_retry_after", send(s, u, T::Deny, None, u32::from(deny::RETRY_AFTER), 0));
+        return tl(
+            "FLR.S.P.NP_TAKEN.req_retry_after",
+            vec![("u", u.to_string()), ("p", format!("{p:?}"))],
+            send(s, u, T::Deny, None, u32::from(deny::RETRY_AFTER), 0),
+        );
     }
     if s.in_q(u) {
         let (pp, qp) = (s.pos(u), s.q_prio(u));
-        return tl("FLR.S.P.NP_TAKEN.req_renotify", send(s, u, T::Qinfo, None, pp, qp));
+        return tl("FLR.S.P.NP_TAKEN.req_renotify", vec![("u", u.to_string()), ("p", format!("{p:?}"))], send(s, u, T::Qinfo, None, pp, qp));
     }
     if p > s.holder_prio() && !s.pre_q() {
-        return tl("FLR.S.P.NP_TAKEN.req_preempt", arb_preempt(s, u, p, c));
+        return tl("FLR.S.P.NP_TAKEN.req_preempt", vec![("u", u.to_string()), ("p", format!("{p:?}"))], arb_preempt(s, u, p, c));
     }
     if p > s.holder_prio() {
-        return tl("FLR.S.P.NP_TAKEN.req_preempt_blocked", r0(s));
+        return tl("FLR.S.P.NP_TAKEN.req_preempt_blocked", vec![("u", u.to_string()), ("p", format!("{p:?}"))], r0(s));
     }
     if s.queue.len() as u32 >= c.qmax {
-        return tl("FLR.S.P.NP_TAKEN.req_full", send(s, u, T::Deny, None, u32::from(deny::QUEUE_FULL), 0));
+        return tl("FLR.S.P.NP_TAKEN.req_full", vec![("u", u.to_string()), ("p", format!("{p:?}"))], send(s, u, T::Deny, None, u32::from(deny::QUEUE_FULL), 0));
     }
     let mut x46 = s;
     x46.queue = insert_q(&x46.queue, Waiter { u: u.to_string(), p, pre: false });
     let pos = x46.pos(u);
-    tl("FLR.S.P.NP_TAKEN.req_enqueue", send(x46, u, T::Qinfo, None, pos, p))
+    tl("FLR.S.P.NP_TAKEN.req_enqueue", vec![("u", u.to_string()), ("p", format!("{p:?}"))], send(x46, u, T::Qinfo, None, pos, p))
 }
 
 pub fn srv_t1(s: Srv, c: &Cfg) -> R {
     if s.g == G::Taken {
         let mut x47 = s;
         x47.prev = x47.speaker.clone();
-        return tl("FLR.S.G.TAKEN.T1", idle_enter(x47, c));
+        return tl("FLR.S.G.TAKEN.T1", Vec::new(), idle_enter(x47, c));
     }
     let mut x48 = s;
     x48.prev = x48.revoking.clone();
-    tl("FLR.S.G.PREVOKE.T1", idle_enter(x48, c))
+    tl("FLR.S.G.PREVOKE.T1", Vec::new(), idle_enter(x48, c))
 }
 
 pub fn srv_t2(s: Srv, c: &Cfg) -> R {
     let u = s.speaker.clone().unwrap_or_default();
     let mut x49 = s;
     x49.retry.insert(u.clone(), true);
-    tl("FLR.S.G.TAKEN.T2", prevoke_enter(x49, &u, u32::from(revoke::TOO_LONG), c))
+    tl("FLR.S.G.TAKEN.T2", Vec::new(), prevoke_enter(x49, &u, u32::from(revoke::TOO_LONG), c))
 }
 
 pub fn srv_t3(s: Srv, c: &Cfg) -> R {
     let mut x50 = s;
     x50.prev = x50.revoking.clone();
-    tl("FLR.S.G.PREVOKE.T3", idle_enter(x50, c))
+    tl("FLR.S.G.PREVOKE.T3", Vec::new(), idle_enter(x50, c))
 }
 
 pub fn srv_t7(s: Srv, c: &Cfg) -> R {
     let mut x51 = s;
     x51.c7 += 1;
     let prev = x51.prev.clone();
-    tl("FLR.S.G.IDLE.T7", fan(x51, M::new(T::Idle, prev, 0, 0), None, c))
+    tl("FLR.S.G.IDLE.T7", Vec::new(), fan(x51, M::new(T::Idle, prev, 0, 0), None, c))
 }
 
 pub fn srv_t20(s: Srv, c: &Cfg) -> R {
@@ -795,11 +855,11 @@ pub fn srv_t20(s: Srv, c: &Cfg) -> R {
         x52.c20 += 1;
         let sp = x52.speaker.clone().unwrap_or_default();
         let g = granted(&x52, T2_SECS);
-        return tl("FLR.S.G.TAKEN.T20", part_a(x52, &sp, &g, c));
+        return tl("FLR.S.G.TAKEN.T20", Vec::new(), part_a(x52, &sp, &g, c));
     }
     let mut x53 = s;
     x53.c20 += 1;
-    tl("FLR.S.G.TAKEN.T20_exhaust", r0(x53))
+    tl("FLR.S.G.TAKEN.T20_exhaust", Vec::new(), r0(x53))
 }
 
 pub fn srv_t8(s: Srv, u: &str) -> R {
@@ -808,9 +868,9 @@ pub fn srv_t8(s: Srv, u: &str) -> R {
     x.c8.insert(u.to_string(), c8);
     if x.part(u) == P::Prevoke {
         let cause = n(&x.rcause, u);
-        return tl("FLR.S.P.PREVOKE.T8", send(x, u, T::Revoke, None, cause, 0));
+        return tl("FLR.S.P.PREVOKE.T8", vec![("u", u.to_string())], send(x, u, T::Revoke, None, cause, 0));
     }
-    tl("FLR.S.P.NPSENDS.T8", send(x, u, T::Revoke, None, u32::from(revoke::NO_PERMISSION), 0))
+    tl("FLR.S.P.NPSENDS.T8", vec![("u", u.to_string())], send(x, u, T::Revoke, None, u32::from(revoke::NO_PERMISSION), 0))
 }
 
 pub fn srv_t21(s: Srv, u: &str) -> R {
@@ -820,15 +880,15 @@ pub fn srv_t21(s: Srv, u: &str) -> R {
     if c21 < u32::from(timers::C21) {
         let h = x.holder();
         let q = n(&x.tq, u);
-        return tl("FLR.S.P.NP_TAKEN.T21", send(x, u, T::Taken, h, 0, q));
+        return tl("FLR.S.P.NP_TAKEN.T21", vec![("u", u.to_string())], send(x, u, T::Taken, h, 0, q));
     }
-    tl("FLR.S.P.NP_TAKEN.T21_exhaust", r0(x))
+    tl("FLR.S.P.NP_TAKEN.T21_exhaust", vec![("u", u.to_string())], r0(x))
 }
 
 pub fn srv_t9(s: Srv, u: &str) -> R {
     let mut x58 = s;
     x58.retry.insert(u.to_string(), false);
-    tl("FLR.S.T9.expire", r0(x58))
+    tl("FLR.S.T9.expire", vec![("u", u.to_string())], r0(x58))
 }
 
 pub fn armed_server(s: &Srv) -> Vec<&'static str> {
@@ -929,7 +989,7 @@ mod tests {
         let r = server_rx(r.s, "a", &M::new(T::Release, None, 0, 0), &c);
         assert_eq!(r.s.speaker.as_deref(), Some("b"));
         assert!(r.s.succ);
-        assert!(r.l.contains(&"FLR.S.G.IDLE.enter_succession"));
+        assert!(r.l.iter().any(|(l, _)| *l == "FLR.S.G.IDLE.enter_succession"));
         assert!(!r.o.iter().any(|o| o.m.t == T::Idle), "큐가 있는데 IDLE 을 보내지 않는다");
     }
 
@@ -968,7 +1028,7 @@ mod tests {
         let r = srv_t21(r.s, "b");
         assert_eq!(r.o[0].m.q, q, "T21 재전송은 같은 번호");
         let r = server_rx(r.s, "b", &M { t: T::Ack, a: None, n: 2, d: 0, q }, &c);
-        assert!(r.l.contains(&"FLR.S.P.NP_TAKEN.rx_ACK_taken"));
+        assert!(r.l.iter().any(|(l, _)| *l == "FLR.S.P.NP_TAKEN.rx_ACK_taken"));
         assert!(!armed_participant(&r.s, "b").contains(&"T21"));
     }
 

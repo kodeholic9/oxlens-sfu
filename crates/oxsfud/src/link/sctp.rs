@@ -60,6 +60,7 @@ pub async fn run(t: Arc<Transport>, conn: Arc<DTLSConn>, mut out: mpsc::Receiver
     let mut ep = Endpoint::new(Arc::new(EndpointConfig::new()), Some(Arc::new(sc)));
     let mut assoc: Option<(AssociationHandle, Association)> = None;
     let mut chan: Option<StreamId> = None;
+    let mut up = false;
     let mut buf = vec![0u8; 65_536];
     loop {
         let deadline = assoc.as_ref().and_then(|(_, a)| a.poll_timeout());
@@ -101,8 +102,10 @@ pub async fn run(t: Arc<Transport>, conn: Arc<DTLSConn>, mut out: mpsc::Receiver
         }
         while a.accept_stream().is_some() {}
         while let Some(ev) = a.poll() {
-            if let Event::Stream(StreamEvent::Readable { id }) = ev {
-                read_stream(&t, a, id, &mut chan);
+            match ev {
+                Event::Connected => up = true,
+                Event::Stream(StreamEvent::Readable { id }) => read_stream(&t, a, id, &mut chan),
+                _ => {}
             }
         }
         let now = Instant::now();
@@ -113,8 +116,11 @@ pub async fn run(t: Arc<Transport>, conn: Arc<DTLSConn>, mut out: mpsc::Receiver
                 }
             }
         }
-        if a.is_closed() {
-            break;
+        if up && a.is_closed() {
+            assoc = None;
+            chan = None;
+            up = false;
+            t.dc_open.store(false, Ordering::Release);
         }
     }
     t.dc_open.store(false, Ordering::Release);

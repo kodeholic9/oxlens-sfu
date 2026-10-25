@@ -303,9 +303,13 @@ pub async fn room_join(sfu: &Arc<Sfu>, ctx: &Ctx, body: &str) -> Reply {
         to: Some("JOINED"),
         cause: "ROOM_JOIN",
         label: Some(label),
-        ins: &[("hidden", ctx.hidden.to_string()), ("select", select.to_string())],
+        ins: &[
+            ("hidden", ctx.hidden.to_string()),
+            ("pcm", serde_json::to_value(ctx.pc_mode).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default()),
+        ],
         room: Some(&room.id),
         user: Some(&ctx.user_id),
+        arev: None,
     });
     if select && let Err(f) = super::aff::move_pub(sfu, &peer, Some(&room.id)).await {
         tracing::info!(user = ctx.user_id.as_str(), room = room.id.as_str(), "join select not moved code={}", f.code);
@@ -410,9 +414,10 @@ pub async fn ice_restart(sfu: &Arc<Sfu>, ctx: &Ctx, body: &str) -> Reply {
         to: Some("restart"),
         cause: "ICE_RESTART",
         label: Some("LINK.S.restart"),
-        ins: &[("ufrag", creds[0].ufrag.clone())],
+        ins: &[],
         room: None,
         user: Some(&ctx.user_id),
+        arev: None,
     });
     let publish = IceRestartResPublish { ufrag: creds[0].ufrag.clone(), pwd: creds[0].pwd.clone() };
     let subscribe = creds.get(1).map(|c| IceRestartResSubscribe { ufrag: c.ufrag.clone(), pwd: c.pwd.clone() });

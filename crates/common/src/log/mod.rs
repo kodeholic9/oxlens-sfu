@@ -436,12 +436,14 @@ pub struct Step<'a> {
     pub ins: &'a [(&'a str, String)],
     pub room: Option<&'a str>,
     pub user: Option<&'a str>,
+    pub arev: Option<u64>,
 }
 
 pub fn transition(s: &Step<'_>) {
     let ins: String = s.ins.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(",");
     let room = s.room.unwrap_or("");
     let user = s.user.unwrap_or("");
+    let arev = s.arev.map(|a| a.to_string()).unwrap_or_default();
     match s.label {
         Some(l) => crate::ev!(
             spec = l,
@@ -452,9 +454,20 @@ pub fn transition(s: &Step<'_>) {
             cause = s.cause,
             room = room,
             user = user,
+            arev = arev.as_str(),
             in_args = ins.as_str()
         ),
-        None => crate::ev!(area = s.area, key = s.key, from = s.from, cause = s.cause, impossible = "1", room = room, user = user, in_args = ins.as_str()),
+        None => crate::ev!(
+            area = s.area,
+            key = s.key,
+            from = s.from,
+            cause = s.cause,
+            impossible = "1",
+            room = room,
+            user = user,
+            arev = arev.as_str(),
+            in_args = ins.as_str()
+        ),
     }
 }
 

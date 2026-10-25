@@ -119,7 +119,7 @@ pub async fn leave(sfu: &Arc<Sfu>, peer: &Arc<Peer>, room: &Arc<Room>, why: Why,
         };
         sfu.emit_room(&room.id, Op::ParticipantEvent, &ev, vec![peer.user.clone()]);
     }
-    let (state, _) = peer.sub_conn().link.state();
+    let ins: Vec<(&str, String)> = if matches!(why, Why::Closed) { Vec::new() } else { vec![("hidden", member.hidden.to_string())] };
     common::log::transition(&common::log::Step {
         area: "ROOM",
         key: &room.id,
@@ -127,9 +127,10 @@ pub async fn leave(sfu: &Arc<Sfu>, peer: &Arc<Peer>, room: &Arc<Room>, why: Why,
         to: Some("NONE"),
         cause: why.name(),
         label: Some(why.label(member.hidden)),
-        ins: &[("peer_state", state.name().to_string())],
+        ins: &ins,
         room: Some(&room.id),
         user: Some(&peer.user),
+        arev: None,
     });
     true
 }
@@ -155,12 +156,13 @@ pub fn reap(sfu: &Arc<Sfu>, peer: &Arc<Peer>, why: &str) {
         area: "LINK",
         key: &peer.user,
         from: state.name(),
-        to: None,
+        to: Some("NONE"),
         cause: why,
         label: Some("LINK.S.peer_reaped"),
-        ins: &[("rooms", peer.aff.count().to_string())],
+        ins: &[("last", "true".to_string())],
         room: None,
         user: Some(&peer.user),
+        arev: None,
     });
 }
 
@@ -361,9 +363,10 @@ fn stall_check(sfu: &Arc<Sfu>, peer: &Arc<Peer>, now: u64) {
             to: Some("JOINED"),
             cause: "stall",
             label: Some("ROOM.S.sync_required"),
-            ins: &[("mid", e.mid.to_string()), ("track", l.track_id.clone())],
+            ins: &[],
             room: Some(&l.room),
             user: Some(&peer.user),
+            arev: None,
         });
     }
 }
@@ -412,9 +415,10 @@ async fn link_watch(sfu: Arc<Sfu>) {
                         to: Some("Suspect"),
                         cause: "pair_expired",
                         label: Some("LINK.S.suspect"),
-                        ins: &[("ufrag", ev.ufrag)],
+                        ins: &[],
                         room: None,
                         user: Some(&p.user),
+                        arev: None,
                     });
                 }
             }

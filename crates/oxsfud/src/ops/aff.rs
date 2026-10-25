@@ -157,6 +157,7 @@ pub async fn affiliation(sfu: &Arc<Sfu>, ctx: &Ctx, body: &str) -> Reply {
         ins: &[],
         room: None,
         user: Some(&ctx.user_id),
+        arev: None,
     });
     let a = peer.aff.snapshot();
     Reply::ok(&AffiliationRes { sub_rooms: a.sub_rooms, pub_room: a.pub_room, cause: AffiliationResCause::User, change_id: req.change_id })

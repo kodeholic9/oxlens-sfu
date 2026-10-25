@@ -155,9 +155,10 @@ fn on_stun(sfu: &Arc<Sfu>, path: Path, src: SocketAddr, b: &[u8]) {
             to: Some("current"),
             cause: "checked_new",
             label: Some("LINK.S.checked_new"),
-            ins: &[("ufrag", uf.clone())],
+            ins: &[("g", uf.clone())],
             room: None,
             user: Some(&conn.user),
+            arev: None,
         });
     }
     if let Some(dwell) = out.alive_again {
@@ -167,10 +168,11 @@ fn on_stun(sfu: &Arc<Sfu>, path: Path, src: SocketAddr, b: &[u8]) {
             from: "Suspect",
             to: Some("Alive"),
             cause: "nominated",
-            label: Some("SV-STATE-PEER-STATE"),
+            label: Some("IMPL-LINK-PEER-STATE"),
             ins: &[("dwell_ms", dwell.to_string()), ("path", path.to_string())],
             room: None,
             user: Some(&conn.user),
+            arev: None,
         });
     }
     let resp = stun::success(&req.txid, src, &pwd);

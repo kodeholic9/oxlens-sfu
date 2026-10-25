@@ -78,7 +78,11 @@ struct Resp {
 }
 
 fn http(o: &Opts, method: &str, path: &str, body: Option<&Value>) -> Result<Resp, String> {
-    let rest = o.hub.strip_prefix("http://").ok_or_else(|| format!("http:// 만 지원한다: {}", o.hub))?;
+    let rest = match o.hub.split_once("://") {
+        Some(("http", r)) => r,
+        Some(_) => return Err(format!("http:// 만 지원한다: {}", o.hub)),
+        None => o.hub.as_str(),
+    };
     let (host, base) = match rest.find('/') {
         Some(i) => (&rest[..i], &rest[i..]),
         None => (rest, ""),

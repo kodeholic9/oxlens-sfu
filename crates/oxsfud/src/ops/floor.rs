@@ -67,19 +67,18 @@ pub fn decode(m: &Msg) -> Option<M> {
 }
 
 pub async fn exec(sfu: &Arc<Sfu>, room: &Arc<Room>, st: Step) {
-    if !st.labels.is_empty() || st.from != st.to {
-        let ins: Vec<(&str, String)> =
-            st.labels.iter().skip(1).take(6).enumerate().map(|(i, l)| (["l1", "l2", "l3", "l4", "l5", "l6"][i], (*l).to_string())).collect();
+    for (label, ins) in &st.labels {
         common::log::transition(&common::log::Step {
             area: "FLR",
             key: &room.id,
             from: st.from.name(),
             to: Some(st.to.name()),
             cause: st.cause,
-            label: st.labels.first().copied(),
-            ins: &ins,
+            label: Some(label),
+            ins,
             room: Some(&room.id),
             user: st.user.as_deref(),
+            arev: None,
         });
     }
     for o in &st.out {

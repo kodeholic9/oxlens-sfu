@@ -96,7 +96,7 @@ pub struct Supervisor {
 fn transition(u: &mut Unit, to: UState) {
     let from = u.state;
     u.state = to;
-    common::ev!(spec = "SV-STATE-UNIT-STATE", "unit {} {} → {}", u.id, from.name(), to.name());
+    common::ev!(spec = "SV-STATE-UNIT-STATE", "unit={} from={} to={}", u.id, from.name(), to.name());
 }
 
 impl Supervisor {
@@ -476,6 +476,7 @@ impl Supervisor {
                 }
                 true
             } else {
+                transition(u, UState::Down);
                 false
             }
         };
@@ -491,7 +492,9 @@ impl Supervisor {
                 let Some(u) = g.iter_mut().find(|u| u.id == id) else {
                     return;
                 };
-                transition(u, UState::Down);
+                if u.state != UState::Down {
+                    transition(u, UState::Down);
+                }
                 if self.stopping() {
                     return;
                 }
@@ -578,6 +581,14 @@ impl Supervisor {
         }
         if let Some(k) = k {
             k.notify_one();
+        }
+        let until = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < until {
+            let gone = self.units.lock().await.iter().find(|u| u.id == id).is_none_or(|u| u.epoch.as_deref() != Some(if_epoch));
+            if gone {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
         Ok(from)
     }

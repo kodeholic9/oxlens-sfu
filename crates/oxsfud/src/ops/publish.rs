@@ -253,9 +253,10 @@ pub async fn publish_tracks(sfu: &Arc<Sfu>, ctx: &Ctx, body: &str) -> Reply {
             to: Some("REG"),
             cause: "PUBLISH_TRACKS",
             label: Some("PUB.S.add"),
-            ins: &[("duplex", format!("{:?}", t.duplex.unwrap_or(Duplex::Full))), ("simulcast", t.simulcast.unwrap_or(false).to_string())],
+            ins: &[],
             room: Some(&room_id),
             user: Some(&ctx.user_id),
+            arev: None,
         });
     }
     if fresh.iter().any(|s| s.half()) {
@@ -304,6 +305,7 @@ async fn remove(sfu: &Arc<Sfu>, peer: &Arc<Peer>, v: &Value) -> Reply {
             ins: &[],
             room: None,
             user: Some(&peer.user),
+            arev: None,
         });
     }
     Reply::ok(&PublishTracksRes::Remove {})
@@ -415,6 +417,7 @@ pub async fn track_set(sfu: &Arc<Sfu>, ctx: &Ctx, body: &str) -> Reply {
         ins: &[],
         room: Some(&req.room_id),
         user: Some(&peer.user),
+        arev: None,
     });
     Reply::ok(&TrackSetRes { ssrc: s.ssrc, muted: None, duplex: Some(d), noop: None })
 }

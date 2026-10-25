@@ -14,7 +14,7 @@ pub const RTP_NOTIFY_MS: u64 = 500;
 pub struct Step {
     pub out: Vec<Out>,
     pub fx: Vec<Fx>,
-    pub labels: Vec<&'static str>,
+    pub labels: Vec<core::Lab>,
     pub cause: &'static str,
     pub from: G,
     pub to: G,
@@ -343,7 +343,7 @@ mod tests {
         let steps = f.due(5000);
         assert!(steps.iter().all(|s| s.to == G::Taken), "RTP 가 T1 을 밀었다");
         let steps = f.due(5600);
-        assert!(steps.iter().any(|s| s.labels.contains(&"FLR.S.G.TAKEN.T1")));
+        assert!(steps.iter().any(|s| s.labels.iter().any(|(l, _)| *l == "FLR.S.G.TAKEN.T1")));
         assert_eq!(f.state(), G::Idle);
     }
 
