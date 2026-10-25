@@ -11,8 +11,9 @@ use oxsig::msg::{BindReq, BindRes, MlineTable, PcMode, Publication, ResumeRes, R
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use super::{ConnHandle, Gone, Identity, Inner, SessData, Session, destroy};
+use super::sess::{destroy, set_rooms};
 use crate::ops::hub::Hub;
+use crate::ses::{ConnHandle, Gone, Identity, Inner, SessData, Session};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "q", rename_all = "snake_case")]
@@ -73,12 +74,12 @@ async fn attach(s: &Arc<Session>, conn: ConnHandle) -> bool {
         g.conn.replace(conn)
     };
     if let Some(o) = old {
-        let _ = o.tx.send(super::Out::Leave(Code::DuplicateSession));
+        let _ = o.tx.send(crate::ses::Out::Leave(Code::DuplicateSession));
     }
     true
 }
 
-pub async fn bind(hub: &Arc<Hub>, req: BindReq, conn_id: u64, tx: tokio::sync::mpsc::UnboundedSender<super::Out>) -> Result<Bound, Code> {
+pub async fn bind(hub: &Arc<Hub>, req: BindReq, conn_id: u64, tx: tokio::sync::mpsc::UnboundedSender<crate::ses::Out>) -> Result<Bound, Code> {
     if let Some(sid) = req.session_id.as_deref().filter(|s| !s.is_empty()) {
         if let Some(s) = hub.ses.get(sid)
             && attach(&s, ConnHandle { id: conn_id, tx: tx.clone(), resumed: true }).await
@@ -157,7 +158,7 @@ async fn handover(hub: &Arc<Hub>, sid: &str) -> Option<Arc<Session>> {
     let _ = hub.bus.watch_user(&d.id.user).await;
     let _ = hub.bus.declare_sess(&d.id.user, &d.sid).await;
     for (n, rs) in d.rooms {
-        super::set_rooms(hub, &s, &n, rs).await;
+        set_rooms(hub, &s, &n, rs).await;
     }
     Some(s)
 }
@@ -173,7 +174,7 @@ pub async fn hand_out(hub: &Arc<Hub>, sid: &str) -> Option<SessData> {
         (std::mem::take(&mut g.rooms), g.conn.take())
     };
     if let Some(c) = conn {
-        let _ = c.tx.send(super::Out::Leave(Code::DuplicateSession));
+        let _ = c.tx.send(crate::ses::Out::Leave(Code::DuplicateSession));
     }
     hub.ses.by_sid.remove(sid);
     hub.ses.by_user.remove_if(&s.id.user, |_, v| v == sid);
@@ -203,12 +204,12 @@ pub async fn resume(hub: &Arc<Hub>, s: &Arc<Session>) -> Result<ResumeRes, Code>
     let mut publications: Vec<Publication> = Vec::new();
     let mut mline_tables: Vec<MlineTable> = Vec::new();
     for node in s.nodes().await {
-        let call = Call::Resume { ctx: s.ctx(hub) };
+        let call = Call::Resume { ctx: s.ctx(hub.home()) };
         match hub.call_node(&node, None, &call).await {
             Reply::Ok { body } => {
                 if let Ok(r) = serde_json::from_str::<ResumeRes>(&body) {
                     let keys: BTreeSet<String> = r.snapshot.keys().cloned().collect();
-                    super::set_rooms(hub, s, &node, keys).await;
+                    set_rooms(hub, s, &node, keys).await;
                     snapshot.extend(r.snapshot);
                     publications.extend(r.publications);
                     mline_tables.extend(r.mline_tables);
@@ -217,7 +218,7 @@ pub async fn resume(hub: &Arc<Hub>, s: &Arc<Session>) -> Result<ResumeRes, Code>
             Reply::Fail { failure } => {
                 tracing::warn!(session = s.fp.as_str(), "resume: node {node} failed {}", failure.code);
                 if failure.code == Code::PeerNotFound.num() {
-                    super::set_rooms(hub, s, &node, BTreeSet::new()).await;
+                    set_rooms(hub, s, &node, BTreeSet::new()).await;
                 }
             }
             Reply::Http { .. } => {}

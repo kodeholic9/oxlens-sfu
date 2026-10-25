@@ -3,8 +3,12 @@
 //! hub 기동과 종료 — 로거 → zenoh → sfu 차례로 세우고 · 버스 사건 · node 사이 질의를 나눠 주고 · 종료는 ①클라 `LEAVE 5004` ②유닛 ③hub.
 
 pub mod admin;
+pub mod bind;
+pub mod conn;
 pub mod hub;
+pub mod rooms;
 pub mod route;
+pub mod sess;
 pub mod shape;
 pub mod supervisor;
 
@@ -25,7 +29,7 @@ use tokio::sync::{Mutex, Notify};
 
 use crate::bus::{Bus, QueryIn};
 use crate::cfg::Config;
-use crate::ses::bind::HubQ;
+use bind::HubQ;
 use hub::{Hub, RemoteCall};
 use supervisor::Supervisor;
 
@@ -42,13 +46,13 @@ pub fn begin_shutdown(hub: &Hub) {
 async fn ws(State(hub): State<Arc<Hub>>, h: HeaderMap, up: WebSocketUpgrade) -> Response {
     let origin = h.get(header::ORIGIN).and_then(|v| v.to_str().ok());
     let host = h.get(header::HOST).and_then(|v| v.to_str().ok());
-    if !crate::ses::conn::origin_ok(&hub, origin, host) {
+    if !conn::origin_ok(&hub, origin, host) {
         return (StatusCode::FORBIDDEN, "origin").into_response();
     }
     if hub.stopping() {
         return (StatusCode::SERVICE_UNAVAILABLE, "stopping").into_response();
     }
-    up.max_message_size(oxsig::frame::WS_MAX_FRAME + 1).on_upgrade(move |sock| crate::ses::conn::run(hub, sock))
+    up.max_message_size(oxsig::frame::WS_MAX_FRAME + 1).on_upgrade(move |sock| conn::run(hub, sock))
 }
 
 async fn dispatch(hub: Arc<Hub>, q: QueryIn) {
@@ -64,10 +68,10 @@ async fn dispatch(hub: Arc<Hub>, q: QueryIn) {
             Err(e) => oxsig::envelope::Reply::failure(Code::InvalidPayload.failure_msg(e.to_string())).encode(),
         },
         "hub" => match serde_json::from_slice::<HubQ>(&q.body) {
-            Ok(HubQ::Sess { sid }) => serde_json::to_vec(&crate::ses::bind::hand_out(&hub, &sid).await).unwrap_or_default(),
+            Ok(HubQ::Sess { sid }) => serde_json::to_vec(&bind::hand_out(&hub, &sid).await).unwrap_or_default(),
             Ok(HubQ::Evict { user }) => {
                 if let Some(s) = hub.ses.of_user(&user) {
-                    crate::ses::destroy(&hub, &s, crate::ses::Gone::Evicted, Some(Code::DuplicateSession)).await;
+                    sess::destroy(&hub, &s, crate::ses::Gone::Evicted, Some(Code::DuplicateSession)).await;
                 }
                 b"{}".to_vec()
             }
@@ -172,7 +176,7 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     let h = hub.clone();
     tokio::spawn(async move {
         while let Some(e) = events.recv().await {
-            crate::ses::deliver(&h, e).await;
+            sess::deliver(&h, e).await;
         }
     });
     let mut queries = opened.queries;
@@ -182,10 +186,10 @@ pub async fn run(cfg: Config) -> Result<(), String> {
             tokio::spawn(dispatch(h.clone(), q));
         }
     });
-    tokio::spawn(crate::ses::sweep(hub.clone()));
+    tokio::spawn(sess::sweep(hub.clone()));
     sup.start_role(Some(UnitRole::Sfu)).await;
     let base = cfg.sys.hub.base_path.trim_end_matches('/').to_string();
-    let app = Router::new().merge(crate::room::routes(&base)).route(&format!("{base}/ws"), get(ws)).merge(admin::routes(hub.clone())).with_state(hub.clone());
+    let app = Router::new().merge(rooms::routes(&base)).route(&format!("{base}/ws"), get(ws)).merge(admin::routes(hub.clone())).with_state(hub.clone());
     serve(hub.clone(), app).await?;
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map_err(|e| e.to_string())?;
     tokio::select! {
@@ -203,7 +207,7 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     }
     tokio::time::sleep(common::bus::LEAVE_FLUSH).await;
     for s in hub.ses.all() {
-        crate::ses::destroy(&hub, &s, crate::ses::Gone::Shutdown, None).await;
+        sess::destroy(&hub, &s, crate::ses::Gone::Shutdown, None).await;
     }
     common::ev!(spec = "SV-STATE-UNIT-STATE", "shutdown ② units");
     sup.shutdown_units().await;

@@ -116,7 +116,8 @@ pub fn sync(sfu: &Arc<Sfu>, peer: &Arc<Peer>) {
 pub fn keyframes_for_room(sfu: &Arc<Sfu>, room: &str, me: &str) {
     let now = now_ms();
     let Some(r) = sfu.room(room) else { return };
-    let listed: Vec<(String, String)> = r.lock().tracks.iter().filter(|l| l.kind == Kind::Video && l.active && l.user != me).map(|l| (l.user.clone(), l.track_id.clone())).collect();
+    let listed: Vec<(String, String)> =
+        r.lock().tracks.iter().filter(|l| l.kind == Kind::Video && l.active && l.user != me).map(|l| (l.user.clone(), l.track_id.clone())).collect();
     for (u, t) in listed {
         if let Some(p) = sfu.peer(&u) {
             for i in p.ingress_of_track(&t) {

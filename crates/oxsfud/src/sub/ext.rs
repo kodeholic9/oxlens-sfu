@@ -29,7 +29,7 @@ pub fn build(table: &ExtTable, mid: Option<&str>, audio_level: Option<u8>, t_us:
     let one = table.one_byte();
     let start = out.len();
     out.extend_from_slice(if one { &[0xbe, 0xde, 0, 0] } else { &[0x10, 0x00, 0, 0] });
-    let put =|out: &mut Vec<u8>, id: u8, data: &[u8]| {
+    let put = |out: &mut Vec<u8>, id: u8, data: &[u8]| {
         if one {
             out.push((id << 4) | ((data.len() as u8).saturating_sub(1) & 0x0f));
         } else {

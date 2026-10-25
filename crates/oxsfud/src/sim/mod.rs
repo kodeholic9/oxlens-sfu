@@ -172,11 +172,7 @@ pub fn auto_layer(sfu: &Sfu, e: &crate::fwd::Egress) -> u8 {
 }
 
 fn sim_rows(conn: &Conn) -> usize {
-    conn.egress
-        .load()
-        .iter()
-        .filter(|e| e.kind == Kind::Video && e.load.load().as_ref().and_then(|l| l.stream.as_ref()).is_some_and(|s| s.simulcast))
-        .count()
+    conn.egress.load().iter().filter(|e| e.kind == Kind::Video && e.load.load().as_ref().and_then(|l| l.stream.as_ref()).is_some_and(|s| s.simulcast)).count()
 }
 
 pub fn tick(sfu: &Arc<Sfu>, conn: &Arc<Conn>, now: u64) {
@@ -195,7 +191,13 @@ pub fn tick(sfu: &Arc<Sfu>, conn: &Arc<Conn>, now: u64) {
     let d = b.policy.tick(now, &sig);
     match d {
         Decision::Stay => {}
-        Decision::Demote(r) => tracing::info!(user = conn.user.as_str(), "[SIM:AUTO] demote reason={r:?} est={:?} loss={:?} nack={}", sig.estimate_bps, sig.loss_pct, sig.nack_per_s),
+        Decision::Demote(r) => tracing::info!(
+            user = conn.user.as_str(),
+            "[SIM:AUTO] demote reason={r:?} est={:?} loss={:?} nack={}",
+            sig.estimate_bps,
+            sig.loss_pct,
+            sig.nack_per_s
+        ),
         Decision::Promote => tracing::info!(user = conn.user.as_str(), "[SIM:AUTO] promote est={:?}", sig.estimate_bps),
         Decision::ProbeStart { rate_bps } => {
             if m == MediaAutolayer::V2 {

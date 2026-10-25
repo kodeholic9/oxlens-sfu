@@ -31,6 +31,10 @@ pub struct Hub {
 }
 
 impl Hub {
+    pub fn home(&self) -> oxsig::envelope::Home {
+        oxsig::envelope::Home { node: self.cfg.node_id.clone(), inst: self.inst.clone() }
+    }
+
     pub fn is_local(&self, node: &str) -> bool {
         node == self.cfg.node_id
     }

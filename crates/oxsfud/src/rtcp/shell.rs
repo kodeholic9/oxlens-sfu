@@ -15,9 +15,7 @@ use rtcp::payload_feedbacks::receiver_estimated_maximum_bitrate::ReceiverEstimat
 use rtcp::receiver_report::ReceiverReport;
 use rtcp::reception_report::ReceptionReport;
 use rtcp::sender_report::SenderReport;
-use rtcp::transport_feedbacks::transport_layer_cc::{
-    PacketStatusChunk, RecvDelta, RunLengthChunk, StatusChunkTypeTcc, SymbolTypeTcc, TransportLayerCc,
-};
+use rtcp::transport_feedbacks::transport_layer_cc::{PacketStatusChunk, RecvDelta, RunLengthChunk, StatusChunkTypeTcc, SymbolTypeTcc, TransportLayerCc};
 use rtcp::transport_feedbacks::transport_layer_nack::{TransportLayerNack, nack_pairs_from_sequence_numbers};
 
 use super::core::{Feedback, Sym};
@@ -240,7 +238,11 @@ fn twcc_packet(fb: &Feedback, media: u32) -> TransportLayerCc {
             Sym::Small => SymbolTypeTcc::PacketReceivedSmallDelta,
             Sym::Large => SymbolTypeTcc::PacketReceivedLargeDelta,
         };
-        chunks.push(PacketStatusChunk::RunLengthChunk(RunLengthChunk { type_tcc: StatusChunkTypeTcc::RunLengthChunk, packet_status_symbol: sym, run_length: (j - i) as u16 }));
+        chunks.push(PacketStatusChunk::RunLengthChunk(RunLengthChunk {
+            type_tcc: StatusChunkTypeTcc::RunLengthChunk,
+            packet_status_symbol: sym,
+            run_length: (j - i) as u16,
+        }));
         i = j;
     }
     let mut deltas = Vec::new();

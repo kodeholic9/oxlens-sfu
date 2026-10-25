@@ -10,8 +10,8 @@ use std::time::Instant;
 use bytes::Bytes;
 use dtls::conn::DTLSConn;
 use sctp_proto::{
-    Association, AssociationHandle, DatagramEvent, Endpoint, EndpointConfig, Event, Payload, PayloadProtocolIdentifier, ReliabilityType, ServerConfig, StreamEvent, StreamId,
-    TransportConfig,
+    Association, AssociationHandle, DatagramEvent, Endpoint, EndpointConfig, Event, Payload, PayloadProtocolIdentifier, ReliabilityType, ServerConfig,
+    StreamEvent, StreamId, TransportConfig,
 };
 use tokio::sync::mpsc;
 

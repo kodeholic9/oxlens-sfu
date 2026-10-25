@@ -18,9 +18,9 @@ use oxsig::envelope::{AdminCall, Call, Reply};
 use oxsig::{Code, Failure};
 
 use super::shape::*;
+use crate::ops::bind::HubQ;
 use crate::ops::hub::Hub;
 use crate::ops::supervisor::{UState, ZENOH_UNIT};
-use crate::ses::bind::HubQ;
 
 fn admin_status(c: Code) -> StatusCode {
     let s = match c {
@@ -426,7 +426,7 @@ pub async fn local_cut(hub: &Arc<Hub>, user: &str) -> Vec<CutRow> {
     if let Some(s) = hub.ses.of_user(user) {
         out.push(CutRow { session: s.fp.clone(), code: Code::SessionRevoked.num() });
         common::ev!(spec = "CP-CODE-SESSION-REVOKED", session = s.fp.as_str(), user = user, "operator cut");
-        crate::ses::destroy(hub, &s, crate::ses::Gone::Cut, Some(Code::SessionRevoked)).await;
+        crate::ops::sess::destroy(hub, &s, crate::ses::Gone::Cut, Some(Code::SessionRevoked)).await;
     }
     out
 }

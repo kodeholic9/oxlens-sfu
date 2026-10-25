@@ -271,7 +271,12 @@ impl Table {
     }
 
     fn empty_row(&self, kind: Kind, class: Class, name: &str) -> Option<usize> {
-        self.rows.iter().enumerate().filter(|(_, r)| r.kind == kind && r.class == class && r.codec == name && r.load.is_none()).min_by_key(|(_, r)| r.mid).map(|(i, _)| i)
+        self.rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.kind == kind && r.class == class && r.codec == name && r.load.is_none())
+            .min_by_key(|(_, r)| r.mid)
+            .map(|(i, _)| i)
     }
 
     fn put(&mut self, i: usize, load: Load, score: u64, now: u64) {
@@ -344,7 +349,13 @@ impl Table {
             self.put(i, load, w.score, now);
             return;
         }
-        let same = self.rows.iter().enumerate().filter(|(_, r)| r.kind == w.kind && r.class == Class::Full && r.codec == w.codec).min_by_key(|(_, r)| (r.score, r.at_ms)).map(|(i, _)| i);
+        let same = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.kind == w.kind && r.class == Class::Full && r.codec == w.codec)
+            .min_by_key(|(_, r)| (r.score, r.at_ms))
+            .map(|(i, _)| i);
         match same {
             Some(i) if self.rows[i].score < w.score => {
                 if let Some(old) = self.rows[i].load.clone() {
@@ -364,7 +375,13 @@ impl Table {
             }
             Some(_) => self.waiting.push(w),
             None => {
-                let lru = self.rows.iter().enumerate().filter(|(_, r)| r.kind == w.kind && r.class == Class::Full).min_by_key(|(_, r)| (r.load.is_some(), r.score, r.at_ms)).map(|(i, _)| i);
+                let lru = self
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, r)| r.kind == w.kind && r.class == Class::Full)
+                    .min_by_key(|(_, r)| (r.load.is_some(), r.score, r.at_ms))
+                    .map(|(i, _)| i);
                 match lru {
                     Some(i) if self.rows[i].load.is_none() || self.rows[i].score < w.score => {
                         let (pt, rtx) = self.pt_for(w.kind, &w.codec);
@@ -372,7 +389,15 @@ impl Table {
                             let kind = self.rows[i].kind;
                             let codec = self.rows[i].codec.clone();
                             let score = self.rows[i].score;
-                            self.waiting.push(Want { room: old.room, track_id: old.track_id, user: old.user.unwrap_or_default(), kind, codec, score, since_ms: now });
+                            self.waiting.push(Want {
+                                room: old.room,
+                                track_id: old.track_id,
+                                user: old.user.unwrap_or_default(),
+                                kind,
+                                codec,
+                                score,
+                                since_ms: now,
+                            });
                         }
                         let r = &mut self.rows[i];
                         r.codec = w.codec.clone();
@@ -504,7 +529,13 @@ mod tests {
             RoomJoinReqCodecs { kind: Kind::Audio, pt: 111, name: "opus".into(), fmtp: Some("minptime=10;useinbandfec=1".into()), rtx_pt: None },
             RoomJoinReqCodecs { kind: Kind::Video, pt: 96, name: "VP8".into(), fmtp: None, rtx_pt: Some(97) },
             RoomJoinReqCodecs { kind: Kind::Video, pt: 98, name: "VP9".into(), fmtp: None, rtx_pt: Some(99) },
-            RoomJoinReqCodecs { kind: Kind::Video, pt: 109, name: "H264".into(), fmtp: Some("packetization-mode=1;profile-level-id=42e01f".into()), rtx_pt: Some(114) },
+            RoomJoinReqCodecs {
+                kind: Kind::Video,
+                pt: 109,
+                name: "H264".into(),
+                fmtp: Some("packetization-mode=1;profile-level-id=42e01f".into()),
+                rtx_pt: Some(114),
+            },
         ]);
         assert_eq!(t.pt_for(Kind::Audio, "opus"), (111, None));
         assert_eq!(t.pt_for(Kind::Video, "H264"), (109, Some(114)), "같은 튜플은 그 PT 재사용");

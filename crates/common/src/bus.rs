@@ -171,9 +171,9 @@ mod tests {
     #[test]
     fn keyspace_shapes() {
         let k = Keys::new("ox");
-        assert_eq!(k.room("r1", "n1", "e1"), "ox/ox/int/room/r1/n1/e1");
+        assert_eq!(k.room("r1", "n1", "e1"), "ox/ox/int/room/r1/n1/e1", "S-sym-RULE-BUS-KEYSPACE-2");
         assert_eq!(k.tail("ox/ox/int/room/r1/n1/e1", "room"), Some(vec!["r1", "n1", "e1"]));
-        assert!(!room_id_ok("a/b"));
+        assert!(!room_id_ok("a/b"), "S-sym-RULE-BUS-KEYSPACE-2");
         assert!(room_id_ok("r-1"));
     }
 }

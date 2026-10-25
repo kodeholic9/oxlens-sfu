@@ -64,7 +64,11 @@ fn fwd_serial_pt_sr_vectors() {
     }
     for c in set(&d, "sr") {
         let i = &c["in"];
-        let o = translate_sr(Sr { ssrc: u(i, "ssrc") as u32, ntp: u(i, "ntp"), rtp_ts: u(i, "rtp_ts") as u32 }, u(c, "downlink_ssrc") as u32, u(c, "ts_off") as u32);
+        let o = translate_sr(
+            Sr { ssrc: u(i, "ssrc") as u32, ntp: u(i, "ntp"), rtp_ts: u(i, "rtp_ts") as u32 },
+            u(c, "downlink_ssrc") as u32,
+            u(c, "ts_off") as u32,
+        );
         let e = &c["out"];
         assert_eq!((u64::from(o.ssrc), o.ntp, u64::from(o.rtp_ts)), (u(e, "ssrc"), u(e, "ntp"), u(e, "rtp_ts")), "{UNIT} sr {c}");
     }
@@ -94,7 +98,11 @@ fn rtcp_rr_vectors() {
             if let Some(r) = ev.get("report") {
                 let got = s.report();
                 let want = (r["fraction"].as_u64(), r["lost"].as_i64(), r["extended_max"].as_u64(), r["jitter"].as_u64());
-                assert_eq!((Some(u64::from(got.fraction)), Some(i64::from(got.lost)), Some(u64::from(got.extended_max)), Some(u64::from(got.jitter))), want, "{UNIT} rr {name}");
+                assert_eq!(
+                    (Some(u64::from(got.fraction)), Some(i64::from(got.lost)), Some(u64::from(got.extended_max)), Some(u64::from(got.jitter))),
+                    want,
+                    "{UNIT} rr {name}"
+                );
             } else {
                 let valid = s.update(u(ev, "seq") as u16, u(ev, "ts") as u32, u(ev, "arrival_ms"), 100);
                 assert_eq!(valid, u(ev, "valid") == 1, "{UNIT} rr {name} valid {ev}");

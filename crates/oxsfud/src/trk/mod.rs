@@ -92,8 +92,10 @@ mod tests {
             codecs: MediaCodecs { audio: Some("opus".into()), video: Some("VP8".into()) },
             unused_ttl: 0,
             departure_ttl: 0,
+            queue_max: 10,
+            t2_secs: 30,
         };
-        let r = Room::new(s, "e", 1, crate::flr::Floor::new("r-1", 10, 30));
+        let r = Room::new(s, "e", 1);
         let st = r.lock();
         let v = all(&r, &st);
         assert_eq!(v.len(), 2);

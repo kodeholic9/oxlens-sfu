@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @36d1dfd · 정:RULE-OPS-SURFACE · 정:RULE-OPS-TOKEN · 정:CAND-OPS-ADMIN-OUTPUT · 운영 규격서 §1 · 운영 규격서 §3 · 운영 규격서 §4 · 운영 규격서 §5 · 운영 규격서 §6 · model: claude-opus-5-5
-//! oxadmin — 운영 도구 하나. C 평면 경로표를 넘지 않는다 · 붙은 곳을 매번 stderr 첫 줄에 · 확인값은 먼저 읽어 되싣는다 · 서버가 안 낸 값은 `-`.
+// spec: v1.3 @d4cc756 · 운영:RULE-TOOL-ONE 운영:RULE-TOOL-CONTRACT 운영:RULE-RISK-CONFIRM 운영:RULE-AUTH-THREE 운영:RULE-FMT-NO-INVENT 운영:RULE-READ-BUS-ALL 운영:RULE-READ-USER-MEDIA 운영:RULE-CTL-SUPERVISOR 운영:RULE-CTL-ROOM 운영:RULE-CTL-CUT 운영:RULE-CTL-LOG-LEVEL 운영:RULE-BOOT-PORTS 정:RULE-OPS-TOKEN · model: claude-opus-5-5
+//! oxadmin — 도구는 하나 · 사람이 읽는 표가 기본(`--json` raw) · 붙은 곳을 stderr 첫 줄에 · 확인값은 도구가 먼저 읽어 되싣는다 · 모르는 값은 `-`.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -8,354 +8,431 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-pub const DEFAULT_HUB: &str = "http://127.0.0.1:1974";
-pub const ENV_URL: &str = "OXADMIN_URL";
+const DEFAULT_HUB: &str = "http://127.0.0.1:1974";
+const OPS_TTL_SECS: u64 = 60;
 
 struct Opts {
     hub: String,
-    source: &'static str,
     json: bool,
-    key: Option<String>,
-    secret: Option<String>,
-    ttl: Option<u64>,
-    all: bool,
+    api_key: Option<String>,
+    api_secret: Option<String>,
+    interval_ms: u64,
+    ttl: Option<u32>,
     rest: Vec<String>,
 }
 
-fn parse(argv: &[String]) -> Result<Opts, String> {
-    let mut o = Opts { hub: String::new(), source: "기본값", json: false, key: None, secret: None, ttl: None, all: false, rest: Vec::new() };
-    let mut hub_arg = None;
+fn usage() -> ! {
+    eprintln!(
+        "usage: oxadmin [--hub URL] [--json] [--api-key K --api-secret S] <cmd>\n  sfus | sfu <id> | rooms | room <id> | users | user <id> [--interval ms] | snapshot | drops | bus [--all]\n  unit list | unit show <id> | load <id> | stop <id> | kill <id> | shutdown\n  probe <user> | user-cut <user> | reap <room> <user> | destroy <room> | log-level <level> [--ttl secs]"
+    );
+    std::process::exit(2)
+}
+
+fn parse() -> Opts {
+    let mut o = Opts { hub: String::new(), json: false, api_key: None, api_secret: None, interval_ms: 1000, ttl: None, rest: Vec::new() };
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let mut hub_flag = None;
+    let mut all = false;
     let mut i = 0;
     while i < argv.len() {
         let a = argv[i].as_str();
-        let mut val = || {
+        let mut val = || -> String {
             i += 1;
-            argv.get(i).cloned().ok_or_else(|| format!("{a} 에 값이 없다"))
+            argv.get(i).cloned().unwrap_or_else(|| usage())
         };
         match a {
+            "--hub" => hub_flag = Some(val()),
             "--json" => o.json = true,
-            "--all" => o.all = true,
-            "--hub" => hub_arg = Some(val()?),
-            "--api-key" => o.key = Some(val()?),
-            "--api-secret" => o.secret = Some(val()?),
-            "--ttl" => o.ttl = Some(val()?.parse().map_err(|_| "--ttl 은 초")?),
-            _ if a.starts_with("--") => return Err(format!("모르는 인자 {a}")),
-            _ => o.rest.push(a.to_string()),
+            "--api-key" => o.api_key = Some(val()),
+            "--api-secret" => o.api_secret = Some(val()),
+            "--interval" => o.interval_ms = val().parse().unwrap_or(1000),
+            "--ttl" => o.ttl = val().parse().ok(),
+            "--all" => all = true,
+            "-h" | "--help" => usage(),
+            _ => o.rest.push(argv[i].clone()),
         }
         i += 1;
     }
-    match (hub_arg, std::env::var(ENV_URL).ok().filter(|v| !v.is_empty())) {
-        (Some(h), _) => {
-            o.hub = h;
-            o.source = "--hub";
-        }
-        (None, Some(e)) => {
-            o.hub = e;
-            o.source = ENV_URL;
-        }
-        (None, None) => o.hub = DEFAULT_HUB.to_string(),
+    if all {
+        o.rest.push("--all".into());
     }
-    o.hub = o.hub.trim_end_matches('/').to_string();
-    if !o.hub.contains("://") {
-        o.hub = format!("http://{}", o.hub);
-    }
-    Ok(o)
+    let (hub, src) = match (hub_flag, std::env::var("OXADMIN_URL").ok().filter(|s| !s.is_empty())) {
+        (Some(h), _) => (h, "--hub"),
+        (None, Some(e)) => (e, "OXADMIN_URL"),
+        (None, None) => (DEFAULT_HUB.to_string(), "기본값"),
+    };
+    eprintln!("[oxadmin] hub={hub} ({src})");
+    o.hub = hub.trim_end_matches('/').to_string();
+    o
 }
 
 fn token(o: &Opts) -> Option<String> {
-    let (k, s) = (o.key.as_ref()?, o.secret.as_ref()?);
-    let now = common::token::now_s();
-    common::token::sign(&common::token::OpsClaims { iss: k.clone(), ops: true, sub: None, iat: now, exp: now + 300 }, s)
+    let (k, s) = (o.api_key.as_ref()?, o.api_secret.as_ref()?);
+    let now = common::jwt::now_secs();
+    common::jwt::sign(&common::jwt::OpsClaims { iss: k.clone(), ops: true, iat: now, exp: now + OPS_TTL_SECS }, s).ok()
 }
 
-fn http(o: &Opts, method: &str, path: &str, body: Option<&Value>) -> Result<(u16, Value), String> {
-    let base = o.hub.strip_prefix("http://").ok_or("hub 주소는 http:// 로 시작해야 한다")?;
-    let (host, prefix) = match base.split_once('/') {
-        Some((h, p)) => (h, format!("/{p}")),
-        None => (base, String::new()),
+struct Resp {
+    status: u16,
+    body: Value,
+}
+
+fn http(o: &Opts, method: &str, path: &str, body: Option<&Value>) -> Result<Resp, String> {
+    let rest = o.hub.strip_prefix("http://").ok_or_else(|| format!("http:// 만 지원한다: {}", o.hub))?;
+    let (host, base) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, ""),
     };
-    let mut s = TcpStream::connect(host).map_err(|e| format!("hub {host} 에 못 붙는다: {e}"))?;
+    let mut s = TcpStream::connect(host).map_err(|e| format!("connect {host}: {e}"))?;
     let _ = s.set_read_timeout(Some(Duration::from_secs(30)));
     let payload = body.map(|b| b.to_string()).unwrap_or_default();
-    let auth = token(o).map(|t| format!("Authorization: Bearer {t}\r\n")).unwrap_or_default();
-    let req = format!("{method} {prefix}{path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{auth}\r\n{payload}", payload.len());
+    let auth = token(o).map(|t| format!("authorization: Bearer {t}\r\n")).unwrap_or_default();
+    let req = format!(
+        "{method} {base}{path} HTTP/1.1\r\nhost: {host}\r\nconnection: close\r\ncontent-type: application/json\r\ncontent-length: {}\r\n{auth}\r\n{payload}",
+        payload.len()
+    );
     s.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
     let mut raw = Vec::new();
     s.read_to_end(&mut raw).map_err(|e| e.to_string())?;
-    let text = String::from_utf8_lossy(&raw).into_owned();
-    let (head, rest) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
-    let code: u16 = head.split_whitespace().nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
-    let body = if head.to_ascii_lowercase().contains("transfer-encoding: chunked") { dechunk(rest) } else { rest.to_string() };
-    let v = serde_json::from_str(&body).unwrap_or(Value::String(body));
-    Ok((code, v))
+    let text = String::from_utf8_lossy(&raw).to_string();
+    let (head, rest) = text.split_once("\r\n\r\n").ok_or("응답 형식")?;
+    let status: u16 = head.split_whitespace().nth(1).and_then(|x| x.parse().ok()).ok_or("상태 줄")?;
+    let chunked = head.lines().any(|l| l.to_ascii_lowercase().starts_with("transfer-encoding:") && l.to_ascii_lowercase().contains("chunked"));
+    let body_text = if chunked { dechunk(rest) } else { rest.to_string() };
+    let body = serde_json::from_str(&body_text).unwrap_or(Value::Null);
+    Ok(Resp { status, body })
 }
 
 fn dechunk(s: &str) -> String {
     let mut out = String::new();
     let mut rest = s;
-    while let Some((len, tail)) = rest.split_once("\r\n") {
+    while let Some((len, after)) = rest.split_once("\r\n") {
         let n = usize::from_str_radix(len.trim(), 16).unwrap_or(0);
-        if n == 0 || tail.len() < n {
+        if n == 0 || after.len() < n {
             break;
         }
-        out.push_str(&tail[..n]);
-        rest = tail[n..].trim_start_matches("\r\n");
+        out.push_str(&after[..n]);
+        rest = after[n..].trim_start_matches("\r\n");
     }
     out
 }
 
-fn s(v: &Value) -> String {
-    match v {
-        Value::Null => "-".into(),
-        Value::String(x) => x.clone(),
-        x => x.to_string(),
+fn call(o: &Opts, method: &str, path: &str, body: Option<&Value>) -> Value {
+    match http(o, method, path, body) {
+        Ok(r) if (200..300).contains(&r.status) => r.body,
+        Ok(r) => {
+            let code = r.body.get("code").map(|c| c.to_string()).unwrap_or_else(|| "-".into());
+            let name = r.body.get("name").and_then(Value::as_str).unwrap_or("-");
+            eprintln!("[oxadmin] {method} {path} → {} {code} {name}", r.status);
+            if o.json {
+                println!("{}", r.body);
+            }
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("[oxadmin] {method} {path} 실패: {e}");
+            std::process::exit(1);
+        }
     }
 }
 
-fn kv(v: &Value, keys: &[&str]) -> String {
-    keys.iter().map(|k| format!("{k}={}", s(&v[*k]))).collect::<Vec<_>>().join(" ")
+fn s(v: &Value, k: &str) -> String {
+    match v.get(k) {
+        None | Some(Value::Null) => "-".into(),
+        Some(Value::String(x)) => x.clone(),
+        Some(x) => x.to_string(),
+    }
 }
 
-fn show(o: &Opts, code: u16, v: &Value, rows: Option<(&str, &[&str])>) -> i32 {
+fn table(head: &[&str], rows: &[Vec<String>]) {
+    let mut w: Vec<usize> = head.iter().map(|h| h.chars().count()).collect();
+    for r in rows {
+        for (i, c) in r.iter().enumerate() {
+            if i < w.len() {
+                w[i] = w[i].max(c.chars().count());
+            }
+        }
+    }
+    let line = |cells: Vec<String>| {
+        let parts: Vec<String> = cells.iter().enumerate().map(|(i, c)| format!("{c:<width$}", width = w.get(i).copied().unwrap_or(0))).collect();
+        println!("{}", parts.join("  ").trim_end());
+    };
+    line(head.iter().map(|h| h.to_string()).collect());
+    for r in rows {
+        line(r.clone());
+    }
+}
+
+fn arr<'a>(v: &'a Value, k: &str) -> Vec<&'a Value> {
+    v.get(k).and_then(Value::as_array).map(|a| a.iter().collect()).unwrap_or_default()
+}
+
+fn out(o: &Opts, v: &Value, human: impl FnOnce(&Value)) {
     if o.json {
         println!("{v}");
-    } else if let Some((field, keys)) = rows
-        && let Some(list) = v[field].as_array()
-    {
-        for r in list {
-            println!("{}", kv(r, keys));
-        }
-        if let Some(t) = v.get("total") {
-            println!("total={}", s(t));
-        }
-    } else if let Some(m) = v.as_object() {
+    } else {
+        human(v);
+    }
+}
+
+fn kv(v: &Value) {
+    if let Some(m) = v.as_object() {
         for (k, x) in m {
-            println!("{k}={}", s(x));
+            println!("{k}: {}", if let Value::String(s) = x { s.clone() } else { x.to_string() });
         }
-    } else {
-        println!("{}", s(v));
-    }
-    if (200..300).contains(&code) {
-        0
-    } else {
-        fail_line(code, v);
-        1
     }
 }
 
-fn fail_line(code: u16, v: &Value) {
-    let reason = match v.get("code") {
-        Some(c) => format!("code={} name={}", s(c), s(&v["name"])),
-        None => format!("error={}", s(&v["error"])),
-    };
-    let _ = writeln!(std::io::stderr(), "oxadmin: HTTP {code} {reason}");
-}
-
-fn arg(o: &Opts, i: usize, what: &str) -> Result<String, String> {
-    o.rest.get(i).cloned().ok_or_else(|| format!("{what} 가 없다"))
-}
-
-fn run(o: &Opts) -> Result<i32, String> {
-    let cmd = o.rest.first().map(String::as_str).unwrap_or("snapshot");
-    let r = match cmd {
-        "sfus" => {
-            let (c, v) = http(o, "GET", "/admin/sfus", None)?;
-            show(o, c, &v, Some(("sfus", &["unit", "sfu_id", "unit_state", "live", "node_live", "addr"])))
+fn media_rows(v: &Value) -> Vec<(String, String, String, u64, u64)> {
+    let mut rows = Vec::new();
+    for l in arr(v, "links") {
+        let sfu = s(l, "sfu_id");
+        for m in arr(l, "mlines") {
+            let e = m.get("entry").cloned().unwrap_or(Value::Null);
+            let rw = m.get("rewrite").cloned().unwrap_or(Value::Null);
+            let last_seq = rw.get("last_seq").and_then(Value::as_u64).unwrap_or(0);
+            let last_at = rw.get("last_at").and_then(Value::as_u64).unwrap_or(0);
+            rows.push((sfu.clone(), s(&e, "mid"), format!("{} {} {}", s(&e, "kind"), s(&e, "track_id"), s(&e, "room_id")), last_seq, last_at));
         }
-        "sfu" => {
-            let (c, v) = http(o, "GET", &format!("/admin/sfus/{}/rooms", arg(o, 1, "sfu_id")?), None)?;
-            show(o, c, &v, Some(("rooms", &["room_id", "members"])))
-        }
-        "rooms" => {
-            let (c, v) = http(o, "GET", "/admin/rooms", None)?;
-            show(o, c, &v, Some(("rooms", &["room_id", "node", "sfu_id", "members"])))
-        }
-        "room" => {
-            let (c, v) = http(o, "GET", &format!("/admin/rooms/{}/snapshot", arg(o, 1, "room_id")?), None)?;
-            if o.json || !(200..300).contains(&c) {
-                show(o, c, &v, None)
-            } else {
-                let r = &v["room"];
-                println!("{}", kv(r, &["room_id", "name", "capacity", "user_count", "hidden_count", "rec"]));
-                println!("version={}:{}", s(&r["version"]["epoch"]), s(&r["version"]["seq"]));
-                for p in r["participants"].as_array().cloned().unwrap_or_default() {
-                    println!("participant {}", kv(&p, &["user_id", "participant_type", "select"]));
-                }
-                for t in r["tracks"].as_array().cloned().unwrap_or_default() {
-                    println!("track {}", kv(&t, &["type", "track_id", "kind", "user_id", "active", "muted"]));
-                }
-                println!("floor {}", kv(&r["floor"], &["state", "speaker", "last_rtp_at"]));
-                0
-            }
-        }
-        "users" => {
-            let (c, v) = http(o, "GET", "/admin/users", None)?;
-            show(o, c, &v, Some(("users", &["session", "user_id", "participant_type", "hidden"])))
-        }
-        "user" => {
-            let u = arg(o, 1, "user_id")?;
-            let (c1, a) = http(o, "GET", &format!("/admin/users/{u}/media"), None)?;
-            std::thread::sleep(Duration::from_secs(1));
-            let (c2, b) = http(o, "GET", &format!("/admin/users/{u}/media"), None)?;
-            if o.json {
-                println!("{}", serde_json::json!({"first": a, "second": b}));
-            } else {
-                for (la, lb) in a["links"].as_array().cloned().unwrap_or_default().iter().zip(b["links"].as_array().cloned().unwrap_or_default().iter()) {
-                    println!("link {}", kv(lb, &["sfu_id", "ufrag", "arev", "acked", "error"]));
-                    let ma = la["mlines"].as_array().cloned().unwrap_or_default();
-                    for (i, m) in lb["mlines"].as_array().cloned().unwrap_or_default().iter().enumerate() {
-                        let before = ma.get(i).map(|x| x["rewrite"]["last_seq"].clone()).unwrap_or(Value::Null);
-                        let after = m["rewrite"]["last_seq"].clone();
-                        let moved = if before.is_null() || after.is_null() { "-".to_string() } else { (before != after).to_string() };
-                        println!("  mid={} track={} ssrc={} last_seq={} moved={}", s(&m["entry"]["mid"]), s(&m["entry"]["track_id"]), s(&m["entry"]["ssrc"]), s(&after), moved);
-                    }
-                }
-            }
-            if !(200..300).contains(&c2) {
-                fail_line(c2, &b);
-            }
-            if (200..300).contains(&c1) && (200..300).contains(&c2) { 0 } else { 1 }
-        }
-        "snapshot" => {
-            let (c, v) = http(o, "GET", "/admin/snapshot", None)?;
-            show(o, c, &v, None)
-        }
-        "drops" => {
-            let (c, v) = http(o, "GET", "/admin/drops", None)?;
-            if o.json {
-                show(o, c, &v, None)
-            } else {
-                for u in v["units"].as_array().cloned().unwrap_or_default() {
-                    let line: Vec<String> = u.as_object().map(|m| m.iter().map(|(k, x)| format!("{k}={}", s(x))).collect()).unwrap_or_default();
-                    println!("{}", line.join(" "));
-                }
-                0
-            }
-        }
-        "bus" => {
-            let path = if o.all { "/admin/bus?all=1" } else { "/admin/bus" };
-            let (c, v) = http(o, "GET", path, None)?;
-            if o.json || !o.all {
-                show(o, c, &v, None)
-            } else {
-                let mut views = Vec::new();
-                for n in v["nodes"].as_array().cloned().unwrap_or_default() {
-                    if n.get("error").is_some() {
-                        println!("node={} error={}", s(&n["node"]), s(&n["error"]));
-                        continue;
-                    }
-                    let mut seen: Vec<String> = n["bus"]["nodes"].as_array().cloned().unwrap_or_default().iter().map(|x| format!("{}/{}", s(&x["node"]), s(&x["inst"]))).collect();
-                    seen.sort();
-                    println!("node={} sees={}", s(&n["node"]), seen.join(","));
-                    views.push(seen);
-                }
-                if views.windows(2).all(|w| w[0] == w[1]) {
-                    println!("합의: 전 node 가 같은 것을 본다");
-                } else {
-                    println!("불일치: node 마다 보는 것이 다르다");
-                }
-                0
-            }
-        }
-        "unit" => match o.rest.get(1).map(String::as_str) {
-            Some("show") => {
-                let id = arg(o, 2, "unit id")?;
-                let (c, v) = http(o, "GET", "/admin/supervisor/status", None)?;
-                let u = v["units"].as_array().and_then(|l| l.iter().find(|x| x["id"] == Value::String(id.clone())).cloned()).unwrap_or(Value::Null);
-                show(o, c, &u, None)
-            }
-            Some("list") | None => {
-                let (c, v) = http(o, "GET", "/admin/supervisor/status", None)?;
-                show(o, c, &v, Some(("units", &["id", "kind", "order", "state", "restarts", "next_retry_ms", "epoch"])))
-            }
-            Some(other) => return Err(format!("모르는 unit 명령 {other} (list|show)")),
-        },
-        "load" | "stop" => {
-            let (c, v) = http(o, "POST", &format!("/admin/supervisor/{cmd}/{}", arg(o, 1, "unit id")?), None)?;
-            show(o, c, &v, None)
-        }
-        "kill" => {
-            let id = arg(o, 1, "unit id")?;
-            let (_, st) = http(o, "GET", "/admin/supervisor/status", None)?;
-            let epoch = st["units"].as_array().and_then(|l| l.iter().find(|x| x["id"] == Value::String(id.clone())).map(|x| s(&x["epoch"]))).unwrap_or_else(|| "-".into());
-            let _ = writeln!(std::io::stderr(), "if_epoch={epoch}");
-            let (c, v) = http(o, "POST", &format!("/admin/supervisor/kill/{id}?if_epoch={epoch}"), None)?;
-            show(o, c, &v, None)
-        }
-        "shutdown" => {
-            let (_, snap) = http(o, "GET", "/admin/snapshot", None)?;
-            let hub = s(&snap["hub_id"]);
-            let _ = writeln!(std::io::stderr(), "confirm={hub}");
-            let (c, v) = http(o, "POST", &format!("/admin/supervisor/shutdown?confirm={hub}"), None)?;
-            show(o, c, &v, None)
-        }
-        "user-cut" => {
-            let (c, v) = http(o, "POST", &format!("/admin/users/{}/cut", arg(o, 1, "user_id")?), None)?;
-            show(o, c, &v, Some(("cut", &["session", "code"])))
-        }
-        "reap" => {
-            let (c, v) = http(o, "POST", &format!("/admin/rooms/{}/reap/{}", arg(o, 1, "room_id")?, arg(o, 2, "user_id")?), None)?;
-            show(o, c, &v, None)
-        }
-        "destroy" => {
-            let room = arg(o, 1, "room_id")?;
-            let (c0, snap) = http(o, "GET", &format!("/admin/rooms/{room}/snapshot"), None)?;
-            if !(200..300).contains(&c0) {
-                return Ok(show(o, c0, &snap, None));
-            }
-            let ver = format!("{}:{}", s(&snap["room"]["version"]["epoch"]), s(&snap["room"]["version"]["seq"]));
-            let _ = writeln!(std::io::stderr(), "if_version={ver}");
-            let (c, v) = http(o, "POST", &format!("/admin/rooms/{room}/destroy?if_version={ver}"), None)?;
-            if o.json || !(200..300).contains(&c) {
-                show(o, c, &v, None)
-            } else {
-                println!("room_id={} destroyed={} notified={}", s(&v["room_id"]), if v["destroyed"] == Value::Bool(true) { "yes" } else { "no" }, s(&v["notified"]));
-                0
-            }
-        }
-        "log-level" => {
-            let level = arg(o, 1, "level")?;
-            let mut body = serde_json::json!({"level": level});
-            if let Some(t) = o.ttl {
-                body["ttl_secs"] = Value::from(t);
-            }
-            let (c, v) = http(o, "POST", "/admin/log-level", Some(&body))?;
-            show(o, c, &v, None)
-        }
-        other => return Err(format!("모르는 명령 {other}")),
-    };
-    Ok(r)
+    }
+    rows
 }
 
 fn main() {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-    let o = match parse(&argv) {
-        Ok(o) => o,
-        Err(e) => {
-            let _ = writeln!(std::io::stderr(), "oxadmin: {e}");
-            std::process::exit(2);
+    let o = parse();
+    let cmd: Vec<&str> = o.rest.iter().map(String::as_str).collect();
+    match cmd.as_slice() {
+        ["sfus"] => {
+            let v = call(&o, "GET", "/admin/sfus", None);
+            out(&o, &v, |v| {
+                let rows: Vec<Vec<String>> =
+                    arr(v, "sfus").iter().map(|x| vec![s(x, "unit"), s(x, "sfu_id"), s(x, "unit_state"), s(x, "live"), s(x, "node_live")]).collect();
+                table(&["unit", "sfu_id", "state", "live", "node_live"], &rows);
+            });
         }
-    };
-    let _ = writeln!(std::io::stderr(), "[oxadmin] hub={} ({})", o.hub, o.source);
-    match run(&o) {
-        Ok(code) => std::process::exit(code),
-        Err(e) => {
-            let _ = writeln!(std::io::stderr(), "oxadmin: {e}");
-            std::process::exit(2);
+        ["sfu", id] => {
+            let v = call(&o, "GET", &format!("/admin/sfus/{id}/rooms"), None);
+            out(&o, &v, |v| {
+                println!("unit={} sfu_id={} total={}", s(v, "unit"), s(v, "sfu_id"), s(v, "total"));
+                let rows: Vec<Vec<String>> = arr(v, "rooms").iter().map(|x| vec![s(x, "room_id"), s(x, "members")]).collect();
+                table(&["room_id", "members"], &rows);
+            });
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn hub_ladder_and_dechunk() {
-        let o = parse(&["--hub".into(), "http://h:1/".into(), "rooms".into()]).expect("ok");
-        assert_eq!((o.hub.as_str(), o.source), ("http://h:1", "--hub"));
-        assert!(parse(&["--nope".into()]).is_err());
-        assert_eq!(dechunk("3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n"), "abcde");
-        assert_eq!(s(&Value::Null), "-", "서버가 안 낸 값은 지어 채우지 않는다");
+        ["rooms"] => {
+            let v = call(&o, "GET", "/admin/rooms", None);
+            out(&o, &v, |v| {
+                let rows: Vec<Vec<String>> = arr(v, "rooms").iter().map(|x| vec![s(x, "room_id"), s(x, "node"), s(x, "sfu_id"), s(x, "members")]).collect();
+                table(&["room_id", "node", "sfu_id", "members"], &rows);
+            });
+        }
+        ["room", id] => {
+            let v = call(&o, "GET", &format!("/admin/rooms/{id}/snapshot"), None);
+            out(&o, &v, |v| {
+                let r = v.get("room").cloned().unwrap_or(Value::Null);
+                let ver = r.get("version").cloned().unwrap_or(Value::Null);
+                println!(
+                    "room={} name={} capacity={} user_count={} hidden_count={} rec={} version={}:{}",
+                    s(&r, "room_id"),
+                    s(&r, "name"),
+                    s(&r, "capacity"),
+                    s(&r, "user_count"),
+                    s(&r, "hidden_count"),
+                    s(&r, "rec"),
+                    s(&ver, "epoch"),
+                    s(&ver, "seq")
+                );
+                let rows: Vec<Vec<String>> =
+                    arr(&r, "participants").iter().map(|x| vec![s(x, "user_id"), s(x, "role"), s(x, "select"), s(x, "participant_type")]).collect();
+                table(&["user_id", "role", "select", "ptype"], &rows);
+                let rows: Vec<Vec<String>> = arr(&r, "tracks")
+                    .iter()
+                    .map(|x| vec![s(x, "track_id"), s(x, "type"), s(x, "kind"), s(x, "user_id"), s(x, "active"), s(x, "muted")])
+                    .collect();
+                table(&["track_id", "type", "kind", "user_id", "active", "muted"], &rows);
+                let f = r.get("floor").cloned().unwrap_or(Value::Null);
+                println!(
+                    "floor state={} speaker={} priority={} first_rtp_at={} last_rtp_at={}",
+                    s(&f, "state"),
+                    s(&f, "speaker"),
+                    s(&f, "priority"),
+                    s(&f, "first_rtp_at"),
+                    s(&f, "last_rtp_at")
+                );
+                for q in arr(&f, "queue") {
+                    println!("  queue {} p={}", s(q, "user_id"), s(q, "priority"));
+                }
+                for t in arr(&f, "timers") {
+                    println!("  timer {} user={} at={}", s(t, "name"), s(t, "user_id"), s(t, "at"));
+                }
+                let sl = r.get("slots").cloned().unwrap_or(Value::Null);
+                println!("slots audio={} video={}", s(&sl, "audio"), s(&sl, "video"));
+            });
+        }
+        ["users"] => {
+            let v = call(&o, "GET", "/admin/users", None);
+            out(&o, &v, |v| {
+                let mut rows = Vec::new();
+                for u in arr(v, "users") {
+                    let links: Vec<String> = arr(u, "links").iter().map(|l| format!("{}:{}:{}", s(l, "sfu_id"), s(l, "ufrag"), s(l, "state"))).collect();
+                    rows.push(vec![
+                        s(u, "session"),
+                        s(u, "user_id"),
+                        s(u, "participant_type"),
+                        s(u, "hidden"),
+                        if links.is_empty() { "-".into() } else { links.join(",") },
+                    ]);
+                }
+                table(&["session", "user_id", "ptype", "hidden", "links"], &rows);
+            });
+        }
+        ["user", id] => {
+            let a = call(&o, "GET", &format!("/admin/users/{id}/media"), None);
+            std::thread::sleep(Duration::from_millis(o.interval_ms));
+            let b = call(&o, "GET", &format!("/admin/users/{id}/media"), None);
+            if o.json {
+                println!("{}", serde_json::json!([a, b]));
+                return;
+            }
+            let (ra, rb) = (media_rows(&a), media_rows(&b));
+            let mut rows = Vec::new();
+            for (sfu, mid, what, seq, at) in &rb {
+                let prev = ra.iter().find(|x| x.0 == *sfu && x.1 == *mid);
+                let (ds, da) = match prev {
+                    Some(p) => ((*seq as i64 - p.3 as i64).to_string(), (*at as i64 - p.4 as i64).to_string()),
+                    None => ("-".into(), "-".into()),
+                };
+                rows.push(vec![sfu.clone(), mid.clone(), what.clone(), seq.to_string(), ds, at.to_string(), da]);
+            }
+            println!("user={id} interval_ms={}", o.interval_ms);
+            table(&["sfu_id", "mid", "kind track room", "last_seq", "Δseq", "last_at", "Δat"], &rows);
+        }
+        ["snapshot"] => {
+            let v = call(&o, "GET", "/admin/snapshot", None);
+            out(&o, &v, kv);
+        }
+        ["drops"] => {
+            let v = call(&o, "GET", "/admin/drops", None);
+            out(&o, &v, |v| {
+                for u in arr(v, "units") {
+                    println!("[{}] sfu_id={} error={}", s(u, "unit"), s(u, "sfu_id"), s(u, "error"));
+                    if let Some(m) = u.as_object() {
+                        for (k, x) in m {
+                            if !["unit", "sfu_id", "error"].contains(&k.as_str()) && x.as_u64().is_some_and(|n| n > 0) {
+                                println!("  {k}={x}");
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        ["bus"] => {
+            let v = call(&o, "GET", "/admin/bus", None);
+            out(&o, &v, kv);
+        }
+        ["bus", "--all"] => {
+            let v = call(&o, "GET", "/admin/bus?all=1", None);
+            out(&o, &v, |v| {
+                let mut views: Vec<(String, String)> = Vec::new();
+                let mut rows = Vec::new();
+                for n in arr(v, "nodes") {
+                    let b = n.get("bus").cloned().unwrap_or(Value::Null);
+                    let mut nodes: Vec<String> = arr(&b, "nodes").iter().map(|x| format!("{}/{}", s(x, "node"), s(x, "inst"))).collect();
+                    nodes.sort();
+                    rows.push(vec![s(n, "node"), s(&b, "inst"), nodes.join(","), arr(&b, "rooms_seen").len().to_string(), s(n, "error")]);
+                    if n.get("error").is_none() {
+                        views.push((s(n, "node"), nodes.join(",")));
+                    }
+                }
+                table(&["node", "inst", "nodes_seen", "rooms_seen", "error"], &rows);
+                let same = views.windows(2).all(|w| w[0].1 == w[1].1) && views.len() == arr(v, "nodes").len();
+                if same {
+                    println!("합의: 전 node 가 같은 것을 본다");
+                } else {
+                    println!("불일치: node 마다 본 것이 다르다");
+                }
+            });
+        }
+        ["unit", "list"] => {
+            let v = call(&o, "GET", "/admin/supervisor/status", None);
+            out(&o, &v, |v| {
+                let rows: Vec<Vec<String>> = arr(v, "units")
+                    .iter()
+                    .map(|x| vec![s(x, "id"), s(x, "kind"), s(x, "order"), s(x, "state"), s(x, "restarts"), s(x, "epoch"), s(x, "next_retry_ms")])
+                    .collect();
+                table(&["id", "kind", "order", "state", "restarts", "epoch", "next_retry_ms"], &rows);
+            });
+        }
+        ["unit", "show", id] => {
+            let v = call(&o, "GET", "/admin/supervisor/status", None);
+            let u = arr(&v, "units").into_iter().find(|x| s(x, "id") == *id).cloned().unwrap_or(Value::Null);
+            out(&o, &u, kv);
+        }
+        [op @ ("load" | "stop"), id] => {
+            let v = call(&o, "POST", &format!("/admin/supervisor/{op}/{id}"), None);
+            out(&o, &v, |v| println!("{} {} → {}", s(v, "id"), s(v, "from"), s(v, "to")));
+        }
+        ["kill", id] => {
+            let st = call(&o, "GET", "/admin/supervisor/status", None);
+            let epoch = arr(&st, "units").into_iter().find(|x| s(x, "id") == *id).map(|x| s(x, "epoch")).unwrap_or_else(|| "-".into());
+            eprintln!("if_epoch={epoch}");
+            let v = call(&o, "POST", &format!("/admin/supervisor/kill/{id}?if_epoch={epoch}"), None);
+            out(&o, &v, |v| println!("{} {} → {}", s(v, "id"), s(v, "from"), s(v, "to")));
+        }
+        ["shutdown"] => {
+            let snap = call(&o, "GET", "/admin/snapshot", None);
+            let hub = s(&snap, "hub_id");
+            eprintln!("confirm={hub}");
+            let v = call(&o, "POST", &format!("/admin/supervisor/shutdown?confirm={hub}"), None);
+            out(&o, &v, kv);
+        }
+        ["probe", user] => {
+            let v = call(&o, "GET", &format!("/admin/users/{user}/probe"), None);
+            out(&o, &v, |v| {
+                for x in arr(v, "sessions") {
+                    let r = if x.get("timeout").and_then(Value::as_bool) == Some(true) {
+                        "timeout".to_string()
+                    } else {
+                        x.get("result").map(Value::to_string).unwrap_or_else(|| "-".into())
+                    };
+                    println!("{} {}", s(x, "session"), r);
+                }
+            });
+        }
+        ["user-cut", user] => {
+            let v = call(&o, "POST", &format!("/admin/users/{user}/cut"), None);
+            out(&o, &v, |v| {
+                for c in arr(v, "cut") {
+                    println!("cut session={} code={}", s(c, "session"), s(c, "code"));
+                }
+                println!("total={}", s(v, "total"));
+            });
+        }
+        ["reap", room, user] => {
+            let v = call(&o, "POST", &format!("/admin/rooms/{room}/reap/{user}"), None);
+            out(&o, &v, |v| {
+                let ver = v.get("version").cloned().unwrap_or(Value::Null);
+                println!("reaped room={} user={} left={} version={}:{}", s(v, "room_id"), s(v, "user_id"), s(v, "left"), s(&ver, "epoch"), s(&ver, "seq"));
+            });
+        }
+        ["destroy", room] => {
+            let snap = call(&o, "GET", &format!("/admin/rooms/{room}/snapshot"), None);
+            let ver = snap.get("room").and_then(|r| r.get("version")).cloned().unwrap_or(Value::Null);
+            let iv = format!("{}:{}", s(&ver, "epoch"), s(&ver, "seq"));
+            eprintln!("if_version={iv}");
+            let v = call(&o, "POST", &format!("/admin/rooms/{room}/destroy?if_version={iv}"), None);
+            out(&o, &v, |v| {
+                let d = if v.get("destroyed").and_then(Value::as_bool) == Some(true) { "yes" } else { "no" };
+                println!("destroyed={d} room={} notified={}", s(v, "room_id"), s(v, "notified"));
+            });
+        }
+        ["log-level", level] => {
+            let mut b = serde_json::json!({ "level": level });
+            if let Some(t) = o.ttl {
+                b["ttl_secs"] = t.into();
+            }
+            let v = call(&o, "POST", "/admin/log-level", Some(&b));
+            out(&o, &v, |v| println!("log-level {} → {} until={} units={}", s(v, "from"), s(v, "to"), s(v, "until"), s(v, "units")));
+        }
+        _ => usage(),
     }
 }

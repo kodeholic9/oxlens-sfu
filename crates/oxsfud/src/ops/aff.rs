@@ -130,7 +130,13 @@ pub async fn affiliation(sfu: &Arc<Sfu>, ctx: &Ctx, body: &str) -> Reply {
     let label;
     match (&sel, &req.pub_deselect) {
         (Some(s), _) => {
-            label = if cur.is_none() { "AFF.S.select" } else if cur.as_deref() == Some(s) { "AFF.S.same" } else { "AFF.S.select_moved" };
+            label = if cur.is_none() {
+                "AFF.S.select"
+            } else if cur.as_deref() == Some(s) {
+                "AFF.S.same"
+            } else {
+                "AFF.S.select_moved"
+            };
             if let Err(f) = move_pub(sfu, &peer, Some(s)).await {
                 return Reply::failure(f);
             }

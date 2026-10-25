@@ -64,7 +64,13 @@ pub async fn dispatch(sfu: &Arc<Sfu>, c: Call) -> Reply {
         Call::LogLevel { level, ttl_secs } => match common::log::parse_level(&level) {
             Some(l) => {
                 let ch = sfu.log.override_level(l, ttl_secs);
-                common::ev!(spec = "SV-STATE-UNIT-STATE", "log level {} -> {} until={:?}", common::log::level_name(ch.from), common::log::level_name(ch.to), ch.until);
+                common::ev!(
+                    spec = "SV-STATE-UNIT-STATE",
+                    "log level {} -> {} until={:?}",
+                    common::log::level_name(ch.from),
+                    common::log::level_name(ch.to),
+                    ch.until
+                );
                 Reply::ok(&serde_json::json!({ "from": common::log::level_name(ch.from), "to": common::log::level_name(ch.to), "until": ch.until }))
             }
             None => Reply::fail(Code::InvalidPayload),

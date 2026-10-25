@@ -66,7 +66,11 @@ async fn tcp_conn(sfu: Arc<Sfu>, s: TcpStream, addr: SocketAddr, id: u64) {
     let born = now_ms();
     let mut identified = false;
     loop {
-        let wait = if identified { std::time::Duration::from_secs(3600) } else { std::time::Duration::from_millis(TCP_IDENTIFY_MS.saturating_sub(now_ms().saturating_sub(born))) };
+        let wait = if identified {
+            std::time::Duration::from_secs(3600)
+        } else {
+            std::time::Duration::from_millis(TCP_IDENTIFY_MS.saturating_sub(now_ms().saturating_sub(born)))
+        };
         let r = tokio::time::timeout(wait, rd.read(&mut buf)).await;
         let n = match r {
             Err(_) if !identified => {

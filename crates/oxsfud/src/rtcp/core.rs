@@ -241,7 +241,14 @@ impl TwccRecv {
             let _ = first_rx;
             let ref_units = (first_at / REF_UNIT_US) % (1 << 24);
             let mut running = (first_at / REF_UNIT_US) as i64 * REF_UNIT_US as i64;
-            let mut fb = Feedback { base_seq: (start & 0xffff) as u16, status_count: 0, reference_time: ref_units as u32, fb_count: self.fb_count, symbols: Vec::new(), deltas_250us: Vec::new() };
+            let mut fb = Feedback {
+                base_seq: (start & 0xffff) as u16,
+                status_count: 0,
+                reference_time: ref_units as u32,
+                fb_count: self.fb_count,
+                symbols: Vec::new(),
+                deltas_250us: Vec::new(),
+            };
             let mut s = start;
             let mut cut = false;
             while s <= end && fb.symbols.len() < MAX_PER_FEEDBACK {

@@ -68,7 +68,8 @@ pub fn decode(m: &Msg) -> Option<M> {
 
 pub async fn exec(sfu: &Arc<Sfu>, room: &Arc<Room>, st: Step) {
     if !st.labels.is_empty() || st.from != st.to {
-        let ins: Vec<(&str, String)> = st.labels.iter().skip(1).take(6).enumerate().map(|(i, l)| (["l1", "l2", "l3", "l4", "l5", "l6"][i], (*l).to_string())).collect();
+        let ins: Vec<(&str, String)> =
+            st.labels.iter().skip(1).take(6).enumerate().map(|(i, l)| (["l1", "l2", "l3", "l4", "l5", "l6"][i], (*l).to_string())).collect();
         common::log::transition(&common::log::Step {
             area: "FLR",
             key: &room.id,
@@ -153,7 +154,8 @@ async fn bind(sfu: &Arc<Sfu>, room: &Arc<Room>, user: &str, prime: bool) {
                 if b.primed.load(Ordering::Acquire) {
                     break;
                 }
-                let x = Synth { kind: Kind::Audio, key: key(ep), seq: (k & 0xffff) as u16, ts: k.wrapping_mul(960), payload: &OPUS_SILENCE, skip: Some(&speaker) };
+                let x =
+                    Synth { kind: Kind::Audio, key: key(ep), seq: (k & 0xffff) as u16, ts: k.wrapping_mul(960), payload: &OPUS_SILENCE, skip: Some(&speaker) };
                 crate::fwd::shell::send_synth(&s2, &rm2, &x);
                 tokio::time::sleep(Duration::from_millis(PRIME_MS)).await;
             }

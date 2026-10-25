@@ -233,7 +233,13 @@ pub struct RoomMedia {
 
 impl RoomMedia {
     pub fn new(id: &str, audio: &str, video: &str) -> RoomMedia {
-        RoomMedia { id: id.to_string(), audio_codec: audio.to_string(), video_codec: video.to_string(), audio: Slot::new(Kind::Audio), video: Slot::new(Kind::Video) }
+        RoomMedia {
+            id: id.to_string(),
+            audio_codec: audio.to_string(),
+            video_codec: video.to_string(),
+            audio: Slot::new(Kind::Audio),
+            video: Slot::new(Kind::Video),
+        }
     }
 
     pub fn slot(&self, kind: Kind) -> &Slot {

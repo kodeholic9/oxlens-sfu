@@ -15,8 +15,9 @@ use oxsig::{Code, Op};
 use tokio::sync::mpsc;
 
 use super::bind;
-use super::{Gone, Out, Session, destroy};
+use super::sess::destroy;
 use crate::ops::hub::Hub;
+use crate::ses::{Gone, Out, Session};
 
 static CONN_SEQ: AtomicU64 = AtomicU64::new(1);
 const BACKLOG_MAX: usize = 1000;

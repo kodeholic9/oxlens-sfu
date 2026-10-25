@@ -7,7 +7,9 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use oxsig::Op;
-use oxsig::msg::{Affiliation, Kind, LinkEventBody, LinkEventBodyType, ParticipantEventBody, ParticipantEventBodyType, RoomEventBody, RoomEventBodyAffiliationCause};
+use oxsig::msg::{
+    Affiliation, Kind, LinkEventBody, LinkEventBodyType, ParticipantEventBody, ParticipantEventBodyType, RoomEventBody, RoomEventBodyAffiliationCause,
+};
 
 use crate::fwd::shell::now_ms;
 use crate::link::transport::PeerState;
@@ -219,7 +221,8 @@ pub async fn close_room(sfu: &Arc<Sfu>, room: &Arc<Room>) -> u32 {
             room.lock().members.remove(&u);
             continue;
         };
-        let ev = RoomEventBody::Affiliation { room_id: room.id.clone(), affiliation: aff_without(&p, &room.id), cause: RoomEventBodyAffiliationCause::RoomClosed };
+        let ev =
+            RoomEventBody::Affiliation { room_id: room.id.clone(), affiliation: aff_without(&p, &room.id), cause: RoomEventBodyAffiliationCause::RoomClosed };
         sfu.emit_user(&u, Op::RoomEvent, &ev, Some(&room.id));
         n += 1;
         let _op = p.op.lock().await;
@@ -419,7 +422,11 @@ async fn link_watch(sfu: Arc<Sfu>) {
             for (room, g) in gates {
                 if g.timeout(now) {
                     sfu.drops.gate_timeout.fetch_add(1, Ordering::Relaxed);
-                    tracing::warn!(user = p.user.as_str(), room = room.as_str(), "T-gate expired without READY — READY 미수신 의심 (no keyframe request on this path)");
+                    tracing::warn!(
+                        user = p.user.as_str(),
+                        room = room.as_str(),
+                        "T-gate expired without READY — READY 미수신 의심 (no keyframe request on this path)"
+                    );
                 }
             }
         }

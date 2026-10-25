@@ -150,10 +150,13 @@ pub struct Spec {
     pub codecs: MediaCodecs,
     pub unused_ttl: u32,
     pub departure_ttl: u32,
+    pub queue_max: u8,
+    pub t2_secs: u16,
 }
 
 impl Room {
-    pub fn new(s: Spec, epoch: &str, now: u64, floor: crate::flr::Floor) -> Room {
+    pub fn new(s: Spec, epoch: &str, now: u64) -> Room {
+        let floor = crate::flr::Floor::new(&s.id, s.queue_max, s.t2_secs);
         Room {
             id: s.id,
             name: s.name,
@@ -192,7 +195,14 @@ impl Room {
 
     pub fn summary(&self) -> RoomSummary {
         let st = self.lock();
-        RoomSummary { room_id: self.id.clone(), name: self.name.clone(), capacity: self.capacity, user_count: st.user_count(), created_at: self.created_at, rec: st.rec() }
+        RoomSummary {
+            room_id: self.id.clone(),
+            name: self.name.clone(),
+            capacity: self.capacity,
+            user_count: st.user_count(),
+            created_at: self.created_at,
+            rec: st.rec(),
+        }
     }
 
     pub fn sweep(&self, now: u64) -> Sweep {
@@ -238,8 +248,10 @@ mod tests {
             codecs: MediaCodecs { audio: Some("opus".into()), video: Some("H264".into()) },
             unused_ttl: unused,
             departure_ttl: dep,
+            queue_max: 10,
+            t2_secs: 30,
         };
-        Room::new(s, "e1", 1000, crate::flr::Floor::new("r1", 10, 30))
+        Room::new(s, "e1", 1000)
     }
 
     #[test]

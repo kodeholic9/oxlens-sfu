@@ -49,7 +49,8 @@ fn rewrite_of(e: &crate::fwd::Egress, sfu: &Sfu) -> Value {
 pub async fn handle(sfu: &Arc<Sfu>, req: AdminCall) -> Reply {
     match req {
         AdminCall::Rooms => {
-            let v: Vec<NodeRoom> = sfu.rooms.iter().map(|r| NodeRoom { room_id: r.id.clone(), member_ids: r.lock().members.keys().cloned().collect() }).collect();
+            let v: Vec<NodeRoom> =
+                sfu.rooms.iter().map(|r| NodeRoom { room_id: r.id.clone(), member_ids: r.lock().members.keys().cloned().collect() }).collect();
             Reply::ok(&v)
         }
         AdminCall::Drops => {

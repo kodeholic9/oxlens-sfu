@@ -61,13 +61,13 @@ fn reply_into(r: Reply) -> Result<Vec<u8>, Failure> {
 }
 
 async fn forward(hub: &Arc<Hub>, s: &Arc<Session>, node: &str, inst: Option<&str>, op: Op, body: Vec<u8>) -> Result<Vec<u8>, Failure> {
-    let call = Call::Op { ctx: s.ctx(hub), op: op.as_u16(), body: String::from_utf8_lossy(&body).into_owned() };
+    let call = Call::Op { ctx: s.ctx(hub.home()), op: op.as_u16(), body: String::from_utf8_lossy(&body).into_owned() };
     reply_into(hub.call_node(node, inst, &call).await)
 }
 
 async fn reconcile(hub: &Arc<Hub>, s: &Arc<Session>, node: &str, op: Op, res: &[u8]) {
     if let Some(rooms) = ses::parse_sub_rooms(op, res) {
-        ses::set_rooms(hub, s, node, rooms).await;
+        super::sess::set_rooms(hub, s, node, rooms).await;
     }
 }
 
@@ -77,7 +77,7 @@ pub async fn handle(hub: &Arc<Hub>, s: &Arc<Session>, op_num: u16, body: Vec<u8>
     };
     match op {
         Op::Resume => {
-            let r = ses::bind::resume(hub, s).await.map_err(|c| c.failure())?;
+            let r = super::bind::resume(hub, s).await.map_err(|c| c.failure())?;
             common::ev!(spec = "CP-OP-RESUME", session = s.fp.as_str(), user = s.id.user.as_str(), "resume rooms={}", r.snapshot.len());
             serde_json::to_vec(&r).map_err(|e| Code::InternalError.failure_msg(e.to_string()))
         }
@@ -120,7 +120,7 @@ pub async fn handle(hub: &Arc<Hub>, s: &Arc<Session>, op_num: u16, body: Vec<u8>
                     Err(f) if f.code == Code::NotInRoom.num() || f.code == Code::RoomNotFound.num() => {
                         let mut cur: BTreeSet<String> = s.inner.lock().await.rooms.get(&node).cloned().unwrap_or_default();
                         cur.remove(&room);
-                        ses::set_rooms(hub, s, &node, cur).await;
+                        super::sess::set_rooms(hub, s, &node, cur).await;
                     }
                     Err(_) => {}
                 }
@@ -161,7 +161,7 @@ pub async fn handle(hub: &Arc<Hub>, s: &Arc<Session>, op_num: u16, body: Vec<u8>
             if let Err(f) = &r
                 && f.code == Code::PeerNotFound.num()
             {
-                ses::set_rooms(hub, s, &node, BTreeSet::new()).await;
+                super::sess::set_rooms(hub, s, &node, BTreeSet::new()).await;
             }
             r
         }

@@ -7,7 +7,8 @@ use std::sync::atomic::Ordering;
 
 use oxsig::envelope::{Ctx, Reply};
 use oxsig::msg::{
-    Duplex, Kind, PublishTracksReqAddAction, PublishTracksRes, PublishTracksResAddTracks, TrackEventBody, TrackSetReq, TrackSetRes, TrackStateBody, TrackStateBodyType,
+    Duplex, Kind, PublishTracksReqAddAction, PublishTracksRes, PublishTracksResAddTracks, TrackEventBody, TrackSetReq, TrackSetRes, TrackStateBody,
+    TrackStateBodyType,
 };
 use oxsig::{Code, Op};
 use serde_json::Value;
@@ -26,7 +27,16 @@ pub fn track_id() -> String {
 }
 
 pub fn listed_of(s: &Stream) -> Listed {
-    Listed { track_id: s.track_id.clone(), user: s.user.clone(), kind: s.kind, source: s.source, active: !s.half(), muted: s.muted(), simulcast: s.simulcast, fmtp: s.fmtp.clone() }
+    Listed {
+        track_id: s.track_id.clone(),
+        user: s.user.clone(),
+        kind: s.kind,
+        source: s.source,
+        active: !s.half(),
+        muted: s.muted(),
+        simulcast: s.simulcast,
+        fmtp: s.fmtp.clone(),
+    }
 }
 
 pub fn want_of(sfu: &Sfu, room: &Room, l: &Listed, sub: &Peer, now: u64) -> Option<Want> {
@@ -41,7 +51,15 @@ pub fn want_of(sfu: &Sfu, room: &Room, l: &Listed, sub: &Peer, now: u64) -> Opti
         Kind::Video => u64::from(prefs.map(|p| p.priority.load(Ordering::Relaxed)).unwrap_or(0)),
         Kind::Audio => sfu.peer(&l.user).and_then(|p| p.lock().pubs.by_id(&l.track_id)).map(|s| s.last_loud_ms.load(Ordering::Relaxed)).unwrap_or(0),
     };
-    Some(Want { room: room.id.clone(), track_id: l.track_id.clone(), user: l.user.clone(), kind: l.kind, codec: room.codec_of(l.kind).to_string(), score, since_ms: now })
+    Some(Want {
+        room: room.id.clone(),
+        track_id: l.track_id.clone(),
+        user: l.user.clone(),
+        kind: l.kind,
+        codec: room.codec_of(l.kind).to_string(),
+        score,
+        since_ms: now,
+    })
 }
 
 pub fn receivable(sfu: &Sfu, room: &Room, peer: &Peer) -> Vec<Want> {
@@ -77,7 +95,12 @@ pub fn list(sfu: &Arc<Sfu>, room: &Arc<Room>, entries: &[Listed]) {
         }
         let seq = st.bump();
         let tracks = entries.iter().map(|l| crate::trk::individual(room, l)).collect();
-        sfu.emit_room(&room.id, Op::TrackEvent, &TrackEventBody { action: PublishTracksReqAddAction::Add, room_id: room.id.clone(), tracks, version: room.version(seq) }, Vec::new());
+        sfu.emit_room(
+            &room.id,
+            Op::TrackEvent,
+            &TrackEventBody { action: PublishTracksReqAddAction::Add, room_id: room.id.clone(), tracks, version: room.version(seq) },
+            Vec::new(),
+        );
         st.members.keys().cloned().collect::<Vec<String>>()
     };
     let now = now_ms();
@@ -103,7 +126,12 @@ pub fn unlist(sfu: &Arc<Sfu>, room: &Arc<Room>, ids: &[String]) -> Vec<Listed> {
         if !gone.is_empty() {
             let seq = st.bump();
             let tracks = gone.iter().map(|l| crate::trk::removed(&room.id, l)).collect();
-            sfu.emit_room(&room.id, Op::TrackEvent, &TrackEventBody { action: PublishTracksReqAddAction::Remove, room_id: room.id.clone(), tracks, version: room.version(seq) }, Vec::new());
+            sfu.emit_room(
+                &room.id,
+                Op::TrackEvent,
+                &TrackEventBody { action: PublishTracksReqAddAction::Remove, room_id: room.id.clone(), tracks, version: room.version(seq) },
+                Vec::new(),
+            );
         }
         (gone, st.members.keys().cloned().collect::<Vec<String>>())
     };
@@ -176,13 +204,20 @@ pub async fn publish_tracks(sfu: &Arc<Sfu>, ctx: &Ctx, body: &str) -> Reply {
         Some(_) => return Reply::fail(Code::InvalidPayload),
     };
     let ext_id = |k: &str| v.get(k).and_then(Value::as_u64).map(|x| x as u8);
-    let ext = ExtIds { twcc: ext_id("twcc_extmap_id"), rid: ext_id("rid_extmap_id"), rrid: ext_id("repair_rid_extmap_id"), mid: ext_id("mid_extmap_id"), audio_level: ext_id("audio_level_extmap_id") };
+    let ext = ExtIds {
+        twcc: ext_id("twcc_extmap_id"),
+        rid: ext_id("rid_extmap_id"),
+        rrid: ext_id("repair_rid_extmap_id"),
+        mid: ext_id("mid_extmap_id"),
+        audio_level: ext_id("audio_level_extmap_id"),
+    };
     let Some(perm) = room.lock().members.get(&ctx.user_id).map(|m| m.perm.clone()) else { return Reply::fail(Code::NotInRoom) };
     let (active, down) = {
         let st = peer.lock();
         (st.pubs.streams.len(), (ctx.pc_mode == oxsig::msg::PcMode::V1pc).then(|| st.table.downlink_ssrcs()))
     };
-    let input = AddInput { items: &items, perm: &perm, is_pub_room: peer.aff.is_pub(&room_id), active, ext, room_codecs: &room.codecs, downlink_ssrcs: down.as_ref() };
+    let input =
+        AddInput { items: &items, perm: &perm, is_pub_room: peer.aff.is_pub(&room_id), active, ext, room_codecs: &room.codecs, downlink_ssrcs: down.as_ref() };
     let tracks = match check_add(&input) {
         Ok(t) => t,
         Err(f) => return Reply::failure(f),
@@ -328,7 +363,15 @@ pub async fn track_set(sfu: &Arc<Sfu>, ctx: &Ctx, body: &str) -> Reply {
                 l.muted = m;
             }
             let seq = st.bump();
-            let b = TrackStateBody { type_: TrackStateBodyType::Muted, user_id: peer.user.clone(), track_id: s.track_id.clone(), kind: s.kind, room_id: rm.id.clone(), version: rm.version(seq), muted: m };
+            let b = TrackStateBody {
+                type_: TrackStateBodyType::Muted,
+                user_id: peer.user.clone(),
+                track_id: s.track_id.clone(),
+                kind: s.kind,
+                room_id: rm.id.clone(),
+                version: rm.version(seq),
+                muted: m,
+            };
             sfu.emit_room(&rm.id, Op::TrackState, &b, Vec::new());
         }
         return Reply::ok(&TrackSetRes { ssrc: s.ssrc, muted: Some(m), duplex: None, noop: None });

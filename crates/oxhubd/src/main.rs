@@ -6,7 +6,6 @@ mod aux;
 mod bus;
 mod cfg;
 mod ops;
-mod room;
 mod ses;
 
 fn main() {

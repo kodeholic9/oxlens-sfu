@@ -8,9 +8,9 @@ use std::sync::atomic::Ordering;
 
 use oxsig::envelope::{Ctx, Reply};
 use oxsig::msg::{
-    CodecPolicy, CreateRoomReq, CreateRoomRes, GetRoomRes, IceRestartRes, IceRestartResPublish, IceRestartResSubscribe, Kind, ListRoomsRes, MediaCodecs, MemberInfo,
-    ParticipantEventBody, ParticipantEventBodyType, PcMode, ResumeRes, RoomJoinReq, RoomJoinRes, RoomLeaveReq, RoomLeaveRes, RoomSnapshot, ServerConfig, ServerConfigDtls,
-    ServerConfigDtlsSetup, ServerConfigIce,
+    CodecPolicy, CreateRoomReq, CreateRoomRes, GetRoomRes, IceRestartRes, IceRestartResPublish, IceRestartResSubscribe, Kind, ListRoomsRes, MediaCodecs,
+    MemberInfo, ParticipantEventBody, ParticipantEventBodyType, PcMode, ResumeRes, RoomJoinReq, RoomJoinRes, RoomLeaveReq, RoomLeaveRes, RoomSnapshot,
+    ServerConfig, ServerConfigDtls, ServerConfigDtlsSetup, ServerConfigIce,
 };
 use oxsig::{Code, Op};
 use serde_json::json;
@@ -119,7 +119,13 @@ pub fn snapshot(room: &Room, peer: &Peer) -> Option<RoomSnapshot> {
 pub async fn create_room(sfu: &Arc<Sfu>, room_id: &str, req: CreateRoomReq) -> Reply {
     let _g = sfu.rooms_op.lock().await;
     if let Some(r) = sfu.room(room_id) {
-        return Reply::ok(&CreateRoomRes { room_id: r.id.clone(), name: r.name.clone(), capacity: r.capacity, created_at: r.created_at, media_codecs: r.codecs.clone() });
+        return Reply::ok(&CreateRoomRes {
+            room_id: r.id.clone(),
+            name: r.name.clone(),
+            capacity: r.capacity,
+            created_at: r.created_at,
+            media_codecs: r.codecs.clone(),
+        });
     }
     let mc = req.media_codecs.clone().unwrap_or(MediaCodecs { audio: None, video: None });
     let audio = mc.audio.as_deref().and_then(codec::canon).unwrap_or("opus").to_string();
@@ -132,16 +138,24 @@ pub async fn create_room(sfu: &Arc<Sfu>, room_id: &str, req: CreateRoomReq) -> R
         codecs: codecs.clone(),
         unused_ttl: req.unused_ttl_secs.unwrap_or(crate::room::PERMANENT),
         departure_ttl: req.departure_ttl_secs.unwrap_or(crate::room::PERMANENT),
+        queue_max: sfu.cfg.policy.floor.queue_max,
+        t2_secs: sfu.cfg.policy.floor.t2_stop_talking_secs,
     };
-    let floor = crate::flr::Floor::new(room_id, sfu.cfg.policy.floor.queue_max, sfu.cfg.policy.floor.t2_stop_talking_secs);
-    let room = Arc::new(Room::new(spec, &sfu.epoch, now_ms(), floor));
+    let room = Arc::new(Room::new(spec, &sfu.epoch, now_ms()));
     sfu.plane.add_room(Arc::new(RoomMedia::new(room_id, &audio, &video)));
     sfu.rooms.insert(room_id.to_string(), room.clone());
     crate::gc::start_floor(sfu, &room);
     if let Err(e) = sfu.bus.declare_room(room_id).await {
         tracing::error!(room = room_id, "room token declare failed {e}");
     }
-    common::ev!(spec = "SV-STATE-UNIT-STATE", room = room_id, "room created capacity={} codecs={audio}/{video} unused_ttl={} departure_ttl={}", room.capacity, room.unused_ttl, room.departure_ttl);
+    common::ev!(
+        spec = "SV-STATE-UNIT-STATE",
+        room = room_id,
+        "room created capacity={} codecs={audio}/{video} unused_ttl={} departure_ttl={}",
+        room.capacity,
+        room.unused_ttl,
+        room.departure_ttl
+    );
     Reply::ok(&CreateRoomRes { room_id: room.id.clone(), name: room.name.clone(), capacity: room.capacity, created_at: room.created_at, media_codecs: codecs })
 }
 
@@ -241,7 +255,16 @@ pub async fn room_join(sfu: &Arc<Sfu>, ctx: &Ctx, body: &str) -> Reply {
         let mut st = room.lock();
         let perm = st.perm_for(&ctx.user_id, ctx.permission.as_ref());
         let was = st.members.contains_key(&ctx.user_id);
-        let m = Member { user: ctx.user_id.clone(), role, select, ptype: ctx.participant_type, hidden: ctx.hidden, metadata: ctx.metadata.clone(), perm: perm.clone(), joined_at: now };
+        let m = Member {
+            user: ctx.user_id.clone(),
+            role,
+            select,
+            ptype: ctx.participant_type,
+            hidden: ctx.hidden,
+            metadata: ctx.metadata.clone(),
+            perm: perm.clone(),
+            joined_at: now,
+        };
         st.members.insert(ctx.user_id.clone(), m.clone());
         if !was && !ctx.hidden {
             let seq = st.bump();
