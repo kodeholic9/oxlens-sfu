@@ -58,6 +58,7 @@ pub fn pli(sfu: &Arc<Sfu>, ing: &Arc<Ingress>, now: u64, infra: bool) {
     ing.last_pli_ms.store(now, Ordering::Relaxed);
     let Some(c) = ing.conn.upgrade() else { return };
     send(&c, &PictureLossIndication { sender_ssrc: SENDER_SSRC, media_ssrc: ing.ssrc });
+    ing.pli_tx.fetch_add(1, Ordering::Relaxed);
 }
 
 pub fn on_rtcp(sfu: &Arc<Sfu>, conn: &Arc<Conn>, plain: &[u8]) {
@@ -83,6 +84,7 @@ pub fn on_rtcp(sfu: &Arc<Sfu>, conn: &Arc<Conn>, plain: &[u8]) {
                 }
             }
         } else if let Some(n) = a.downcast_ref::<TransportLayerNack>() {
+            conn.nack_rx.fetch_add(1, Ordering::Relaxed);
             let Some(e) = conn.egress_by_ssrc(n.media_ssrc) else {
                 sfu.drops.rtcp_unresolved.fetch_add(1, Ordering::Relaxed);
                 continue;
@@ -93,6 +95,7 @@ pub fn on_rtcp(sfu: &Arc<Sfu>, conn: &Arc<Conn>, plain: &[u8]) {
                 }
             }
         } else if let Some(x) = a.downcast_ref::<PictureLossIndication>() {
+            conn.pli_rx.fetch_add(1, Ordering::Relaxed);
             key_request(sfu, conn, x.media_ssrc, now);
         } else if let Some(x) = a.downcast_ref::<FullIntraRequest>() {
             key_request(sfu, conn, x.media_ssrc, now);
@@ -221,6 +224,7 @@ fn nack_down(sfu: &Arc<Sfu>, conn: &Arc<Conn>, e: &Arc<Egress>, seq: u16, now: u
     rtp::rtx(&pkt, &h, seq, &Rewrite { pt: rtx_pt, seq: rseq, ts: h.ts.wrapping_add(ts_off), ssrc: e.rtx_ssrc.unwrap_or(0), ext: &ext_buf }, &mut out);
     if conn.link.send_rtp(&out) {
         sfu.drops.rtx_sent.fetch_add(1, Ordering::Relaxed);
+        conn.rtx_tx.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -314,6 +318,7 @@ pub async fn conn_loop(sfu: Arc<Sfu>, conn: Arc<Conn>) {
             if !due.is_empty() {
                 send(&conn, &TransportLayerNack { sender_ssrc: SENDER_SSRC, media_ssrc: i.ssrc, nacks: nack_pairs_from_sequence_numbers(&due) });
                 sfu.drops.nack_up_sent.fetch_add(due.len() as u64, Ordering::Relaxed);
+                i.nack_tx.fetch_add(1, Ordering::Relaxed);
             }
         }
         if now.saturating_sub(last_twcc) >= TWCC_MS && conn.twcc_id.load(Ordering::Relaxed) != 0 {

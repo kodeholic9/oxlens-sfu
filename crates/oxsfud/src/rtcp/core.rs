@@ -135,6 +135,15 @@ impl RecvStats {
         Report { fraction, lost, extended_max: ext, jitter: self.jitter as u32 }
     }
 
+    pub fn lost(&self) -> i64 {
+        let expected = self.extended_max().wrapping_sub(self.base_seq).wrapping_add(1);
+        if self.started { i64::from(expected) - i64::from(self.received) } else { 0 }
+    }
+
+    pub fn jitter_secs(&self) -> f64 {
+        if self.clock == 0 { 0.0 } else { self.jitter / f64::from(self.clock) }
+    }
+
     pub fn started(&self) -> bool {
         self.started
     }

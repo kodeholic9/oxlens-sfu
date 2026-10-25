@@ -65,6 +65,8 @@ pub struct Ingress {
     pub last_rx_ms: AtomicU64,
     pub last_pli_ms: AtomicU64,
     pub rx_pkts: AtomicU64,
+    pub nack_tx: AtomicU64,
+    pub pli_tx: AtomicU64,
 }
 
 impl Ingress {
@@ -80,6 +82,8 @@ impl Ingress {
             last_rx_ms: AtomicU64::new(0),
             last_pli_ms: AtomicU64::new(0),
             rx_pkts: AtomicU64::new(0),
+            nack_tx: AtomicU64::new(0),
+            pli_tx: AtomicU64::new(0),
         }
     }
 
@@ -141,6 +145,7 @@ pub struct Egress {
     pub rtx_block: AtomicBool,
     pub stall_from: AtomicU64,
     pub stall_count: AtomicU64,
+    pub bytes: AtomicU64,
 }
 
 impl Egress {
@@ -177,6 +182,7 @@ impl Egress {
             rtx_block: AtomicBool::new(false),
             stall_from: AtomicU64::new(0),
             stall_count: AtomicU64::new(0),
+            bytes: AtomicU64::new(0),
         }
     }
 
@@ -266,6 +272,9 @@ pub struct Conn {
     pub twcc_id: AtomicU8,
     pub media_ssrc: AtomicU32,
     pub unknown_drop: AtomicU64,
+    pub rtx_tx: AtomicU64,
+    pub nack_rx: AtomicU64,
+    pub pli_rx: AtomicU64,
     pub bwe: std::sync::Mutex<crate::sim::Bwe>,
 }
 

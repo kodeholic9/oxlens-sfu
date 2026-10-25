@@ -529,6 +529,7 @@ pub fn send_on(sfu: &Arc<Sfu>, e: &Arc<Egress>, src: Option<&Arc<Ingress>>, key:
             b.on_sent(tw as u16, t_us, out_buf.len(), false);
         }
         e.sent.fetch_add(1, Ordering::Relaxed);
+        e.bytes.fetch_add(out_buf.len() as u64, Ordering::Relaxed);
         e.last_sent_ms.store(now, Ordering::Relaxed);
     }
     rw.ext_buf = ext_buf;

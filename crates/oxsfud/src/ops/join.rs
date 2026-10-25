@@ -74,6 +74,9 @@ fn new_conn(sfu: &Arc<Sfu>, user: &str, role: Role, ext: SubExt, peer: std::sync
         twcc_id: Default::default(),
         media_ssrc: Default::default(),
         unknown_drop: Default::default(),
+        rtx_tx: Default::default(),
+        nack_rx: Default::default(),
+        pli_rx: Default::default(),
         bwe: Default::default(),
     })
 }

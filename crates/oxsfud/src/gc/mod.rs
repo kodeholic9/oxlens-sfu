@@ -453,10 +453,60 @@ async fn home_watch(sfu: Arc<Sfu>) {
     }
 }
 
+fn peer_stats(p: &Peer) {
+    for c in &p.conns {
+        for i in c.ingress.load().values() {
+            let (packets, bytes, lost, jitter) = match i.st.lock() {
+                Ok(s) => (s.stats.packets, s.stats.bytes, s.stats.lost(), s.stats.jitter_secs()),
+                Err(_) => continue,
+            };
+            let nack = i.nack_tx.load(Ordering::Relaxed);
+            let pli = i.pli_tx.load(Ordering::Relaxed);
+            let rid = if i.stream.simulcast { if i.layer == 0 { "l" } else { "h" } } else { "" };
+            common::stat!(
+                track = i.stream.track_id.as_str(),
+                ssrc = u64::from(i.ssrc),
+                packets_received = packets,
+                packets_lost = lost,
+                jitter = jitter,
+                bytes_received = bytes,
+                nack_count = nack,
+                pli_count = pli,
+                rid = rid
+            );
+        }
+    }
+    let (mut sent, mut bytes, mut rtx, mut nack, mut pli, mut rows) = (0u64, 0u64, 0u64, 0u64, 0u64, 0usize);
+    for c in &p.conns {
+        for e in c.egress.load().iter() {
+            sent += e.sent.load(Ordering::Relaxed);
+            bytes += e.bytes.load(Ordering::Relaxed);
+            rows += 1;
+        }
+        rtx += c.rtx_tx.load(Ordering::Relaxed);
+        nack += c.nack_rx.load(Ordering::Relaxed);
+        pli += c.pli_rx.load(Ordering::Relaxed);
+    }
+    if rows > 0 {
+        common::stat!(
+            user = p.user.as_str(),
+            packets_sent = sent,
+            bytes_sent = bytes,
+            retransmitted_packets_sent = rtx,
+            nack_count = nack,
+            pli_count = pli
+        );
+    }
+}
+
 async fn stats(sfu: Arc<Sfu>) {
-    let ms = u64::from(sfu.cfg.policy.logging.stat_interval_ms).max(1000);
+    let ms = u64::from(sfu.cfg.policy.logging.stat_interval_ms);
     loop {
         tokio::time::sleep(Duration::from_millis(ms)).await;
+        let peers: Vec<Arc<Peer>> = sfu.peers.iter().map(|p| p.clone()).collect();
+        for p in &peers {
+            peer_stats(p);
+        }
         let conns = sfu.plane.conns().len();
         let send_fail = sfu.io.send_fail.load(Ordering::Relaxed);
         let put_drop = sfu.bus.put_drop.load(Ordering::Relaxed);
