@@ -21,18 +21,18 @@ fn spec_dir() -> PathBuf {
 
 fn load(name: &str) -> Value {
     let p = spec_dir().join("server/out/vectors").join(name);
-    let t = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{UNIT} 벡터 파일 {} 없음: {e}", p.display()));
-    serde_json::from_str(&t).unwrap_or_else(|e| panic!("{UNIT} 벡터 {name} 형: {e}"))
+    let t = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("S-sym-RULE-CONC-SANS-IO-1 벡터 파일 {} 없음: {e}", p.display()));
+    serde_json::from_str(&t).unwrap_or_else(|e| panic!("S-sym-RULE-CONC-SANS-IO-1 벡터 {name} 형: {e}"))
 }
 
 fn set<'a>(v: &'a Value, key: &str) -> &'a Vec<Value> {
-    let a = v.get(key).and_then(Value::as_array).unwrap_or_else(|| panic!("{UNIT} 판 묶음 {key} 없음"));
-    assert!(!a.is_empty(), "{UNIT} 판 묶음 {key} 비었다");
+    let a = v.get(key).and_then(Value::as_array).unwrap_or_else(|| panic!("S-sym-RULE-CONC-SANS-IO-1 판 묶음 {key} 없음"));
+    assert!(!a.is_empty(), "S-sym-RULE-CONC-SANS-IO-1 판 묶음 {key} 비었다");
     a
 }
 
 fn u(v: &Value, k: &str) -> u64 {
-    v.get(k).and_then(Value::as_u64).unwrap_or_else(|| panic!("{UNIT} 칸 {k} 없음 in {v}"))
+    v.get(k).and_then(Value::as_u64).unwrap_or_else(|| panic!("S-sym-RULE-CONC-SANS-IO-1 칸 {k} 없음 in {v}"))
 }
 
 fn hex(b: &[u8]) -> String {
@@ -46,13 +46,13 @@ fn fwd_rewrite_vectors() {
         let name = case["name"].as_str().unwrap_or("?");
         let clock = u(case, "clock") as u32;
         let mut r = Rewriter::default();
-        for st in case["steps"].as_array().unwrap_or_else(|| panic!("{UNIT} steps")) {
+        for st in case["steps"].as_array().unwrap_or_else(|| panic!("S-sym-RULE-CONC-SANS-IO-1 steps")) {
             let (s, t) = r.map(u(st, "src"), u(st, "seq") as u16, u(st, "ts") as u32, u(st, "at_ms"), clock);
-            assert_eq!((u64::from(s), u64::from(t)), (u(st, "out_seq"), u(st, "out_ts")), "{UNIT} rewrite {name} step {st}");
+            assert_eq!((u64::from(s), u64::from(t)), (u(st, "out_seq"), u(st, "out_ts")), "S-sym-RULE-CONC-SANS-IO-1 rewrite {name} step {st}");
         }
         for n in case.get("nack").and_then(Value::as_array).into_iter().flatten() {
             let got = r.nack_to_source(u(n, "out_seq") as u16).map(u64::from);
-            assert_eq!(got, n.get("in_seq").and_then(Value::as_u64), "{UNIT} rewrite {name} nack {n}");
+            assert_eq!(got, n.get("in_seq").and_then(Value::as_u64), "S-sym-RULE-CONC-SANS-IO-1 rewrite {name} nack {n}");
         }
     }
 }
@@ -61,10 +61,10 @@ fn fwd_rewrite_vectors() {
 fn fwd_serial_pt_sr_vectors() {
     let d = load("fwd.json");
     for c in set(&d, "serial") {
-        assert_eq!(seq_after(u(c, "a") as u16, u(c, "b") as u16), c["after"].as_bool().unwrap_or(false), "{UNIT} serial {c}");
+        assert_eq!(seq_after(u(c, "a") as u16, u(c, "b") as u16), c["after"].as_bool().unwrap_or(false), "S-sym-RULE-CONC-SANS-IO-1 serial {c}");
     }
     for c in set(&d, "pt_byte1") {
-        assert_eq!(u64::from(pt_byte1(u(c, "byte1") as u8, u(c, "pt") as u8)), u(c, "out"), "{UNIT} pt_byte1 {c}");
+        assert_eq!(u64::from(pt_byte1(u(c, "byte1") as u8, u(c, "pt") as u8)), u(c, "out"), "S-sym-RULE-CONC-SANS-IO-1 pt_byte1 {c}");
     }
     for c in set(&d, "sr") {
         let i = &c["in"];
@@ -74,7 +74,7 @@ fn fwd_serial_pt_sr_vectors() {
             u(c, "ts_off") as u32,
         );
         let e = &c["out"];
-        assert_eq!((u64::from(o.ssrc), o.ntp, u64::from(o.rtp_ts)), (u(e, "ssrc"), u(e, "ntp"), u(e, "rtp_ts")), "{UNIT} sr {c}");
+        assert_eq!((u64::from(o.ssrc), o.ntp, u64::from(o.rtp_ts)), (u(e, "ssrc"), u(e, "ntp"), u(e, "rtp_ts")), "S-sym-RULE-CONC-SANS-IO-1 sr {c}");
     }
 }
 
@@ -87,8 +87,8 @@ fn ext_vectors() {
         let t = ExtTable { mid: id("mid"), audio_level: id("audio_level"), abs_send_time: id("abs_send_time"), twcc: id("twcc") };
         let mut out = Vec::new();
         build(&t, c["mid"].as_str(), c["audio_level_in"].as_u64().map(|x| x as u8), u(c, "t_us"), u(c, "twcc_counter"), &mut out);
-        assert_eq!(t.one_byte(), c["form"].as_str() == Some("one"), "{UNIT} ext form {}", c["name"]);
-        assert_eq!(hex(&out), c["hex"].as_str().unwrap_or(""), "{UNIT} ext {}", c["name"]);
+        assert_eq!(t.one_byte(), c["form"].as_str() == Some("one"), "S-sym-RULE-CONC-SANS-IO-1 ext form {}", c["name"]);
+        assert_eq!(hex(&out), c["hex"].as_str().unwrap_or(""), "S-sym-RULE-CONC-SANS-IO-1 ext {}", c["name"]);
     }
 }
 
@@ -98,7 +98,7 @@ fn rtcp_rr_vectors() {
     for case in set(&d, "rr") {
         let name = case["name"].as_str().unwrap_or("?");
         let mut s = RecvStats::new(u(case, "clock") as u32);
-        for ev in case["events"].as_array().unwrap_or_else(|| panic!("{UNIT} events")) {
+        for ev in case["events"].as_array().unwrap_or_else(|| panic!("S-sym-RULE-CONC-SANS-IO-1 events")) {
             if let Some(r) = ev.get("report") {
                 let got = s.report();
                 let want = (r["fraction"].as_u64(), r["lost"].as_i64(), r["extended_max"].as_u64(), r["jitter"].as_u64());
@@ -109,7 +109,7 @@ fn rtcp_rr_vectors() {
                 );
             } else {
                 let valid = s.update(u(ev, "seq") as u16, u(ev, "ts") as u32, u(ev, "arrival_ms"), 100);
-                assert_eq!(valid, u(ev, "valid") == 1, "{UNIT} rr {name} valid {ev}");
+                assert_eq!(valid, u(ev, "valid") == 1, "S-sym-RULE-CONC-SANS-IO-1 rr {name} valid {ev}");
             }
         }
     }
@@ -122,26 +122,26 @@ fn rtcp_twcc_vectors() {
         let name = case["name"].as_str().unwrap_or("?");
         let mut t = TwccRecv::default();
         let mut built: Vec<oxsfud::rtcp::core::Feedback> = Vec::new();
-        for ev in case["events"].as_array().unwrap_or_else(|| panic!("{UNIT} events")) {
+        for ev in case["events"].as_array().unwrap_or_else(|| panic!("S-sym-RULE-CONC-SANS-IO-1 events")) {
             if let Some(b) = ev.get("build") {
                 if built.is_empty() {
                     built = t.build();
                     built.reverse();
                 }
-                let fb = built.pop().unwrap_or_else(|| panic!("{UNIT} twcc {name} 피드백 모자람"));
+                let fb = built.pop().unwrap_or_else(|| panic!("S-sym-RULE-CONC-SANS-IO-1 twcc {name} 피드백 모자람"));
                 let syms: String = fb.symbols.iter().map(|s| s.letter()).collect();
                 let deltas: Vec<i64> = fb.deltas_250us.iter().map(|x| i64::from(*x)).collect();
                 let want_d: Vec<i64> = b["deltas_250us"].as_array().map(|a| a.iter().filter_map(Value::as_i64).collect()).unwrap_or_default();
                 assert_eq!(
                     (u64::from(fb.base_seq), u64::from(fb.status_count), u64::from(fb.reference_time), u64::from(fb.fb_count), syms.as_str(), deltas),
                     (u(b, "base_seq"), u(b, "status_count"), u(b, "reference_time"), u(b, "fb_count"), b["symbols"].as_str().unwrap_or(""), want_d),
-                    "{UNIT} twcc {name}"
+                    "S-sym-RULE-CONC-SANS-IO-1 twcc {name}"
                 );
             } else {
                 t.record(u(ev, "seq") as u16, u(ev, "arrival_us"));
             }
         }
-        assert!(built.is_empty(), "{UNIT} twcc {name} 남은 피드백");
+        assert!(built.is_empty(), "S-sym-RULE-CONC-SANS-IO-1 twcc {name} 남은 피드백");
     }
 }
 
@@ -151,9 +151,9 @@ fn sim_aimd_vectors() {
     for case in set(&d, "aimd") {
         let name = case["name"].as_str().unwrap_or("?");
         let mut a = Aimd::new(u(case, "start_bps") as f64);
-        for st in case["steps"].as_array().unwrap_or_else(|| panic!("{UNIT} steps")) {
+        for st in case["steps"].as_array().unwrap_or_else(|| panic!("S-sym-RULE-CONC-SANS-IO-1 steps")) {
             let (bps, near) = a.update(u(st, "at_ms"), Usage::parse(st["usage"].as_str().unwrap_or("normal")), u(st, "acked_bps") as f64);
-            assert_eq!((bps, near), (u(st, "out_bps"), st["out_near"].as_bool().unwrap_or(false)), "{UNIT} aimd {name} step {st}");
+            assert_eq!((bps, near), (u(st, "out_bps"), st["out_near"].as_bool().unwrap_or(false)), "S-sym-RULE-CONC-SANS-IO-1 aimd {name} step {st}");
         }
     }
 }
