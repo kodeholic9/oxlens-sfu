@@ -1,30 +1,34 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @36d1dfd · 정:IMPL-AUX-MESSAGE · 정:IMPL-AUX-DC-SEND · 연:AUX.op.MESSAGE · 연:RULE-AUX-MESSAGE-FORM · 연:RULE-AUX-MESSAGE-PROC · model: claude-opus-5-5
-//! 부가 통신 — `MESSAGE` 중계(방 방송 · 발신자 제외 · 입장한 방만 · `user_id` 는 봉투에서 · `msg_id` uuid).
+// spec: v1.3 @d4cc756 · 정:IMPL-AUX-MESSAGE 정:IMPL-AUX-DC-SEND 정:RULE-BUS-REQUEST 연:AUX.op.MESSAGE · model: claude-opus-5-5
+//! `MESSAGE` 중계 — `user_id` 는 세션에서 · 그 방 전원(발신자 제외) · 응답 `msg_id` = uuid.
 
 use std::sync::Arc;
 
-use common::bus::envelope::Reply;
-use oxsig::{parse, Code, MessageBody, MessageReq, MessageRes, Op};
+use oxsig::envelope::{Ctx, Reply};
+use oxsig::msg::{MessageBody, MessageRes};
+use oxsig::{Code, Op};
 
-use crate::ops::call::Who;
 use crate::ops::Sfu;
+use crate::ops::call::{body_json, need_str};
 
-pub async fn message(sfu: &Arc<Sfu>, who: &Who, body: serde_json::Value) -> Reply {
-    let req: MessageReq = match parse::typed(body) {
-        Ok(r) => r,
-        Err(e) => return sfu.fail(e.code().failure_with(e.message(), None)),
+pub fn message(sfu: &Arc<Sfu>, ctx: &Ctx, body: &str) -> Reply {
+    let v = match body_json(body) {
+        Ok(v) => v,
+        Err(r) => return r,
     };
-    let w = sfu.world.lock().await;
-    if !w.rooms.contains_key(&req.room_id) {
-        return sfu.fail(Code::RoomNotFound.failure());
+    let room = match need_str(&v, "room_id") {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let content = match need_str(&v, "content") {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let member = sfu.room(&room).is_some_and(|r| r.lock().members.contains_key(&ctx.user_id));
+    if !member {
+        return Reply::fail(Code::NotInRoom);
     }
-    if !w.rooms.get(&req.room_id).map(|r| r.has(&who.user)).unwrap_or(false) {
-        return sfu.fail(Code::NotInRoom.failure());
-    }
-    let msg_id = uuid::Uuid::new_v4().to_string();
-    let out = MessageBody { room_id: req.room_id.clone(), user_id: who.user.clone(), content: req.content };
-    sfu.to_room(&req.room_id, Op::Message, serde_json::to_value(out).unwrap_or_default(), vec![who.user.clone()]);
-    tracing::info!(kind = "ev", spec = "CP-OP-MESSAGE", user = %who.user, room = %req.room_id, "message relayed");
-    Reply::ok(&MessageRes { msg_id })
+    let b = MessageBody { room_id: room.clone(), user_id: ctx.user_id.clone(), content };
+    sfu.emit_room(&room, Op::Message, &b, vec![ctx.user_id.clone()]);
+    Reply::ok(&MessageRes { msg_id: common::id::uuid4() })
 }

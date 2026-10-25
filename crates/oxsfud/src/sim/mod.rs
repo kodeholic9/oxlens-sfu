@@ -1,168 +1,268 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @36d1dfd · 정:RULE-SIM-MODES · 정:RULE-SIM-TICK · 정:IMPL-SIM-SWITCH · 정:CAND-SIM-PROBE-SHAPE · 연:RULE-SUB-LAYER-PROC · 연:RULE-SUB-LAYER-PAUSED-AXIS · model: claude-opus-5-5
-//! 영역 SIM — 구독 전송로마다 판단 재료(egress twcc 송신 기록 · GCC 추정 · REMB · RR 손실 · NACK · 드롭) · 레이어 판단 · 프로브 상태.
+// spec: v1.3 @d4cc756 · 정:RULE-SIM-MODES 정:RULE-SIM-TICK 정:IMPL-SIM-SWITCH 정:CAND-SIM-PROBE-SHAPE 정:IMPL-RTCP-TERMINATE 정:RULE-OPS-OBSERVE · model: claude-opus-5-5
+//! 시뮬캐스트 자동 판단 — 구독 전송로마다(`off` · v1 REMB + RR 손실 · v2 TWCC GCC + RTX 패딩 프로브) · 판단은 `core` 순수 함수 · 여기는 신호 모으기와 집행.
 
 pub mod core;
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
-use self::core::{Aimd, Overuse, Policy, Signals, Trendline, Usage, DECREASE_GAP_MS, START_BPS, V2_STALE_MS};
+use common::policy::MediaAutolayer;
+use oxsig::msg::Kind;
+use rtcp::transport_feedbacks::transport_layer_cc::{SymbolTypeTcc, TransportLayerCc};
 
-pub const SEND_LOG_MAX: usize = 4096;
-pub const BURST_US: u64 = 5_000;
-pub const ACKED_WINDOW_MS: u64 = 500;
+use self::core::{Aimd, Decision, LAYER_H_BPS, LAYER_L_BPS, Layer, Policy, Signals, Trendline, Usage};
+use crate::fwd::Conn;
+use crate::ops::Sfu;
 
-#[derive(Debug, Clone, Default)]
-pub struct SendLog {
-    map: BTreeMap<u16, (u64, usize, bool)>,
+const SENT_KEEP: usize = 4096;
+
+struct Sent {
+    seq: u16,
+    t_us: u64,
+    size: usize,
+    probe: bool,
 }
 
-impl SendLog {
-    pub fn record(&mut self, seq: u16, send_us: u64, bytes: usize, probe: bool) {
-        self.map.insert(seq, (send_us, bytes, probe));
-        if self.map.len() > SEND_LOG_MAX
-            && let Some(&k) = self.map.keys().next()
-        {
-            self.map.remove(&k);
-        }
-    }
-
-    pub fn take(&mut self, seq: u16) -> Option<(u64, usize, bool)> {
-        self.map.remove(&seq)
-    }
+struct ProbeRun {
+    started: u64,
+    rate_bps: f64,
+    acked_bytes: usize,
+    first_arrival_us: Option<i64>,
+    last_arrival_us: Option<i64>,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct Probe {
-    pub started_ms: u64,
-    pub rate_bps: u64,
-    pub need_bps: u64,
-    pub bytes_acked: u64,
-    pub sent: u64,
-    pub first_arrival_us: Option<i64>,
-    pub last_arrival_us: Option<i64>,
-}
-
-impl Probe {
-    pub fn measured_bps(&self) -> Option<u64> {
-        let (a, b) = (self.first_arrival_us?, self.last_arrival_us?);
-        let span = (b - a).max(0) as u64;
-        if span < 100_000 || self.bytes_acked == 0 {
-            return None;
-        }
-        Some(self.bytes_acked * 8 * 1_000_000 / span)
-    }
-}
-
-#[derive(Debug, Clone)]
 pub struct Bwe {
-    pub aimd: Aimd,
-    trend: Trendline,
-    over: Overuse,
     pub policy: Policy,
-    pub remb: Option<(u64, u64)>,
-    pub loss: Option<(f64, u64)>,
-    pub nacks: u64,
-    pub drops: u64,
-    pub last_fb_ms: u64,
-    acked: VecDeque<(u64, usize)>,
-    group: Option<(u64, u64, i64)>,
-    prev_group: Option<(u64, i64)>,
-    pub probe: Option<Probe>,
-    pub probe_result_bps: Option<u64>,
+    aimd: Aimd,
+    trend: Trendline,
+    remb: Option<(f64, u64)>,
+    loss: HashMap<u8, (f64, u64)>,
+    nacks: VecDeque<u64>,
+    sent: VecDeque<Sent>,
+    est: Option<(f64, u64)>,
+    overuse: bool,
+    last_fb_ms: u64,
+    group: Option<(u64, f64)>,
+    probe: Option<ProbeRun>,
 }
 
 impl Default for Bwe {
     fn default() -> Self {
         Bwe {
-            aimd: Aimd::new(START_BPS),
-            trend: Trendline::default(),
-            over: Overuse::default(),
             policy: Policy::default(),
+            aimd: Aimd::new(core::START_BPS),
+            trend: Trendline::default(),
             remb: None,
-            loss: None,
-            nacks: 0,
-            drops: 0,
+            loss: HashMap::new(),
+            nacks: VecDeque::new(),
+            sent: VecDeque::new(),
+            est: None,
+            overuse: false,
             last_fb_ms: 0,
-            acked: VecDeque::new(),
             group: None,
-            prev_group: None,
             probe: None,
-            probe_result_bps: None,
         }
     }
 }
 
 impl Bwe {
-    pub fn acked_bps(&self, now_ms: u64) -> u64 {
-        let bytes: usize = self.acked.iter().filter(|(t, _)| now_ms.saturating_sub(*t) <= ACKED_WINDOW_MS).map(|(_, b)| *b).sum();
-        (bytes as u64 * 8 * 1000) / ACKED_WINDOW_MS
+    pub fn on_sent(&mut self, seq: u16, t_us: u64, size: usize, probe: bool) {
+        self.sent.push_back(Sent { seq, t_us, size, probe });
+        while self.sent.len() > SENT_KEEP {
+            self.sent.pop_front();
+        }
     }
 
-    pub fn on_feedback(&mut self, pkts: &[(u64, i64, usize, bool)], now_ms: u64) {
-        self.last_fb_ms = now_ms;
-        let mut overused = false;
-        for &(send_us, arrival_us, bytes, probe) in pkts {
-            self.acked.push_back((now_ms, bytes));
-            if probe && let Some(p) = self.probe.as_mut() {
-                p.bytes_acked += bytes as u64;
-                p.first_arrival_us.get_or_insert(arrival_us);
-                p.last_arrival_us = Some(arrival_us);
-            }
-            match self.group {
-                None => self.group = Some((send_us, send_us, arrival_us)),
-                Some((first, _, arr)) if send_us.saturating_sub(first) <= BURST_US => {
-                    self.group = Some((first, send_us, arr.max(arrival_us)));
+    pub fn on_loss(&mut self, mid: u8, pct: f64, now: u64) {
+        self.loss.insert(mid, (pct, now));
+    }
+
+    pub fn on_remb(&mut self, bps: f64, now: u64) {
+        self.remb = Some((bps, now));
+    }
+
+    pub fn on_nack(&mut self, now: u64) {
+        self.nacks.push_back(now);
+    }
+
+    pub fn on_twcc(&mut self, t: &TransportLayerCc, now: u64) {
+        let mut arrival_us = i64::from(t.reference_time) * 64_000;
+        let mut seq = t.base_sequence_number;
+        let mut d = t.recv_deltas.iter();
+        let mut acked_bytes = 0usize;
+        let mut first_arr: Option<i64> = None;
+        let mut last_arr: Option<i64> = None;
+        let mut statuses: Vec<SymbolTypeTcc> = Vec::new();
+        for c in &t.packet_chunks {
+            match c {
+                rtcp::transport_feedbacks::transport_layer_cc::PacketStatusChunk::RunLengthChunk(r) => {
+                    statuses.extend(std::iter::repeat_n(r.packet_status_symbol, r.run_length as usize));
                 }
-                Some((_, last_send, last_arr)) => {
-                    if let Some((ps, pa)) = self.prev_group {
-                        let recv_d = (last_arr - pa) as f64 / 1000.0;
-                        let send_d = last_send.saturating_sub(ps) as f64 / 1000.0;
-                        if let Some(m) = self.trend.update(recv_d, send_d, last_arr as f64 / 1000.0) {
-                            let u = self.over.detect(m, send_d, now_ms as f64);
-                            overused |= u == Usage::Overuse;
+                rtcp::transport_feedbacks::transport_layer_cc::PacketStatusChunk::StatusVectorChunk(v) => statuses.extend(v.symbol_list.iter().copied()),
+            }
+        }
+        statuses.truncate(t.packet_status_count as usize);
+        for s in statuses {
+            let got = matches!(s, SymbolTypeTcc::PacketReceivedSmallDelta | SymbolTypeTcc::PacketReceivedLargeDelta);
+            if got && let Some(rd) = d.next() {
+                arrival_us += rd.delta;
+                if let Some(p) = self.sent.iter().find(|x| x.seq == seq) {
+                    acked_bytes += p.size;
+                    first_arr.get_or_insert(arrival_us);
+                    last_arr = Some(arrival_us);
+                    let send_ms = p.t_us as f64 / 1000.0;
+                    let arr_ms = arrival_us as f64 / 1000.0;
+                    match self.group {
+                        Some((g_send, g_arr)) if (p.t_us / 1000).saturating_sub(g_send) >= 5 => {
+                            let usage = self.trend.update(arr_ms - g_arr, send_ms - g_send as f64, arr_ms);
+                            self.overuse = usage == Usage::Overuse;
+                            self.group = Some((p.t_us / 1000, arr_ms));
                         }
+                        None => self.group = Some((p.t_us / 1000, arr_ms)),
+                        _ => {}
                     }
-                    self.prev_group = Some((last_send, last_arr));
-                    self.group = Some((send_us, send_us, arrival_us));
+                    if p.probe
+                        && let Some(pr) = self.probe.as_mut()
+                    {
+                        pr.acked_bytes += p.size;
+                        pr.first_arrival_us.get_or_insert(arrival_us);
+                        pr.last_arrival_us = Some(arrival_us);
+                    }
                 }
             }
+            seq = seq.wrapping_add(1);
         }
-        while let Some(&(t, _)) = self.acked.front() {
-            if now_ms.saturating_sub(t) > ACKED_WINDOW_MS * 4 {
-                self.acked.pop_front();
+        let span_us = match (first_arr, last_arr) {
+            (Some(a), Some(b)) if b > a => (b - a) as f64,
+            _ => 0.0,
+        };
+        let acked_bps = if span_us > 0.0 { acked_bytes as f64 * 8.0 * 1_000_000.0 / span_us } else { 0.0 };
+        let usage = if self.overuse { Usage::Overuse } else { Usage::Normal };
+        let (rate, _) = self.aimd.update(now, usage, acked_bps);
+        self.est = Some((rate as f64, now));
+        self.last_fb_ms = now;
+    }
+
+    fn signals(&mut self, now: u64, v2: bool, demand: f64) -> Signals {
+        while self.nacks.front().is_some_and(|t| now.saturating_sub(*t) > 1000) {
+            self.nacks.pop_front();
+        }
+        let v2_fresh = v2 && now.saturating_sub(self.last_fb_ms) <= core::V2_STALE_MS;
+        let estimate = if v2_fresh { self.est } else { self.remb };
+        let loss = self.loss.values().copied().max_by(|a, b| a.0.total_cmp(&b.0));
+        Signals { estimate_bps: estimate, overuse: v2_fresh && self.overuse, loss_pct: loss, nack_per_s: self.nacks.len() as f64, drops: 0, demand_bps: demand }
+    }
+}
+
+pub fn mode(sfu: &Sfu) -> MediaAutolayer {
+    sfu.cfg.policy.media.auto_layer
+}
+
+pub fn auto_layer(sfu: &Sfu, e: &crate::fwd::Egress) -> u8 {
+    if mode(sfu) == MediaAutolayer::Off {
+        return crate::sub::MAX_SPATIAL;
+    }
+    let Some(c) = e.conn.upgrade() else { return crate::sub::MAX_SPATIAL };
+    match c.bwe.lock().map(|b| b.policy.layer) {
+        Ok(Layer::High) => 1,
+        _ => 0,
+    }
+}
+
+fn sim_rows(conn: &Conn) -> usize {
+    conn.egress
+        .load()
+        .iter()
+        .filter(|e| e.kind == Kind::Video && e.load.load().as_ref().and_then(|l| l.stream.as_ref()).is_some_and(|s| s.simulcast))
+        .count()
+}
+
+pub fn tick(sfu: &Arc<Sfu>, conn: &Arc<Conn>, now: u64) {
+    let m = mode(sfu);
+    if m == MediaAutolayer::Off {
+        return;
+    }
+    let n = sim_rows(conn);
+    if n == 0 {
+        return;
+    }
+    let demand = n as f64 * LAYER_H_BPS;
+    let Ok(mut b) = conn.bwe.lock() else { return };
+    let sig = b.signals(now, m == MediaAutolayer::V2, demand);
+    let before = b.policy.layer;
+    let d = b.policy.tick(now, &sig);
+    match d {
+        Decision::Stay => {}
+        Decision::Demote(r) => tracing::info!(user = conn.user.as_str(), "[SIM:AUTO] demote reason={r:?} est={:?} loss={:?} nack={}", sig.estimate_bps, sig.loss_pct, sig.nack_per_s),
+        Decision::Promote => tracing::info!(user = conn.user.as_str(), "[SIM:AUTO] promote est={:?}", sig.estimate_bps),
+        Decision::ProbeStart { rate_bps } => {
+            if m == MediaAutolayer::V2 {
+                b.probe = Some(ProbeRun { started: now, rate_bps, acked_bytes: 0, first_arrival_us: None, last_arrival_us: None });
+                tracing::info!(user = conn.user.as_str(), "[SIM:PROBE] start rate_bps={rate_bps:.0}");
             } else {
-                break;
+                b.policy.probing = None;
             }
         }
-        let usage = if overused { Usage::Overuse } else { self.over.usage };
-        let acked = self.acked_bps(now_ms);
-        if usage == Usage::Overuse && self.aimd.last_decrease_ms.map(|t| now_ms.saturating_sub(t) < DECREASE_GAP_MS).unwrap_or(false) {
+    }
+    if before != b.policy.layer {
+        sfu.drops.sim_switch.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+pub fn probe(sfu: &Arc<Sfu>, conn: &Arc<Conn>, now: u64) {
+    let (rate, started, judge) = {
+        let Ok(mut b) = conn.bwe.lock() else { return };
+        let Some(p) = b.probe.as_ref() else { return };
+        let (rate, started) = (p.rate_bps, p.started);
+        if now.saturating_sub(started) >= core::PROBE_JUDGE_MS {
+            let measured = match (p.first_arrival_us, p.last_arrival_us) {
+                (Some(a), Some(z)) if z > a => Some(p.acked_bytes as f64 * 8.0 * 1_000_000.0 / (z - a) as f64),
+                _ => None,
+            };
+            b.probe = None;
+            let demand = sim_rows(conn) as f64 * LAYER_H_BPS;
+            let r = b.policy.probe_result(now, measured, demand);
+            if let Some(m) = r {
+                b.est = Some((m, now));
+            }
+            tracing::info!(user = conn.user.as_str(), "[SIM:PROBE] judge measured={measured:?} promoted_est={r:?}");
             return;
         }
-        self.aimd.update(usage, acked.max(1), now_ms);
+        (rate, started, false)
+    };
+    let _ = judge;
+    if now.saturating_sub(started) >= core::PROBE_DURATION_MS {
+        return;
     }
-
-    pub fn signals(&self, now_ms: u64, v2: bool, tracks: u32) -> Signals {
-        let v2_fresh = v2 && now_ms.saturating_sub(self.last_fb_ms) <= V2_STALE_MS && self.last_fb_ms > 0;
-        let (est, est_at) = if v2_fresh {
-            (Some(self.probe_result_bps.unwrap_or(0).max(self.aimd.rate())), now_ms)
-        } else {
-            match self.remb {
-                Some((b, at)) => (Some(b), at),
-                None => (None, 0),
+    let Some(e) = conn.egress.load().iter().find(|e| e.kind == Kind::Video && e.rtx_ssrc.is_some() && e.load.load().is_some()).cloned() else { return };
+    let bytes = ((rate - LAYER_L_BPS).max(0.0) * core::PROBE_CHUNK_MS as f64 / 1000.0 / 8.0) as usize;
+    let count = bytes / core::PROBE_PAD_BYTES;
+    let ext = crate::sub::table::SubExt::of(Kind::Video, &conn.ext.load());
+    for _ in 0..count.max(1) {
+        let (seq, osn, ts) = match e.rw.lock() {
+            Ok(mut rw) => {
+                rw.rtx_seq = rw.rtx_seq.wrapping_add(1);
+                let last = rw.rewriter.last.map(|l| (l.seq, l.ts)).unwrap_or((0, 0));
+                (rw.rtx_seq, last.0, last.1)
             }
+            Err(_) => return,
         };
-        Signals {
-            estimate_bps: est,
-            estimate_at_ms: est_at,
-            loss: self.loss.map(|l| l.0),
-            loss_at_ms: self.loss.map(|l| l.1).unwrap_or(0),
-            nack_per_s: self.nacks as f64,
-            drops: self.drops,
-            overusing: v2_fresh && self.over.usage == Usage::Overuse,
-            v2_fresh,
-            tracks,
+        let tw = conn.twcc_out.fetch_add(1, Ordering::Relaxed);
+        let t_us = crate::fwd::shell::now_us();
+        let mut ext_buf = Vec::new();
+        if !ext.is_empty() {
+            crate::sub::ext::build(&ext, Some(&e.mid_str), None, t_us, tw, &mut ext_buf);
+        }
+        let mut out = Vec::new();
+        let w = crate::fwd::rtp::Rewrite { pt: e.rtx_pt.load(Ordering::Relaxed), seq, ts, ssrc: e.rtx_ssrc.unwrap_or(0), ext: &ext_buf };
+        crate::fwd::rtp::padding_probe(&w, osn, core::PROBE_PAD_BYTES, &mut out);
+        if conn.link.send_rtp(&out) {
+            if let Ok(mut b) = conn.bwe.lock() {
+                b.on_sent(tw as u16, t_us, out.len(), true);
+            }
+            sfu.drops.probe_sent.fetch_add(1, Ordering::Relaxed);
         }
     }
 }

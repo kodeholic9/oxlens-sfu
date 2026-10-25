@@ -1,429 +1,360 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @36d1dfd · 정:IMPL-FLR-LOCK · 정:IMPL-FLR-RTP-OBSERVE · 정:IMPL-FLR-POLICY · 정:IMPL-FLR-FIRST-NOTICE · 정:RULE-FLR-SNAPSHOT · 연:FLR.wire · 연:RULE-FLR-HEADER · 연:RULE-FLR-TIMERS · 연:ASM-FLR-RTP-INSTANT · 연:ASM-FLR-T20-OVER-RTP · model: claude-opus-5-5
-//! 영역 FLR — 방마다 한 락이 판정 상태 · 참가자 상태 · 큐 · 만료 시각을 지킨다. 판정은 락 안, 송신 · 미디어 결합은 부르는 쪽이 락 밖에서. 타이머는 가장 이른 만료 시각에 깨어난다.
+// spec: v1.3 @d4cc756 · 정:IMPL-FLR-LOCK 정:IMPL-FLR-RTP-OBSERVE 정:IMPL-FLR-POLICY 정:IMPL-FLR-FIRST-NOTICE 정:RULE-FLR-SNAPSHOT 정:RULE-CONC-SIX 정:RULE-GC-FOUR 운영:RULE-READ-ROOM-DETAIL 연:RULE-FLR-TIMERS 연:ASM-FLR-RTP-INSTANT · model: claude-opus-5-5
+//! 방마다 한 락 — 판정은 락 안(생성 판정 로직), 보낼 것 · 효과는 목록으로 돌려 락 밖에서 집행 · 타이머는 만료 시각으로(가장 이른 시각에 깨어난다) · RTP 는 사람마다 500ms 에 한 번(첫 RTP 즉시).
 
 pub mod core;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 
-use oxsig::mbcp::{self, tlv};
-use serde_json::{json, Value};
+use self::core::{Cfg, Fx, G, M, Out, P, R, Srv};
 
-use self::core::{armed_participant, armed_server, Cfg, Fx, Msg, Out, Srv, Step, Tm, Tp, G, T};
+pub const RTP_NOTIFY_MS: u64 = 500;
 
-pub const T1_MS: u64 = 4_000;
-pub const T3_MS: u64 = 3_000;
-pub const T7_MS: u64 = 1_000;
-pub const T8_MS: u64 = 1_000;
-pub const T9_MS: u64 = 3_000;
-pub const T20_MS: u64 = 1_000;
-pub const T21_MS: u64 = 1_000;
-pub const RTP_NOTE_MS: u64 = 500;
-
-type Due = (Option<Tm>, Option<(String, Tp)>);
-
-#[derive(Debug, Clone, Default)]
-pub struct Outcome {
-    pub outs: Vec<Out>,
+pub struct Step {
+    pub out: Vec<Out>,
     pub fx: Vec<Fx>,
     pub labels: Vec<&'static str>,
+    pub cause: &'static str,
+    pub from: G,
+    pub to: G,
+    pub user: Option<String>,
 }
 
-#[derive(Debug, Default)]
+impl Step {
+    pub fn empty(&self) -> bool {
+        self.out.is_empty() && self.fx.is_empty()
+    }
+}
+
+#[derive(Default)]
 struct Inner {
-    srv: Srv,
-    server_due: BTreeMap<Tm, u64>,
-    part_due: BTreeMap<(String, Tp), u64>,
-    t1_start: u64,
-    first_rtp_at: u64,
+    s: Srv,
+    dl: HashMap<(&'static str, Option<String>), u64>,
     granted_at: u64,
-    holder_since: u64,
-    started_at_wall: u64,
-    c7: u32,
-    c20: u32,
-    revoking: Option<String>,
-    marks: BTreeMap<String, (u32, u32, u16, bool)>,
+    rtp_notified: HashMap<String, u64>,
 }
 
 pub struct Floor {
     pub room: String,
-    qmax: usize,
-    t2_ms: u64,
-    inner: Mutex<Inner>,
-    pub last_rtp_ms: AtomicU64,
-    last_note_ms: AtomicU64,
+    qmax: u32,
+    t2_secs: u32,
+    inner: std::sync::Mutex<Inner>,
+    pub first_rtp_at: AtomicU64,
+    pub last_rtp_at: AtomicU64,
     pub wake: tokio::sync::Notify,
 }
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|p| p.into_inner())
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct QRow {
+    pub user_id: String,
+    pub priority: u32,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TimerRow {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    pub at: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct View {
+    pub state: &'static str,
+    pub speaker: Option<String>,
+    pub priority: u32,
+    pub queue: Vec<QRow>,
+    pub first_rtp_at: Option<u64>,
+    pub last_rtp_at: Option<u64>,
+    pub timers: Vec<TimerRow>,
+}
+
+fn opt(v: u64) -> Option<u64> {
+    (v != 0).then_some(v)
 }
 
 impl Floor {
-    pub fn new(room: &str, qmax: u8, t2_secs: u16) -> Floor {
+    pub fn new(room: &str, queue_max: u8, t2_secs: u16) -> Floor {
         Floor {
             room: room.to_string(),
-            qmax: qmax as usize,
-            t2_ms: (t2_secs.max(1) as u64) * 1000,
-            inner: Mutex::new(Inner::default()),
-            last_rtp_ms: AtomicU64::new(0),
-            last_note_ms: AtomicU64::new(0),
+            qmax: u32::from(queue_max),
+            t2_secs: u32::from(t2_secs),
+            inner: std::sync::Mutex::new(Inner::default()),
+            first_rtp_at: AtomicU64::new(0),
+            last_rtp_at: AtomicU64::new(0),
             wake: tokio::sync::Notify::new(),
         }
     }
 
-    fn cfg(&self, i: &Inner, now: u64) -> Cfg {
-        let t2s = (self.t2_ms / 1000) as u32;
-        let remain = if i.first_rtp_at > 0 { (i.first_rtp_at + self.t2_ms).saturating_sub(now).div_ceil(1000) as u32 } else { t2s };
-        Cfg { qmax: self.qmax, t2_secs: t2s, t2_remain_secs: remain }
+    fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
+        self.inner.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    fn run(&self, now: u64, f: impl FnOnce(&mut Step<'_>)) -> Outcome {
-        let mut g = lock(&self.inner);
-        let before_holder = Step::holder(&g.srv);
-        let before_g = g.srv.g;
-        let cfg = self.cfg(&g, now);
-        let r = {
-            let srv: &mut Srv = &mut g.srv;
-            let mut st = Step::new(srv, cfg);
-            f(&mut st);
-            st.r
-        };
-        let after_holder = Step::holder(&g.srv);
-        if g.srv.g != before_g && matches!(g.srv.g, G::Taken | G::Prevoke) && !matches!(before_g, G::Taken | G::Prevoke) {
-            g.t1_start = now;
+    fn cfg(&self, now: u64) -> Cfg {
+        let first = self.first_rtp_at.load(Ordering::Acquire);
+        let used = if first == 0 { 0 } else { now.saturating_sub(first) / 1000 };
+        Cfg { qmax: self.qmax, t2_remain_secs: (u64::from(self.t2_secs)).saturating_sub(used) as u32 }
+    }
+
+    fn t1_base(&self, g: &Inner) -> u64 {
+        g.granted_at.max(self.last_rtp_at.load(Ordering::Acquire))
+    }
+
+    fn apply(&self, g: &mut Inner, r: R, now: u64, cause: &'static str, user: Option<&str>, fired: Option<(&'static str, Option<String>)>) -> Step {
+        let before = g.s.clone();
+        let from = before.g;
+        g.s = r.s;
+        let holder_changed = before.holder() != g.s.holder() || (before.g == G::Idle) != (g.s.g == G::Idle);
+        if holder_changed && g.s.g == G::Taken && before.speaker != g.s.speaker {
+            g.granted_at = now;
+            self.first_rtp_at.store(0, Ordering::Release);
+            self.last_rtp_at.store(0, Ordering::Release);
         }
-        if after_holder != before_holder {
-            g.t1_start = now;
-            g.first_rtp_at = 0;
-            if g.srv.g == G::Taken {
-                g.granted_at = now;
-                g.holder_since = common::time::wall_ms();
+        let mut want: Vec<(&'static str, Option<String>)> = self::core::armed_server(&g.s).into_iter().map(|n| (n, None)).collect();
+        let users: BTreeSet<String> = g.s.part.keys().cloned().collect();
+        for u in &users {
+            for n in self::core::armed_participant(&g.s, u) {
+                want.push((n, Some(u.clone())));
             }
-            self.last_rtp_ms.store(0, Ordering::Release);
-            self.last_note_ms.store(0, Ordering::Release);
         }
-        if g.srv.first_rtp && g.first_rtp_at == 0 {
-            g.first_rtp_at = now;
+        g.dl.retain(|k, _| want.contains(k));
+        for k in want {
+            let restart = fired.as_ref() == Some(&k) || self.counter_reset(&before, &g.s, &k);
+            if restart || !g.dl.contains_key(&k) {
+                let at = match k.0 {
+                    "T1" => self.t1_base(g) + self::core::timer_ms("T1"),
+                    "T2" => {
+                        let f = self.first_rtp_at.load(Ordering::Acquire);
+                        (if f == 0 { now } else { f }) + u64::from(self.t2_secs) * 1000
+                    }
+                    n => now + self::core::timer_ms(n),
+                };
+                g.dl.insert(k, at);
+            }
         }
-        if !g.srv.first_rtp {
-            g.first_rtp_at = 0;
-        }
-        self.rearm(&mut g, now, false);
-        drop(g);
         self.wake.notify_one();
-        Outcome { outs: r.o, fx: r.fx, labels: r.l }
+        Step { out: r.o, fx: r.fx, labels: r.l, cause, from, to: g.s.g, user: user.map(str::to_string) }
     }
 
-    fn rearm(&self, g: &mut Inner, now: u64, _fired: bool) {
-        let armed: Vec<Tm> = armed_server(&g.srv);
-        g.server_due.retain(|k, _| armed.contains(k));
-        let revoking_changed = g.revoking != g.srv.revoking;
-        for t in armed {
-            let restart = match t {
-                Tm::T7 => g.c7 != g.srv.c7 && g.srv.c7 == 1,
-                Tm::T20 => g.c20 != g.srv.c20 && g.srv.c20 == 1,
-                Tm::T3 => revoking_changed,
-                _ => false,
-            };
-            if restart || !g.server_due.contains_key(&t) {
-                let d = match t {
-                    Tm::T1 => T1_MS,
-                    Tm::T2 => self.t2_ms,
-                    Tm::T3 => T3_MS,
-                    Tm::T7 => T7_MS,
-                    Tm::T20 => T20_MS,
-                };
-                g.server_due.insert(t, now + d);
+    fn counter_reset(&self, a: &Srv, b: &Srv, k: &(&'static str, Option<String>)) -> bool {
+        let get = |m: &HashMap<String, u32>, u: &str| -> u32 { m.get(u).copied().unwrap_or(0) };
+        match (k.0, k.1.as_deref()) {
+            ("T21", Some(u)) => get(&b.c21, u) == 1 && (get(&a.c21, u) != 1 || a.tq.get(u) != b.tq.get(u)),
+            ("T8", Some(u)) => get(&b.c8, u) == 1 && get(&a.c8, u) != 1,
+            ("T7", None) => b.c7 == 1 && a.c7 != 1,
+            ("T20", None) => b.c20 == 1 && a.c20 != 1,
+            ("T3", None) => b.g == G::Prevoke && a.g != G::Prevoke,
+            _ => false,
+        }
+    }
+
+    pub fn join(&self, u: &str, is_pub: bool, half: bool, perm: bool) {
+        let mut g = self.lock();
+        let s = &mut g.s;
+        s.members.insert(u.to_string());
+        s.pub_.insert(u.to_string(), is_pub);
+        s.half.insert(u.to_string(), half);
+        s.perm.insert(u.to_string(), perm);
+        s.retry.insert(u.to_string(), false);
+        let p = if s.holder().is_some() { P::NpTaken } else { P::NpIdle };
+        s.part.insert(u.to_string(), p);
+        s.g_taken.insert(u.to_string(), p == P::NpTaken);
+        s.c21.insert(u.to_string(), 0);
+        s.c8.insert(u.to_string(), 0);
+        s.released.insert(u.to_string(), false);
+    }
+
+    pub fn set_half(&self, u: &str, half: bool, perm: bool, now: u64) -> Option<Step> {
+        let mut g = self.lock();
+        g.s.perm.insert(u.to_string(), perm);
+        if !half {
+            return None;
+        }
+        let r = self::core::ws_reg_half(g.s.clone(), u);
+        Some(self.apply(&mut g, r, now, "reg_half", Some(u), None))
+    }
+
+    pub fn rx(&self, u: &str, m: &M, now: u64) -> Step {
+        let c = self.cfg(now);
+        let mut g = self.lock();
+        let r = self::core::server_rx(g.s.clone(), u, m, &c);
+        self.apply(&mut g, r, now, "dc", Some(u), None)
+    }
+
+    pub fn observe_rtp_gated(&self, u: &str, now: u64, pass: bool) -> Option<Step> {
+        let holder = { self.lock().s.holder() };
+        if pass && holder.as_deref() == Some(u) {
+            self.last_rtp_at.store(now, Ordering::Release);
+            let first = self.first_rtp_at.compare_exchange(0, now.max(1), Ordering::AcqRel, Ordering::Acquire).is_ok();
+            let mut g = self.lock();
+            let last = g.rtp_notified.get(u).copied().unwrap_or(0);
+            if !first && now.saturating_sub(last) < RTP_NOTIFY_MS {
+                return None;
             }
+            g.rtp_notified.insert(u.to_string(), now);
+            let c = self.cfg(now);
+            let r = self::core::server_rx(g.s.clone(), u, &M::new(self::core::T::Rtp, None, 0, 0), &c);
+            return Some(self.apply(&mut g, r, now, "rtp", Some(u), None));
         }
-        g.c7 = g.srv.c7;
-        g.c20 = g.srv.c20;
-        g.revoking = g.srv.revoking.clone();
-        let users: Vec<String> = g.srv.u.keys().cloned().collect();
-        let mut keep: Vec<(String, Tp)> = Vec::new();
-        for u in users {
-            let p = g.srv.u.get(&u).cloned().unwrap_or_default();
-            let mark = (p.c8, p.c21, p.tq, p.retry);
-            let prev = g.marks.get(&u).copied();
-            for t in armed_participant(&g.srv, &u) {
-                keep.push((u.clone(), t));
-                let restart = match (t, prev) {
-                    (Tp::T8, Some(m)) => m.0 != p.c8 && p.c8 == 1,
-                    (Tp::T21, Some(m)) => (m.1 != p.c21 && p.c21 == 1) || m.2 != p.tq,
-                    (Tp::T9, Some(m)) => !m.3,
-                    _ => false,
-                };
-                let key = (u.clone(), t);
-                if restart || !g.part_due.contains_key(&key) {
-                    let d = match t {
-                        Tp::T8 => T8_MS,
-                        Tp::T9 => T9_MS,
-                        Tp::T21 => T21_MS,
-                    };
-                    g.part_due.insert(key, now + d);
-                }
-            }
-            g.marks.insert(u, mark);
+        let mut g = self.lock();
+        let last = g.rtp_notified.get(u).copied().unwrap_or(0);
+        if now.saturating_sub(last) < RTP_NOTIFY_MS {
+            return None;
         }
-        g.part_due.retain(|k, _| keep.contains(k));
+        g.rtp_notified.insert(u.to_string(), now);
+        let c = self.cfg(now);
+        let r = self::core::server_rx(g.s.clone(), u, &M::new(self::core::T::Rtp, None, 0, 0), &c);
+        Some(self.apply(&mut g, r, now, "rtp", Some(u), None))
     }
 
-    fn t1_due(&self, g: &Inner) -> Option<u64> {
-        g.server_due.get(&Tm::T1)?;
-        let base = g.t1_start.max(self.last_rtp_ms.load(Ordering::Acquire));
-        Some(base + T1_MS)
+    pub fn release(&self, u: &str, now: u64) -> Step {
+        let c = self.cfg(now);
+        let mut g = self.lock();
+        let r = self::core::away(g.s.clone(), u, &c);
+        self.apply(&mut g, r, now, "release", Some(u), None)
     }
 
-    pub fn next_due(&self) -> Option<u64> {
-        let g = lock(&self.inner);
-        let mut best: Option<u64> = None;
-        for (k, v) in &g.server_due {
-            let d = if *k == Tm::T1 { self.t1_due(&g).unwrap_or(*v) } else if *k == Tm::T2 { g.first_rtp_at + self.t2_ms } else { *v };
-            best = Some(best.map(|b| b.min(d)).unwrap_or(d));
-        }
-        for v in g.part_due.values() {
-            best = Some(best.map(|b| b.min(*v)).unwrap_or(*v));
-        }
-        best
+    pub fn ready(&self, u: &str, now: u64) -> Step {
+        let mut g = self.lock();
+        let r = self::core::ready(g.s.clone(), u);
+        self.apply(&mut g, r, now, "ready", Some(u), None)
     }
 
-    pub fn fire(&self, now: u64) -> Vec<Outcome> {
-        let mut out = Vec::new();
+    pub fn perm(&self, u: &str, ok: bool, now: u64) -> Step {
+        let c = self.cfg(now);
+        let mut g = self.lock();
+        let r = if ok { self::core::perm_up(g.s.clone(), u) } else { self::core::perm_down(g.s.clone(), u, &c) };
+        self.apply(&mut g, r, now, "perm", Some(u), None)
+    }
+
+    pub fn pub_select(&self, u: &str, now: u64) -> Step {
+        let mut g = self.lock();
+        let r = self::core::ws_pub_select(g.s.clone(), u);
+        self.apply(&mut g, r, now, "pub_select", Some(u), None)
+    }
+
+    pub fn pub_away(&self, u: &str, now: u64) -> Step {
+        let c = self.cfg(now);
+        let mut g = self.lock();
+        let r = self::core::ws_pub_away(g.s.clone(), u, &c);
+        self.apply(&mut g, r, now, "pub_away", Some(u), None)
+    }
+
+    pub fn leave(&self, u: &str, now: u64) -> Step {
+        let c = self.cfg(now);
+        let mut g = self.lock();
+        let r = self::core::ws_leave(g.s.clone(), u, &c);
+        g.rtp_notified.remove(u);
+        self.apply(&mut g, r, now, "leave", Some(u), None)
+    }
+
+    pub fn next_deadline(&self) -> Option<u64> {
+        self.lock().dl.values().min().copied()
+    }
+
+    pub fn due(&self, now: u64) -> Vec<Step> {
+        let mut steps = Vec::new();
         for _ in 0..64 {
-            let due: Option<Due> = {
-                let g = lock(&self.inner);
-                let mut pick = None;
-                for (k, v) in &g.server_due {
-                    let d = if *k == Tm::T1 { self.t1_due(&g).unwrap_or(*v) } else if *k == Tm::T2 { g.first_rtp_at + self.t2_ms } else { *v };
-                    if d <= now {
-                        pick = Some((Some(*k), None));
-                        break;
-                    }
+            let mut g = self.lock();
+            let Some((k, at)) = g.dl.iter().min_by_key(|(_, v)| **v).map(|(k, v)| (k.clone(), *v)) else { break };
+            if at > now {
+                break;
+            }
+            if k.0 == "T1" {
+                let real = self.t1_base(&g) + self::core::timer_ms("T1");
+                if real > now {
+                    g.dl.insert(k, real);
+                    continue;
                 }
-                if pick.is_none() {
-                    for (k, v) in &g.part_due {
-                        if *v <= now {
-                            pick = Some((None, Some(k.clone())));
-                            break;
-                        }
-                    }
-                }
-                pick
+            }
+            g.dl.remove(&k);
+            let c = self.cfg(now);
+            let s = g.s.clone();
+            let r = match (k.0, k.1.as_deref()) {
+                ("T1", None) => self::core::srv_t1(s, &c),
+                ("T2", None) => self::core::srv_t2(s, &c),
+                ("T3", None) => self::core::srv_t3(s, &c),
+                ("T7", None) => self::core::srv_t7(s, &c),
+                ("T20", None) => self::core::srv_t20(s, &c),
+                ("T8", Some(u)) => self::core::srv_t8(s, u),
+                ("T21", Some(u)) => self::core::srv_t21(s, u),
+                ("T9", Some(u)) => self::core::srv_t9(s, u),
+                _ => continue,
             };
-            let Some(due) = due else { break };
-            let o = match due {
-                (Some(t), _) => {
-                    {
-                        let mut g = lock(&self.inner);
-                        g.server_due.remove(&t);
-                    }
-                    self.run(now, |st| match t {
-                        Tm::T1 => st.t1(),
-                        Tm::T2 => st.t2(),
-                        Tm::T3 => st.t3(),
-                        Tm::T7 => st.t7(),
-                        Tm::T20 => st.t20(),
-                    })
-                }
-                (None, Some((u, t))) => {
-                    {
-                        let mut g = lock(&self.inner);
-                        g.part_due.remove(&(u.clone(), t));
-                    }
-                    self.run(now, |st| match t {
-                        Tp::T8 => st.t8(&u),
-                        Tp::T9 => st.t9(&u),
-                        Tp::T21 => st.t21(&u),
-                    })
-                }
-                _ => break,
-            };
-            out.push(o);
+            let user = k.1.clone();
+            steps.push(self.apply(&mut g, r, now, k.0, user.as_deref(), Some(k)));
         }
-        out
-    }
-
-    pub fn rx(&self, u: &str, m: Msg, now: u64) -> Outcome {
-        self.run(now, |st| st.server_rx(u, m))
-    }
-
-    pub fn ready(&self, u: &str, now: u64) -> Outcome {
-        self.run(now, |st| st.ready(u))
-    }
-
-    pub fn join(&self, u: &str, perm: bool, half: bool, is_pub: bool, now: u64) -> Outcome {
-        self.run(now, |st| st.join(u, perm, half, is_pub))
-    }
-
-    pub fn leave(&self, u: &str, now: u64) -> Outcome {
-        self.run(now, |st| st.ws_leave(u))
-    }
-
-    pub fn release_for(&self, u: &str, now: u64) -> Outcome {
-        self.run(now, |st| st.release(u))
-    }
-
-    pub fn pub_select(&self, u: &str, now: u64) -> Outcome {
-        self.run(now, |st| st.ws_pub_select(u))
-    }
-
-    pub fn pub_away(&self, u: &str, now: u64) -> Outcome {
-        self.run(now, |st| st.ws_pub_away(u))
-    }
-
-    pub fn reg_half(&self, u: &str, on: bool, now: u64) -> Outcome {
-        self.run(now, |st| if on { st.ws_reg_half(u) } else { st.ws_unreg_half(u) })
-    }
-
-    pub fn perm(&self, u: &str, on: bool, now: u64) -> Outcome {
-        self.run(now, |st| if on { st.perm_up(u) } else { st.perm_down(u) })
+        steps
     }
 
     pub fn holder(&self) -> Option<String> {
-        Step::holder(&lock(&self.inner).srv)
+        self.lock().s.holder()
     }
 
-    pub fn granted_at(&self) -> u64 {
-        lock(&self.inner).granted_at
+    pub fn state(&self) -> G {
+        self.lock().s.g
     }
 
-    pub fn speaker_is(&self, u: &str) -> bool {
-        self.holder().as_deref() == Some(u)
+    pub fn part_of(&self, u: &str) -> P {
+        self.lock().s.part(u)
     }
 
-    pub fn on_rtp(&self, u: &str, now: u64) -> Option<Outcome> {
-        self.last_rtp_ms.store(now, Ordering::Release);
-        let last = self.last_note_ms.load(Ordering::Acquire);
-        if last != 0 && now.saturating_sub(last) < RTP_NOTE_MS {
-            return None;
+    pub fn in_queue(&self, u: &str) -> bool {
+        self.lock().s.queue.iter().any(|w| w.u == u)
+    }
+
+    pub fn view(&self) -> View {
+        let g = self.lock();
+        let s = &g.s;
+        let mut timers: Vec<TimerRow> = g.dl.iter().map(|((n, u), at)| TimerRow { name: (*n).to_string(), user_id: u.clone(), at: *at }).collect();
+        timers.sort_by(|a, b| a.at.cmp(&b.at).then(a.name.cmp(&b.name)));
+        View {
+            state: s.g.name(),
+            speaker: s.holder(),
+            priority: if s.g == G::Taken { s.sprio } else { s.rprio },
+            queue: s.queue.iter().map(|w| QRow { user_id: w.u.clone(), priority: w.p }).collect(),
+            first_rtp_at: opt(self.first_rtp_at.load(Ordering::Acquire)),
+            last_rtp_at: opt(self.last_rtp_at.load(Ordering::Acquire)),
+            timers,
         }
-        self.last_note_ms.store(now.max(1), Ordering::Release);
-        Some(self.run(now, |st| st.server_rx(u, Msg::new(T::Rtp, None, 0, 0))))
-    }
-
-    pub fn snapshot(&self) -> Value {
-        let g = lock(&self.inner);
-        let speaker = Step::holder(&g.srv);
-        json!({
-            "speaker": speaker,
-            "queue": g.srv.queue.iter().map(|w| json!({"user_id": w.u, "priority": w.p})).collect::<Vec<_>>(),
-            "started_at": if speaker.is_some() { Some(g.holder_since) } else { None },
-            "state": format!("{:?}", g.srv.g),
-        })
-    }
-
-    pub fn started_wall(&self) -> u64 {
-        lock(&self.inner).started_at_wall
-    }
-}
-
-pub fn decode(b: &[u8]) -> Option<(String, Msg, bool)> {
-    let m = mbcp::decode(b)?;
-    let room = m.room()?;
-    let t = match m.msg_type {
-        mbcp::REQUEST => T::Request,
-        mbcp::RELEASE => T::Release,
-        mbcp::QPOS_REQ => T::QposReq,
-        mbcp::ACK => T::Ack,
-        _ => return None,
-    };
-    let n = match t {
-        T::Request => m.get_u8spare(tlv::PRIORITY).or_else(|| m.get_u8(tlv::PRIORITY)).unwrap_or(0) as u32,
-        T::Ack => m.get_u8spare(tlv::ACKTYPE).or_else(|| m.get_u8(tlv::ACKTYPE)).unwrap_or(0) as u32,
-        _ => 0,
-    };
-    let q = m.get_u16(tlv::SEQ).unwrap_or(0);
-    Some((room, Msg { t, a: None, n, d: 0, q }, m.ack))
-}
-
-pub fn encode(room: &str, m: &Msg) -> Option<Vec<u8>> {
-    let out = match m.t {
-        T::Granted => mbcp::Msg::new(mbcp::GRANTED).with_ack(true).put_u8spare(tlv::PRIORITY, m.n as u8).put_u16(tlv::DURATION, m.d as u16).put_u16(tlv::SEQ, m.q),
-        T::Taken => mbcp::Msg::new(mbcp::TAKEN).with_ack(true).put_str(tlv::SPEAKER, m.a.as_deref().unwrap_or("")).put_u16(tlv::SEQ, m.q),
-        T::Deny => {
-            let x = mbcp::Msg::new(mbcp::DENY).with_ack(true).put_u8(tlv::CAUSE, m.n as u8);
-            match m.a.as_deref() {
-                Some(r) => x.put_str(tlv::REASON, r),
-                None => x,
-            }
-        }
-        T::Idle => {
-            let mut x = mbcp::Msg::new(mbcp::IDLE);
-            if let Some(p) = m.a.as_deref() {
-                x = x.put_str(tlv::PREV, p);
-            }
-            x.put_u16(tlv::SEQ, m.q)
-        }
-        T::Revoke => mbcp::Msg::new(mbcp::REVOKE).put_u8(tlv::CAUSE, m.n as u8),
-        T::Qinfo => mbcp::Msg::new(mbcp::QINFO).put_pair(tlv::QINFO, m.n.min(255) as u8, m.d.min(255) as u8),
-        _ => return None,
-    };
-    let body = mbcp::encode(&out.put_str(tlv::ROOM, room))?;
-    oxsig::dc::DcFrame::encode(oxsig::dc::SVC_FLOOR, &body)
-}
-
-pub fn ack_for(room: &str, of: u8, seq: Option<u16>) -> Option<Vec<u8>> {
-    let mut x = mbcp::Msg::new(mbcp::ACK).put_u8spare(tlv::ACKTYPE, of);
-    if let Some(s) = seq {
-        x = x.put_u16(tlv::SEQ, s);
-    }
-    let body = mbcp::encode(&x.put_str(tlv::ROOM, room))?;
-    oxsig::dc::DcFrame::encode(oxsig::dc::SVC_FLOOR, &body)
-}
-
-pub fn name(t: T) -> &'static str {
-    match t {
-        T::Request => "CP-MSG-FLOOR-REQUEST",
-        T::Granted => "CP-MSG-FLOOR-GRANTED",
-        T::Taken => "CP-MSG-FLOOR-TAKEN",
-        T::Deny => "CP-MSG-FLOOR-DENY",
-        T::Release => "CP-MSG-FLOOR-RELEASE",
-        T::Idle => "CP-MSG-FLOOR-IDLE",
-        T::Revoke => "CP-MSG-FLOOR-REVOKE",
-        T::QposReq => "CP-MSG-FLOOR-QUEUE-POS-REQUEST",
-        T::Qinfo => "CP-MSG-FLOOR-QUEUE-INFO",
-        T::Ack => "CP-MSG-FLOOR-ACK",
-        T::Rtp => "IMPL-FLR-RTP-OBSERVE",
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::flr::core::T;
 
     #[test]
-    fn timers_run_on_deadlines_not_ticks() {
+    fn deadlines_follow_ledger() {
         let f = Floor::new("r", 10, 30);
-        f.join("a", true, true, true, 0);
-        f.join("b", true, true, true, 0);
-        let o = f.rx("a", Msg::new(T::Request, None, 0, 0), 1000);
-        assert!(o.labels.contains(&"FLR.S.G.IDLE.req_grant"));
-        let taken_q = o.outs.iter().find(|x| x.to == "b").map(|x| x.m.q).expect("taken");
-        let ack = f.rx("b", Msg { t: T::Ack, a: None, n: 2, d: 0, q: taken_q }, 1000);
-        assert!(ack.labels.contains(&"FLR.S.P.NP_TAKEN.rx_ACK_taken"));
-        assert_eq!(f.next_due(), Some(1000 + T1_MS), "S-sym-IMPL-FLR-RTP-OBSERVE-1 T1 은 허가부터 — RTP 가 오면 밀린다");
-        assert!(f.on_rtp("a", 2000).is_some());
-        assert!(f.on_rtp("a", 2100).is_none(), "S-sym-IMPL-FLR-RTP-OBSERVE-2 RTP 사건은 500ms 에 한 번");
-        assert_eq!(f.next_due(), Some((2100 + T1_MS).min(2000 + 30_000)));
-        let fired = f.fire(2100 + T1_MS);
-        assert!(fired.iter().any(|o| o.labels.contains(&"FLR.S.G.TAKEN.T1")), "S-sym-IMPL-FLR-RTP-OBSERVE-3 T1 은 마지막 RTP 부터");
-        assert!(f.holder().is_none());
+        f.join("a", true, true, true);
+        f.join("b", true, true, true);
+        let st = f.rx("a", &M::new(T::Request, None, 0, 0), 1000);
+        assert_eq!(st.to, G::Taken);
+        let v = f.view();
+        let t1 = v.timers.iter().find(|t| t.name == "T1").map(|t| t.at);
+        assert_eq!(t1, Some(5000), "T1 = 허가 뒤 4000ms");
+        let t21 = v.timers.iter().find(|t| t.name == "T21").map(|t| t.at);
+        assert_eq!(t21, Some(2000), "T21 = 1000ms");
+        assert!(f.observe_rtp_gated("a", 1500, true).is_some(), "첫 RTP 는 즉시");
+        assert!(f.observe_rtp_gated("a", 1600, true).is_none(), "500ms 에 한 번");
+        let steps = f.due(5000);
+        assert!(steps.iter().all(|s| s.to == G::Taken), "RTP 가 T1 을 밀었다");
+        let steps = f.due(5600);
+        assert!(steps.iter().any(|s| s.labels.contains(&"FLR.S.G.TAKEN.T1")));
+        assert_eq!(f.state(), G::Idle);
     }
 
     #[test]
-    fn wire_round_trip() {
-        let enc = encode("r1", &Msg { t: T::Taken, a: Some("u1".into()), n: 0, d: 0, q: 7 }).expect("enc");
-        let frame = oxsig::dc::DcFrame::decode(&enc).expect("frame");
-        let m = mbcp::decode(&frame.payload).expect("mbcp");
-        assert_eq!(m.msg_type, mbcp::TAKEN);
-        assert!(m.ack);
-        assert_eq!(m.get_u16(tlv::SEQ), Some(7));
-        let req = mbcp::encode(&mbcp::Msg::new(mbcp::REQUEST).put_u8spare(tlv::PRIORITY, 3).put_str(tlv::ROOM, "r1")).expect("req");
-        let (room, msg, _) = decode(&req).expect("dec");
-        assert_eq!(room, "r1");
-        assert_eq!(msg.n, 3);
+    fn t2_from_first_rtp() {
+        let f = Floor::new("r", 10, 30);
+        f.join("a", true, true, true);
+        f.join("b", true, true, true);
+        f.rx("a", &M::new(T::Request, None, 0, 0), 0);
+        f.observe_rtp_gated("a", 2_000, true);
+        let v = f.view();
+        assert_eq!(v.timers.iter().find(|t| t.name == "T2").map(|t| t.at), Some(32_000), "T2 는 첫 RTP 부터");
     }
 }

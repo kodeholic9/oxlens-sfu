@@ -1,115 +1,178 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @36d1dfd · 정:RULE-CFG-THREE-PLACES · 정:RULE-CFG-INDEX · 정:CAND-BUS-NO-ZENOH-BOOT · 운영 규격서 §8-1 · 운영 규격서 §8-2 · model: claude-opus-5-5
-//! 기동 값 — 인자 > 정책 파일 > 코드 기본값. 포트에 기본값이 없다(없으면 기동 실패) · `--public-ip auto` 는 기본 경로의 출발 주소 · 해석된 최종값을 배너 한 줄로.
+// spec: v1.3 @d4cc756 · 정:RULE-CFG-THREE-PLACES 정:IMPL-CFG-SYSTEM-FILE 정:CAND-CFG-SFUD-DEFAULT-PORTS 정:RULE-BUS-SHAPE 정:CAND-BUS-NO-ZENOH-BOOT 정:RULE-LINK-TRANSPORT 운영:RULE-BOOT-ARGS · model: claude-opus-5-5
+//! sfud 기동 인자 · 정책 파일 — 포트는 기본값이 없다 · 버스 좌표가 없으면 기동 실패 · public-ip `auto` 는 기본 인터페이스 주소.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
-use std::path::PathBuf;
+use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 
-use common::args::Args;
 use common::policy::Policy;
 
-pub const VALUED: &[&str] = &["grpc-listen", "udp-port", "tcp-port", "policy", "public-ip", "id", "build", "zenoh-namespace", "zenoh-connect", "log-dir", "log-socket"];
-pub const SWITCHES: &[&str] = &["version"];
+#[derive(Debug, Clone, Default)]
+pub struct Args {
+    pub policy: Option<String>,
+    pub id: Option<String>,
+    pub build: Option<String>,
+    pub grpc_listen: Option<String>,
+    pub udp_port: Option<u16>,
+    pub tcp_port: Option<u16>,
+    pub public_ip: Option<String>,
+    pub zenoh_namespace: Option<String>,
+    pub zenoh_connect: Option<String>,
+    pub log_dir: Option<String>,
+    pub log_socket: Option<String>,
+}
+
+pub enum Parsed {
+    Version(Option<String>),
+    Run(Args),
+}
+
+pub fn parse_args(argv: &[String]) -> Result<Parsed, String> {
+    let mut a = Args::default();
+    let mut version = false;
+    let mut i = 0;
+    while i < argv.len() {
+        let k = argv[i].as_str();
+        let mut v = || -> Result<String, String> {
+            i += 1;
+            argv.get(i).cloned().ok_or_else(|| format!("{k} 값이 없다"))
+        };
+        match k {
+            "--version" => version = true,
+            "--policy" => a.policy = Some(v()?),
+            "--id" => a.id = Some(v()?),
+            "--build" => a.build = Some(v()?),
+            "--grpc-listen" => a.grpc_listen = Some(v()?),
+            "--udp-port" => a.udp_port = Some(v()?.parse().map_err(|_| "--udp-port 가 수가 아니다".to_string())?),
+            "--tcp-port" => a.tcp_port = Some(v()?.parse().map_err(|_| "--tcp-port 가 수가 아니다".to_string())?),
+            "--public-ip" => a.public_ip = Some(v()?),
+            "--zenoh-namespace" => a.zenoh_namespace = Some(v()?),
+            "--zenoh-connect" => a.zenoh_connect = Some(v()?),
+            "--log-dir" => a.log_dir = Some(v()?),
+            "--log-socket" => a.log_socket = Some(v()?),
+            other => return Err(format!("모르는 인자 {other}")),
+        }
+        i += 1;
+    }
+    if version {
+        return Ok(Parsed::Version(a.build));
+    }
+    Ok(Parsed::Run(a))
+}
 
 #[derive(Debug, Clone)]
-pub struct Boot {
-    pub args: Args,
+pub struct Config {
     pub policy: Policy,
     pub node_id: String,
-    pub grpc_listen: SocketAddr,
+    pub build: String,
+    pub grpc_listen: String,
     pub udp_port: u16,
     pub tcp_port: Option<u16>,
     pub public_ip: IpAddr,
     pub bind_ip: IpAddr,
-    pub namespace: String,
+    pub zenoh_namespace: String,
     pub zenoh_connect: String,
-    pub log_dir: Option<PathBuf>,
-    pub log_socket: Option<PathBuf>,
-    pub build: String,
+    pub log_dir: Option<String>,
+    pub log_socket: Option<String>,
+    pub node_grace_secs: u64,
 }
 
-fn local_ip() -> IpAddr {
-    UdpSocket::bind("0.0.0.0:0")
-        .and_then(|s| {
-            s.connect("192.0.2.1:9")?;
-            s.local_addr()
-        })
-        .map(|a| a.ip())
-        .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
+pub const NODE_GRACE_SECS: u64 = 30;
+
+fn default_iface() -> IpAddr {
+    let probe = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).and_then(|s| {
+        s.connect((Ipv4Addr::new(192, 0, 2, 1), 9))?;
+        s.local_addr()
+    });
+    match probe {
+        Ok(a) if !a.ip().is_unspecified() => a.ip(),
+        _ => IpAddr::V4(Ipv4Addr::LOCALHOST),
+    }
 }
 
 fn is_local(ip: IpAddr) -> bool {
-    UdpSocket::bind(SocketAddr::new(ip, 0)).is_ok()
+    UdpSocket::bind((ip, 0)).is_ok()
 }
 
-impl Boot {
-    pub fn from_args(argv: &[String]) -> Result<Boot, String> {
-        let args = Args::parse(argv, VALUED, SWITCHES)?;
-        let build = common::identity::build(args.get("build"));
-        if args.has("version") {
-            return Err(format!("version:{build}"));
-        }
-        let policy = match args.get("policy") {
-            Some(p) => Policy::load(&PathBuf::from(p)).map_err(|e| e.to_string())?,
-            None => Policy::default(),
-        };
-        let node_id = args.require("id")?.to_string();
-        if !common::bus::keys::chunk_ok(&node_id) {
-            return Err(format!("node_id {node_id:?} 는 키 조각이 될 수 없다"));
-        }
-        let grpc_listen: SocketAddr = args.require("grpc-listen")?.parse().map_err(|e| format!("--grpc-listen: {e}"))?;
-        let udp_port: u16 = args.require("udp-port")?.parse().map_err(|e| format!("--udp-port: {e}"))?;
-        let tcp_port: Option<u16> = match args.get("tcp-port") {
-            Some(v) => Some(v.parse().map_err(|e| format!("--tcp-port: {e}"))?),
-            None => None,
-        };
-        let public_ip = match args.get("public-ip") {
-            None | Some("auto") => local_ip(),
-            Some(v) => v.parse().map_err(|e| format!("--public-ip: {e}"))?,
-        };
-        let bind_ip = if is_local(public_ip) { public_ip } else { IpAddr::V4(Ipv4Addr::UNSPECIFIED) };
-        let zenoh_connect = args.require("zenoh-connect")?.to_string();
-        let namespace = args.get("zenoh-namespace").unwrap_or("oxlens").to_string();
-        Ok(Boot {
-            policy,
-            node_id,
-            grpc_listen,
-            udp_port,
-            tcp_port,
-            public_ip,
-            bind_ip,
-            namespace,
-            zenoh_connect,
-            log_dir: args.get("log-dir").map(PathBuf::from),
-            log_socket: args.get("log-socket").map(PathBuf::from),
-            build,
-            args,
-        })
-    }
+pub fn load(a: &Args) -> Result<Config, String> {
+    let policy = match &a.policy {
+        Some(p) => Policy::parse(&std::fs::read_to_string(p).map_err(|e| format!("{p}: {e}"))?).map_err(|e| e.to_string())?,
+        None => Policy::default(),
+    };
+    let grpc_listen = a.grpc_listen.clone().ok_or("--grpc-listen 이 없다(기본값 없음)")?;
+    let udp_port = a.udp_port.ok_or("--udp-port 가 없다(기본값 없음)")?;
+    let zenoh_connect = a.zenoh_connect.clone().ok_or("--zenoh-connect 가 없다 — 버스 없이는 기동하지 않는다")?;
+    let public_ip = match a.public_ip.as_deref() {
+        None => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        Some("auto") => default_iface(),
+        Some(s) => s.parse::<IpAddr>().map_err(|_| format!("--public-ip {s} 형식"))?,
+    };
+    let bind_ip = if is_local(public_ip) { public_ip } else { IpAddr::V4(Ipv4Addr::UNSPECIFIED) };
+    Ok(Config {
+        build: common::build_id(a.build.as_deref()),
+        node_id: a.id.clone().unwrap_or_else(|| "local".into()),
+        grpc_listen,
+        udp_port,
+        tcp_port: a.tcp_port,
+        public_ip,
+        bind_ip,
+        zenoh_namespace: a.zenoh_namespace.clone().unwrap_or_else(|| "ox".into()),
+        zenoh_connect,
+        log_dir: a.log_dir.clone(),
+        log_socket: a.log_socket.clone(),
+        node_grace_secs: NODE_GRACE_SECS,
+        policy,
+    })
+}
 
+impl Config {
     pub fn banner(&self, epoch: &str) -> String {
         let p = &self.policy;
         format!(
-            "node={} epoch={} grpc={} udp={}:{} tcp={} advertise={} zenoh.connect={} zenoh.namespace={} media.auto_layer={:?} media.bwe_mode={:?} media.max_bitrate_bps={} media.slot_mid_reserve={} floor.queue_max={} floor.t2_stop_talking_secs={} hub.room_unused_ttl_secs={} hub.room_departure_ttl_secs={} logging.level={} args=[{}]",
+            "sfud boot node={} epoch={epoch} grpc={} udp={} tcp={} public_ip={} bind_ip={} zenoh.connect={} zenoh.ns={} log_dir={} log_socket={} node_grace_s={} bwe_mode={:?} auto_layer={:?} slot_mid_reserve={} max_bitrate_bps={} floor.queue_max={} floor.t2_s={} stat_interval_ms={}",
             self.node_id,
-            epoch,
             self.grpc_listen,
-            self.bind_ip,
             self.udp_port,
             self.tcp_port.map(|p| p.to_string()).unwrap_or_else(|| "-".into()),
             self.public_ip,
+            self.bind_ip,
             self.zenoh_connect,
-            self.namespace,
-            p.media.auto_layer,
+            self.zenoh_namespace,
+            self.log_dir.as_deref().unwrap_or("-"),
+            self.log_socket.as_deref().unwrap_or("-"),
+            self.node_grace_secs,
             p.media.bwe_mode,
-            p.media.max_bitrate_bps,
+            p.media.auto_layer,
             p.media.slot_mid_reserve,
+            p.media.max_bitrate_bps,
             p.floor.queue_max,
             p.floor.t2_stop_talking_secs,
-            p.hub.room_unused_ttl_secs,
-            p.hub.room_departure_ttl_secs,
-            p.logging.level.as_str(),
-            self.args.banner(),
+            p.logging.stat_interval_ms
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn argv(s: &[&str]) -> Vec<String> {
+        s.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn ports_have_no_default() {
+        let Ok(Parsed::Run(a)) = parse_args(&argv(&["--zenoh-connect", "tcp/127.0.0.1:7447"])) else { panic!("parse") };
+        assert!(load(&a).is_err(), "정:CAND-CFG-SFUD-DEFAULT-PORTS");
+    }
+
+    #[test]
+    fn bus_is_required() {
+        let Ok(Parsed::Run(a)) = parse_args(&argv(&["--grpc-listen", "127.0.0.1:1", "--udp-port", "1"])) else { panic!("parse") };
+        assert!(load(&a).is_err(), "정:CAND-BUS-NO-ZENOH-BOOT");
+    }
+
+    #[test]
+    fn unknown_arg_fails() {
+        assert!(parse_args(&argv(&["--nope"])).is_err());
     }
 }

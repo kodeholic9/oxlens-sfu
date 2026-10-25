@@ -1,125 +1,183 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @36d1dfd · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · 정:RULE-BUS-PRESENCE · 정:RULE-BUS-EVENTS · 정:RULE-BUS-FATE · 정:IMPL-BUS-FAULTS · 정:IMPL-BUS-HOME-LOST · 정:CAND-BUS-NOTICE-ENVELOPE · 정:CAND-BUS-NO-ZENOH-BOOT · model: claude-opus-5-5
-//! 영역 BUS(미디어 서버 쪽) — zenoh client(로컬 hub 하나) · `room` 토큰 선언 · 통지 put(혼잡 Drop · 한 줄로 차례 보존) · node 토큰 구독(홈 판정).
+// spec: v1.3 @d4cc756 · 정:RULE-BUS-SHAPE 정:RULE-BUS-KEYSPACE 정:RULE-BUS-PRESENCE 정:RULE-BUS-EVENTS 정:IMPL-BUS-HOME-LOST 정:IMPL-BUS-FAULTS 정:CAND-BUS-NOTICE-ENVELOPE 정:CAND-BUS-HOME-INST 정:CAND-BUS-NO-ZENOH-BOOT 정:RULE-CONC-SIX · model: claude-opus-5-5
+//! sfud 쪽 버스 — zenoh client · `room` 토큰 선언(주체 = sfud · inst = epoch) · `ev` put(Drop · 한 줄 차례) · `node` 토큰 `history` 구독으로 홈 생존 · 고립 판정.
 
-pub mod core;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-
-use common::bus::envelope::Notice;
-use common::bus::keys::Keys;
-use tokio::sync::mpsc;
+use common::bus::{Keys, ZenohOpts};
+use oxsig::envelope::Notice;
+use tokio::sync::{Mutex, mpsc};
 use zenoh::liveliness::LivelinessToken;
 use zenoh::qos::CongestionControl;
 use zenoh::sample::SampleKind;
 
-use self::core::{Nodes, Verdict};
-
 pub const PUT_QUEUE: usize = 65_536;
 
+fn err_s(e: impl std::fmt::Display) -> String {
+    e.to_string()
+}
+
+#[derive(Default)]
+struct View {
+    alive: HashMap<String, BTreeSet<String>>,
+    missing_since: HashMap<(String, String), Instant>,
+    others_seen: bool,
+    isolated: bool,
+    nodes_ever: BTreeSet<String>,
+}
+
 pub struct Bus {
+    z: zenoh::Session,
     pub keys: Keys,
     pub node: String,
-    pub inst: String,
-    session: zenoh::Session,
-    rooms: tokio::sync::Mutex<HashMap<String, LivelinessToken>>,
-    puts: mpsc::Sender<(String, Vec<u8>)>,
-    pub nodes: Mutex<Nodes>,
-    pub dropped: std::sync::atomic::AtomicU64,
+    pub epoch: String,
+    pub connect: String,
+    tx: mpsc::Sender<(String, Vec<u8>)>,
+    room_tokens: Mutex<HashMap<String, LivelinessToken>>,
+    view: std::sync::Mutex<View>,
+    pub put_drop: AtomicU64,
+    pub put_sent: AtomicU64,
+}
+
+pub enum HomeState {
+    Alive,
+    Missing,
+    Lost,
+    Deferred,
 }
 
 impl Bus {
-    pub async fn open(connect: &str, namespace: &str, node: &str, inst: &str) -> Result<Arc<Bus>, String> {
-        let cfg = common::bus::session::client_config(connect).map_err(|e| e.to_string())?;
-        let session = common::bus::session::open(cfg).await.map_err(|e| e.to_string())?;
+    pub async fn open(connect: &str, ns: &str, node: &str, epoch: &str) -> Result<Arc<Bus>, String> {
+        let conn = vec![connect.to_string()];
+        let zc = common::bus::zenoh_config(&ZenohOpts { mode: "client", listen: &[], connect: &conn, multicast_scouting: false, base_config: None })?;
+        let z = zenoh::open(zc).await.map_err(err_s)?;
         let (tx, mut rx) = mpsc::channel::<(String, Vec<u8>)>(PUT_QUEUE);
         let bus = Arc::new(Bus {
-            keys: Keys::new(namespace),
+            z,
+            keys: Keys::new(ns),
             node: node.to_string(),
-            inst: inst.to_string(),
-            session,
-            rooms: tokio::sync::Mutex::new(HashMap::new()),
-            puts: tx,
-            nodes: Mutex::new(Nodes::new(node)),
-            dropped: std::sync::atomic::AtomicU64::new(0),
+            epoch: epoch.to_string(),
+            connect: connect.to_string(),
+            tx,
+            room_tokens: Mutex::new(HashMap::new()),
+            view: std::sync::Mutex::new(View::default()),
+            put_drop: AtomicU64::new(0),
+            put_sent: AtomicU64::new(0),
         });
-        let s = bus.session.clone();
+        let b2 = bus.clone();
         tokio::spawn(async move {
-            while let Some((key, body)) = rx.recv().await {
-                if let Err(e) = s.put(&key, body).congestion_control(CongestionControl::Drop).await {
-                    tracing::warn!(kind = "diag", key = %key, "ev put: {e}");
+            while let Some((k, v)) = rx.recv().await {
+                if b2.z.put(&k, v).congestion_control(CongestionControl::Drop).await.is_ok() {
+                    b2.put_sent.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    b2.put_drop.fetch_add(1, Ordering::Relaxed);
                 }
+            }
+        });
+        let sub = bus.z.liveliness().declare_subscriber(bus.keys.node_all()).history(true).await.map_err(err_s)?;
+        let b3 = bus.clone();
+        tokio::spawn(async move {
+            while let Ok(s) = sub.recv_async().await {
+                b3.on_node(s.key_expr().as_str(), s.kind());
             }
         });
         Ok(bus)
     }
 
-    pub async fn declare_room(&self, room: &str) {
-        let key = self.keys.room(room, &self.node, &self.inst);
-        match self.session.liveliness().declare_token(&key).await {
-            Ok(t) => {
-                self.rooms.lock().await.insert(room.to_string(), t);
-                tracing::info!(kind = "ev", spec = "RULE-BUS-PRESENCE", room = %room, key = %key, "room token declared");
-            }
-            Err(e) => tracing::warn!(kind = "diag", room = %room, "room token: {e}"),
+    fn on_node(&self, key: &str, kind: SampleKind) {
+        let Some(t) = self.keys.tail(key, "node") else { return };
+        if t.len() != 2 {
+            return;
         }
-    }
-
-    pub async fn undeclare_room(&self, room: &str) {
-        if let Some(t) = self.rooms.lock().await.remove(room) {
-            let _ = t.undeclare().await;
-            tracing::info!(kind = "ev", spec = "RULE-BUS-PRESENCE", room = %room, "room token withdrawn");
-        }
-    }
-
-    fn enqueue(&self, key: String, n: &Notice) {
-        if self.puts.try_send((key, n.encode())).is_err() {
-            self.dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-
-    pub fn to_room(&self, room: &str, n: &Notice) {
-        self.enqueue(self.keys.ev_room(room), n);
-    }
-
-    pub fn to_user(&self, user: &str, n: &Notice) {
-        self.enqueue(self.keys.ev_user(user), n);
-    }
-
-    pub async fn watch_nodes(self: &Arc<Self>, out: mpsc::UnboundedSender<Verdict>) -> Result<(), String> {
-        let sub = self.session.liveliness().declare_subscriber(self.keys.node_all()).history(true).await.map_err(|e| e.to_string())?;
-        let b = Arc::downgrade(self);
-        tokio::spawn(async move {
-            while let Ok(s) = sub.recv_async().await {
-                let Some(bus) = b.upgrade() else { break };
-                let Some((node, inst)) = bus.keys.parse_node(s.key_expr().as_str()) else { continue };
-                let now = common::time::mono_ms();
-                let mut n = bus.nodes.lock().unwrap_or_else(|p| p.into_inner());
-                if s.kind() == SampleKind::Put {
-                    n.put(&node, &inst);
-                } else {
-                    n.delete(&node, &inst, now);
-                }
+        let (n, i) = (t[0].to_string(), t[1].to_string());
+        let mut v = self.view.lock().unwrap_or_else(|p| p.into_inner());
+        v.nodes_ever.insert(n.clone());
+        if kind == SampleKind::Put {
+            v.alive.entry(n.clone()).or_default().insert(i.clone());
+            v.missing_since.remove(&(n.clone(), i.clone()));
+        } else {
+            if let Some(s) = v.alive.get_mut(&n) {
+                s.remove(&i);
             }
-        });
-        let b = Arc::downgrade(self);
-        tokio::spawn(async move {
-            let mut iv = tokio::time::interval(std::time::Duration::from_millis(500));
-            loop {
-                iv.tick().await;
-                let Some(bus) = b.upgrade() else { break };
-                let verdicts = bus.nodes.lock().unwrap_or_else(|p| p.into_inner()).judge(common::time::mono_ms());
-                for v in verdicts {
-                    let _ = out.send(v);
-                }
-            }
-        });
+            v.missing_since.entry((n.clone(), i.clone())).or_insert_with(Instant::now);
+        }
+        let others = v.alive.iter().filter(|(k, s)| **k != self.node && !s.is_empty()).count();
+        if others > 0 {
+            v.others_seen = true;
+            v.isolated = false;
+        } else if v.others_seen && kind == SampleKind::Delete && n != self.node {
+            v.isolated = true;
+        }
+        drop(v);
+        tracing::info!("node token {} node={n} inst={i}", if kind == SampleKind::Put { "put" } else { "delete" });
+    }
+
+    pub fn home(&self, node: &str, inst: &str, grace: Duration) -> HomeState {
+        let mut v = self.view.lock().unwrap_or_else(|p| p.into_inner());
+        if v.alive.get(node).is_some_and(|s| s.contains(inst)) {
+            return HomeState::Alive;
+        }
+        let since = *v.missing_since.entry((node.to_string(), inst.to_string())).or_insert_with(Instant::now);
+        if since.elapsed() < grace {
+            return HomeState::Missing;
+        }
+        if v.isolated || v.nodes_ever.len() <= 2 {
+            return HomeState::Deferred;
+        }
+        HomeState::Lost
+    }
+
+    pub fn isolated(&self) -> bool {
+        self.view.lock().map(|v| v.isolated).unwrap_or(false)
+    }
+
+    pub fn nodes(&self) -> Vec<(String, Vec<String>)> {
+        self.view.lock().map(|v| v.alive.iter().map(|(k, s)| (k.clone(), s.iter().cloned().collect())).collect()).unwrap_or_default()
+    }
+
+    pub async fn declare_room(&self, room: &str) -> Result<(), String> {
+        let mut g = self.room_tokens.lock().await;
+        if g.contains_key(room) {
+            return Ok(());
+        }
+        let t = self.z.liveliness().declare_token(self.keys.room(room, &self.node, &self.epoch)).await.map_err(err_s)?;
+        g.insert(room.to_string(), t);
         Ok(())
     }
 
+    pub async fn undeclare_room(&self, room: &str) {
+        let t = self.room_tokens.lock().await.remove(room);
+        if let Some(t) = t {
+            let _ = t.undeclare().await;
+        }
+    }
+
+    fn put(&self, key: String, n: &Notice) {
+        let Ok(v) = serde_json::to_vec(n) else { return };
+        if self.tx.try_send((key, v)).is_err() {
+            self.put_drop.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn room_event(&self, room: &str, op: u16, body: String, exclude: Vec<String>) {
+        let n = Notice { op, body, exclude, room_id: Some(room.to_string()), sfu_id: Some(self.epoch.clone()) };
+        self.put(self.keys.ev_room(room), &n);
+    }
+
+    pub fn user_event(&self, user: &str, op: u16, body: String, room: Option<&str>) {
+        let n = Notice { op, body, exclude: Vec::new(), room_id: room.map(str::to_string), sfu_id: Some(self.epoch.clone()) };
+        self.put(self.keys.ev_user(user), &n);
+    }
+
     pub async fn close(&self) {
-        self.rooms.lock().await.clear();
-        let _ = self.session.close().await;
+        let tokens: Vec<LivelinessToken> = self.room_tokens.lock().await.drain().map(|(_, t)| t).collect();
+        for t in tokens {
+            let _ = t.undeclare().await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let _ = self.z.close().await;
     }
 }

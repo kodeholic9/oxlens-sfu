@@ -1,13 +1,13 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @36d1dfd · 정:IMPL-RTCP-TERMINATE · 정:RULE-RTCP-NACK-UP · 정:RULE-RTCP-NACK-DOWN · 정:CAND-RTCP-TWCC-HISTORY · 정:CAND-RTCP-NACK-BUDGET-UNIT · 정:RULE-CONC-SANS-IO · model: claude-opus-5-5
-//! RTCP 산수(순수) — 수신 통계(RFC 3550 부록 A) · TWCC 피드백 창(draft-holmer §3.1 · libwebrtc 수신 쪽) · 상향 NACK 결손 추적 · 하향 NACK 예산 · PLI 스로틀.
+// spec: v1.3 @d4cc756 · 정:IMPL-RTCP-TERMINATE 정:RULE-RTCP-NACK-UP 정:RULE-CONC-SANS-IO 정:CAND-RTCP-TWCC-HISTORY · model: claude-opus-5-5
+//! RTCP 산수 — RR 통계(RFC 3550 A.1 · A.3 · A.8) · TWCC 피드백 조립(draft-holmer §3.1 · 창은 libwebrtc 수신 쪽) · 상향 NACK 결손 추적. 시계 · I/O 없음.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 
-pub const RTP_SEQ_MOD: u32 = 1 << 16;
-pub const MIN_SEQUENTIAL: u32 = 2;
-pub const MAX_DROPOUT: u32 = 3000;
-pub const MAX_MISORDER: u32 = 100;
+const RTP_SEQ_MOD: u32 = 1 << 16;
+const MAX_DROPOUT: u32 = 3000;
+const MAX_MISORDER: u32 = 100;
+const MIN_SEQUENTIAL: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Report {
@@ -17,26 +17,46 @@ pub struct Report {
     pub jitter: u32,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RecvStats {
+    clock: u32,
     started: bool,
-    max_seq: u16,
-    cycles: u32,
-    base_seq: u32,
-    bad_seq: u32,
     probation: u32,
+    base_seq: u32,
+    max_seq: u16,
+    bad_seq: u32,
+    cycles: u32,
     received: u32,
-    expected_prior: u32,
     received_prior: u32,
+    expected_prior: u32,
     transit: Option<i64>,
     jitter: f64,
-    pub last_sr_ntp_mid: u32,
-    pub last_sr_at_ms: u64,
+    pub packets: u64,
+    pub bytes: u64,
 }
 
 impl RecvStats {
+    pub fn new(clock: u32) -> RecvStats {
+        RecvStats {
+            clock,
+            started: false,
+            probation: 0,
+            base_seq: 0,
+            max_seq: 0,
+            bad_seq: RTP_SEQ_MOD + 1,
+            cycles: 0,
+            received: 0,
+            received_prior: 0,
+            expected_prior: 0,
+            transit: None,
+            jitter: 0.0,
+            packets: 0,
+            bytes: 0,
+        }
+    }
+
     fn init_seq(&mut self, seq: u16) {
-        self.base_seq = seq as u32;
+        self.base_seq = u32::from(seq);
         self.max_seq = seq;
         self.bad_seq = RTP_SEQ_MOD + 1;
         self.cycles = 0;
@@ -46,13 +66,7 @@ impl RecvStats {
     }
 
     fn update_seq(&mut self, seq: u16) -> bool {
-        if !self.started {
-            self.started = true;
-            self.init_seq(seq);
-            self.max_seq = seq.wrapping_sub(1);
-            self.probation = MIN_SEQUENTIAL;
-        }
-        let udelta = seq.wrapping_sub(self.max_seq) as u32;
+        let udelta = u32::from(seq.wrapping_sub(self.max_seq));
         if self.probation > 0 {
             if seq == self.max_seq.wrapping_add(1) {
                 self.probation -= 1;
@@ -73,10 +87,10 @@ impl RecvStats {
             }
             self.max_seq = seq;
         } else if udelta <= RTP_SEQ_MOD - MAX_MISORDER {
-            if seq as u32 == self.bad_seq {
+            if u32::from(seq) == self.bad_seq {
                 self.init_seq(seq);
             } else {
-                self.bad_seq = (seq as u32 + 1) & (RTP_SEQ_MOD - 1);
+                self.bad_seq = (u32::from(seq) + 1) & (RTP_SEQ_MOD - 1);
                 return false;
             }
         }
@@ -84,10 +98,18 @@ impl RecvStats {
         true
     }
 
-    pub fn on_packet(&mut self, seq: u16, ts: u32, arrival_ms: u64, clock: u32) -> bool {
+    pub fn update(&mut self, seq: u16, ts: u32, arrival_ms: u64, len: usize) -> bool {
+        self.packets += 1;
+        self.bytes += len as u64;
+        if !self.started {
+            self.started = true;
+            self.init_seq(seq);
+            self.max_seq = seq.wrapping_sub(1);
+            self.probation = MIN_SEQUENTIAL;
+        }
         let valid = self.update_seq(seq);
-        let arrival = ((arrival_ms as u128 * clock as u128) / 1000) as i64;
-        let transit = arrival - ts as i64;
+        let arrival = ((arrival_ms as u128 * self.clock as u128) / 1000) as u32;
+        let transit = i64::from(arrival.wrapping_sub(ts) as i32);
         if let Some(prev) = self.transit {
             let d = (transit - prev).abs() as f64;
             self.jitter += (d - self.jitter) / 16.0;
@@ -96,17 +118,21 @@ impl RecvStats {
         valid
     }
 
+    pub fn extended_max(&self) -> u32 {
+        self.cycles.wrapping_add(u32::from(self.max_seq))
+    }
+
     pub fn report(&mut self) -> Report {
-        let extended_max = self.cycles.wrapping_add(self.max_seq as u32);
-        let expected = extended_max.wrapping_sub(self.base_seq).wrapping_add(1);
-        let lost = (expected as i64 - self.received as i64).clamp(-0x80_0000, 0x7f_ffff) as i32;
+        let ext = self.extended_max();
+        let expected = ext.wrapping_sub(self.base_seq).wrapping_add(1);
+        let lost = (i64::from(expected) - i64::from(self.received)).clamp(-0x80_0000, 0x7f_ffff) as i32;
         let expected_interval = expected.wrapping_sub(self.expected_prior);
         self.expected_prior = expected;
         let received_interval = self.received.wrapping_sub(self.received_prior);
         self.received_prior = self.received;
-        let lost_interval = expected_interval as i64 - received_interval as i64;
-        let fraction = if expected_interval == 0 || lost_interval <= 0 { 0 } else { ((lost_interval << 8) / expected_interval as i64).min(255) as u8 };
-        Report { fraction, lost, extended_max, jitter: self.jitter as u32 }
+        let lost_interval = i64::from(expected_interval) - i64::from(received_interval);
+        let fraction = if expected_interval == 0 || lost_interval <= 0 { 0 } else { ((lost_interval << 8) / i64::from(expected_interval)).min(255) as u8 };
+        Report { fraction, lost, extended_max: ext, jitter: self.jitter as u32 }
     }
 
     pub fn started(&self) -> bool {
@@ -138,255 +164,188 @@ pub struct Feedback {
     pub reference_time: u32,
     pub fb_count: u8,
     pub symbols: Vec<Sym>,
-    pub deltas: Vec<i32>,
+    pub deltas_250us: Vec<i32>,
 }
 
-pub const TWCC_HISTORY_US: i64 = 500_000;
-pub const TWCC_MAX_PACKETS: usize = 2001;
-const REF_UNIT_US: i64 = 64_000;
-const REF_WRAP_US: i64 = REF_UNIT_US << 24;
-const DELTA_UNIT_US: i64 = 250;
+const REF_UNIT_US: u64 = 64_000;
+const BACK_WINDOW_US: u64 = 500_000;
+const HISTORY_MAX: usize = 1 << 15;
+const MAX_PER_FEEDBACK: usize = 2001;
 
 #[derive(Debug, Clone, Default)]
 pub struct TwccRecv {
-    arrivals: BTreeMap<i64, i64>,
-    last_unwrapped: Option<i64>,
-    start: Option<i64>,
+    last16: Option<u16>,
+    ext: i64,
+    arrivals: BTreeMap<i64, u64>,
+    next_start: Option<i64>,
+    late_min: Option<i64>,
     fb_count: u8,
-}
-
-fn round_delta(us: i64) -> i64 {
-    let half = DELTA_UNIT_US / 2;
-    if us < 0 { (us - half) / DELTA_UNIT_US } else { (us + half) / DELTA_UNIT_US }
+    latest_us: u64,
 }
 
 impl TwccRecv {
     fn unwrap(&mut self, seq: u16) -> i64 {
-        let v = match self.last_unwrapped {
-            None => seq as i64,
-            Some(last) => {
-                let diff = seq.wrapping_sub(last as u16) as i16 as i64;
-                last + diff
+        match self.last16 {
+            None => {
+                self.ext = i64::from(seq);
             }
-        };
-        if self.last_unwrapped.map(|l| v > l).unwrap_or(true) {
-            self.last_unwrapped = Some(v);
+            Some(prev) => {
+                self.ext += i64::from(seq.wrapping_sub(prev) as i16);
+            }
         }
-        v
+        self.last16 = Some(seq);
+        self.ext
     }
 
-    pub fn on_packet(&mut self, seq: u16, arrival_us: i64) {
+    pub fn record(&mut self, seq: u16, arrival_us: u64) {
         let s = self.unwrap(seq);
-        if let Some(st) = self.start
-            && s < st
-        {
-            let newest = self.arrivals.iter().next_back().map(|(_, t)| *t).unwrap_or(arrival_us);
-            if newest - arrival_us <= TWCC_HISTORY_US || self.arrivals.is_empty() {
-                self.start = Some(s);
-            }
+        if self.arrivals.contains_key(&s) {
+            return;
         }
-        self.arrivals.entry(s).or_insert(arrival_us);
-        let newest = self.arrivals.values().copied().max().unwrap_or(arrival_us);
-        while let Some((&k, &t)) = self.arrivals.iter().next() {
-            if newest - t > TWCC_HISTORY_US && Some(k) < self.start {
-                self.arrivals.remove(&k);
-            } else {
-                break;
-            }
+        if self.next_start.is_some_and(|n| s < n) {
+            self.late_min = Some(self.late_min.map_or(s, |m| m.min(s)));
+        }
+        self.arrivals.insert(s, arrival_us);
+        self.latest_us = self.latest_us.max(arrival_us);
+        while self.arrivals.len() > HISTORY_MAX {
+            let Some((&k, _)) = self.arrivals.iter().next() else { break };
+            self.arrivals.remove(&k);
         }
     }
 
     pub fn pending(&self) -> bool {
-        let Some(&max) = self.arrivals.keys().next_back() else { return false };
-        match self.start {
+        let Some(&end) = self.arrivals.keys().next_back() else { return false };
+        match self.next_start {
             None => true,
-            Some(st) => max >= st,
+            Some(n) => end >= n || self.late_min.is_some(),
         }
     }
 
     pub fn build(&mut self) -> Vec<Feedback> {
         let mut out = Vec::new();
-        let Some(&max) = self.arrivals.keys().next_back() else { return out };
-        let mut from = match self.start {
-            Some(st) => st,
-            None => *self.arrivals.keys().next().unwrap_or(&max),
+        let Some(&end) = self.arrivals.keys().next_back() else { return out };
+        let first = *self.arrivals.keys().next().unwrap_or(&end);
+        let mut start = match self.next_start {
+            None => first,
+            Some(n) => match self.late_min {
+                Some(l) => l.min(n),
+                None => n,
+            },
         };
-        if from > max {
+        start = start.max(first);
+        if start > end {
             return out;
         }
-        while from <= max {
-            let Some((&first_rx, &first_t)) = self.arrivals.range(from..=max).next() else { break };
+        while start <= end {
+            let Some((&first_rx, &first_at)) = self.arrivals.range(start..=end).next() else { break };
             let _ = first_rx;
-            let ref_time = (first_t.rem_euclid(REF_WRAP_US)) / REF_UNIT_US;
-            let mut base_t = first_t - (first_t.rem_euclid(REF_WRAP_US) - ref_time * REF_UNIT_US);
-            let mut fb = Feedback { base_seq: (from & 0xffff) as u16, status_count: 0, reference_time: ref_time as u32, fb_count: self.fb_count, symbols: Vec::new(), deltas: Vec::new() };
-            let mut seq = from;
-            let mut cut = None;
-            while seq <= max {
-                if fb.symbols.len() >= TWCC_MAX_PACKETS {
-                    cut = Some(seq);
-                    break;
-                }
-                match self.arrivals.get(&seq) {
+            let ref_units = (first_at / REF_UNIT_US) % (1 << 24);
+            let mut running = (first_at / REF_UNIT_US) as i64 * REF_UNIT_US as i64;
+            let mut fb = Feedback { base_seq: (start & 0xffff) as u16, status_count: 0, reference_time: ref_units as u32, fb_count: self.fb_count, symbols: Vec::new(), deltas_250us: Vec::new() };
+            let mut s = start;
+            let mut cut = false;
+            while s <= end && fb.symbols.len() < MAX_PER_FEEDBACK {
+                match self.arrivals.get(&s) {
                     None => fb.symbols.push(Sym::NotReceived),
-                    Some(&t) => {
-                        let d = round_delta(t - base_t);
-                        if !(-32768..=32767).contains(&d) {
-                            cut = Some(seq);
+                    Some(&at) => {
+                        let d = at as i64 - running;
+                        let units = (d as f64 / 250.0).round() as i64;
+                        if units < i64::from(i16::MIN) || units > i64::from(i16::MAX) {
+                            cut = true;
                             break;
                         }
-                        base_t += d * DELTA_UNIT_US;
-                        fb.symbols.push(if (0..=255).contains(&d) { Sym::Small } else { Sym::Large });
-                        fb.deltas.push(d as i32);
+                        fb.symbols.push(if (0..=255).contains(&units) { Sym::Small } else { Sym::Large });
+                        fb.deltas_250us.push(units as i32);
+                        running += units * 250;
                     }
                 }
-                seq += 1;
+                s += 1;
             }
             while fb.symbols.last() == Some(&Sym::NotReceived) {
                 fb.symbols.pop();
+                s -= 1;
             }
             fb.status_count = fb.symbols.len() as u16;
-            self.fb_count = self.fb_count.wrapping_add(1);
             out.push(fb);
-            match cut {
-                Some(c) => from = c,
-                None => break,
+            self.fb_count = self.fb_count.wrapping_add(1);
+            start = s;
+            if !cut && s > end {
+                break;
             }
         }
-        self.start = Some(max + 1);
+        self.next_start = Some(end + 1);
+        self.late_min = None;
+        let horizon = self.latest_us.saturating_sub(BACK_WINDOW_US);
+        let keep_from = end + 1;
+        self.arrivals.retain(|k, at| *k >= keep_from || *at >= horizon);
         out
     }
 }
 
-pub const NACK_GAP_MAX: u16 = 128;
-pub const NACK_RETRY_MS: u64 = 200;
-pub const NACK_GIVEUP_MS: u64 = 1000;
-pub const NACK_TRACK_MAX: usize = 128;
-
 #[derive(Debug, Clone, Copy)]
-struct Missing {
+struct Miss {
     first_ms: u64,
     sent_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct NackUp {
-    last: Option<i64>,
-    missing: BTreeMap<i64, Missing>,
+    last: Option<u16>,
+    missing: BTreeMap<u16, Miss>,
+}
+
+pub const NACK_RETRY_MS: u64 = 200;
+pub const NACK_GIVEUP_MS: u64 = 1000;
+pub const NACK_TRACK_MAX: usize = 128;
+
+pub enum Gap {
+    None,
+    Tracked(usize),
+    TooLarge,
 }
 
 impl NackUp {
-    pub fn on_packet(&mut self, seq: u16, now_ms: u64) {
+    pub fn on_packet(&mut self, seq: u16, now_ms: u64) -> Gap {
         let Some(last) = self.last else {
-            self.last = Some(seq as i64);
-            return;
+            self.last = Some(seq);
+            return Gap::None;
         };
-        let diff = seq.wrapping_sub(last as u16) as i16 as i64;
-        let ext = last + diff;
+        let diff = seq.wrapping_sub(last) as i16;
         if diff <= 0 {
-            self.missing.remove(&ext);
-            return;
+            self.missing.remove(&seq);
+            return Gap::None;
         }
-        if diff > 1 && diff < NACK_GAP_MAX as i64 {
-            for k in last + 1..ext {
-                if self.missing.len() >= NACK_TRACK_MAX {
-                    break;
-                }
-                self.missing.entry(k).or_insert(Missing { first_ms: now_ms, sent_ms: None });
+        self.last = Some(seq);
+        if diff == 1 {
+            return Gap::None;
+        }
+        if diff >= 128 {
+            self.missing.clear();
+            return Gap::TooLarge;
+        }
+        let mut n = 0;
+        let mut s = last.wrapping_add(1);
+        while s != seq {
+            if self.missing.len() >= NACK_TRACK_MAX {
+                break;
             }
+            self.missing.insert(s, Miss { first_ms: now_ms, sent_ms: None });
+            n += 1;
+            s = s.wrapping_add(1);
         }
-        self.last = Some(ext);
+        Gap::Tracked(n)
     }
 
     pub fn due(&mut self, now_ms: u64) -> Vec<u16> {
         self.missing.retain(|_, m| now_ms.saturating_sub(m.first_ms) < NACK_GIVEUP_MS);
         let mut out = Vec::new();
-        for (k, m) in self.missing.iter_mut() {
-            let ready = match m.sent_ms {
-                None => true,
-                Some(t) => now_ms.saturating_sub(t) >= NACK_RETRY_MS,
-            };
-            if ready {
+        for (s, m) in self.missing.iter_mut() {
+            if m.sent_ms.is_none_or(|t| now_ms.saturating_sub(t) >= NACK_RETRY_MS) {
                 m.sent_ms = Some(now_ms);
-                out.push((k.rem_euclid(RTP_SEQ_MOD as i64)) as u16);
+                out.push(*s);
             }
         }
         out
-    }
-
-    pub fn tracked(&self) -> usize {
-        self.missing.len()
-    }
-}
-
-pub fn nack_pairs(seqs: &[u16]) -> Vec<(u16, u16)> {
-    let mut out: Vec<(u16, u16)> = Vec::new();
-    for &s in seqs {
-        if let Some((pid, blp)) = out.last_mut() {
-            let d = s.wrapping_sub(pid.to_owned());
-            if (1..=16).contains(&d) {
-                let bit = 1u16 << (d - 1);
-                let merged = blp.to_owned() | bit;
-                let _ = std::mem::replace(blp, merged);
-                continue;
-            }
-        }
-        out.push((s, 0));
-    }
-    out
-}
-
-pub fn nack_expand(pid: u16, blp: u16) -> Vec<u16> {
-    let mut out = vec![pid];
-    for i in 0..16 {
-        if blp & (1 << i) != 0 {
-            out.push(pid.wrapping_add(i + 1));
-        }
-    }
-    out
-}
-
-pub const RTX_BUDGET: usize = 200;
-pub const RTX_BUDGET_WINDOW_MS: u64 = 3000;
-
-#[derive(Debug, Clone, Default)]
-pub struct Budget {
-    spent: VecDeque<u64>,
-}
-
-impl Budget {
-    pub fn take(&mut self, now_ms: u64) -> bool {
-        while let Some(&t) = self.spent.front() {
-            if now_ms.saturating_sub(t) >= RTX_BUDGET_WINDOW_MS {
-                self.spent.pop_front();
-            } else {
-                break;
-            }
-        }
-        if self.spent.len() >= RTX_BUDGET {
-            return false;
-        }
-        self.spent.push_back(now_ms);
-        true
-    }
-}
-
-pub const PLI_THROTTLE_H_MS: u64 = 300;
-pub const PLI_THROTTLE_L_MS: u64 = 100;
-
-#[derive(Debug, Clone, Default)]
-pub struct PliGate {
-    last_ms: Option<u64>,
-}
-
-impl PliGate {
-    pub fn pass(&mut self, now_ms: u64, low: bool, infra: bool) -> bool {
-        let gap = if low { PLI_THROTTLE_L_MS } else { PLI_THROTTLE_H_MS };
-        let ok = infra || self.last_ms.map(|t| now_ms.saturating_sub(t) >= gap).unwrap_or(true);
-        if ok {
-            self.last_ms = Some(now_ms);
-        }
-        ok
     }
 }
 
@@ -395,42 +354,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nack_up_rules() {
+    fn nack_gap_rules() {
         let mut n = NackUp::default();
         n.on_packet(10, 0);
-        n.on_packet(13, 0);
-        assert_eq!(n.due(0), vec![11, 12]);
-        assert!(n.due(100).is_empty(), "재전송 간격 200ms");
-        n.on_packet(11, 120);
-        assert_eq!(n.due(200), vec![12]);
-        assert!(n.due(1000).is_empty(), "1,000ms 경과 시 만료");
-        n.on_packet(13 + 200, 1000);
-        assert_eq!(n.tracked(), 0, "128 이상 점프는 NACK 하지 않는다");
-        let mut w = NackUp::default();
-        w.on_packet(65534, 0);
-        w.on_packet(65535, 0);
-        w.on_packet(2, 0);
-        assert_eq!(w.due(0), vec![0, 1], "감김 너머 결손");
-    }
-
-    #[test]
-    fn nack_pack_and_budget() {
-        assert_eq!(nack_pairs(&[5, 6, 8, 30]), vec![(5, 0b101), (30, 0)]);
-        assert_eq!(nack_expand(5, 0b101), vec![5, 6, 8]);
-        let mut b = Budget::default();
-        for _ in 0..RTX_BUDGET {
-            assert!(b.take(0));
-        }
-        assert!(!b.take(10), "200회 / 3초 / 구독자");
-        assert!(b.take(3000));
-    }
-
-    #[test]
-    fn pli_throttle() {
-        let mut g = PliGate::default();
-        assert!(g.pass(0, false, false));
-        assert!(!g.pass(100, false, false));
-        assert!(g.pass(150, false, true), "인프라 PLI 는 bypass");
-        assert!(g.pass(250, true, false));
+        assert!(matches!(n.on_packet(13, 1), Gap::Tracked(2)));
+        assert_eq!(n.due(5), vec![11, 12]);
+        assert!(n.due(100).is_empty());
+        n.on_packet(11, 150);
+        assert_eq!(n.due(300), vec![12]);
+        assert!(matches!(n.on_packet(400, 310), Gap::TooLarge));
+        assert!(n.due(1500).is_empty());
     }
 }

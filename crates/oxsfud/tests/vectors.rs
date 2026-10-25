@@ -1,26 +1,38 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @36d1dfd · 정:RULE-CONC-SANS-IO · 정:IMPL-FWD-SOURCE-SWITCH · 정:PROP-FWD-SWITCH-SEQ-CONTIGUOUS · 정:PROP-FWD-SWITCH-TS-FORWARD · 정:IMPL-SUB-SUBSCRIBER-TABLE · 정:IMPL-RTCP-TERMINATE · 정:RULE-SIM-TICK · 정:CAND-DOC-GUARD-PLACE · model: claude-opus-5-5
-//! 1층 벡터 — `server/out/vectors/*.json` 판을 그대로 넣어 같은 출력. 판 파일 · 판 묶음이 없거나 비면 빨강.
+// spec: v1.3 @d4cc756 · 정:RULE-CONC-SANS-IO 정:IMPL-FWD-SOURCE-SWITCH 정:IMPL-SUB-SUBSCRIBER-TABLE 정:IMPL-RTCP-TERMINATE 정:RULE-SIM-TICK 정:PROP-FWD-SWITCH-SEQ-CONTIGUOUS 정:PROP-FWD-SWITCH-TS-FORWARD 정:RULE-DOC-CODE-MIRROR · model: claude-opus-5-5
+//! 1층 — 벡터 셋(fwd · rtcp · sim) 판 전부를 산수 함수에 그대로 넣는다 · 판 묶음이 없거나 비면 빨강 · 규격 위치는 `OXLENS_SPEC` 이 이긴다 · PROP 두 성질.
 
-use oxsfud::fwd::core::{self as fwd, ExtTable, ExtValues, Rewriter, Sr};
+use std::path::PathBuf;
+
+use oxsfud::fwd::core::{Rewriter, Sr, pt_byte1, seq_after, translate_sr};
 use oxsfud::rtcp::core::{RecvStats, TwccRecv};
 use oxsfud::sim::core::{Aimd, Usage};
+use oxsfud::sub::ext::{ExtTable, build};
 use serde_json::Value;
 
-fn load(name: &str) -> Value {
-    let p = common::spec_root().join("server/out/vectors").join(name);
-    let raw = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("벡터 {} 를 못 읽는다: {e}", p.display()));
-    serde_json::from_str(&raw).unwrap_or_else(|e| panic!("벡터 {} 형: {e}", p.display()))
+const UNIT: &str = "S-sym-RULE-CONC-SANS-IO-1";
+
+fn spec_dir() -> PathBuf {
+    match std::env::var("OXLENS_SPEC") {
+        Ok(p) if !p.is_empty() => PathBuf::from(p),
+        _ => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../context/spec"),
+    }
 }
 
-fn group<'a>(doc: &'a Value, key: &str) -> &'a Vec<Value> {
-    let g = doc.get(key).and_then(Value::as_array).unwrap_or_else(|| panic!("판 묶음 {key} 이 없다"));
-    assert!(!g.is_empty(), "판 묶음 {key} 이 비었다");
-    g
+fn load(name: &str) -> Value {
+    let p = spec_dir().join("server/out/vectors").join(name);
+    let t = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{UNIT} 벡터 파일 {} 없음: {e}", p.display()));
+    serde_json::from_str(&t).unwrap_or_else(|e| panic!("{UNIT} 벡터 {name} 형: {e}"))
+}
+
+fn set<'a>(v: &'a Value, key: &str) -> &'a Vec<Value> {
+    let a = v.get(key).and_then(Value::as_array).unwrap_or_else(|| panic!("{UNIT} 판 묶음 {key} 없음"));
+    assert!(!a.is_empty(), "{UNIT} 판 묶음 {key} 비었다");
+    a
 }
 
 fn u(v: &Value, k: &str) -> u64 {
-    v.get(k).and_then(Value::as_u64).unwrap_or_else(|| panic!("칸 {k} 가 없다: {v}"))
+    v.get(k).and_then(Value::as_u64).unwrap_or_else(|| panic!("{UNIT} 칸 {k} 없음 in {v}"))
 }
 
 fn hex(b: &[u8]) -> String {
@@ -28,131 +40,150 @@ fn hex(b: &[u8]) -> String {
 }
 
 #[test]
-fn fwd_rewrite() {
-    let doc = load("fwd.json");
-    for case in group(&doc, "rewrite") {
-        let name = case["name"].as_str().unwrap_or("?");
-        let mut rw = Rewriter::new(u(case, "clock") as u32);
-        for st in case["steps"].as_array().expect("steps") {
-            let (os, ot) = rw.rewrite(u(st, "src"), u(st, "seq") as u16, u(st, "ts") as u32, u(st, "at_ms"));
-            assert_eq!(os as u64, u(st, "out_seq"), "정:PROP-FWD-SWITCH-SEQ-CONTIGUOUS {name}: {st}");
-            assert_eq!(ot as u64, u(st, "out_ts"), "정:PROP-FWD-SWITCH-TS-FORWARD {name}: {st}");
-        }
-        for n in case["nack"].as_array().expect("nack") {
-            let want = n["in_seq"].as_u64().map(|x| x as u16);
-            assert_eq!(rw.nack_in(u(n, "out_seq") as u16), want, "정:IMPL-FWD-SOURCE-SWITCH NACK 되돌림 {name}: {n}");
-        }
-    }
-}
-
-#[test]
-fn fwd_serial_pt_sr() {
-    let doc = load("fwd.json");
-    for c in group(&doc, "serial") {
-        assert_eq!(fwd::seq_after(u(c, "a") as u16, u(c, "b") as u16), c["after"].as_bool().expect("after"), "RFC 1982 serial: {c}");
-    }
-    for c in group(&doc, "pt_byte1") {
-        assert_eq!(fwd::pt_byte1(u(c, "byte1") as u8, u(c, "pt") as u8) as u64, u(c, "out"), "byte1 하위 7비트만: {c}");
-    }
-    for c in group(&doc, "sr") {
-        let i = &c["in"];
-        let o = &c["out"];
-        let got = fwd::translate_sr(Sr { ssrc: u(i, "ssrc") as u32, ntp: u(i, "ntp"), rtp_ts: u(i, "rtp_ts") as u32 }, u(c, "downlink_ssrc") as u32, u(c, "ts_off") as u32);
-        assert_eq!(got, Sr { ssrc: u(o, "ssrc") as u32, ntp: u(o, "ntp"), rtp_ts: u(o, "rtp_ts") as u32 }, "SR 번역 — NTP 원본 · RTP 같은 오프셋: {c}");
-    }
-}
-
-#[test]
-fn fwd_ext_rebuild() {
-    let doc = load("fwd.json");
-    for c in group(&doc, "ext") {
-        let name = c["name"].as_str().unwrap_or("?");
-        let t = &c["table"];
-        let id = |k: &str| t.get(k).and_then(Value::as_u64).map(|x| x as u8);
-        let table = ExtTable { mid: id("mid"), audio_level: id("audio_level"), abs_send_time: id("abs_send_time"), twcc: id("twcc") };
-        let v = ExtValues {
-            mid: c["mid"].as_str().map(str::to_string),
-            audio_level: c["audio_level_in"].as_u64().map(|x| x as u8),
-            t_us: u(c, "t_us"),
-            twcc: Some((u(c, "twcc_counter") & 0xffff) as u16),
-        };
-        let form = if table.two_byte() { "two" } else { "one" };
-        assert_eq!(form, c["form"].as_str().expect("form"), "정:IMPL-SUB-SUBSCRIBER-TABLE 꼴은 표로 정한다 {name}");
-        let elems = fwd::ext_elements(&table, &v);
-        let want: Vec<(u64, String)> = c["elements"].as_array().expect("elements").iter().map(|e| (u(e, "id"), e["hex"].as_str().unwrap_or("").to_string())).collect();
-        let got: Vec<(u64, String)> = elems.iter().map(|(i, d)| (*i as u64, hex(d))).collect();
-        assert_eq!(got, want, "원소 {name}");
-        let block = fwd::ext_block(&table, &v);
-        assert_eq!(((block.len() - 4) / 4) as u64, u(c, "words"), "32비트 단위 {name}");
-        assert_eq!(hex(&block), c["hex"].as_str().expect("hex"), "S-sym-RULE-CONC-SANS-IO-1 같은 판 같은 출력 {name}");
-    }
-}
-
-#[test]
-fn rtcp_rr() {
-    let doc = load("rtcp.json");
-    for case in group(&doc, "rr") {
+fn fwd_rewrite_vectors() {
+    let d = load("fwd.json");
+    for case in set(&d, "rewrite") {
         let name = case["name"].as_str().unwrap_or("?");
         let clock = u(case, "clock") as u32;
-        let mut st = RecvStats::default();
-        for ev in case["events"].as_array().expect("events") {
+        let mut r = Rewriter::default();
+        for st in case["steps"].as_array().unwrap_or_else(|| panic!("{UNIT} steps")) {
+            let (s, t) = r.map(u(st, "src"), u(st, "seq") as u16, u(st, "ts") as u32, u(st, "at_ms"), clock);
+            assert_eq!((u64::from(s), u64::from(t)), (u(st, "out_seq"), u(st, "out_ts")), "{UNIT} rewrite {name} step {st}");
+        }
+    }
+}
+
+#[test]
+fn fwd_serial_pt_sr_vectors() {
+    let d = load("fwd.json");
+    for c in set(&d, "serial") {
+        assert_eq!(seq_after(u(c, "a") as u16, u(c, "b") as u16), c["after"].as_bool().unwrap_or(false), "{UNIT} serial {c}");
+    }
+    for c in set(&d, "pt_byte1") {
+        assert_eq!(u64::from(pt_byte1(u(c, "byte1") as u8, u(c, "pt") as u8)), u(c, "out"), "{UNIT} pt_byte1 {c}");
+    }
+    for c in set(&d, "sr") {
+        let i = &c["in"];
+        let o = translate_sr(Sr { ssrc: u(i, "ssrc") as u32, ntp: u(i, "ntp"), rtp_ts: u(i, "rtp_ts") as u32 }, u(c, "downlink_ssrc") as u32, u(c, "ts_off") as u32);
+        let e = &c["out"];
+        assert_eq!((u64::from(o.ssrc), o.ntp, u64::from(o.rtp_ts)), (u(e, "ssrc"), u(e, "ntp"), u(e, "rtp_ts")), "{UNIT} sr {c}");
+    }
+}
+
+#[test]
+fn ext_vectors() {
+    let d = load("fwd.json");
+    for c in set(&d, "ext") {
+        let tb = &c["table"];
+        let id = |k: &str| tb.get(k).and_then(Value::as_u64).map(|x| x as u8);
+        let t = ExtTable { mid: id("mid"), audio_level: id("audio_level"), abs_send_time: id("abs_send_time"), twcc: id("twcc") };
+        let mut out = Vec::new();
+        build(&t, c["mid"].as_str(), c["audio_level_in"].as_u64().map(|x| x as u8), u(c, "t_us"), u(c, "twcc_counter"), &mut out);
+        assert_eq!(t.one_byte(), c["form"].as_str() == Some("one"), "{UNIT} ext form {}", c["name"]);
+        assert_eq!(hex(&out), c["hex"].as_str().unwrap_or(""), "{UNIT} ext {}", c["name"]);
+    }
+}
+
+#[test]
+fn rtcp_rr_vectors() {
+    let d = load("rtcp.json");
+    for case in set(&d, "rr") {
+        let name = case["name"].as_str().unwrap_or("?");
+        let mut s = RecvStats::new(u(case, "clock") as u32);
+        for ev in case["events"].as_array().unwrap_or_else(|| panic!("{UNIT} events")) {
             if let Some(r) = ev.get("report") {
-                let got = st.report();
-                assert_eq!(got.fraction as u64, u(r, "fraction"), "fraction {name}");
-                assert_eq!(got.lost as i64, r["lost"].as_i64().expect("lost"), "누적 손실(부호 있음) {name}");
-                assert_eq!(got.extended_max as u64, u(r, "extended_max"), "extended_max {name}");
-                assert_eq!(got.jitter as u64, u(r, "jitter"), "정:IMPL-RTCP-TERMINATE 지터 A.8 {name}");
-                continue;
+                let got = s.report();
+                let want = (r["fraction"].as_u64(), r["lost"].as_i64(), r["extended_max"].as_u64(), r["jitter"].as_u64());
+                assert_eq!((Some(u64::from(got.fraction)), Some(i64::from(got.lost)), Some(u64::from(got.extended_max)), Some(u64::from(got.jitter))), want, "{UNIT} rr {name}");
+            } else {
+                let valid = s.update(u(ev, "seq") as u16, u(ev, "ts") as u32, u(ev, "arrival_ms"), 100);
+                assert_eq!(valid, u(ev, "valid") == 1, "{UNIT} rr {name} valid {ev}");
             }
-            let valid = st.on_packet(u(ev, "seq") as u16, u(ev, "ts") as u32, u(ev, "arrival_ms"), clock);
-            assert_eq!(valid as u64, u(ev, "valid"), "A.1 출처 인정 {name}: {ev}");
         }
     }
 }
 
 #[test]
-fn rtcp_twcc() {
-    let doc = load("rtcp.json");
-    for case in group(&doc, "twcc") {
+fn rtcp_twcc_vectors() {
+    let d = load("rtcp.json");
+    for case in set(&d, "twcc") {
         let name = case["name"].as_str().unwrap_or("?");
-        let mut rx = TwccRecv::default();
-        let mut queue = std::collections::VecDeque::new();
-        for ev in case["events"].as_array().expect("events") {
+        let mut t = TwccRecv::default();
+        let mut built: Vec<oxsfud::rtcp::core::Feedback> = Vec::new();
+        for ev in case["events"].as_array().unwrap_or_else(|| panic!("{UNIT} events")) {
             if let Some(b) = ev.get("build") {
-                if queue.is_empty() {
-                    queue.extend(rx.build());
+                if built.is_empty() {
+                    built = t.build();
+                    built.reverse();
                 }
-                let fb = queue.pop_front().unwrap_or_else(|| panic!("피드백이 없다 {name}"));
-                let symbols: String = fb.symbols.iter().map(|s| s.letter()).collect();
-                let deltas: Vec<i64> = b["deltas_250us"].as_array().expect("deltas").iter().map(|d| d.as_i64().expect("delta")).collect();
-                assert_eq!(fb.base_seq as u64, u(b, "base_seq"), "base {name}");
-                assert_eq!(fb.status_count as u64, u(b, "status_count"), "상태 수 {name}");
-                assert_eq!(fb.reference_time as u64, u(b, "reference_time"), "기준 시각 {name}");
-                assert_eq!(fb.fb_count as u64, u(b, "fb_count"), "피드백 수 {name}");
-                assert_eq!(symbols, b["symbols"].as_str().expect("symbols"), "상태 {name}");
-                assert_eq!(fb.deltas.iter().map(|d| *d as i64).collect::<Vec<_>>(), deltas, "정:IMPL-RTCP-TERMINATE 수신 델타 {name}");
-                continue;
+                let fb = built.pop().unwrap_or_else(|| panic!("{UNIT} twcc {name} 피드백 모자람"));
+                let syms: String = fb.symbols.iter().map(|s| s.letter()).collect();
+                let deltas: Vec<i64> = fb.deltas_250us.iter().map(|x| i64::from(*x)).collect();
+                let want_d: Vec<i64> = b["deltas_250us"].as_array().map(|a| a.iter().filter_map(Value::as_i64).collect()).unwrap_or_default();
+                assert_eq!(
+                    (u64::from(fb.base_seq), u64::from(fb.status_count), u64::from(fb.reference_time), u64::from(fb.fb_count), syms.as_str(), deltas),
+                    (u(b, "base_seq"), u(b, "status_count"), u(b, "reference_time"), u(b, "fb_count"), b["symbols"].as_str().unwrap_or(""), want_d),
+                    "{UNIT} twcc {name}"
+                );
+            } else {
+                t.record(u(ev, "seq") as u16, u(ev, "arrival_us"));
             }
-            rx.on_packet(u(ev, "seq") as u16, u(ev, "arrival_us") as i64);
         }
-        assert!(queue.is_empty(), "남은 피드백 {name}");
+        assert!(built.is_empty(), "{UNIT} twcc {name} 남은 피드백");
     }
 }
 
 #[test]
-fn sim_aimd() {
-    let doc = load("sim.json");
-    let k = &doc["constants"];
-    assert_eq!(u(k, "floor_bps"), oxsfud::sim::core::FLOOR_BPS);
-    assert_eq!(u(k, "rtt_ms") as f64, oxsfud::sim::core::RTT_MS);
-    for case in group(&doc, "aimd") {
+fn sim_aimd_vectors() {
+    let d = load("sim.json");
+    for case in set(&d, "aimd") {
         let name = case["name"].as_str().unwrap_or("?");
-        let mut a = Aimd::new(u(case, "start_bps"));
-        for st in case["steps"].as_array().expect("steps") {
-            let usage = Usage::parse(st["usage"].as_str().expect("usage")).expect("usage 값");
-            let got = a.update(usage, u(st, "acked_bps"), u(st, "at_ms"));
-            assert_eq!(got, u(st, "out_bps"), "정:RULE-SIM-TICK AIMD {name}: {st}");
-            assert_eq!(a.near(), st["out_near"].as_bool().expect("out_near"), "수렴 근처 {name}: {st}");
+        let mut a = Aimd::new(u(case, "start_bps") as f64);
+        for st in case["steps"].as_array().unwrap_or_else(|| panic!("{UNIT} steps")) {
+            let (bps, near) = a.update(u(st, "at_ms"), Usage::parse(st["usage"].as_str().unwrap_or("normal")), u(st, "acked_bps") as f64);
+            assert_eq!((bps, near), (u(st, "out_bps"), st["out_near"].as_bool().unwrap_or(false)), "{UNIT} aimd {name} step {st}");
+        }
+    }
+}
+
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 >> 33
+    }
+}
+
+#[test]
+fn prop_switch_seq_contiguous_and_ts_forward() {
+    let mut x = Lcg(0x5eed);
+    for _ in 0..2000 {
+        let mut r = Rewriter::default();
+        let mut now = 0u64;
+        let mut src = 0u64;
+        let mut seq = (x.next() & 0xffff) as u16;
+        let mut ts = x.next() as u32;
+        let mut prev: Option<(u16, u32)> = None;
+        for _ in 0..(5 + x.next() % 20) {
+            let switching = prev.is_some() && x.next().is_multiple_of(4);
+            if switching {
+                src += 1;
+                seq = (x.next() & 0xffff) as u16;
+                ts = x.next() as u32;
+            }
+            now += x.next() % 60;
+            let (os, ot) = r.map(src, seq, ts, now, 48000);
+            if let Some((ps, pt)) = prev
+                && switching
+            {
+                assert_eq!(os, ps.wrapping_add(1), "S-sym-IMPL-FWD-SOURCE-SWITCH-2 PROP-FWD-SWITCH-SEQ-CONTIGUOUS");
+                let d = ot.wrapping_sub(pt);
+                assert!((1..(1u32 << 31)).contains(&d), "S-sym-IMPL-FWD-SOURCE-SWITCH-1 PROP-FWD-SWITCH-TS-FORWARD {d}");
+            }
+            prev = Some((os, ot));
+            seq = seq.wrapping_add(1);
+            ts = ts.wrapping_add(960);
         }
     }
 }

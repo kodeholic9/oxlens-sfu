@@ -1,247 +1,224 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @36d1dfd · 정:RULE-DOC-PLANES · 정:RULE-DOC-OWNERSHIP · 정:CAND-DOC-ORCHESTRATION-ASPECT · 정:RULE-CONC-SIX · 정:RULE-BUS-FATE · 정:CAND-BUS-HANDLE-SHAPE · 정:CAND-BUS-SELF-WATCH-VALUES · 정:RULE-OPS-SURFACE · 정:RULE-OPS-OBSERVE · 정:IMPL-ROOM-VERSION-ISSUE · 정:IMPL-ROOM-EMIT · model: claude-opus-5-5
-//! 조율(가로지르는 것) — 미디어 서버 하나의 상태 마스터: 제어 판정은 World 락 하나 안(판번호 증가와 통지 enqueue 가 한 임계 구역) · 핫패스는 RCU 사본만 읽는다 · gRPC Handle · 기동 · 정지.
+// spec: v1.3 @d4cc756 · 정:RULE-DOC-PLANES 정:CAND-DOC-ORCHESTRATION-ASPECT 정:RULE-BUS-SHAPE 정:RULE-BUS-FATE 정:CAND-BUS-SELF-WATCH-VALUES 정:RULE-OPS-LOGGER 정:RULE-OPS-SURFACE 정:RULE-CFG-THREE-PLACES 정:RULE-LINK-TRANSPORT 정:CAND-LINK-UDP-BUFFER 정:IMPL-ROOM-VERSION-ISSUE 운영:RULE-LOG-SENDER 운영:RULE-BOOT-ARGS · model: claude-opus-5-5
+//! sfud 조율 — 기동(배너 · 로깅 · 인증서 · 소켓 · 버스 · Handle) · 레지스트리(방 · Peer) · 통지 내기 · 자가 감시 · 부모 생존.
 
 pub mod admin;
+pub mod aff;
 pub mod call;
-pub mod pubs;
-pub mod rooms;
-pub mod subs;
+pub mod drops;
+pub mod floor;
+pub mod handle;
+pub mod join;
+pub mod peer;
+pub mod publish;
+pub mod sub;
 
-use std::collections::{BTreeMap, HashMap};
+use std::os::fd::AsRawFd;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-use arc_swap::ArcSwap;
-use common::bus::envelope::{Call, Notice, Reply};
-use common::bus::grpc::handle_server::{Handle, HandleServer};
-use common::bus::grpc::{CallReq, CallRes, HelloReq, HelloRes};
+use arc_swap::ArcSwapOption;
+use common::log::{LogHandle, LogOpts, Sink};
+use dashmap::DashMap;
 use oxsig::Op;
+use serde::Serialize;
 
-use crate::aff::Peer;
+use self::drops::Drops;
+use self::peer::Peer;
 use crate::bus::Bus;
-use crate::cfg::Boot;
-use crate::fwd::RoomHot;
-use crate::link::Net;
+use crate::cfg::Config;
+use crate::fwd::Plane;
+use crate::link::dtls::Cert;
+use crate::link::transport::{Io, SOCKET_BUF};
 use crate::room::Room;
 
-pub const UDP_BUF: usize = 4 * 1024 * 1024;
-
-pub struct World {
-    pub rooms: BTreeMap<String, Room>,
-    pub peers: HashMap<String, Arc<Peer>>,
-}
+pub const WATCHDOG_BEAT_MS: u64 = 500;
+pub const WATCHDOG_STALL_MS: u64 = 10_000;
 
 pub struct Sfu {
-    pub boot: Boot,
+    pub cfg: Config,
     pub epoch: String,
-    pub node: String,
-    pub net: Arc<Net>,
+    pub log: LogHandle,
     pub bus: Arc<Bus>,
-    pub world: tokio::sync::Mutex<World>,
-    pub hot: ArcSwap<HashMap<String, Arc<RoomHot>>>,
-    pub peers: ArcSwap<HashMap<String, Arc<Peer>>>,
-    pub counters: crate::err::Counters,
-    pub shutting: std::sync::atomic::AtomicBool,
-    pub me: std::sync::OnceLock<std::sync::Weak<Sfu>>,
+    pub cert: Arc<Cert>,
+    pub io: Arc<Io>,
+    pub plane: Plane,
+    pub rooms: DashMap<String, Arc<Room>>,
+    pub peers: DashMap<String, Arc<Peer>>,
+    pub drops: Drops,
+    pub hub_inst: ArcSwapOption<String>,
+    pub shutting: AtomicBool,
+    pub rooms_op: tokio::sync::Mutex<()>,
+    ids: AtomicU64,
+    beat: Arc<AtomicU64>,
 }
 
 impl Sfu {
-    pub fn self_weak(&self) -> std::sync::Weak<Sfu> {
-        self.me.get().cloned().unwrap_or_default()
+    pub fn next_id(&self) -> u64 {
+        self.ids.fetch_add(1, Ordering::Relaxed)
     }
 
-    pub fn now() -> u64 {
-        common::time::mono_ms()
-    }
-
-    pub fn wall() -> u64 {
-        common::time::wall_ms()
-    }
-
-    pub fn v2(&self) -> bool {
-        matches!(self.boot.policy.media.auto_layer, common::policy::MediaAutolayer::V2)
-    }
-
-    pub fn auto_on(&self) -> bool {
-        !matches!(self.boot.policy.media.auto_layer, common::policy::MediaAutolayer::Off)
-    }
-
-    pub fn room_hot(&self, room: &str) -> Option<Arc<RoomHot>> {
-        self.hot.load().get(room).cloned()
-    }
-
-    pub fn put_hot(&self, h: Arc<RoomHot>) {
-        self.hot.rcu(|m| {
-            let mut m = HashMap::clone(m);
-            m.insert(h.id.clone(), h.clone());
-            m
-        });
-    }
-
-    pub fn drop_hot(&self, room: &str) {
-        self.hot.rcu(|m| {
-            let mut m = HashMap::clone(m);
-            m.remove(room);
-            m
-        });
+    pub fn room(&self, id: &str) -> Option<Arc<Room>> {
+        self.rooms.get(id).map(|r| r.clone())
     }
 
     pub fn peer(&self, user: &str) -> Option<Arc<Peer>> {
-        self.peers.load().get(user).cloned()
+        self.peers.get(user).map(|p| p.clone())
     }
 
-    pub fn sync_peers(&self, w: &World) {
-        self.peers.store(Arc::new(w.peers.clone()));
+    pub fn emit_room<T: Serialize>(&self, room: &str, op: Op, body: &T, exclude: Vec<String>) {
+        if let Ok(s) = serde_json::to_string(body) {
+            self.bus.room_event(room, op.as_u16(), s, exclude);
+        }
     }
 
-    pub fn notice(&self, op: Op, body: serde_json::Value, room: Option<&str>, exclude: Vec<String>, target: Option<&str>) -> Notice {
-        Notice { op: op.as_u16(), body, exclude, room_id: room.map(str::to_string), sfu_id: Some(self.epoch.clone()), target: target.map(str::to_string) }
-    }
-
-    pub fn to_room(&self, room: &str, op: Op, body: serde_json::Value, exclude: Vec<String>) {
-        let n = self.notice(op, body, Some(room), exclude, None);
-        self.bus.to_room(room, &n);
-    }
-
-    pub fn to_user(&self, user: &str, op: Op, body: serde_json::Value, room: Option<&str>) {
-        let n = self.notice(op, body, room, Vec::new(), Some(user));
-        self.bus.to_user(user, &n);
-    }
-
-    pub fn fail(&self, f: oxsig::Failure) -> Reply {
-        self.counters.code(f.code);
-        Reply::Fail(f)
+    pub fn emit_user<T: Serialize>(&self, user: &str, op: Op, body: &T, room: Option<&str>) {
+        if let Ok(s) = serde_json::to_string(body) {
+            self.bus.user_event(user, op.as_u16(), s, room);
+        }
     }
 }
 
-pub struct Svc(pub Arc<Sfu>);
-
-#[tonic::async_trait]
-impl Handle for Svc {
-    async fn hello(&self, req: tonic::Request<HelloReq>) -> Result<tonic::Response<HelloRes>, tonic::Status> {
-        let r = req.into_inner();
-        tracing::info!(kind = "ev", spec = "CAND-BUS-HANDLE-SHAPE", node = %r.node, hub_inst = %r.hub_inst, "Hello from hub");
-        Ok(tonic::Response::new(HelloRes { epoch: self.0.epoch.clone(), build: self.0.boot.build.clone() }))
-    }
-
-    async fn call(&self, req: tonic::Request<CallReq>) -> Result<tonic::Response<CallRes>, tonic::Status> {
-        let env = req.into_inner().envelope;
-        let reply = match Call::decode(&env) {
-            Ok(c) => call::dispatch(&self.0, c).await,
-            Err(e) => self.0.fail(oxsig::Code::InvalidPayload.failure_with(format!("envelope: {e}"), None)),
-        };
-        Ok(tonic::Response::new(CallRes { reply: reply.encode() }))
-    }
+fn set_buf(sock: &std::net::UdpSocket) {
+    use nix::sys::socket::{setsockopt, sockopt};
+    let fd = sock.as_raw_fd();
+    let _ = setsockopt(fd, sockopt::SndBuf, &SOCKET_BUF);
+    let _ = setsockopt(fd, sockopt::RcvBuf, &SOCKET_BUF);
 }
 
-pub async fn run(boot: Boot) -> i32 {
-    let epoch = common::identity::epoch();
-    tracing::info!(kind = "ev", spec = "RULE-CFG-INDEX", "{}", boot.banner(&epoch));
-    let (cert, fingerprint) = match crate::link::shell::make_cert() {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!(kind = "diag", "certificate: {e}");
-            return 2;
-        }
-    };
-    let udp = match tokio::net::UdpSocket::bind(std::net::SocketAddr::new(boot.bind_ip, boot.udp_port)).await {
-        Ok(s) => Arc::new(s),
-        Err(e) => {
-            tracing::error!(kind = "diag", "udp bind {}:{}: {e}", boot.bind_ip, boot.udp_port);
-            return 2;
-        }
-    };
-    let tcp = match boot.tcp_port {
-        Some(p) => match tokio::net::TcpListener::bind(std::net::SocketAddr::new(boot.bind_ip, p)).await {
-            Ok(l) => Some(l),
-            Err(e) => {
-                tracing::error!(kind = "diag", "tcp bind {}:{p}: {e}", boot.bind_ip);
-                return 2;
-            }
-        },
-        None => None,
-    };
-    let fd = std::os::fd::AsRawFd::as_raw_fd(udp.as_ref());
-    let _ = nix::sys::socket::setsockopt(fd, nix::sys::socket::sockopt::SndBuf, &UDP_BUF);
-    let _ = nix::sys::socket::setsockopt(fd, nix::sys::socket::sockopt::RcvBuf, &UDP_BUF);
-    let net = Net::new(udp, boot.public_ip, boot.udp_port, boot.tcp_port, cert, fingerprint);
-    let bus = match Bus::open(&boot.zenoh_connect, &boot.namespace, &boot.node_id, &epoch).await {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::error!(kind = "diag", spec = "CAND-BUS-NO-ZENOH-BOOT", "zenoh connect {}: {e}", boot.zenoh_connect);
-            return 2;
-        }
-    };
-    let grpc_addr = boot.grpc_listen;
-    let sfu = Arc::new(Sfu {
-        node: boot.node_id.clone(),
-        boot,
-        epoch: epoch.clone(),
-        net: net.clone(),
-        bus: bus.clone(),
-        world: tokio::sync::Mutex::new(World { rooms: BTreeMap::new(), peers: HashMap::new() }),
-        hot: ArcSwap::from_pointee(HashMap::new()),
-        peers: ArcSwap::from_pointee(HashMap::new()),
-        counters: crate::err::Counters::default(),
-        shutting: std::sync::atomic::AtomicBool::new(false),
-        me: std::sync::OnceLock::new(),
-    });
-    let _ = sfu.me.set(Arc::downgrade(&sfu));
-    let _ = net.up.set(Arc::new(crate::fwd::Plane(Arc::downgrade(&sfu))));
-    tokio::spawn(crate::link::shell::udp_loop(net.clone()));
-    if let Some(l) = tcp {
-        tokio::spawn(crate::link::shell::tcp_loop(net.clone(), l));
-        tokio::spawn(crate::link::shell::keepalive_loop(net.clone()));
-    }
-    let (home_tx, home_rx) = tokio::sync::mpsc::unbounded_channel();
-    if let Err(e) = bus.watch_nodes(home_tx).await {
-        tracing::error!(kind = "diag", "node watch: {e}");
-        return 2;
-    }
-    tokio::spawn(crate::gc::home_loop(sfu.clone(), home_rx));
-    tokio::spawn(crate::gc::sweep_loop(sfu.clone()));
-    crate::fwd::shell::spawn_loops(&sfu);
-    let beat = common::lifeline::Beat::default();
-    {
-        let b = beat.clone();
-        tokio::spawn(async move {
-            let mut iv = tokio::time::interval(Duration::from_millis(common::lifeline::BEAT_MS));
+fn parent_watch(stop: Arc<tokio::sync::Notify>) {
+    let ppid = std::os::unix::process::parent_id();
+    let fifo = std::fs::metadata("/dev/stdin").map(|m| std::os::unix::fs::FileTypeExt::is_fifo(&m.file_type())).unwrap_or(false);
+    if fifo {
+        let s2 = stop.clone();
+        let _ = std::thread::Builder::new().name("ox-parent".into()).spawn(move || {
+            let mut buf = [0u8; 256];
             loop {
-                iv.tick().await;
-                b.touch();
+                match std::io::Read::read(&mut std::io::stdin(), &mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
             }
+            tracing::warn!("parent channel closed — shutting down");
+            s2.notify_one();
         });
     }
-    common::lifeline::self_watch(beat, |age| {
-        tracing::error!(kind = "diag", spec = "RULE-BUS-FATE", stalled_ms = age, "runtime stalled — exiting");
-        std::process::exit(common::lifeline::EXIT_STALL);
-    });
-    let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
-    common::lifeline::watch_stdin(move || {
-        let _ = stop_tx.send(true);
-    });
-    let svc = HandleServer::new(Svc(sfu.clone())).max_decoding_message_size(16 * 1024 * 1024).max_encoding_message_size(16 * 1024 * 1024);
-    let server = tonic::transport::Server::builder().add_service(svc).serve_with_shutdown(grpc_addr, async move {
-        let _ = stop_rx.changed().await;
-    });
-    tracing::info!(kind = "ev", spec = "RULE-OPS-SURFACE", grpc = %grpc_addr, udp = sfu.net.port, epoch = %sfu.epoch, "ready");
-    let code = match server.await {
-        Ok(()) => 0,
-        Err(e) => {
-            tracing::error!(kind = "diag", "grpc: {e}");
-            2
+    let _ = std::thread::Builder::new().name("ox-orphan".into()).spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_millis(500));
+            if std::os::unix::process::parent_id() != ppid {
+                tracing::warn!("parent changed (orphan) — shutting down");
+                stop.notify_one();
+                std::thread::sleep(Duration::from_secs(3));
+                std::process::exit(0);
+            }
         }
+    });
+}
+
+fn watchdog(beat: Arc<AtomicU64>) {
+    let _ = std::thread::Builder::new().name("ox-watchdog".into()).spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_millis(WATCHDOG_BEAT_MS));
+            let last = beat.load(Ordering::Acquire);
+            let now = common::log::now_ms();
+            if last != 0 && now.saturating_sub(last) > WATCHDOG_STALL_MS {
+                eprintln!("oxsfud watchdog: runtime stalled {} ms — exiting", now.saturating_sub(last));
+                tracing::error!("runtime stalled {} ms — self-watchdog exit", now.saturating_sub(last));
+                std::thread::sleep(Duration::from_millis(200));
+                std::process::exit(70);
+            }
+        }
+    });
+}
+
+pub async fn run(cfg: Config) -> Result<(), String> {
+    let epoch = common::id::instance();
+    let p = &cfg.policy.logging;
+    let sink = match (&cfg.log_socket, &cfg.log_dir) {
+        (Some(s), Some(d)) => Sink::Socket { path: s.into(), spool: common::log::spool_path(d, &cfg.node_id, "sfu"), spool_max: p.spool_max_bytes },
+        (Some(s), None) => Sink::Socket { path: s.into(), spool: common::log::spool_path("/tmp", &cfg.node_id, "sfu"), spool_max: p.spool_max_bytes },
+        _ => Sink::Stdout,
     };
-    sfu.shutting.store(true, std::sync::atomic::Ordering::Relaxed);
-    {
-        let w = sfu.world.lock().await;
-        for p in w.peers.values() {
-            p.close();
+    let log = common::log::init(LogOpts {
+        node: cfg.node_id.clone(),
+        proc_: "sfu",
+        level: common::log::env_level(p.level),
+        line_max: p.line_max_bytes as usize,
+        queue_max: p.queue_max_lines as usize,
+        sink,
+    });
+    log.set_epoch(&epoch);
+    common::ev!(spec = "SV-STATE-UNIT-STATE", build = cfg.build.as_str(), "{} level={}", cfg.banner(&epoch), common::log::level_name(log.level()));
+    let cert = Arc::new(crate::link::dtls::make_cert()?);
+    let std_udp = std::net::UdpSocket::bind((cfg.bind_ip, cfg.udp_port)).map_err(|e| format!("udp bind {}:{}: {e}", cfg.bind_ip, cfg.udp_port))?;
+    set_buf(&std_udp);
+    std_udp.set_nonblocking(true).map_err(|e| e.to_string())?;
+    let udp = Arc::new(tokio::net::UdpSocket::from_std(std_udp).map_err(|e| e.to_string())?);
+    let tcp = match cfg.tcp_port {
+        Some(port) => Some(tokio::net::TcpListener::bind((cfg.bind_ip, port)).await.map_err(|e| format!("tcp bind {port}: {e}"))?),
+        None => None,
+    };
+    let bus = Bus::open(&cfg.zenoh_connect, &cfg.zenoh_namespace, &cfg.node_id, &epoch).await?;
+    let beat = Arc::new(AtomicU64::new(0));
+    let grpc = cfg.grpc_listen.clone();
+    let sfu = Arc::new(Sfu {
+        cfg,
+        epoch,
+        log,
+        bus,
+        cert,
+        io: Arc::new(Io::new(udp)),
+        plane: Plane::default(),
+        rooms: DashMap::new(),
+        peers: DashMap::new(),
+        drops: Drops::default(),
+        hub_inst: ArcSwapOption::empty(),
+        shutting: AtomicBool::new(false),
+        rooms_op: tokio::sync::Mutex::new(()),
+        ids: AtomicU64::new(1),
+        beat: beat.clone(),
+    });
+    watchdog(beat.clone());
+    let b2 = beat.clone();
+    tokio::spawn(async move {
+        loop {
+            b2.store(common::log::now_ms(), Ordering::Release);
+            tokio::time::sleep(Duration::from_millis(WATCHDOG_BEAT_MS)).await;
         }
+    });
+    let stop = Arc::new(tokio::sync::Notify::new());
+    parent_watch(stop.clone());
+    tokio::spawn(crate::fwd::shell::udp_loop(sfu.clone()));
+    if let Some(l) = tcp {
+        tokio::spawn(crate::fwd::shell::tcp_listen(sfu.clone(), l));
     }
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    crate::gc::start(&sfu);
+    let addr: std::net::SocketAddr = grpc.parse().map_err(|e| format!("--grpc-listen {grpc}: {e}"))?;
+    let svc = common::handle::HandleServer::new(handle::Svc { sfu: sfu.clone() });
+    let s3 = stop.clone();
+    let serve = tonic::transport::Server::builder().add_service(svc).serve_with_shutdown(addr, async move {
+        tokio::select! {
+            _ = s3.notified() => {}
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term() => {}
+        }
+    });
+    tracing::info!("sfud ready grpc={addr} udp={} epoch={}", sfu.cfg.udp_port, sfu.epoch);
+    let r = serve.await.map_err(|e| e.to_string());
+    sfu.shutting.store(true, Ordering::Release);
+    common::ev!(spec = "SV-STATE-UNIT-STATE", "sfud shutdown epoch={}", sfu.epoch);
     sfu.bus.close().await;
-    tracing::info!(kind = "ev", spec = "RULE-BUS-FATE", "parent channel closed — stopped");
-    code
+    let _ = sfu.beat.load(Ordering::Relaxed);
+    r
+}
+
+async fn term() {
+    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        Ok(mut s) => {
+            s.recv().await;
+        }
+        Err(_) => std::future::pending::<()>().await,
+    }
 }

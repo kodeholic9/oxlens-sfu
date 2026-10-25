@@ -1,38 +1,36 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @36d1dfd · 정:RULE-SIM-MODES · 정:RULE-SIM-TICK · 정:IMPL-SIM-SWITCH · 정:CAND-SIM-PROBE-SHAPE · 정:RULE-CONC-SANS-IO · 연:RULE-PUB-RID-TO-SPATIAL · model: claude-opus-5-5
-//! 시뮬캐스트 산수(순수) — 속도 제어(GCC §5.5 · libwebrtc AimdRateControl · LinkCapacityEstimator) · 지연 기울기(trendline) · 과사용 판정 · 레이어 판단 tick · 전환 기계.
+// spec: v1.3 @d4cc756 · 정:RULE-SIM-TICK 정:RULE-SIM-MODES 정:RULE-CONC-SANS-IO 정:CAND-SIM-PROBE-SHAPE · model: claude-opus-5-5
+//! 자동 레이어 산수 — GCC(묶음 5ms · trendline · 적응 문턱 · 과사용 판정 · AIMD + 링크 용량 추정) · 강등 사유 넷 · 승격(clean 유지 + backoff) · 프로브 판정. 시계는 인자다.
 
 use std::collections::VecDeque;
 
-pub const START_BPS: u64 = 300_000;
-pub const FLOOR_BPS: u64 = 30_000;
-pub const RTT_MS: f64 = 200.0;
-pub const PACKET_BYTES: f64 = 1200.0;
-pub const FPS: f64 = 30.0;
-pub const BETA: f64 = 0.85;
-pub const DECREASE_GAP_MS: u64 = 300;
-
-pub const LAYER_H_BPS: u64 = 1_650_000;
-pub const LAYER_L_BPS: u64 = 250_000;
+pub const LAYER_H_BPS: f64 = 1_650_000.0;
+pub const LAYER_L_BPS: f64 = 250_000.0;
 pub const HEADROOM: f64 = 1.2;
-pub const LOSS_BAD: f64 = 0.08;
-pub const LOSS_CLEAN: f64 = 0.02;
+pub const LOSS_BAD: f64 = 8.0;
+pub const LOSS_CLEAN: f64 = 2.0;
 pub const NACK_BAD_PER_S: f64 = 20.0;
-pub const DEMOTE_TICKS: u32 = 2;
+pub const BAD_TICKS: u32 = 2;
 pub const TICK_MS: u64 = 1000;
-pub const BACKOFF_START_MS: u64 = 15_000;
-pub const BACKOFF_MAX_MS: u64 = 60_000;
+pub const BACKOFF_INIT_MS: u64 = 15_000;
+pub const BACKOFF_CAP_MS: u64 = 60_000;
 pub const COLLAPSE_MS: u64 = 5_000;
-pub const REMB_GRACE_MS: u64 = 10_000;
-pub const FRESH_REMB_MS: u64 = 5_000;
-pub const FRESH_LOSS_MS: u64 = 6_000;
-pub const PENDING_MS: u64 = 10_000;
-pub const V2_STALE_MS: u64 = 1_000;
-pub const PROBE_RUN_MS: u64 = 2_500;
+pub const PROMOTE_REMB_GRACE_MS: u64 = 10_000;
+pub const REMB_FRESH_MS: u64 = 5_000;
+pub const LOSS_FRESH_MS: u64 = 6_000;
+pub const PENDING_EXPIRE_MS: u64 = 10_000;
+pub const PLI_THROTTLE_H_MS: u64 = 300;
+pub const PLI_THROTTLE_L_MS: u64 = 100;
+pub const PROBE_DURATION_MS: u64 = 2_500;
 pub const PROBE_JUDGE_MS: u64 = 4_000;
 pub const PROBE_CHUNK_MS: u64 = 20;
 pub const PROBE_GAIN: f64 = 1.35;
-pub const PROBE_CAP_BPS: u64 = 3_000_000;
+pub const PROBE_CAP_BPS: f64 = 3_000_000.0;
+pub const PROBE_PAD_BYTES: usize = 224;
+pub const V2_STALE_MS: u64 = 1_000;
+pub const START_BPS: f64 = 300_000.0;
+pub const FLOOR_BPS: f64 = 30_000.0;
+pub const DECREASE_GAP_MS: u64 = 300;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Usage {
@@ -42,165 +40,137 @@ pub enum Usage {
 }
 
 impl Usage {
-    pub fn parse(s: &str) -> Option<Usage> {
+    pub fn parse(s: &str) -> Usage {
         match s {
-            "normal" => Some(Usage::Normal),
-            "overuse" => Some(Usage::Overuse),
-            "underuse" => Some(Usage::Underuse),
-            _ => None,
+            "overuse" => Usage::Overuse,
+            "underuse" => Usage::Underuse,
+            _ => Usage::Normal,
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RateState {
+enum RcState {
     Hold,
     Increase,
     Decrease,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct LinkCapacity {
-    estimate_kbps: Option<f64>,
-    deviation_kbps: f64,
+#[derive(Debug, Clone, Copy)]
+struct LinkCap {
+    est_kbps: f64,
+    dev: f64,
 }
 
-impl Default for LinkCapacity {
-    fn default() -> Self {
-        LinkCapacity { estimate_kbps: None, deviation_kbps: 0.4 }
+impl LinkCap {
+    fn std(&self) -> f64 {
+        (self.dev * self.est_kbps).sqrt()
     }
-}
-
-impl LinkCapacity {
-    fn dev(&self) -> f64 {
-        self.estimate_kbps.map(|e| (self.deviation_kbps * e).sqrt()).unwrap_or(0.0)
+    fn upper(&self) -> f64 {
+        self.est_kbps + 3.0 * self.std()
     }
-
-    pub fn upper_kbps(&self) -> f64 {
-        self.estimate_kbps.map(|e| e + 3.0 * self.dev()).unwrap_or(f64::INFINITY)
-    }
-
-    pub fn lower_kbps(&self) -> f64 {
-        self.estimate_kbps.map(|e| e - 3.0 * self.dev()).unwrap_or(0.0)
-    }
-
-    pub fn reset(&mut self) {
-        self.estimate_kbps = None;
-    }
-
-    pub fn has(&self) -> bool {
-        self.estimate_kbps.is_some()
-    }
-
-    pub fn kbps(&self) -> Option<f64> {
-        self.estimate_kbps
-    }
-
-    pub fn on_overuse(&mut self, sample_kbps: f64) {
-        let alpha = 0.05;
-        let est = match self.estimate_kbps {
-            None => sample_kbps,
-            Some(e) => (1.0 - alpha) * e + alpha * sample_kbps,
-        };
-        self.estimate_kbps = Some(est);
-        let norm = est.max(1.0);
-        let err = est - sample_kbps;
-        self.deviation_kbps = ((1.0 - alpha) * self.deviation_kbps + alpha * err * err / norm).clamp(0.4, 2.5);
+    fn lower(&self) -> f64 {
+        self.est_kbps - 3.0 * self.std()
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct Aimd {
-    rate: u64,
-    state: RateState,
-    last_change_ms: Option<u64>,
-    pub link: LinkCapacity,
-    pub last_decrease_ms: Option<u64>,
+    rate: f64,
+    state: RcState,
+    last_ms: Option<u64>,
+    cap: Option<LinkCap>,
+    rtt_ms: f64,
 }
 
 impl Aimd {
-    pub fn new(start_bps: u64) -> Aimd {
-        Aimd { rate: start_bps, state: RateState::Hold, last_change_ms: None, link: LinkCapacity::default(), last_decrease_ms: None }
+    pub fn new(start_bps: f64) -> Aimd {
+        Aimd { rate: start_bps, state: RcState::Hold, last_ms: None, cap: None, rtt_ms: 200.0 }
     }
 
-    pub fn rate(&self) -> u64 {
-        self.rate
+    pub fn rate_bps(&self) -> u64 {
+        self.rate as u64
     }
 
     pub fn near(&self) -> bool {
-        self.link.has()
+        self.cap.is_some()
     }
 
-    pub fn reset_rate(&mut self, bps: u64) {
-        self.rate = bps.max(FLOOR_BPS);
-        self.link.reset();
+    fn cap_update(&mut self, sample_kbps: f64) {
+        const A: f64 = 0.05;
+        let c = match self.cap {
+            None => LinkCap { est_kbps: sample_kbps, dev: 0.4 },
+            Some(c) => LinkCap { est_kbps: (1.0 - A) * c.est_kbps + A * sample_kbps, dev: c.dev },
+        };
+        let norm = c.est_kbps.max(1.0);
+        let err = c.est_kbps - sample_kbps;
+        let dev = ((1.0 - A) * c.dev + A * err * err / norm).clamp(0.4, 2.5);
+        self.cap = Some(LinkCap { est_kbps: c.est_kbps, dev });
     }
 
-    fn near_max_increase_bps_per_s(&self) -> f64 {
-        let frame_bytes = self.rate as f64 / 8.0 / FPS;
-        let packets = (frame_bytes / PACKET_BYTES).ceil().max(1.0);
-        let avg_bits = frame_bytes / packets * 8.0;
-        let response_s = 2.0 * (RTT_MS + 100.0) / 1000.0;
-        (avg_bits / response_s).max(4000.0)
+    fn additive_bps_per_s(&self) -> f64 {
+        let frame_bytes = self.rate / 30.0 / 8.0;
+        let packets = (frame_bytes / 1200.0).ceil().max(1.0);
+        let avg_packet_bits = frame_bytes / packets * 8.0;
+        let response_s = 2.0 * (self.rtt_ms + 100.0) / 1000.0;
+        (avg_packet_bits / response_s).max(4000.0)
     }
 
-    pub fn update(&mut self, usage: Usage, acked_bps: u64, now_ms: u64) -> u64 {
-        match usage {
-            Usage::Normal => {
-                if self.state == RateState::Hold {
-                    self.last_change_ms = Some(now_ms);
-                    self.state = RateState::Increase;
-                }
-            }
-            Usage::Overuse => self.state = RateState::Decrease,
-            Usage::Underuse => self.state = RateState::Hold,
-        }
-        let acked = acked_bps as f64;
-        let cur = self.rate as f64;
-        let limit = 1.5 * acked + 10_000.0;
-        let mut new_rate: Option<f64> = None;
+    pub fn update(&mut self, at_ms: u64, usage: Usage, acked_bps: f64) -> (u64, bool) {
+        let elapsed_s = self.last_ms.map(|l| at_ms.saturating_sub(l) as f64 / 1000.0).unwrap_or(0.0);
+        let prev = self.state;
+        self.state = match usage {
+            Usage::Overuse => RcState::Decrease,
+            Usage::Underuse => RcState::Hold,
+            Usage::Normal => match self.state {
+                RcState::Hold => RcState::Increase,
+                s => s,
+            },
+        };
+        let acked_kbps = acked_bps / 1000.0;
         match self.state {
-            RateState::Hold => {}
-            RateState::Increase => {
-                if acked / 1000.0 > self.link.upper_kbps() {
-                    self.link.reset();
+            RcState::Hold => {}
+            RcState::Increase => {
+                if let Some(c) = self.cap
+                    && acked_kbps > c.upper()
+                {
+                    self.cap = None;
                 }
-                if cur < limit {
-                    let elapsed_s = self.last_change_ms.map(|t| now_ms.saturating_sub(t) as f64 / 1000.0).unwrap_or(0.0);
-                    let inc = if self.link.has() {
-                        self.near_max_increase_bps_per_s() * elapsed_s
-                    } else {
-                        (cur * (1.08f64.powf(elapsed_s.min(1.0)) - 1.0)).max(1000.0)
+                let elapsed = if prev == RcState::Hold { 0.0 } else { elapsed_s };
+                let limit = 1.5 * acked_bps + 10_000.0;
+                if self.rate < limit {
+                    let inc = match self.cap {
+                        Some(_) => self.additive_bps_per_s() * elapsed,
+                        None => (self.rate * (1.08f64.powf(elapsed.min(1.0)) - 1.0)).max(1000.0),
                     };
-                    new_rate = Some((cur + inc).min(limit));
+                    self.rate = (self.rate + inc).min(limit);
                 }
-                self.last_change_ms = Some(now_ms);
             }
-            RateState::Decrease => {
-                let mut dec = acked * BETA;
+            RcState::Decrease => {
+                let mut dec = 0.85 * acked_bps;
                 if dec > 5000.0 {
                     dec -= 5000.0;
                 }
-                if dec > cur
-                    && let Some(e) = self.link.kbps()
+                if dec > self.rate
+                    && let Some(c) = self.cap
                 {
-                    dec = BETA * e * 1000.0;
+                    dec = 0.85 * c.est_kbps * 1000.0;
                 }
-                if dec < cur {
-                    new_rate = Some(dec);
+                if dec < self.rate {
+                    self.rate = dec;
                 }
-                if acked / 1000.0 < self.link.lower_kbps() {
-                    self.link.reset();
+                if let Some(c) = self.cap
+                    && acked_kbps < c.lower()
+                {
+                    self.cap = None;
                 }
-                self.link.on_overuse(acked / 1000.0);
-                self.state = RateState::Hold;
-                self.last_change_ms = Some(now_ms);
-                self.last_decrease_ms = Some(now_ms);
+                self.cap_update(acked_kbps);
+                self.state = RcState::Hold;
             }
         }
-        let next = new_rate.map(|r| r as u64).unwrap_or(self.rate);
-        self.rate = next.max(FLOOR_BPS);
-        self.rate
+        self.rate = self.rate.max(FLOOR_BPS).floor();
+        self.last_ms = Some(at_ms);
+        (self.rate as u64, self.cap.is_some())
     }
 }
 
@@ -210,101 +180,110 @@ pub struct Trendline {
     acc_delay: f64,
     smoothed: f64,
     first_ms: Option<f64>,
-    deltas: u32,
-    pub prev_trend: f64,
-}
-
-impl Default for Trendline {
-    fn default() -> Self {
-        Trendline { window: VecDeque::new(), acc_delay: 0.0, smoothed: 0.0, first_ms: None, deltas: 0, prev_trend: 0.0 }
-    }
-}
-
-pub const TRENDLINE_WINDOW: usize = 20;
-pub const TRENDLINE_SMOOTHING: f64 = 0.9;
-pub const TRENDLINE_GAIN: f64 = 4.0;
-
-impl Trendline {
-    pub fn update(&mut self, recv_delta_ms: f64, send_delta_ms: f64, arrival_ms: f64) -> Option<f64> {
-        let delta = recv_delta_ms - send_delta_ms;
-        self.deltas = (self.deltas + 1).min(1000);
-        let first = *self.first_ms.get_or_insert(arrival_ms);
-        self.acc_delay += delta;
-        self.smoothed = TRENDLINE_SMOOTHING * self.smoothed + (1.0 - TRENDLINE_SMOOTHING) * self.acc_delay;
-        self.window.push_back((arrival_ms - first, self.smoothed));
-        if self.window.len() > TRENDLINE_WINDOW {
-            self.window.pop_front();
-        }
-        if self.window.len() < TRENDLINE_WINDOW {
-            return None;
-        }
-        let n = self.window.len() as f64;
-        let mx = self.window.iter().map(|p| p.0).sum::<f64>() / n;
-        let my = self.window.iter().map(|p| p.1).sum::<f64>() / n;
-        let num: f64 = self.window.iter().map(|p| (p.0 - mx) * (p.1 - my)).sum();
-        let den: f64 = self.window.iter().map(|p| (p.0 - mx) * (p.0 - mx)).sum();
-        if den == 0.0 {
-            return None;
-        }
-        let slope = num / den;
-        let modified = (self.deltas.min(60) as f64) * slope * TRENDLINE_GAIN;
-        Some(modified)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Overuse {
+    num_deltas: u32,
     threshold: f64,
-    last_update_ms: Option<f64>,
-    over_ms: f64,
-    over_count: u32,
+    last_threshold_ms: Option<f64>,
+    overuse_ms: f64,
+    overuse_count: u32,
+    prev_trend: f64,
     prev_m: f64,
     pub usage: Usage,
 }
 
-impl Default for Overuse {
+impl Default for Trendline {
     fn default() -> Self {
-        Overuse { threshold: 12.5, last_update_ms: None, over_ms: -1.0, over_count: 0, prev_m: 0.0, usage: Usage::Normal }
+        Trendline {
+            window: VecDeque::new(),
+            acc_delay: 0.0,
+            smoothed: 0.0,
+            first_ms: None,
+            num_deltas: 0,
+            threshold: 12.5,
+            last_threshold_ms: None,
+            overuse_ms: -1.0,
+            overuse_count: 0,
+            prev_trend: 0.0,
+            prev_m: 0.0,
+            usage: Usage::Normal,
+        }
     }
 }
 
-impl Overuse {
-    pub fn detect(&mut self, m: f64, ts_delta_ms: f64, now_ms: f64) -> Usage {
-        if m > self.threshold {
-            if self.over_ms < 0.0 {
-                self.over_ms = ts_delta_ms / 2.0;
-            } else {
-                self.over_ms += ts_delta_ms;
+impl Trendline {
+    const WINDOW: usize = 20;
+    const SMOOTHING: f64 = 0.9;
+    const GAIN: f64 = 4.0;
+    const K_UP: f64 = 0.0087;
+    const K_DOWN: f64 = 0.039;
+    const OVERUSE_TIME_MS: f64 = 10.0;
+
+    pub fn update(&mut self, recv_delta_ms: f64, send_delta_ms: f64, arrival_ms: f64) -> Usage {
+        let delay = recv_delta_ms - send_delta_ms;
+        self.num_deltas = (self.num_deltas + 1).min(1000);
+        let first = *self.first_ms.get_or_insert(arrival_ms);
+        self.acc_delay += delay;
+        self.smoothed = Self::SMOOTHING * self.smoothed + (1.0 - Self::SMOOTHING) * self.acc_delay;
+        self.window.push_back((arrival_ms - first, self.smoothed));
+        if self.window.len() > Self::WINDOW {
+            self.window.pop_front();
+        }
+        let mut trend = self.prev_trend;
+        if self.window.len() == Self::WINDOW {
+            let n = self.window.len() as f64;
+            let mx = self.window.iter().map(|p| p.0).sum::<f64>() / n;
+            let my = self.window.iter().map(|p| p.1).sum::<f64>() / n;
+            let num: f64 = self.window.iter().map(|p| (p.0 - mx) * (p.1 - my)).sum();
+            let den: f64 = self.window.iter().map(|p| (p.0 - mx) * (p.0 - mx)).sum();
+            if den != 0.0 {
+                trend = num / den;
             }
-            self.over_count += 1;
-            if self.over_ms > 10.0 && self.over_count > 1 && m >= self.prev_m {
-                self.over_ms = 0.0;
-                self.over_count = 0;
+        }
+        self.detect(trend, send_delta_ms, arrival_ms);
+        self.prev_trend = trend;
+        self.usage
+    }
+
+    fn detect(&mut self, trend: f64, ts_delta_ms: f64, now_ms: f64) {
+        if self.num_deltas < 2 {
+            self.usage = Usage::Normal;
+            return;
+        }
+        let m = (self.num_deltas.min(60) as f64) * trend * Self::GAIN;
+        if m > self.threshold {
+            if self.overuse_ms < 0.0 {
+                self.overuse_ms = ts_delta_ms / 2.0;
+            } else {
+                self.overuse_ms += ts_delta_ms;
+            }
+            self.overuse_count += 1;
+            if self.overuse_ms > Self::OVERUSE_TIME_MS && self.overuse_count > 1 && trend >= self.prev_trend {
+                self.overuse_ms = 0.0;
+                self.overuse_count = 0;
                 self.usage = Usage::Overuse;
             }
         } else if m < -self.threshold {
-            self.over_ms = -1.0;
+            self.overuse_ms = -1.0;
+            self.overuse_count = 0;
             self.usage = Usage::Underuse;
         } else {
-            self.over_ms = -1.0;
+            self.overuse_ms = -1.0;
+            self.overuse_count = 0;
             self.usage = Usage::Normal;
         }
         self.prev_m = m;
         self.adapt(m, now_ms);
-        self.usage
     }
 
     fn adapt(&mut self, m: f64, now_ms: f64) {
-        let last = self.last_update_ms.unwrap_or(now_ms);
+        let last = *self.last_threshold_ms.get_or_insert(now_ms);
         if m.abs() > self.threshold + 15.0 {
-            self.last_update_ms = Some(now_ms);
+            self.last_threshold_ms = Some(now_ms);
             return;
         }
-        let k = if m.abs() < self.threshold { 0.039 } else { 0.0087 };
+        let k = if m.abs() < self.threshold { Self::K_DOWN } else { Self::K_UP };
         let dt = (now_ms - last).min(100.0);
-        self.threshold += k * (m.abs() - self.threshold) * dt;
-        self.threshold = self.threshold.clamp(6.0, 600.0);
-        self.last_update_ms = Some(now_ms);
+        self.threshold = (self.threshold + k * (m.abs() - self.threshold) * dt).clamp(6.0, 600.0);
+        self.last_threshold_ms = Some(now_ms);
     }
 }
 
@@ -316,24 +295,12 @@ pub enum Layer {
 }
 
 impl Layer {
-    pub fn spatial(self) -> Option<u8> {
+    pub fn rid(self) -> Option<&'static str> {
         match self {
-            Layer::High => Some(1),
-            Layer::Low => Some(0),
+            Layer::High => Some("h"),
+            Layer::Low => Some("l"),
             Layer::Pause => None,
         }
-    }
-
-    pub fn rid(self) -> &'static str {
-        match self {
-            Layer::High => "h",
-            Layer::Low => "l",
-            Layer::Pause => "",
-        }
-    }
-
-    pub fn from_spatial(s: u8) -> Layer {
-        if s == 0 { Layer::Low } else { Layer::High }
     }
 }
 
@@ -345,190 +312,127 @@ pub enum Reason {
     Drop,
 }
 
-impl Reason {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Reason::Remb => "remb",
-            Reason::Loss => "loss",
-            Reason::Nack => "nack",
-            Reason::Drop => "drop",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Signals {
-    pub estimate_bps: Option<u64>,
-    pub estimate_at_ms: u64,
-    pub loss: Option<f64>,
-    pub loss_at_ms: u64,
+    pub estimate_bps: Option<(f64, u64)>,
+    pub overuse: bool,
+    pub loss_pct: Option<(f64, u64)>,
     pub nack_per_s: f64,
     pub drops: u64,
-    pub overusing: bool,
-    pub v2_fresh: bool,
-    pub tracks: u32,
+    pub demand_bps: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Decision {
+    Stay,
+    Demote(Reason),
+    Promote,
+    ProbeStart { rate_bps: f64 },
 }
 
 #[derive(Debug, Clone)]
 pub struct Policy {
     pub layer: Layer,
-    pub backoff_ms: u64,
-    pub last_demote_ms: Option<u64>,
-    pub last_promote_ms: Option<u64>,
-    streak: [u32; 4],
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Verdict {
-    Stay,
-    Demote(Reason),
-    Promote,
+    bad: Option<(Reason, u32)>,
+    clean_since: Option<u64>,
+    last_demote: Option<u64>,
+    last_promote: Option<u64>,
+    backoff_ms: u64,
+    pub probing: Option<(u64, f64)>,
 }
 
 impl Default for Policy {
     fn default() -> Self {
-        Policy { layer: Layer::High, backoff_ms: BACKOFF_START_MS, last_demote_ms: None, last_promote_ms: None, streak: [0; 4] }
+        Policy { layer: Layer::High, bad: None, clean_since: None, last_demote: None, last_promote: None, backoff_ms: BACKOFF_INIT_MS, probing: None }
     }
 }
 
 impl Policy {
-    pub fn demand_bps(tracks: u32, layer: Layer) -> u64 {
-        let per = match layer {
-            Layer::High => LAYER_H_BPS,
-            Layer::Low | Layer::Pause => LAYER_L_BPS,
+    fn fresh(v: Option<(f64, u64)>, now: u64, ttl: u64) -> Option<f64> {
+        v.filter(|(_, at)| now.saturating_sub(*at) <= ttl).map(|(x, _)| x)
+    }
+
+    pub fn tick(&mut self, now: u64, s: &Signals) -> Decision {
+        let est = Self::fresh(s.estimate_bps, now, REMB_FRESH_MS);
+        let loss = Self::fresh(s.loss_pct, now, LOSS_FRESH_MS);
+        let need = s.demand_bps * HEADROOM;
+        let in_grace = self.last_promote.is_some_and(|p| now.saturating_sub(p) < PROMOTE_REMB_GRACE_MS);
+        let reason = if !in_grace && est.is_some_and(|e| e < need) && self.layer == Layer::High {
+            Some(Reason::Remb)
+        } else if loss.is_some_and(|l| l >= LOSS_BAD) {
+            Some(Reason::Loss)
+        } else if s.nack_per_s > NACK_BAD_PER_S {
+            Some(Reason::Nack)
+        } else if s.drops > 0 {
+            Some(Reason::Drop)
+        } else {
+            None
         };
-        per * tracks.max(1) as u64
-    }
-
-    pub fn probe_due(&self, now_ms: u64, s: &Signals) -> Option<u64> {
-        if self.layer != Layer::Low || !s.v2_fresh {
-            return None;
-        }
-        let fresh_loss = s.loss.filter(|_| now_ms.saturating_sub(s.loss_at_ms) <= FRESH_LOSS_MS);
-        let clean = fresh_loss.map(|l| l <= LOSS_CLEAN).unwrap_or(true) && s.drops == 0 && !s.overusing;
-        let waited = self.last_demote_ms.map(|t| now_ms.saturating_sub(t) >= self.backoff_ms).unwrap_or(true);
-        let need = (Policy::demand_bps(s.tracks, Layer::High) as f64 * HEADROOM) as u64;
-        let short = s.estimate_bps.map(|e| e < need).unwrap_or(true);
-        (clean && waited && short).then(|| ((need as f64 * PROBE_GAIN) as u64).min(PROBE_CAP_BPS))
-    }
-
-    pub fn tick(&mut self, now_ms: u64, s: &Signals) -> Verdict {
-        let fresh_est = s.estimate_bps.filter(|_| now_ms.saturating_sub(s.estimate_at_ms) <= FRESH_REMB_MS);
-        let fresh_loss = s.loss.filter(|_| now_ms.saturating_sub(s.loss_at_ms) <= FRESH_LOSS_MS);
-        let in_grace = self.last_promote_ms.map(|t| now_ms.saturating_sub(t) < REMB_GRACE_MS).unwrap_or(false);
-        let need = (Policy::demand_bps(s.tracks, Layer::High) as f64 * HEADROOM) as u64;
-        let conds = [
-            !in_grace && fresh_est.map(|e| e < need).unwrap_or(false),
-            fresh_loss.map(|l| l > LOSS_BAD).unwrap_or(false),
-            s.nack_per_s > NACK_BAD_PER_S,
-            s.drops > 0,
-        ];
-        for (i, c) in conds.iter().enumerate() {
-            if *c {
-                self.streak[i] += 1;
-            } else {
-                self.streak[i] = 0;
-            }
-        }
+        let clean = loss.is_none_or(|l| l <= LOSS_CLEAN) && !s.overuse && reason.is_none();
         if self.layer == Layer::High {
-            let reasons = [Reason::Remb, Reason::Loss, Reason::Nack, Reason::Drop];
-            for (i, r) in reasons.iter().enumerate() {
-                if self.streak[i] >= DEMOTE_TICKS {
-                    let collapsed = self.last_promote_ms.map(|t| now_ms.saturating_sub(t) < COLLAPSE_MS).unwrap_or(false);
-                    if collapsed {
-                        self.backoff_ms = (self.backoff_ms * 2).min(BACKOFF_MAX_MS);
+            if let Some(r) = reason {
+                let n = match self.bad {
+                    Some((pr, c)) if pr == r => c + 1,
+                    _ => 1,
+                };
+                self.bad = Some((r, n));
+                if n >= BAD_TICKS {
+                    self.bad = None;
+                    if self.last_promote.is_some_and(|p| now.saturating_sub(p) < COLLAPSE_MS) {
+                        self.backoff_ms = (self.backoff_ms * 2).min(BACKOFF_CAP_MS);
                     }
                     self.layer = Layer::Low;
-                    self.last_demote_ms = Some(now_ms);
-                    self.streak = [0; 4];
-                    return Verdict::Demote(*r);
+                    self.last_demote = Some(now);
+                    self.clean_since = None;
+                    return Decision::Demote(r);
                 }
+            } else {
+                self.bad = None;
             }
-            return Verdict::Stay;
+            return Decision::Stay;
         }
-        if self.layer == Layer::Low {
-            let clean = fresh_loss.map(|l| l <= LOSS_CLEAN).unwrap_or(true) && s.drops == 0 && !s.overusing;
-            let waited = self.last_demote_ms.map(|t| now_ms.saturating_sub(t) >= self.backoff_ms).unwrap_or(true);
-            let room = fresh_est.map(|e| e >= need).unwrap_or(fresh_est.is_none() && !s.v2_fresh);
-            if clean && waited && room {
-                self.layer = Layer::High;
-                self.last_promote_ms = Some(now_ms);
-                return Verdict::Promote;
-            }
-            if !clean {
-                self.last_demote_ms = Some(now_ms);
-            }
+        if !clean {
+            self.clean_since = None;
+            return Decision::Stay;
         }
-        Verdict::Stay
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Step {
-    Forward,
-    Drop,
-    Switched,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Switch {
-    pub current: Option<Layer>,
-    pub target: Layer,
-    pub pending_since: Option<u64>,
-    pub other_since: Option<u64>,
-}
-
-impl Switch {
-    pub fn new(target: Layer) -> Switch {
-        Switch { current: None, target, pending_since: None, other_since: None }
+        let since = *self.clean_since.get_or_insert(now);
+        let backoff_ok = self.last_demote.is_none_or(|d| now.saturating_sub(d) >= self.backoff_ms);
+        if !backoff_ok || now.saturating_sub(since) < TICK_MS {
+            return Decision::Stay;
+        }
+        if est.is_some_and(|e| e >= need) || est.is_none() {
+            self.layer = Layer::High;
+            self.last_promote = Some(now);
+            self.clean_since = None;
+            self.probing = None;
+            return Decision::Promote;
+        }
+        if self.probing.is_none() {
+            let rate = (need * PROBE_GAIN).min(PROBE_CAP_BPS);
+            self.probing = Some((now, rate));
+            return Decision::ProbeStart { rate_bps: rate };
+        }
+        Decision::Stay
     }
 
-    pub fn retarget(&mut self, target: Layer, now_ms: u64) -> bool {
-        if self.target == target {
-            return false;
+    pub fn probe_result(&mut self, now: u64, measured_bps: Option<f64>, demand_bps: f64) -> Option<f64> {
+        let (started, _) = self.probing?;
+        if now.saturating_sub(started) < PROBE_JUDGE_MS {
+            return None;
         }
-        self.target = target;
-        if Some(target) != self.current && target != Layer::Pause {
-            self.pending_since = Some(now_ms);
-            return true;
+        self.probing = None;
+        match measured_bps {
+            Some(m) if m >= demand_bps * HEADROOM => Some(m),
+            _ => {
+                self.last_demote = Some(now);
+                self.clean_since = None;
+                None
+            }
         }
-        self.pending_since = None;
-        false
     }
 
-    pub fn step(&mut self, layer: Layer, keyframe: bool, now_ms: u64) -> Step {
-        if let Some(p) = self.pending_since
-            && now_ms.saturating_sub(p) >= PENDING_MS
-        {
-            self.pending_since = None;
-            if let Some(c) = self.current {
-                self.target = c;
-            }
-        }
-        if self.target == Layer::Pause {
-            return Step::Drop;
-        }
-        if layer == self.target && Some(layer) != self.current {
-            if keyframe {
-                self.current = Some(layer);
-                self.pending_since = None;
-                self.other_since = None;
-                return Step::Switched;
-            }
-            return Step::Drop;
-        }
-        if Some(layer) == self.current {
-            self.other_since = None;
-            return Step::Forward;
-        }
-        if self.current == Some(Layer::High) && layer == Layer::Low {
-            let since = *self.other_since.get_or_insert(now_ms);
-            if now_ms.saturating_sub(since) >= 1000 && self.target == Layer::High {
-                self.target = Layer::Low;
-                self.pending_since = Some(now_ms);
-            }
-        }
-        Step::Drop
+    pub fn force(&mut self, layer: Layer) {
+        self.layer = layer;
     }
 }
 
@@ -537,32 +441,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn switch_waits_for_target_keyframe() {
-        let mut s = Switch::new(Layer::High);
-        assert_eq!(s.step(Layer::High, false, 0), Step::Drop);
-        assert_eq!(s.step(Layer::High, true, 10), Step::Switched);
-        assert_eq!(s.step(Layer::High, false, 20), Step::Forward);
-        assert!(s.retarget(Layer::Low, 30));
-        assert_eq!(s.step(Layer::High, false, 40), Step::Forward, "target 키프레임 전까지 current 를 릴레이한다");
-        assert_eq!(s.step(Layer::Low, true, 50), Step::Switched);
-        assert!(s.retarget(Layer::High, 60));
-        assert_eq!(s.step(Layer::Low, false, 60 + PENDING_MS), Step::Forward, "pending 만료 10s 면 현재 층으로");
-    }
-
-    #[test]
-    fn policy_demotes_after_two_ticks_and_backs_off() {
+    fn demote_needs_two_ticks_and_promote_waits_backoff() {
         let mut p = Policy::default();
-        let bad = Signals { loss: Some(0.2), loss_at_ms: 0, tracks: 1, ..Signals::default() };
-        assert_eq!(p.tick(0, &bad), Verdict::Stay);
-        assert_eq!(p.tick(1000, &Signals { loss_at_ms: 1000, ..bad }), Verdict::Demote(Reason::Loss));
-        let good = Signals { loss: Some(0.0), loss_at_ms: 2000, tracks: 1, ..Signals::default() };
-        assert_eq!(p.tick(2000, &good), Verdict::Stay);
-        assert_eq!(p.tick(1000 + BACKOFF_START_MS, &Signals { loss_at_ms: 1000 + BACKOFF_START_MS, ..good }), Verdict::Promote);
+        let bad = Signals { loss_pct: Some((10.0, 0)), demand_bps: LAYER_H_BPS, ..Default::default() };
+        assert_eq!(p.tick(0, &bad), Decision::Stay);
+        assert_eq!(p.tick(1000, &Signals { loss_pct: Some((10.0, 1000)), ..bad }), Decision::Demote(Reason::Loss));
+        let good = |t| Signals { loss_pct: Some((0.0, t)), demand_bps: LAYER_H_BPS, ..Default::default() };
+        assert_eq!(p.tick(5000, &good(5000)), Decision::Stay);
+        assert_eq!(p.tick(15_999, &good(15_999)), Decision::Stay);
+        assert_eq!(p.tick(16_000, &good(16_000)), Decision::Promote);
     }
 
     #[test]
-    fn abs_layers() {
-        assert_eq!(Layer::from_spatial(0), Layer::Low);
-        assert_eq!(Layer::High.spatial(), Some(1));
+    fn trendline_flags_rising_delay() {
+        let mut t = Trendline::default();
+        let mut u = Usage::Normal;
+        for i in 0..60 {
+            u = t.update(5.0 + i as f64 * 0.5, 5.0, i as f64 * 5.0);
+        }
+        assert_eq!(u, Usage::Overuse);
     }
 }

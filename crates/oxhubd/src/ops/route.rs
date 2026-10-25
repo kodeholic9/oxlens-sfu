@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.3 @d4cc756 · 정:RULE-BUS-REQUEST 정:IMPL-ROOM-JOIN 정:IMPL-SES-ADMISSION 정:IMPL-ERR-ISSUERS 정:RULE-BUS-EVENTS 정:IMPL-AUX-MESSAGE 정:IMPL-AUX-TASK 정:IMPL-LINK-ICE-RESTART 정:CAND-DOC-ORCHESTRATION-ASPECT 정:CAND-AUX-TASK-CLIENT-REQUEST 연:RULE-ROOM-JOIN-NUMBER-TAGS 연:RULE-ROOM-CREATE-FORM 연:RULE-ERR-FAILURE-FORM 연:DEV-ROOM-JOIN-FAIL-4009 연:RULE-AUX-TASK-PROC · model: claude-opus-5-5
+// spec: v1.3 @d4cc756 · 정:RULE-BUS-REQUEST 정:IMPL-ROOM-JOIN 정:IMPL-SES-ADMISSION 정:IMPL-ERR-ISSUERS 정:RULE-BUS-EVENTS 정:IMPL-AUX-MESSAGE 정:IMPL-AUX-TASK 정:IMPL-LINK-ICE-RESTART 정:CAND-DOC-ORCHESTRATION-ASPECT 정:CAND-AUX-TASK-CLIENT-REQUEST 정:IMPL-AFF-PUB-ROOM 정:CAND-AFF-SPLIT-ROUTE 연:RULE-ROOM-JOIN-NUMBER-TAGS 연:RULE-ROOM-CREATE-FORM 연:RULE-ERR-FAILURE-FORM 연:DEV-ROOM-JOIN-FAIL-4009 연:RULE-AUX-TASK-PROC · model: claude-opus-5-5
 //! op 길 — 클라 요청 하나를 게이트웨이 검사(①) 뒤 그 방 · 그 서버의 미디어 서버로 넘기고 응답이 나르는 진실로 서버별 입장 방 집합을 갈아 끼운다.
 
 use std::collections::BTreeSet;
@@ -140,13 +140,7 @@ pub async fn handle(hub: &Arc<Hub>, s: &Arc<Session>, op_num: u16, body: Vec<u8>
                 (None, None) => {
                     return Err(Code::MissingField.failure_msg("pub_select · pub_deselect 둘 다 없음"));
                 }
-                (Some(a), Some(b)) => match (hub.bus.room_where(a), hub.bus.room_where(b)) {
-                    (Some(x), Some(y)) if x.0 == y.0 => x,
-                    (Some(_), Some(_)) => {
-                        return Err(Code::InvalidPayload.failure_msg("두 방이 다른 서버 — 서버마다 따로 보낸다"));
-                    }
-                    _ => return Err(Code::RoomNotFound.failure()),
-                },
+                (Some(a), Some(b)) => hub.bus.room_where(a).or_else(|| hub.bus.room_where(b)).ok_or_else(|| Code::RoomNotFound.failure())?,
                 (Some(a), None) | (None, Some(a)) => hub.bus.room_where(a).ok_or_else(|| Code::RoomNotFound.failure())?,
             };
             let r = forward(hub, s, &target.0, Some(&target.1), op, body).await;
