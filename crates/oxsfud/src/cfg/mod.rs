@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.3 @d4cc756 · 정:RULE-CFG-THREE-PLACES 정:IMPL-CFG-SYSTEM-FILE 정:CAND-CFG-SFUD-DEFAULT-PORTS 정:RULE-BUS-SHAPE 정:CAND-BUS-NO-ZENOH-BOOT 정:RULE-LINK-TRANSPORT 운영:RULE-BOOT-ARGS · model: claude-opus-5-5
+// spec: v1.3 @d4cc756 · 정:RULE-CFG-THREE-PLACES 정:IMPL-CFG-SYSTEM-FILE 정:CAND-CFG-SFUD-DEFAULT-PORTS 정:RULE-BUS-SHAPE 정:CAND-BUS-NO-ZENOH-BOOT 정:RULE-LINK-TRANSPORT 운영:RULE-BOOT-ARGS 정:CAND-CFG-SFUD-NODE-GRACE · model: claude-opus-5-5
 //! sfud 기동 인자 · 정책 파일 — 포트는 기본값이 없다 · 버스 좌표가 없으면 기동 실패 · public-ip `auto` 는 기본 인터페이스 주소.
 
 use std::net::{IpAddr, Ipv4Addr, UdpSocket};

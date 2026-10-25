@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.3 @d4cc756 · 정:IMPL-FLR-LOCK 정:IMPL-FLR-RTP-OBSERVE 정:IMPL-FLR-POLICY 정:IMPL-FLR-FIRST-NOTICE 정:RULE-FLR-SNAPSHOT 정:RULE-CONC-SIX 정:RULE-GC-FOUR 운영:RULE-READ-ROOM-DETAIL 연:RULE-FLR-TIMERS 연:ASM-FLR-RTP-INSTANT · model: claude-opus-5-5
+// spec: v1.3 @d4cc756 · 정:IMPL-FLR-LOCK 정:IMPL-FLR-RTP-OBSERVE 정:IMPL-FLR-POLICY 정:IMPL-FLR-FIRST-NOTICE 정:RULE-FLR-SNAPSHOT 정:RULE-CONC-SIX 정:RULE-GC-FOUR 운영:RULE-READ-ROOM-DETAIL 연:RULE-FLR-TIMERS 연:ASM-FLR-RTP-INSTANT 정:CAND-FLR-MEMBER-JOIN-INIT · model: claude-opus-5-5
 //! 방마다 한 락 — 판정은 락 안(생성 판정 로직), 보낼 것 · 효과는 목록으로 돌려 락 밖에서 집행 · 타이머는 만료 시각으로(가장 이른 시각에 깨어난다) · RTP 는 사람마다 500ms 에 한 번(첫 RTP 즉시).
 
 pub mod core;

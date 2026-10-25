@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.3 @d4cc756 · 정:IMPL-PUB-ACCEPT 정:IMPL-PUB-ADD 정:CAND-PUB-H264-PROFILE 정:IMPL-ROOM-SERVER-CONFIG 연:RULE-ROOM-MEDIA-CODECS 연:RULE-LINK-EGRESS-REWRITE · model: claude-opus-5-5
+// spec: v1.3 @d4cc756 · 정:IMPL-PUB-ACCEPT 정:IMPL-PUB-ADD 정:CAND-PUB-H264-PROFILE 정:IMPL-ROOM-SERVER-CONFIG 연:RULE-ROOM-MEDIA-CODECS 연:RULE-LINK-EGRESS-REWRITE 정:CAND-PUB-CODEC-REGISTRY-PLACE · model: claude-opus-5-5
 //! 코덱 등록부 단일 출처 — 지원 video = 키프레임 판정기가 있는 것(VP8 · H264) · 방 코덱 견줌은 파라미터로(H264 = packetization-mode · profile 앞 네 자리) · 구독 줄의 고정 fmtp.
 
 use oxsig::msg::Kind;

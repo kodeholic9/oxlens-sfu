@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.3 @d4cc756 · 정:IMPL-ROOM-JOIN 정:IMPL-ROOM-LIFE 정:IMPL-ROOM-DERIVED 정:IMPL-ROOM-SERVER-CONFIG 정:IMPL-ROOM-RESYNC 정:IMPL-ROOM-VERSION-ISSUE 정:IMPL-SES-RESUME 정:IMPL-LINK-ICE-RESTART 정:IMPL-SUB-PIPELINE 정:IMPL-AFF-PUB-MOVE 정:RULE-GC-EDGES 연:ROOM.S.join 연:ROOM.S.join_again 연:ROOM.S.join_hidden 연:ROOM.S.join_3001 연:ROOM.S.join_4001 연:ROOM.S.leave 연:ROOM.S.leave_3002 연:ROOM.S.leave_hidden 연:LINK.S.restart 연:LINK.S.restart_3010 연:RULE-ROOM-JOIN-PROC 연:RULE-ROOM-MAX-100 연:RULE-ROOM-BUDGET-SPLIT 연:DEV-ROOM-ME-APART 연:RULE-SES-RESUME-PROC · model: claude-opus-5-5
+// spec: v1.3 @d4cc756 · 정:IMPL-ROOM-JOIN 정:IMPL-ROOM-LIFE 정:IMPL-ROOM-DERIVED 정:IMPL-ROOM-SERVER-CONFIG 정:IMPL-ROOM-RESYNC 정:IMPL-ROOM-VERSION-ISSUE 정:IMPL-SES-RESUME 정:IMPL-LINK-ICE-RESTART 정:IMPL-SUB-PIPELINE 정:IMPL-AFF-PUB-MOVE 정:RULE-GC-EDGES 연:ROOM.S.join 연:ROOM.S.join_again 연:ROOM.S.join_hidden 연:ROOM.S.join_3001 연:ROOM.S.join_4001 연:ROOM.S.leave 연:ROOM.S.leave_3002 연:ROOM.S.leave_hidden 연:LINK.S.restart 연:LINK.S.restart_3010 연:RULE-ROOM-JOIN-PROC 연:RULE-ROOM-MAX-100 연:RULE-ROOM-BUDGET-SPLIT 연:DEV-ROOM-ME-APART 연:RULE-SES-RESUME-PROC 정:CAND-ROOM-JOIN-AGAIN-EDGE · model: claude-opus-5-5
 //! 입장 ②재입장 축출 ③정원 ④방 수 ⑤배정표 줄(원자) ⑥명단 · 퇴장 · 세션 폐기 · RESUME 스냅샷 · ICE 재시작 · 방 생성 · 상세 · 목록.
 
 use std::collections::BTreeMap;

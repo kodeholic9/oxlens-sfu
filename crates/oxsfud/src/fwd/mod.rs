@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.3 @d4cc756 · 정:RULE-FWD-SCOPE 정:RULE-FWD-STEPS 정:RULE-FWD-BRANCH-AUTHORITY 정:IMPL-FWD-ROOM 정:IMPL-FWD-SOURCE-SWITCH 정:RULE-PUB-TWO-LAYERS 정:RULE-CONC-SIX 정:RULE-CONC-PERF-AXES 정:CAND-FWD-REWRITER-LOCK 정:CAND-FWD-PRIME-EPISODE · model: claude-opus-5-5
+// spec: v1.3 @d4cc756 · 정:RULE-FWD-SCOPE 정:RULE-FWD-STEPS 정:RULE-FWD-BRANCH-AUTHORITY 정:IMPL-FWD-ROOM 정:IMPL-FWD-SOURCE-SWITCH 정:RULE-PUB-TWO-LAYERS 정:RULE-CONC-SIX 정:RULE-CONC-PERF-AXES 정:CAND-FWD-REWRITER-LOCK 정:CAND-FWD-PRIME-EPISODE 정:CAND-PUB-INGRESS-STATS-OWNER · model: claude-opus-5-5
 //! 전달 — 핫패스 자료(RCU 맵 · 원자값) · 업링크 스트림(물리 · 구독자 목록 `Weak`) · 다운링크 스트림(배정표 줄 하나 · 재기록기 Mutex 하나) · 방마다 슬롯 둘.
 
 pub mod core;
