@@ -1,394 +1,366 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @36d1dfd · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · 정:RULE-BUS-PRESENCE · 정:RULE-BUS-PLACEMENT · 정:RULE-BUS-EVENTS · 정:RULE-BUS-REQUEST · 정:IMPL-BUS-FAULTS · 정:CAND-BUS-REQUEST-TIMEOUT · 정:CAND-BUS-HANDLE-SHAPE · model: claude-opus-5-5
-//! 영역 BUS(게이트웨이 쪽) — zenoh router(임베드) · 존재 토큰 선언과 구독(history) · 통지 구독(참조계수) · node 간 요청 · node 안 gRPC Handle.
+// spec: v1.3 @d4cc756 · 정:RULE-BUS-SHAPE 정:RULE-BUS-KEYSPACE 정:RULE-BUS-PRESENCE 정:RULE-BUS-PLACEMENT 정:RULE-BUS-EVENTS 정:RULE-BUS-REQUEST 정:IMPL-BUS-FAULTS 정:CAND-BUS-HOME-INST 정:CAND-BUS-REQUEST-TIMEOUT 운영:RULE-READ-BUS · model: claude-opus-5-5
+//! hub 쪽 버스 — zenoh router 세션 · `node` · `sess` 토큰 선언 · `node` · `room` 토큰 `history` 구독(방 → node 맵 · node 집합 · 고립 판정) · `ev` 관심 선언 · node 사이 요청.
 
-pub mod core;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-
-use common::bus::envelope::{Call, Notice, NodeQuery, Reply};
-use common::bus::grpc::handle_client::HandleClient;
-use common::bus::grpc::CallReq;
-use common::bus::keys::Keys;
-use common::system::Zenoh as ZenohCfg;
+use common::bus::{Keys, NODE_CALL_TIMEOUT, SESS_GET_TIMEOUT};
 use oxsig::Code;
-use tokio::sync::{mpsc, oneshot};
-use tonic::transport::Channel;
+use oxsig::envelope::Notice;
+use tokio::sync::{Mutex, mpsc};
 use zenoh::liveliness::LivelinessToken;
-use zenoh::pubsub::Subscriber;
 use zenoh::sample::SampleKind;
 
-use self::core::{NodeSet, RoomMap};
+#[derive(Debug, Clone)]
+pub enum Incoming {
+    Room { room: String, notice: Notice },
+    User { user: String, notice: Notice },
+    RoomGone { room: String },
+}
 
-pub const NODE_CALL_TIMEOUT: Duration = Duration::from_secs(10);
-pub const SESS_GET_TIMEOUT: Duration = Duration::from_secs(2);
-pub const LOCAL_CALL_TIMEOUT: Duration = Duration::from_secs(10);
-const INBOUND_MAX: usize = 65_536;
+pub struct QueryIn {
+    pub what: String,
+    pub body: Vec<u8>,
+    pub query: zenoh::query::Query,
+}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Delivery {
-    Room(String),
-    User(String),
+#[derive(Debug, Clone, Default)]
+struct NodeView {
+    insts: BTreeSet<String>,
+    gone_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
-pub struct Inbound {
-    pub to: Delivery,
-    pub notice: Notice,
+pub struct LastEvent {
+    pub at_ms: u64,
+    pub kind: &'static str,
+    pub key: String,
 }
 
-pub struct NodeAsk {
-    pub query: NodeQuery,
-    pub reply: oneshot::Sender<Vec<u8>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RoomChange {
-    Up,
-    Down,
+#[derive(Default)]
+struct State {
+    nodes: BTreeMap<String, NodeView>,
+    rooms: BTreeMap<String, BTreeSet<(String, String)>>,
+    last: Option<LastEvent>,
+    isolated: bool,
+    others_seen: bool,
 }
 
 pub struct Bus {
+    pub z: zenoh::Session,
     pub keys: Keys,
-    pub me: String,
-    pub zcfg: ZenohCfg,
-    session: zenoh::Session,
-    pub nodes: Mutex<NodeSet>,
-    pub rooms: Mutex<RoomMap>,
-    node_token: tokio::sync::Mutex<Option<(String, LivelinessToken)>>,
-    sess_tokens: tokio::sync::Mutex<HashMap<String, (String, LivelinessToken)>>,
-    room_subs: tokio::sync::Mutex<HashMap<String, (usize, Subscriber<()>)>>,
-    user_subs: tokio::sync::Mutex<HashMap<String, (usize, Subscriber<()>)>>,
-    local: Mutex<Option<HandleClient<Channel>>>,
-    inbound: mpsc::Sender<Inbound>,
-    room_changes: mpsc::UnboundedSender<(String, RoomChange)>,
-    node_changes: mpsc::UnboundedSender<(String, String, bool)>,
-    grace_ms: u64,
+    pub node: String,
+    pub inst: String,
+    pub grace: Duration,
+    pub mode: String,
+    pub listen: Vec<String>,
+    pub connect: Vec<String>,
+    st: std::sync::Mutex<State>,
+    node_token: Mutex<Option<LivelinessToken>>,
+    sess_tokens: Mutex<HashMap<String, LivelinessToken>>,
+    user_subs: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    room_subs: Mutex<HashMap<String, (usize, tokio::task::JoinHandle<()>)>>,
+    ev_tx: mpsc::UnboundedSender<Incoming>,
+    pub dup_rooms: AtomicU64,
 }
 
-pub struct BusStreams {
-    pub inbound: mpsc::Receiver<Inbound>,
-    pub asks: mpsc::Receiver<NodeAsk>,
-    pub room_changes: mpsc::UnboundedReceiver<(String, RoomChange)>,
-    pub node_changes: mpsc::UnboundedReceiver<(String, String, bool)>,
+pub struct BusOpen {
+    pub bus: Arc<Bus>,
+    pub events: mpsc::UnboundedReceiver<Incoming>,
+    pub queries: mpsc::UnboundedReceiver<QueryIn>,
 }
 
-fn now_ms() -> u64 {
-    common::time::wall_ms()
+fn err_s(e: impl std::fmt::Display) -> String {
+    e.to_string()
 }
 
 impl Bus {
-    pub async fn open(me: &str, zcfg: &ZenohCfg, grace_secs: u64) -> Result<(Arc<Bus>, BusStreams), String> {
-        let cfg = common::bus::session::router_config(zcfg).map_err(|e| e.to_string())?;
-        let session = common::bus::session::open(cfg).await.map_err(|e| e.to_string())?;
-        let (in_tx, in_rx) = mpsc::channel(INBOUND_MAX);
-        let (ask_tx, ask_rx) = mpsc::channel(1024);
-        let (rc_tx, rc_rx) = mpsc::unbounded_channel();
-        let (nc_tx, nc_rx) = mpsc::unbounded_channel();
+    pub async fn open(cfg: &common::system::Zenoh, node: &str, inst: &str, grace: Duration) -> Result<BusOpen, String> {
+        let zc = common::bus::zenoh_config(&common::bus::ZenohOpts {
+            mode: &cfg.mode,
+            listen: &cfg.listen,
+            connect: &cfg.connect,
+            multicast_scouting: cfg.multicast_scouting,
+            base_config: cfg.base_config.as_deref(),
+        })?;
+        let z = zenoh::open(zc).await.map_err(err_s)?;
+        let (ev_tx, events) = mpsc::unbounded_channel();
+        let (q_tx, queries) = mpsc::unbounded_channel();
         let bus = Arc::new(Bus {
-            keys: Keys::new(&zcfg.namespace),
-            me: me.to_string(),
-            zcfg: zcfg.clone(),
-            session,
-            nodes: Mutex::new(NodeSet::new(me)),
-            rooms: Mutex::new(RoomMap::default()),
-            node_token: tokio::sync::Mutex::new(None),
-            sess_tokens: tokio::sync::Mutex::new(HashMap::new()),
-            room_subs: tokio::sync::Mutex::new(HashMap::new()),
-            user_subs: tokio::sync::Mutex::new(HashMap::new()),
-            local: Mutex::new(None),
-            inbound: in_tx,
-            room_changes: rc_tx,
-            node_changes: nc_tx,
-            grace_ms: grace_secs * 1000,
+            z,
+            keys: Keys::new(&cfg.namespace),
+            node: node.to_string(),
+            inst: inst.to_string(),
+            grace,
+            mode: cfg.mode.clone(),
+            listen: cfg.listen.clone(),
+            connect: cfg.connect.clone(),
+            st: std::sync::Mutex::new(State::default()),
+            node_token: Mutex::new(None),
+            sess_tokens: Mutex::new(HashMap::new()),
+            user_subs: Mutex::new(HashMap::new()),
+            room_subs: Mutex::new(HashMap::new()),
+            ev_tx,
+            dup_rooms: AtomicU64::new(0),
         });
-        bus.watch_presence().await?;
-        bus.serve_queries(ask_tx).await?;
-        Ok((bus.clone(), BusStreams { inbound: in_rx, asks: ask_rx, room_changes: rc_rx, node_changes: nc_rx }))
-    }
-
-    async fn watch_presence(self: &Arc<Self>) -> Result<(), String> {
-        let b = Arc::downgrade(self);
-        let node_sub = self
-            .session
-            .liveliness()
-            .declare_subscriber(self.keys.node_all())
-            .history(true)
-            .await
-            .map_err(|e| e.to_string())?;
+        let node_sub = bus.z.liveliness().declare_subscriber(bus.keys.node_all()).history(true).await.map_err(err_s)?;
+        let b = bus.clone();
         tokio::spawn(async move {
             while let Ok(s) = node_sub.recv_async().await {
-                let Some(bus) = b.upgrade() else { break };
-                let Some((node, inst)) = bus.keys.parse_node(s.key_expr().as_str()) else { continue };
-                let put = s.kind() == SampleKind::Put;
-                let was_isolated;
-                {
-                    let mut ns = bus.nodes.lock().unwrap_or_else(|p| p.into_inner());
-                    was_isolated = ns.isolated;
-                    if put {
-                        ns.put(&node, &inst, now_ms());
-                    } else {
-                        ns.delete(&node, &inst, now_ms());
-                    }
-                }
-                if put && was_isolated {
-                    bus.redeclare_all().await;
-                }
-                let _ = bus.node_changes.send((node, inst, put));
+                b.on_node_token(s.key_expr().as_str(), s.kind());
             }
         });
-        let b = Arc::downgrade(self);
-        let room_sub = self
-            .session
-            .liveliness()
-            .declare_subscriber(self.keys.room_all())
-            .history(true)
-            .await
-            .map_err(|e| e.to_string())?;
+        let room_sub = bus.z.liveliness().declare_subscriber(bus.keys.room_all()).history(true).await.map_err(err_s)?;
+        let b = bus.clone();
         tokio::spawn(async move {
             while let Ok(s) = room_sub.recv_async().await {
-                let Some(bus) = b.upgrade() else { break };
-                let Some((room, node, inst)) = bus.keys.parse_room(s.key_expr().as_str()) else { continue };
-                let up = s.kind() == SampleKind::Put;
-                {
-                    let mut rm = bus.rooms.lock().unwrap_or_else(|p| p.into_inner());
-                    if up {
-                        if rm.put(&room, &node, &inst) {
-                            tracing::warn!(kind = "ev", spec = "RULE-BUS-PLACEMENT", room = %room, node = %node, "room on two nodes — duplicate detected");
-                        }
-                    } else {
-                        rm.delete(&room, &node, &inst);
-                    }
-                }
-                let _ = bus.room_changes.send((room, if up { RoomChange::Up } else { RoomChange::Down }));
+                b.on_room_token(s.key_expr().as_str(), s.kind());
             }
         });
-        Ok(())
-    }
-
-    async fn serve_queries(self: &Arc<Self>, asks: mpsc::Sender<NodeAsk>) -> Result<(), String> {
-        let q = self.session.declare_queryable(self.keys.q_node_queryable(&self.me)).await.map_err(|e| e.to_string())?;
+        let qable = bus.z.declare_queryable(bus.keys.q_node_all(node)).await.map_err(err_s)?;
+        let pre = format!("{}/", bus.keys.q_node(node, "").trim_end_matches('/'));
         tokio::spawn(async move {
-            while let Ok(query) = q.recv_async().await {
-                let asks = asks.clone();
-                tokio::spawn(async move {
-                    let payload = query.payload().map(|p| p.to_bytes().to_vec()).unwrap_or_default();
-                    let reply = match serde_json::from_slice::<NodeQuery>(&payload) {
-                        Ok(nq) => {
-                            let (tx, rx) = oneshot::channel();
-                            if asks.send(NodeAsk { query: nq, reply: tx }).await.is_err() {
-                                Reply::fail(Code::InternalError).encode()
-                            } else {
-                                rx.await.unwrap_or_else(|_| Reply::fail(Code::InternalError).encode())
-                            }
-                        }
-                        Err(e) => Reply::Fail(Code::InvalidPayload.failure_with(e.to_string(), None)).encode(),
-                    };
-                    let key = query.key_expr().clone();
-                    let _ = query.reply(key, reply).await;
-                });
+            while let Ok(q) = qable.recv_async().await {
+                let what = q.key_expr().as_str().strip_prefix(pre.as_str()).unwrap_or("").to_string();
+                let body = q.payload().map(|p| p.to_bytes().to_vec()).unwrap_or_default();
+                if q_tx.send(QueryIn { what, body, query: q }).is_err() {
+                    break;
+                }
             }
         });
-        Ok(())
+        Ok(BusOpen { bus, events, queries })
     }
 
-    pub fn set_local(&self, c: Option<HandleClient<Channel>>) {
-        let mut g = self.local.lock().unwrap_or_else(|p| p.into_inner());
-        let slot: &mut Option<HandleClient<Channel>> = &mut g;
-        let _ = std::mem::replace(slot, c);
+    fn note(st: &mut State, kind: &'static str, key: &str) {
+        st.last = Some(LastEvent { at_ms: common::log::now_ms(), kind, key: key.to_string() });
     }
 
-    pub async fn set_node_inst(&self, inst: Option<&str>) {
-        let mut g = self.node_token.lock().await;
-        if g.as_ref().map(|(i, _)| i.as_str()) == inst {
+    fn on_node_token(&self, key: &str, kind: SampleKind) {
+        let Some(t) = self.keys.tail(key, "node") else {
+            return;
+        };
+        if t.len() != 2 {
             return;
         }
-        if let Some((_, t)) = g.take() {
-            let _ = t.undeclare().await;
-        }
-        if let Some(i) = inst {
-            match self.session.liveliness().declare_token(self.keys.node(&self.me, i)).await {
-                Ok(t) => {
-                    tracing::info!(kind = "ev", spec = "RULE-BUS-PRESENCE", node = %self.me, inst = %i, "node token declared");
-                    let _ = g.insert((i.to_string(), t));
-                }
-                Err(e) => tracing::warn!(kind = "diag", "node token: {e}"),
-            }
-        }
-    }
-
-    pub async fn declare_sess(&self, user: &str, sid: &str) {
-        let key = self.keys.sess(user, &self.me, sid);
-        if let Ok(t) = self.session.liveliness().declare_token(key).await {
-            self.sess_tokens.lock().await.insert(sid.to_string(), (user.to_string(), t));
-        }
-    }
-
-    pub async fn undeclare_sess(&self, sid: &str) {
-        if let Some((_, t)) = self.sess_tokens.lock().await.remove(sid) {
-            let _ = t.undeclare().await;
-        }
-    }
-
-    async fn redeclare_all(&self) {
+        let (n, i) = (t[0].to_string(), t[1].to_string());
+        let mut st = self.st.lock().unwrap_or_else(|p| p.into_inner());
+        let put = kind == SampleKind::Put;
+        Self::note(&mut st, if put { "put" } else { "delete" }, key);
         {
-            let mut g = self.node_token.lock().await;
-            if let Some((i, t)) = g.take() {
-                let _ = t.undeclare().await;
-                if let Ok(t2) = self.session.liveliness().declare_token(self.keys.node(&self.me, &i)).await {
-                    let _ = g.insert((i, t2));
+            let v = st.nodes.entry(n.clone()).or_default();
+            if put {
+                v.insts.insert(i.clone());
+                v.gone_at = None;
+            } else {
+                v.insts.remove(&i);
+                if v.insts.is_empty() {
+                    v.gone_at = Some(Instant::now());
                 }
             }
         }
-        let mut st = self.sess_tokens.lock().await;
-        let entries: Vec<(String, String)> = st.iter().map(|(sid, (u, _))| (sid.clone(), u.clone())).collect();
-        for (sid, user) in entries {
-            if let Some((_, t)) = st.remove(&sid) {
-                let _ = t.undeclare().await;
+        let others = st.nodes.iter().filter(|(k, v)| **k != self.node && !v.insts.is_empty()).count();
+        if others > 0 {
+            st.others_seen = true;
+            if st.isolated {
+                st.isolated = false;
+                tracing::warn!("bus isolation cleared — other node tokens visible again");
             }
-            if let Ok(t) = self.session.liveliness().declare_token(self.keys.sess(&user, &self.me, &sid)).await {
-                st.insert(sid, (user, t));
-            }
+        } else if st.others_seen && !put && n != self.node && !st.isolated {
+            st.isolated = true;
+            tracing::warn!("bus isolation — every other node token vanished; routing kept · home reaping deferred");
         }
-        tracing::info!(kind = "ev", spec = "RULE-BUS-PRESENCE", "re-declared node and session tokens after isolation");
+        drop(st);
+        tracing::info!("node token {} node={n} inst={i}", if put { "put" } else { "delete" });
     }
 
-    fn sink(&self, to: Delivery) -> impl Fn(zenoh::sample::Sample) + Send + Sync + 'static {
-        let tx = self.inbound.clone();
-        move |s: zenoh::sample::Sample| {
-            if let Some(n) = Notice::decode(&s.payload().to_bytes()) {
-                let _ = tx.try_send(Inbound { to: to.clone(), notice: n });
-            }
-        }
-    }
-
-    pub async fn interest_room(&self, room: &str) {
-        let mut g = self.room_subs.lock().await;
-        if let Some(e) = g.get_mut(room) {
-            e.0 += 1;
+    fn on_room_token(&self, key: &str, kind: SampleKind) {
+        let Some(t) = self.keys.tail(key, "room") else {
+            return;
+        };
+        if t.len() != 3 {
             return;
         }
-        let key = self.keys.ev_room(room);
-        match self.session.declare_subscriber(key).callback(self.sink(Delivery::Room(room.to_string()))).await {
-            Ok(sub) => {
-                g.insert(room.to_string(), (1, sub));
+        let (r, n, i) = (t[0].to_string(), t[1].to_string(), t[2].to_string());
+        let mut st = self.st.lock().unwrap_or_else(|p| p.into_inner());
+        Self::note(&mut st, if kind == SampleKind::Put { "put" } else { "delete" }, key);
+        if kind == SampleKind::Put {
+            let e = st.rooms.entry(r.clone()).or_default();
+            e.insert((n, i));
+            let nodes: BTreeSet<&String> = e.iter().map(|(n, _)| n).collect();
+            if nodes.len() > 1 {
+                self.dup_rooms.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(room = r.as_str(), "room duplicate — two nodes hold room {r}");
             }
-            Err(e) => tracing::warn!(kind = "diag", room = %room, "ev/room subscribe: {e}"),
-        }
-    }
-
-    pub async fn release_room(&self, room: &str) {
-        let mut g = self.room_subs.lock().await;
-        let drop_it = match g.get_mut(room) {
-            Some(e) => {
-                e.0 = e.0.saturating_sub(1);
-                e.0 == 0
-            }
-            None => false,
-        };
-        if drop_it && let Some((_, sub)) = g.remove(room) {
-            let _ = sub.undeclare().await;
-        }
-    }
-
-    pub async fn interest_user(&self, user: &str) {
-        let mut g = self.user_subs.lock().await;
-        if let Some(e) = g.get_mut(user) {
-            e.0 += 1;
             return;
         }
-        let key = self.keys.ev_user(user);
-        if let Ok(sub) = self.session.declare_subscriber(key).callback(self.sink(Delivery::User(user.to_string()))).await {
-            g.insert(user.to_string(), (1, sub));
-        }
-    }
-
-    pub async fn release_user(&self, user: &str) {
-        let mut g = self.user_subs.lock().await;
-        let drop_it = match g.get_mut(user) {
-            Some(e) => {
-                e.0 = e.0.saturating_sub(1);
-                e.0 == 0
+        let isolated = st.isolated;
+        if let Some(e) = st.rooms.get_mut(&r) {
+            if isolated {
+                return;
             }
-            None => false,
-        };
-        if drop_it && let Some((_, sub)) = g.remove(user) {
-            let _ = sub.undeclare().await;
+            e.remove(&(n, i));
+            if e.is_empty() {
+                st.rooms.remove(&r);
+                drop(st);
+                let _ = self.ev_tx.send(Incoming::RoomGone { room: r });
+            }
         }
     }
 
-    pub fn room_node(&self, room: &str) -> Option<String> {
-        self.rooms.lock().ok().and_then(|m| m.node_of(room).map(str::to_string))
+    pub fn last_event(&self) -> Option<LastEvent> {
+        self.st.lock().ok().and_then(|s| s.last.clone())
     }
 
     pub fn node_live(&self, node: &str) -> bool {
-        self.nodes.lock().map(|n| n.live(node)).unwrap_or(false)
+        self.st.lock().map(|s| s.nodes.get(node).is_some_and(|v| !v.insts.is_empty())).unwrap_or(false)
     }
 
-    pub fn node_of_sfu(&self, sfu_id: &str) -> Option<String> {
-        self.nodes.lock().ok().and_then(|n| n.node_of_inst(sfu_id).map(str::to_string))
+    pub fn nodes(&self) -> Vec<(String, String)> {
+        let st = self.st.lock().unwrap_or_else(|p| p.into_inner());
+        st.nodes.iter().flat_map(|(n, v)| v.insts.iter().map(move |i| (n.clone(), i.clone()))).collect()
     }
 
-    pub fn my_inst(&self) -> Option<String> {
-        self.nodes.lock().ok().and_then(|n| n.inst_of(&self.me).map(str::to_string))
+    pub fn live_nodes(&self) -> Vec<String> {
+        let st = self.st.lock().unwrap_or_else(|p| p.into_inner());
+        st.nodes.iter().filter(|(_, v)| !v.insts.is_empty()).map(|(n, _)| n.clone()).collect()
     }
 
     pub fn candidates(&self) -> Vec<String> {
-        self.nodes.lock().map(|n| n.candidates(now_ms(), self.grace_ms).into_iter().map(str::to_string).collect()).unwrap_or_default()
+        let st = self.st.lock().unwrap_or_else(|p| p.into_inner());
+        st.nodes.iter().filter(|(_, v)| !v.insts.is_empty() || v.gone_at.is_some_and(|g| g.elapsed() < self.grace)).map(|(n, _)| n.clone()).collect()
     }
 
-    pub fn alive_nodes(&self) -> Vec<String> {
-        self.nodes.lock().map(|n| n.alive_nodes()).unwrap_or_default()
+    pub fn room_where(&self, room: &str) -> Option<(String, String)> {
+        let st = self.st.lock().unwrap_or_else(|p| p.into_inner());
+        st.rooms.get(room).and_then(|s| s.iter().next().cloned())
     }
 
-    pub fn isolated(&self) -> bool {
-        self.nodes.lock().map(|n| n.isolated).unwrap_or(false)
+    pub fn rooms(&self) -> Vec<(String, String, String)> {
+        let st = self.st.lock().unwrap_or_else(|p| p.into_inner());
+        st.rooms.iter().flat_map(|(r, s)| s.iter().map(move |(n, i)| (r.clone(), n.clone(), i.clone()))).collect()
     }
 
-    pub async fn call(&self, node: &str, call: &Call) -> Reply {
-        if node == self.me {
-            return self.call_local(call).await;
+    pub fn room_count(&self) -> usize {
+        self.st.lock().map(|s| s.rooms.len()).unwrap_or(0)
+    }
+
+    pub fn inst_node(&self, inst: &str) -> Option<String> {
+        let st = self.st.lock().unwrap_or_else(|p| p.into_inner());
+        st.rooms.values().flat_map(|s| s.iter()).find(|(_, i)| i == inst).map(|(n, _)| n.clone())
+    }
+
+    pub async fn declare_node(&self) -> Result<(), String> {
+        let mut g = self.node_token.lock().await;
+        if g.is_some() {
+            return Ok(());
         }
-        if !self.node_live(node) {
-            return Reply::fail(Code::SfuUnavailable);
-        }
-        let q = NodeQuery::Call { call: call.clone(), unit: None };
-        match self.query(node, "call", &q, NODE_CALL_TIMEOUT).await {
-            Some(b) => Reply::decode(&b),
-            None => Reply::fail(Code::SfuError),
+        let t = self.z.liveliness().declare_token(self.keys.node(&self.node, &self.inst)).await.map_err(err_s)?;
+        g.replace(t);
+        Ok(())
+    }
+
+    pub async fn declare_sess(&self, user: &str, sid: &str) -> Result<(), String> {
+        let t = self.z.liveliness().declare_token(self.keys.sess(user, &self.node, sid)).await.map_err(err_s)?;
+        self.sess_tokens.lock().await.insert(sid.to_string(), t);
+        Ok(())
+    }
+
+    pub async fn undeclare_sess(&self, sid: &str) {
+        let t = self.sess_tokens.lock().await.remove(sid);
+        if let Some(t) = t {
+            let _ = t.undeclare().await;
         }
     }
 
-    pub async fn call_local(&self, call: &Call) -> Reply {
-        let client = self.local.lock().ok().and_then(|g| g.clone());
-        let Some(mut c) = client else { return Reply::fail(Code::SfuUnavailable) };
-        match tokio::time::timeout(LOCAL_CALL_TIMEOUT, c.call(CallReq { envelope: call.encode() })).await {
-            Ok(Ok(r)) => Reply::decode(&r.into_inner().reply),
-            Ok(Err(e)) => Reply::Fail(Code::SfuError.failure_with(e.message().to_string(), None)),
-            Err(_) => Reply::fail(Code::SfuError),
+    pub async fn watch_user(&self, user: &str) -> Result<(), String> {
+        let mut subs = self.user_subs.lock().await;
+        if subs.contains_key(user) {
+            return Ok(());
+        }
+        let sub = self.z.declare_subscriber(self.keys.ev_user(user)).await.map_err(err_s)?;
+        let tx = self.ev_tx.clone();
+        let u = user.to_string();
+        let h = tokio::spawn(async move {
+            while let Ok(s) = sub.recv_async().await {
+                if let Ok(n) = serde_json::from_slice::<Notice>(&s.payload().to_bytes()) {
+                    let _ = tx.send(Incoming::User { user: u.clone(), notice: n });
+                }
+            }
+        });
+        subs.insert(user.to_string(), h);
+        Ok(())
+    }
+
+    pub async fn unwatch_user(&self, user: &str) {
+        if let Some(h) = self.user_subs.lock().await.remove(user) {
+            h.abort();
         }
     }
 
-    pub async fn query(&self, node: &str, what: &str, q: &NodeQuery, timeout: Duration) -> Option<Vec<u8>> {
-        let body = serde_json::to_vec(q).ok()?;
-        let replies = self.session.get(self.keys.q_node(node, what)).payload(body).timeout(timeout).await.ok()?;
-        while let Ok(r) = replies.recv_async().await {
-            if let Ok(s) = r.result() {
-                return Some(s.payload().to_bytes().to_vec());
+    pub async fn room_interest(&self, room: &str, delta: i32) -> Result<(), String> {
+        let mut subs = self.room_subs.lock().await;
+        if delta > 0 {
+            if let Some(e) = subs.get_mut(room) {
+                e.0 += 1;
+                return Ok(());
+            }
+            let sub = self.z.declare_subscriber(self.keys.ev_room(room)).await.map_err(err_s)?;
+            let tx = self.ev_tx.clone();
+            let r = room.to_string();
+            let h = tokio::spawn(async move {
+                while let Ok(s) = sub.recv_async().await {
+                    if let Ok(n) = serde_json::from_slice::<Notice>(&s.payload().to_bytes()) {
+                        let _ = tx.send(Incoming::Room { room: r.clone(), notice: n });
+                    }
+                }
+            });
+            subs.insert(room.to_string(), (1, h));
+        } else if let Some(e) = subs.get_mut(room) {
+            e.0 = e.0.saturating_sub(1);
+            if e.0 == 0
+                && let Some((_, h)) = subs.remove(room)
+            {
+                h.abort();
             }
         }
-        None
+        Ok(())
+    }
+
+    pub async fn drop_room_interest(&self, room: &str) {
+        if let Some((_, h)) = self.room_subs.lock().await.remove(room) {
+            h.abort();
+        }
+    }
+
+    pub async fn ask(&self, node: &str, what: &str, body: Vec<u8>, timeout: Duration) -> Result<Vec<u8>, Code> {
+        if !self.node_live(node) {
+            return Err(Code::SfuUnavailable);
+        }
+        let replies = self.z.get(self.keys.q_node(node, what)).payload(body).timeout(timeout).await.map_err(|_| Code::SfuError)?;
+        match replies.recv_async().await {
+            Ok(r) => match r.result() {
+                Ok(s) => Ok(s.payload().to_bytes().to_vec()),
+                Err(_) => Err(Code::SfuError),
+            },
+            Err(_) => Err(Code::SfuError),
+        }
+    }
+
+    pub async fn ask_call(&self, node: &str, body: Vec<u8>) -> Result<Vec<u8>, Code> {
+        self.ask(node, "call", body, NODE_CALL_TIMEOUT).await
     }
 
     pub async fn sess_by_sid(&self, sid: &str) -> Option<(String, String)> {
-        let replies = self.session.liveliness().get(self.keys.sess_by_sid(sid)).timeout(SESS_GET_TIMEOUT).await.ok()?;
+        let replies = self.z.liveliness().get(self.keys.sess_by_sid(sid)).timeout(SESS_GET_TIMEOUT).await.ok()?;
         while let Ok(r) = replies.recv_async().await {
             if let Ok(s) = r.result()
-                && let Some((user, node, _)) = self.keys.parse_sess(s.key_expr().as_str())
+                && let Some(t) = self.keys.tail(s.key_expr().as_str(), "sess")
+                && t.len() == 3
             {
-                return Some((user, node));
+                return Some((t[0].to_string(), t[1].to_string()));
             }
         }
         None
@@ -396,88 +368,34 @@ impl Bus {
 
     pub async fn sess_of_user(&self, user: &str) -> Vec<(String, String)> {
         let mut out = Vec::new();
-        let Ok(replies) = self.session.liveliness().get(self.keys.sess_of_user(user)).timeout(SESS_GET_TIMEOUT).await else { return out };
+        let Ok(replies) = self.z.liveliness().get(self.keys.sess_of_user(user)).timeout(SESS_GET_TIMEOUT).await else {
+            return out;
+        };
         while let Ok(r) = replies.recv_async().await {
             if let Ok(s) = r.result()
-                && let Some((_, node, sid)) = self.keys.parse_sess(s.key_expr().as_str())
+                && let Some(t) = self.keys.tail(s.key_expr().as_str(), "sess")
+                && t.len() == 3
             {
-                out.push((node, sid));
+                out.push((t[1].to_string(), t[2].to_string()));
             }
         }
         out
     }
 
-    pub async fn sess_count(&self) -> usize {
-        let Ok(replies) = self.session.liveliness().get(format!("ox/{}/int/sess/**", self.keys.ns)).timeout(SESS_GET_TIMEOUT).await else { return 0 };
-        let mut n = 0;
-        while let Ok(r) = replies.recv_async().await {
-            if r.result().is_ok() {
-                n += 1;
-            }
+    pub async fn peers(&self) -> Vec<(String, &'static str)> {
+        let mut out = Vec::new();
+        for z in self.z.info().routers_zid().await {
+            out.push((z.to_string(), "router"));
         }
-        n
-    }
-
-    pub async fn info(&self) -> serde_json::Value {
-        let zid = self.session.info().zid().await.to_string();
-        let links: Vec<(String, String)> = self.session.info().links().await.map(|l| (l.zid().to_string(), l.dst().to_string())).collect();
-        let peers: Vec<serde_json::Value> = self
-            .session
-            .info()
-            .transports()
-            .await
-            .map(|t| {
-                let z = t.zid().to_string();
-                let ls: Vec<&String> = links.iter().filter(|(lz, _)| lz == &z).map(|(_, d)| d).collect();
-                serde_json::json!({"zid": z, "whatami": t.whatami().to_string(), "links": ls})
-            })
-            .collect();
-        let (nodes, last, my_inst) = {
-            let ns = self.nodes.lock().unwrap_or_else(|p| p.into_inner());
-            let nodes: Vec<serde_json::Value> = ns
-                .nodes
-                .iter()
-                .filter(|(_, e)| e.alive)
-                .map(|(n, e)| if n == &self.me { serde_json::json!({"node": n, "inst": e.inst, "self": true}) } else { serde_json::json!({"node": n, "inst": e.inst}) })
-                .collect();
-            let last = ns.last_event.clone().map(|(at, kind, key)| serde_json::json!({"at_ms": at, "kind": kind, "key": key}));
-            (nodes, last, ns.inst_of(&self.me).map(str::to_string))
-        };
-        let (rooms_seen, dup) = {
-            let rm = self.rooms.lock().unwrap_or_else(|p| p.into_inner());
-            let seen: Vec<serde_json::Value> = rm
-                .rooms
-                .iter()
-                .flat_map(|(r, s)| s.iter().filter(|(n, _)| n != &self.me).map(move |(n, i)| serde_json::json!({"room_id": r, "node": n, "inst": i})))
-                .collect();
-            (seen, rm.duplicates_now())
-        };
-        let mut v = serde_json::json!({
-            "node": self.me, "mode": self.zcfg.mode, "namespace": self.zcfg.namespace,
-            "listen": self.zcfg.listen, "connect": self.zcfg.connect, "zid": zid,
-            "peers": peers, "nodes": nodes, "rooms_seen": rooms_seen,
-            "pending": {"rooms_unplaced": serde_json::Value::Array(vec![]), "rooms_no_view": serde_json::Value::Array(vec![]), "rooms_duplicated": dup},
-        });
-        if let Some(i) = my_inst {
-            v["inst"] = serde_json::Value::String(i);
+        for z in self.z.info().peers_zid().await {
+            out.push((z.to_string(), "peer"));
         }
-        if let Some(l) = last {
-            v["last_event"] = l;
-        }
-        v
+        out
     }
 
     pub async fn close(&self) {
-        if let Some((_, t)) = self.node_token.lock().await.take() {
-            let _ = t.undeclare().await;
-        }
-        let toks: Vec<(String, (String, LivelinessToken))> = self.sess_tokens.lock().await.drain().collect();
-        for (_, (_, t)) in toks {
-            let _ = t.undeclare().await;
-        }
-    }
-
-    pub async fn shutdown_session(&self) {
-        let _ = self.session.close().await;
+        self.node_token.lock().await.take();
+        self.sess_tokens.lock().await.clear();
+        let _ = self.z.close().await;
     }
 }

@@ -223,28 +223,16 @@ impl System {
 
     pub fn validate(&self) -> Result<(), SystemError> {
         if self.zenoh.mode != "router" {
-            return Err(SystemError(format!(
-                "zenoh.mode {} — router 고정(정:RULE-BUS-SHAPE)",
-                self.zenoh.mode
-            )));
+            return Err(SystemError(format!("zenoh.mode {} — router 고정(정:RULE-BUS-SHAPE)", self.zenoh.mode)));
         }
         if !self.zenoh.qos_enabled {
-            return Err(SystemError(
-                "zenoh.qos_enabled = false — 전제(정:RULE-BUS-SHAPE)".into(),
-            ));
+            return Err(SystemError("zenoh.qos_enabled = false — 전제(정:RULE-BUS-SHAPE)".into()));
         }
         if self.zenoh.lowlatency {
-            return Err(SystemError(
-                "zenoh.lowlatency = true — 전제(정:RULE-BUS-SHAPE)".into(),
-            ));
+            return Err(SystemError("zenoh.lowlatency = true — 전제(정:RULE-BUS-SHAPE)".into()));
         }
-        if self.zenoh.namespace.is_empty()
-            || self.zenoh.namespace.contains(['/', '*', '$', '?', '#'])
-        {
-            return Err(SystemError(format!(
-                "zenoh.namespace {:?} — 키를 깨는 값",
-                self.zenoh.namespace
-            )));
+        if self.zenoh.namespace.is_empty() || self.zenoh.namespace.contains(['/', '*', '$', '?', '#']) {
+            return Err(SystemError(format!("zenoh.namespace {:?} — 키를 깨는 값", self.zenoh.namespace)));
         }
         if self.supervisor.backoff_ms.is_empty() {
             return Err(SystemError("supervisor.backoff_ms 가 비었다".into()));
@@ -258,16 +246,10 @@ impl System {
         }
         for u in &self.unit {
             if u.kind == UnitKind::Process && u.cmd.is_empty() {
-                return Err(SystemError(format!(
-                    "unit {} — process 인데 cmd 가 없다",
-                    u.id
-                )));
+                return Err(SystemError(format!("unit {} — process 인데 cmd 가 없다", u.id)));
             }
             if u.role == UnitRole::Sfu && u.kind != UnitKind::Inproc && u.addr.is_none() {
-                return Err(SystemError(format!(
-                    "unit {} — sfu 인데 addr 가 없다",
-                    u.id
-                )));
+                return Err(SystemError(format!("unit {} — sfu 인데 addr 가 없다", u.id)));
             }
         }
         if let Some(tls) = &self.hub.tls
@@ -279,10 +261,7 @@ impl System {
     }
 
     pub fn first_sfu_id(&self) -> Option<&str> {
-        self.unit
-            .iter()
-            .find(|u| u.role == UnitRole::Sfu)
-            .map(|u| u.id.as_str())
+        self.unit.iter().find(|u| u.role == UnitRole::Sfu).map(|u| u.id.as_str())
     }
 
     pub fn account(&self, key: &str) -> Option<&ApiKey> {
@@ -326,20 +305,8 @@ namespace = "ox"
 
     #[test]
     fn premise_values_are_fixed() {
-        assert!(
-            System::parse(&MIN.replace(
-                "namespace = \"ox\"",
-                "namespace = \"ox\"\nlowlatency = true"
-            ))
-            .is_err()
-        );
-        assert!(
-            System::parse(&MIN.replace(
-                "namespace = \"ox\"",
-                "namespace = \"ox\"\nqos_enabled = false"
-            ))
-            .is_err()
-        );
+        assert!(System::parse(&MIN.replace("namespace = \"ox\"", "namespace = \"ox\"\nlowlatency = true")).is_err());
+        assert!(System::parse(&MIN.replace("namespace = \"ox\"", "namespace = \"ox\"\nqos_enabled = false")).is_err());
         assert!(System::parse(&MIN.replace("namespace = \"ox\"", "namespace = \"o/x\"")).is_err());
     }
 }

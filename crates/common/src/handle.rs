@@ -21,15 +21,8 @@ pub const CALL_TIMEOUT: Duration = Duration::from_secs(10);
 pub type Client = HandleClient<tonic::transport::Channel>;
 
 pub async fn connect(addr: &str, timeout: Duration) -> Result<Client, String> {
-    let uri = if addr.starts_with("http") {
-        addr.to_string()
-    } else {
-        format!("http://{addr}")
-    };
-    let ep = tonic::transport::Endpoint::from_shared(uri)
-        .map_err(|e| e.to_string())?
-        .connect_timeout(timeout)
-        .timeout(CALL_TIMEOUT);
+    let uri = if addr.starts_with("http") { addr.to_string() } else { format!("http://{addr}") };
+    let ep = tonic::transport::Endpoint::from_shared(uri).map_err(|e| e.to_string())?.connect_timeout(timeout).timeout(CALL_TIMEOUT);
     let ch = ep.connect().await.map_err(|e| e.to_string())?;
     Ok(HandleClient::new(ch))
 }
@@ -38,15 +31,11 @@ pub async fn call(c: &mut Client, call: &Call) -> Reply {
     let body = match serde_json::to_vec(call) {
         Ok(b) => b,
         Err(e) => {
-            return Reply::Fail {
-                failure: Code::InternalError.failure_msg(e.to_string()),
-            };
+            return Reply::Fail { failure: Code::InternalError.failure_msg(e.to_string()) };
         }
     };
     match c.call(Envelope { body }).await {
         Ok(r) => Reply::decode(&r.into_inner().body),
-        Err(s) => Reply::Fail {
-            failure: Code::SfuError.failure_msg(s.message().to_string()),
-        },
+        Err(s) => Reply::Fail { failure: Code::SfuError.failure_msg(s.message().to_string()) },
     }
 }

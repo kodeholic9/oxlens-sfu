@@ -62,31 +62,16 @@ pub const CODES: &[(Code, u16, &str, Option<bool>)] = &[
     (Code::InvalidApiKey, 2004, "INVALID_API_KEY", Some(true)),
     (Code::ClaimNotAllowed, 2005, "CLAIM_NOT_ALLOWED", Some(true)),
     (Code::NotAuthorized, 2006, "NOT_AUTHORIZED", Some(true)),
-    (
-        Code::SessionNotFound,
-        2008,
-        "SESSION_NOT_FOUND",
-        Some(false),
-    ),
+    (Code::SessionNotFound, 2008, "SESSION_NOT_FOUND", Some(false)),
     (Code::SessionRevoked, 2009, "SESSION_REVOKED", None),
     (Code::DuplicateSession, 2010, "DUPLICATE_SESSION", None),
     (Code::RoomNotFound, 3001, "ROOM_NOT_FOUND", Some(false)),
     (Code::NotInRoom, 3002, "NOT_IN_ROOM", Some(false)),
     (Code::RoomNotEmpty, 3004, "ROOM_NOT_EMPTY", Some(false)),
     (Code::TrackNotFound, 3005, "TRACK_NOT_FOUND", Some(false)),
-    (
-        Code::TrackOpUnsupported,
-        3006,
-        "TRACK_OP_UNSUPPORTED",
-        Some(true),
-    ),
+    (Code::TrackOpUnsupported, 3006, "TRACK_OP_UNSUPPORTED", Some(true)),
     (Code::SsrcCollision, 3008, "SSRC_COLLISION", Some(true)),
-    (
-        Code::PreconditionFailed,
-        3009,
-        "PRECONDITION_FAILED",
-        Some(false),
-    ),
+    (Code::PreconditionFailed, 3009, "PRECONDITION_FAILED", Some(false)),
     (Code::PeerNotFound, 3010, "PEER_NOT_FOUND", Some(false)),
     (Code::NotPubRoom, 3011, "NOT_PUB_ROOM", Some(false)),
     (Code::RoomFull, 4001, "ROOM_FULL", Some(false)),
@@ -108,10 +93,7 @@ pub const RETIRED: &[u16] = &[2007, 3003, 3007];
 
 impl Code {
     fn row(self) -> &'static (Code, u16, &'static str, Option<bool>) {
-        CODES
-            .iter()
-            .find(|r| r.0 == self)
-            .unwrap_or(&CODES[CODES.len() - 3])
+        CODES.iter().find(|r| r.0 == self).unwrap_or(&CODES[CODES.len() - 3])
     }
 
     pub fn num(self) -> u16 {
@@ -135,30 +117,17 @@ impl Code {
     }
 
     pub fn failure(self) -> Failure {
-        Failure {
-            code: self.num(),
-            name: self.name().to_string(),
-            permanent: self.permanent().unwrap_or(false),
-            message: None,
-            details: None,
-        }
+        Failure { code: self.num(), name: self.name().to_string(), permanent: self.permanent().unwrap_or(false), message: None, details: None }
     }
 
     pub fn failure_msg(self, message: impl Into<String>) -> Failure {
-        Failure {
-            message: Some(message.into()),
-            ..self.failure()
-        }
+        Failure { message: Some(message.into()), ..self.failure() }
     }
 
     pub fn http_status(self) -> u16 {
         let n = self.num();
         match self {
-            Code::NotBound
-            | Code::TokenInvalid
-            | Code::TokenExpired
-            | Code::InvalidApiKey
-            | Code::SessionNotFound => 401,
+            Code::NotBound | Code::TokenInvalid | Code::TokenExpired | Code::InvalidApiKey | Code::SessionNotFound => 401,
             Code::NotAuthorized => 403,
             Code::RoomNotFound => 404,
             Code::PreconditionFailed => 409,
@@ -215,14 +184,7 @@ mod tests {
 
     #[test]
     fn leave_only_codes_have_null_permanent() {
-        for c in [
-            Code::FlowTimeout,
-            Code::FlowOverflow,
-            Code::HeartbeatTimeout,
-            Code::ServerShutdown,
-            Code::SessionRevoked,
-            Code::DuplicateSession,
-        ] {
+        for c in [Code::FlowTimeout, Code::FlowOverflow, Code::HeartbeatTimeout, Code::ServerShutdown, Code::SessionRevoked, Code::DuplicateSession] {
             assert_eq!(c.permanent(), None, "연:RULE-ERR-UNKNOWN-BY-LEAD");
         }
         assert_eq!(Code::ProtocolError.permanent(), Some(true));

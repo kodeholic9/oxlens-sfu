@@ -88,12 +88,7 @@ pub struct Media {
 }
 impl Default for Media {
     fn default() -> Self {
-        Self {
-            bwe_mode: MediaBwemode::Twcc,
-            slot_mid_reserve: 40,
-            auto_layer: MediaAutolayer::Off,
-            max_bitrate_bps: 800_000,
-        }
+        Self { bwe_mode: MediaBwemode::Twcc, slot_mid_reserve: 40, auto_layer: MediaAutolayer::Off, max_bitrate_bps: 800_000 }
     }
 }
 
@@ -105,10 +100,7 @@ pub struct Floor {
 }
 impl Default for Floor {
     fn default() -> Self {
-        Self {
-            queue_max: 10,
-            t2_stop_talking_secs: 30,
-        }
+        Self { queue_max: 10, t2_stop_talking_secs: 30 }
     }
 }
 
@@ -163,11 +155,7 @@ pub struct Hook {
 }
 impl Default for Hook {
     fn default() -> Self {
-        Self {
-            retry_backoff_ms: vec![1000, 2000, 4000, 8000, 16000],
-            retry_max: 5,
-            queue_max: 10_000,
-        }
+        Self { retry_backoff_ms: vec![1000, 2000, 4000, 8000, 16000], retry_max: 5, queue_max: 10_000 }
     }
 }
 
@@ -179,126 +167,72 @@ impl Policy {
     }
     pub fn validate(&self) -> Result<(), PolicyError> {
         if self.hub.token_ttl_secs < 60 {
-            return bad(format!(
-                "hub.token_ttl_secs {} 는 60 미만",
-                self.hub.token_ttl_secs
-            ));
+            return bad(format!("hub.token_ttl_secs {} 는 60 미만", self.hub.token_ttl_secs));
         }
         if !(1000..=60000).contains(&self.hub.heartbeat_interval_ms) {
-            return bad(format!(
-                "hub.heartbeat_interval_ms {} 는 1000~60000 밖",
-                self.hub.heartbeat_interval_ms
-            ));
+            return bad(format!("hub.heartbeat_interval_ms {} 는 1000~60000 밖", self.hub.heartbeat_interval_ms));
         }
         if self.hub.heartbeat_timeout_ms < 2000 {
-            return bad(format!(
-                "hub.heartbeat_timeout_ms {} 는 2000 미만",
-                self.hub.heartbeat_timeout_ms
-            ));
+            return bad(format!("hub.heartbeat_timeout_ms {} 는 2000 미만", self.hub.heartbeat_timeout_ms));
         }
         if self.hub.resume_window_ms < 52000 {
-            return bad(format!(
-                "hub.resume_window_ms {} 는 52000 미만",
-                self.hub.resume_window_ms
-            ));
+            return bad(format!("hub.resume_window_ms {} 는 52000 미만", self.hub.resume_window_ms));
         }
         if !(1..=10).contains(&self.hub.ws_flow_window) {
-            return bad(format!(
-                "hub.ws_flow_window {} 는 1~10 밖",
-                self.hub.ws_flow_window
-            ));
+            return bad(format!("hub.ws_flow_window {} 는 1~10 밖", self.hub.ws_flow_window));
         }
         if self.hub.room_default_capacity < 1 {
-            return bad(format!(
-                "hub.room_default_capacity {} 는 1 미만",
-                self.hub.room_default_capacity
-            ));
+            return bad(format!("hub.room_default_capacity {} 는 1 미만", self.hub.room_default_capacity));
         }
         if self.hub.metadata_max_bytes < 256 {
-            return bad(format!(
-                "hub.metadata_max_bytes {} 는 256 미만",
-                self.hub.metadata_max_bytes
-            ));
+            return bad(format!("hub.metadata_max_bytes {} 는 256 미만", self.hub.metadata_max_bytes));
         }
         if self.hub.join_retry_after_ms < 100 {
-            return bad(format!(
-                "hub.join_retry_after_ms {} 는 100 미만",
-                self.hub.join_retry_after_ms
-            ));
+            return bad(format!("hub.join_retry_after_ms {} 는 100 미만", self.hub.join_retry_after_ms));
         }
         if self.logging.rotate_max_bytes < 1048576 {
-            return bad(format!(
-                "logging.rotate_max_bytes {} 는 1048576 미만",
-                self.logging.rotate_max_bytes
-            ));
+            return bad(format!("logging.rotate_max_bytes {} 는 1048576 미만", self.logging.rotate_max_bytes));
         }
         if !(256..=2047).contains(&self.logging.line_max_bytes) {
-            return bad(format!(
-                "logging.line_max_bytes {} 는 256~2047 밖",
-                self.logging.line_max_bytes
-            ));
+            return bad(format!("logging.line_max_bytes {} 는 256~2047 밖", self.logging.line_max_bytes));
         }
         if self.logging.queue_max_lines < 256 {
-            return bad(format!(
-                "logging.queue_max_lines {} 는 256 미만",
-                self.logging.queue_max_lines
-            ));
+            return bad(format!("logging.queue_max_lines {} 는 256 미만", self.logging.queue_max_lines));
         }
         if self.logging.spool_max_bytes < 1048576 {
-            return bad(format!(
-                "logging.spool_max_bytes {} 는 1048576 미만",
-                self.logging.spool_max_bytes
-            ));
+            return bad(format!("logging.spool_max_bytes {} 는 1048576 미만", self.logging.spool_max_bytes));
         }
         if self.logging.socket_rcvbuf_bytes < 65536 {
-            return bad(format!(
-                "logging.socket_rcvbuf_bytes {} 는 65536 미만",
-                self.logging.socket_rcvbuf_bytes
-            ));
+            return bad(format!("logging.socket_rcvbuf_bytes {} 는 65536 미만", self.logging.socket_rcvbuf_bytes));
         }
         if !(200..=60000).contains(&self.logging.stat_interval_ms) {
-            return bad(format!(
-                "logging.stat_interval_ms {} 는 200~60000 밖",
-                self.logging.stat_interval_ms
-            ));
+            return bad(format!("logging.stat_interval_ms {} 는 200~60000 밖", self.logging.stat_interval_ms));
         }
         if !(0..=128).contains(&self.media.slot_mid_reserve) {
-            return bad(format!(
-                "media.slot_mid_reserve {} 는 0~128 밖",
-                self.media.slot_mid_reserve
-            ));
+            return bad(format!("media.slot_mid_reserve {} 는 0~128 밖", self.media.slot_mid_reserve));
         }
         if !(100000..=5000000).contains(&self.media.max_bitrate_bps) {
-            return bad(format!(
-                "media.max_bitrate_bps {} 는 100000~5000000 밖",
-                self.media.max_bitrate_bps
-            ));
+            return bad(format!("media.max_bitrate_bps {} 는 100000~5000000 밖", self.media.max_bitrate_bps));
         }
         if !(1..=255).contains(&self.floor.queue_max) {
-            return bad(format!(
-                "floor.queue_max {} 는 1~255 밖",
-                self.floor.queue_max
-            ));
+            return bad(format!("floor.queue_max {} 는 1~255 밖", self.floor.queue_max));
         }
         if !(5..=600).contains(&self.floor.t2_stop_talking_secs) {
-            return bad(format!(
-                "floor.t2_stop_talking_secs {} 는 5~600 밖",
-                self.floor.t2_stop_talking_secs
-            ));
+            return bad(format!("floor.t2_stop_talking_secs {} 는 5~600 밖", self.floor.t2_stop_talking_secs));
         }
         if self.hook.queue_max < 1 {
             return bad(format!("hook.queue_max {} 는 1 미만", self.hook.queue_max));
         }
         if self.hub.heartbeat_timeout_ms < 2 * self.hub.heartbeat_interval_ms {
-            return bad(
-                "hb-timeout: hub.heartbeat_timeout_ms ≥ 2 × hub.heartbeat_interval_ms".to_string(),
-            );
+            return bad("hb-timeout: hub.heartbeat_timeout_ms ≥ 2 × hub.heartbeat_interval_ms".to_string());
         }
         if self.hub.resume_window_ms < 52_000 {
-            return bad("resume-window: hub.resume_window_ms ≥ 52,000 — 연:RULE-SES-BACKOFF-LADDER 백오프 합계(44~52초)보다 길어야 정상 재접속이 세션을 잃지 않는다".to_string());
+            return bad(
+                "resume-window: hub.resume_window_ms ≥ 52,000 — 연:RULE-SES-BACKOFF-LADDER 백오프 합계(44~52초)보다 길어야 정상 재접속이 세션을 잃지 않는다"
+                    .to_string(),
+            );
         }
-        if self.media.auto_layer == MediaAutolayer::V2 && self.media.bwe_mode != MediaBwemode::Twcc
-        {
+        if self.media.auto_layer == MediaAutolayer::V2 && self.media.bwe_mode != MediaBwemode::Twcc {
             return bad("v2-twcc: media.auto_layer = v2 면 media.bwe_mode = twcc(정:RULE-SIM-TICK v2 = TWCC send-side)".to_string());
         }
         if self.hook.retry_max as usize > self.hook.retry_backoff_ms.len() {

@@ -75,10 +75,7 @@ pub struct Msg {
 }
 
 pub fn adopted(t: u8) -> bool {
-    matches!(
-        t,
-        REQUEST | GRANTED | TAKEN | DENY | RELEASE | IDLE | REVOKE | QPOS_REQ | QINFO | ACK
-    )
+    matches!(t, REQUEST | GRANTED | TAKEN | DENY | RELEASE | IDLE | REVOKE | QPOS_REQ | QINFO | ACK)
 }
 
 pub fn ack_allowed(t: u8) -> bool {
@@ -135,11 +132,7 @@ pub fn decode(b: &[u8]) -> Option<Msg> {
     if !adopted(t) {
         return None;
     }
-    let mut m = Msg {
-        msg_type: t,
-        ack: head & 0x10 != 0,
-        tlvs: Vec::new(),
-    };
+    let mut m = Msg { msg_type: t, ack: head & 0x10 != 0, tlvs: Vec::new() };
     let mut rest = &b[2..];
     for _ in 0..b[1] {
         if rest.len() < 2 {
@@ -157,18 +150,11 @@ pub fn decode(b: &[u8]) -> Option<Msg> {
 
 impl Msg {
     pub fn new(msg_type: u8, ack: bool) -> Msg {
-        Msg {
-            msg_type,
-            ack,
-            tlvs: Vec::new(),
-        }
+        Msg { msg_type, ack, tlvs: Vec::new() }
     }
 
     pub fn get(&self, id: u8) -> Option<&[u8]> {
-        self.tlvs
-            .iter()
-            .find(|(i, _)| *i == id)
-            .map(|(_, v)| v.as_slice())
+        self.tlvs.iter().find(|(i, _)| *i == id).map(|(_, v)| v.as_slice())
     }
 
     pub fn u8_of(&self, id: u8) -> Option<u8> {
@@ -176,15 +162,11 @@ impl Msg {
     }
 
     pub fn u16_of(&self, id: u8) -> Option<u16> {
-        self.get(id)
-            .filter(|v| v.len() >= 2)
-            .map(|v| u16::from_be_bytes([v[0], v[1]]))
+        self.get(id).filter(|v| v.len() >= 2).map(|v| u16::from_be_bytes([v[0], v[1]]))
     }
 
     pub fn str_of(&self, id: u8) -> Option<String> {
-        self.get(id)
-            .and_then(|v| std::str::from_utf8(v).ok())
-            .map(str::to_string)
+        self.get(id).and_then(|v| std::str::from_utf8(v).ok()).map(str::to_string)
     }
 
     pub fn room(&self) -> Option<String> {
@@ -233,10 +215,7 @@ mod tests {
 
     #[test]
     fn header_bits_follow_rule_flr_header() {
-        let m = Msg::new(TAKEN, true)
-            .with_str(tlv::SPEAKER, "u2")
-            .with_u16(tlv::SEQ, 7)
-            .with_str(tlv::ROOM, "r1");
+        let m = Msg::new(TAKEN, true).with_str(tlv::SPEAKER, "u2").with_u16(tlv::SEQ, 7).with_str(tlv::ROOM, "r1");
         let b = encode(&m).expect("enc");
         assert_eq!(b[0], 0x12);
         assert_eq!(b[1], 3);

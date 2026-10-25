@@ -29,10 +29,7 @@ pub struct UserClaims {
 
 impl UserClaims {
     pub fn user(&self) -> Option<&str> {
-        self.sub
-            .as_deref()
-            .or(self.user_id.as_deref())
-            .filter(|u| !u.is_empty())
+        self.sub.as_deref().or(self.user_id.as_deref()).filter(|u| !u.is_empty())
     }
 }
 
@@ -46,19 +43,11 @@ pub struct OpsClaims {
 }
 
 pub fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 pub fn sign<T: Serialize>(claims: &T, secret: &str) -> Result<String, Code> {
-    encode(
-        &Header::new(Algorithm::HS256),
-        claims,
-        &EncodingKey::from_secret(secret.as_bytes()),
-    )
-    .map_err(|_| Code::InternalError)
+    encode(&Header::new(Algorithm::HS256), claims, &EncodingKey::from_secret(secret.as_bytes())).map_err(|_| Code::InternalError)
 }
 
 fn validation() -> Validation {
@@ -77,23 +66,13 @@ fn map_err(e: &jsonwebtoken::errors::Error) -> Code {
 }
 
 pub fn verify_user(token: &str, sys: &System) -> Result<UserClaims, Code> {
-    let mut secrets: Vec<&str> = sys
-        .hub
-        .auth
-        .api_keys
-        .iter()
-        .map(|a| a.secret.as_str())
-        .collect();
+    let mut secrets: Vec<&str> = sys.hub.auth.api_keys.iter().map(|a| a.secret.as_str()).collect();
     if let Some(j) = sys.hub.auth.jwt_secret.as_deref() {
         secrets.push(j);
     }
     let mut expired = false;
     for s in secrets {
-        match decode::<UserClaims>(
-            token,
-            &DecodingKey::from_secret(s.as_bytes()),
-            &validation(),
-        ) {
+        match decode::<UserClaims>(token, &DecodingKey::from_secret(s.as_bytes()), &validation()) {
             Ok(d) => {
                 if d.claims.user().is_none() {
                     return Err(Code::TokenInvalid);
@@ -104,22 +83,13 @@ pub fn verify_user(token: &str, sys: &System) -> Result<UserClaims, Code> {
             Err(_) => {}
         }
     }
-    Err(if expired {
-        Code::TokenExpired
-    } else {
-        Code::TokenInvalid
-    })
+    Err(if expired { Code::TokenExpired } else { Code::TokenInvalid })
 }
 
 pub fn verify_ops(token: &str, sys: &System) -> Result<OpsClaims, Code> {
     let iss = jsonwebtoken::dangerous_insecure_decode_iss(token).ok_or(Code::TokenInvalid)?;
     let acct = sys.account(&iss).ok_or(Code::InvalidApiKey)?;
-    let d = decode::<OpsClaims>(
-        token,
-        &DecodingKey::from_secret(acct.secret.as_bytes()),
-        &validation(),
-    )
-    .map_err(|e| map_err(&e))?;
+    let d = decode::<OpsClaims>(token, &DecodingKey::from_secret(acct.secret.as_bytes()), &validation()).map_err(|e| map_err(&e))?;
     if !d.claims.ops || !acct.ops_allowed {
         return Err(Code::NotAuthorized);
     }
@@ -134,16 +104,8 @@ mod jsonwebtoken {
         v.insecure_disable_signature_validation();
         v.validate_exp = false;
         v.required_spec_claims.clear();
-        let d = ::jsonwebtoken::decode::<serde_json::Value>(
-            token,
-            &::jsonwebtoken::DecodingKey::from_secret(b""),
-            &v,
-        )
-        .ok()?;
-        d.claims
-            .get("iss")
-            .and_then(|x| x.as_str())
-            .map(str::to_string)
+        let d = ::jsonwebtoken::decode::<serde_json::Value>(token, &::jsonwebtoken::DecodingKey::from_secret(b""), &v).ok()?;
+        d.claims.get("iss").and_then(|x| x.as_str()).map(str::to_string)
     }
 }
 
@@ -174,16 +136,7 @@ namespace = "ox"
     }
 
     fn user(exp: u64) -> UserClaims {
-        UserClaims {
-            sub: Some("u1".into()),
-            user_id: None,
-            participant_type: 0,
-            hidden: false,
-            permission: None,
-            metadata: None,
-            iat: now_secs(),
-            exp,
-        }
+        UserClaims { sub: Some("u1".into()), user_id: None, participant_type: 0, hidden: false, permission: None, metadata: None, iat: now_secs(), exp }
     }
 
     #[test]
@@ -202,34 +155,11 @@ namespace = "ox"
     #[test]
     fn ops_token_rules() {
         let s = sys();
-        let mk = |iss: &str, ops: bool, secret: &str| {
-            sign(
-                &OpsClaims {
-                    iss: iss.into(),
-                    ops,
-                    iat: now_secs(),
-                    exp: now_secs() + 60,
-                },
-                secret,
-            )
-            .expect("sign")
-        };
+        let mk = |iss: &str, ops: bool, secret: &str| sign(&OpsClaims { iss: iss.into(), ops, iat: now_secs(), exp: now_secs() + 60 }, secret).expect("sign");
         assert!(verify_ops(&mk("k1", true, "s1"), &s).is_ok());
-        assert_eq!(
-            verify_ops(&mk("zz", true, "s1"), &s),
-            Err(Code::InvalidApiKey)
-        );
-        assert_eq!(
-            verify_ops(&mk("k1", true, "bad"), &s),
-            Err(Code::TokenInvalid)
-        );
-        assert_eq!(
-            verify_ops(&mk("k1", false, "s1"), &s),
-            Err(Code::NotAuthorized)
-        );
-        assert_eq!(
-            verify_ops(&mk("k2", true, "s2"), &s),
-            Err(Code::NotAuthorized)
-        );
+        assert_eq!(verify_ops(&mk("zz", true, "s1"), &s), Err(Code::InvalidApiKey));
+        assert_eq!(verify_ops(&mk("k1", true, "bad"), &s), Err(Code::TokenInvalid));
+        assert_eq!(verify_ops(&mk("k1", false, "s1"), &s), Err(Code::NotAuthorized));
+        assert_eq!(verify_ops(&mk("k2", true, "s2"), &s), Err(Code::NotAuthorized));
     }
 }

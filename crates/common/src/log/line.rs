@@ -5,18 +5,7 @@
 use std::fmt::Write as _;
 
 pub const HEAD: &[&str] = &["ts", "mono", "node", "proc", "kind", "spec"];
-pub const CORR: &[&str] = &[
-    "session",
-    "room",
-    "user",
-    "epoch",
-    "track",
-    "ssrc",
-    "seq",
-    "floor_sequence",
-    "mbcp_seq",
-    "arev",
-];
+pub const CORR: &[&str] = &["session", "room", "user", "epoch", "track", "ssrc", "seq", "floor_sequence", "mbcp_seq", "arev"];
 pub const REST_LINE: &[&str] = &[
     "build",
     "truncated",
@@ -70,10 +59,7 @@ impl Record {
     }
 
     pub fn get(&self, k: &str) -> Option<&str> {
-        self.fields
-            .iter()
-            .find(|(n, _)| n == k)
-            .map(|(_, v)| v.as_str())
+        self.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str())
     }
 
     fn take(&self, k: &str) -> Option<&str> {
@@ -82,9 +68,7 @@ impl Record {
 }
 
 pub fn quote(v: &str) -> String {
-    let needs = v.is_empty()
-        || v.chars()
-            .any(|c| c.is_whitespace() || c == '"' || c == '=' || c.is_control());
+    let needs = v.is_empty() || v.chars().any(|c| c.is_whitespace() || c == '"' || c == '=' || c.is_control());
     if !needs {
         return v.to_string();
     }
@@ -118,18 +102,8 @@ fn push(out: &mut String, k: &str, v: &str) {
 
 pub fn render(r: &Record, max: usize) -> String {
     let transition = r.take("area").is_some();
-    let rest: &[&str] = if transition {
-        REST_TRANSITION
-    } else {
-        REST_LINE
-    };
-    let known: Vec<&str> = HEAD
-        .iter()
-        .chain(CORR)
-        .chain(REST_LINE)
-        .chain(REST_TRANSITION)
-        .copied()
-        .collect();
+    let rest: &[&str] = if transition { REST_TRANSITION } else { REST_LINE };
+    let known: Vec<&str> = HEAD.iter().chain(CORR).chain(REST_LINE).chain(REST_TRANSITION).copied().collect();
     let mut extra = String::new();
     for (k, v) in &r.fields {
         if !known.contains(&k.as_str()) && !v.is_empty() {
@@ -161,11 +135,7 @@ pub fn render(r: &Record, max: usize) -> String {
             push(&mut head, &format!("in.{k}"), v);
         }
     }
-    let full = if msg.is_empty() {
-        head.clone()
-    } else {
-        format!("{head} msg={}", quote(&msg))
-    };
+    let full = if msg.is_empty() { head.clone() } else { format!("{head} msg={}", quote(&msg)) };
     if full.len() <= max {
         return full;
     }
@@ -194,10 +164,7 @@ mod tests {
     use super::*;
 
     fn rec(pairs: &[(&str, &str)], msg: &str) -> Record {
-        let mut r = Record {
-            msg: msg.into(),
-            ..Default::default()
-        };
+        let mut r = Record { msg: msg.into(), ..Default::default() };
         for (k, v) in pairs {
             r.set(k, *v);
         }
@@ -207,41 +174,16 @@ mod tests {
     #[test]
     fn order_is_fixed_and_absent_keys_skipped() {
         let r = rec(
-            &[
-                ("user", "u1"),
-                ("kind", "ev"),
-                ("node", "n"),
-                ("proc", "hub"),
-                ("ts", "T"),
-                ("mono", "5"),
-                ("spec", "CP-OP-BIND"),
-                ("room", ""),
-            ],
+            &[("user", "u1"), ("kind", "ev"), ("node", "n"), ("proc", "hub"), ("ts", "T"), ("mono", "5"), ("spec", "CP-OP-BIND"), ("room", "")],
             "bound ok",
         );
-        assert_eq!(
-            render(&r, 1024),
-            "ts=T mono=5 node=n proc=hub kind=ev spec=CP-OP-BIND user=u1 msg=\"bound ok\""
-        );
+        assert_eq!(render(&r, 1024), "ts=T mono=5 node=n proc=hub kind=ev spec=CP-OP-BIND user=u1 msg=\"bound ok\"");
     }
 
     #[test]
     fn unknown_keys_fold_into_msg() {
-        let r = rec(
-            &[
-                ("ts", "T"),
-                ("mono", "1"),
-                ("node", "n"),
-                ("proc", "sfu"),
-                ("kind", "diag"),
-                ("why", "x"),
-            ],
-            "m",
-        );
-        assert_eq!(
-            render(&r, 1024),
-            "ts=T mono=1 node=n proc=sfu kind=diag msg=\"m why=x\""
-        );
+        let r = rec(&[("ts", "T"), ("mono", "1"), ("node", "n"), ("proc", "sfu"), ("kind", "diag"), ("why", "x")], "m");
+        assert_eq!(render(&r, 1024), "ts=T mono=1 node=n proc=sfu kind=diag msg=\"m why=x\"");
     }
 
     #[test]
@@ -272,16 +214,7 @@ mod tests {
 
     #[test]
     fn long_msg_truncated_with_mark() {
-        let r = rec(
-            &[
-                ("ts", "T"),
-                ("mono", "1"),
-                ("node", "n"),
-                ("proc", "hub"),
-                ("kind", "diag"),
-            ],
-            &"가".repeat(800),
-        );
+        let r = rec(&[("ts", "T"), ("mono", "1"), ("node", "n"), ("proc", "hub"), ("kind", "diag")], &"가".repeat(800));
         let s = render(&r, 300);
         assert!(s.len() <= 300);
         assert!(s.contains("truncated=1 msg="));

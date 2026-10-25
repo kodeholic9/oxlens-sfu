@@ -503,9 +503,7 @@ pub struct PublishTracksResAddTracks {
 #[serde(tag = "action")]
 pub enum PublishTracksRes {
     #[serde(rename = "add")]
-    Add {
-        tracks: Vec<PublishTracksResAddTracks>,
-    },
+    Add { tracks: Vec<PublishTracksResAddTracks> },
     #[serde(rename = "remove")]
     Remove {},
 }
@@ -638,11 +636,7 @@ pub enum RoomEventBodyAffiliationCause {
 #[serde(tag = "type")]
 pub enum RoomEventBody {
     #[serde(rename = "affiliation")]
-    Affiliation {
-        room_id: String,
-        affiliation: Affiliation,
-        cause: RoomEventBodyAffiliationCause,
-    },
+    Affiliation { room_id: String, affiliation: Affiliation, cause: RoomEventBodyAffiliationCause },
     #[serde(rename = "sync_required")]
     SyncRequired { room_id: String, reason: String },
 }

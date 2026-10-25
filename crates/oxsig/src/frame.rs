@@ -49,33 +49,15 @@ pub enum FrameError {
 
 impl Frame {
     pub fn request(op: Op, pid: u32, body: Vec<u8>) -> Frame {
-        Frame {
-            kind: Kind::Request,
-            reserved: 0,
-            op: op.as_u16(),
-            pid,
-            body,
-        }
+        Frame { kind: Kind::Request, reserved: 0, op: op.as_u16(), pid, body }
     }
 
     pub fn reply_ok(op: u16, pid: u32, body: Vec<u8>) -> Frame {
-        Frame {
-            kind: Kind::Ok,
-            reserved: 0,
-            op,
-            pid,
-            body,
-        }
+        Frame { kind: Kind::Ok, reserved: 0, op, pid, body }
     }
 
     pub fn reply_fail(op: u16, pid: u32, body: Vec<u8>) -> Frame {
-        Frame {
-            kind: Kind::Fail,
-            reserved: 0,
-            op,
-            pid,
-            body,
-        }
+        Frame { kind: Kind::Fail, reserved: 0, op, pid, body }
     }
 
     pub fn encode(&self) -> Vec<u8> {
@@ -114,12 +96,7 @@ impl Frame {
     }
 
     pub fn body_is_empty(&self) -> bool {
-        self.body.is_empty()
-            || self
-                .body
-                .iter()
-                .filter(|c| !c.is_ascii_whitespace())
-                .eq(b"{}".iter())
+        self.body.is_empty() || self.body.iter().filter(|c| !c.is_ascii_whitespace()).eq(b"{}".iter())
     }
 }
 
@@ -152,13 +129,7 @@ mod tests {
 
     #[test]
     fn ws_round_trip_keeps_reserved_bits() {
-        let f = Frame {
-            kind: Kind::Fail,
-            reserved: 0b101,
-            op: 0x0201,
-            pid: 7,
-            body: b"{\"a\":1}".to_vec(),
-        };
+        let f = Frame { kind: Kind::Fail, reserved: 0b101, op: 0x0201, pid: 7, body: b"{\"a\":1}".to_vec() };
         let g = Frame::decode(&f.encode()).expect("decode");
         assert_eq!(f, g);
     }
@@ -166,18 +137,9 @@ mod tests {
     #[test]
     fn ws_rejects_per_rule_trn_close() {
         assert_eq!(Frame::decode(&[1, 0, 0]), Err(FrameError::TooShort));
-        assert_eq!(
-            Frame::decode(&[2, 0, 0, 1, 0, 0, 0, 1]),
-            Err(FrameError::BadVersion)
-        );
-        assert_eq!(
-            Frame::decode(&[1, 3, 0, 1, 0, 0, 0, 1]),
-            Err(FrameError::ReservedKind)
-        );
-        assert_eq!(
-            Frame::decode(&vec![1u8; WS_MAX_FRAME + 1]),
-            Err(FrameError::TooLarge)
-        );
+        assert_eq!(Frame::decode(&[2, 0, 0, 1, 0, 0, 0, 1]), Err(FrameError::BadVersion));
+        assert_eq!(Frame::decode(&[1, 3, 0, 1, 0, 0, 0, 1]), Err(FrameError::ReservedKind));
+        assert_eq!(Frame::decode(&vec![1u8; WS_MAX_FRAME + 1]), Err(FrameError::TooLarge));
     }
 
     #[test]

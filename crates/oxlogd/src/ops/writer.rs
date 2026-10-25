@@ -21,24 +21,11 @@ pub struct Out {
 
 impl Out {
     pub fn new(dir: PathBuf, max: u64, retention_days: u16) -> Out {
-        Out {
-            dir,
-            max,
-            retention_days,
-            date: String::new(),
-            idx: 0,
-            size: 0,
-            file: None,
-            path: None,
-        }
+        Out { dir, max, retention_days, date: String::new(), idx: 0, size: 0, file: None, path: None }
     }
 
     fn name(&self) -> PathBuf {
-        if self.idx == 0 {
-            self.dir.join(format!("ox.log.{}", self.date))
-        } else {
-            self.dir.join(format!("ox.log.{}.{}", self.date, self.idx))
-        }
+        if self.idx == 0 { self.dir.join(format!("ox.log.{}", self.date)) } else { self.dir.join(format!("ox.log.{}.{}", self.date, self.idx)) }
     }
 
     fn open(&mut self) {
@@ -86,12 +73,7 @@ impl Out {
             if Some(&p) == self.path.as_ref() || !closed_kind(&p) {
                 continue;
             }
-            let old = e
-                .metadata()
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .and_then(|m| now.duration_since(m).ok())
-                .is_some_and(|age| age > keep);
+            let old = e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|m| now.duration_since(m).ok()).is_some_and(|age| age > keep);
             if old {
                 let _ = std::fs::remove_file(&p);
             }

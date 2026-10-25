@@ -169,15 +169,7 @@ impl Op {
     pub fn routed_to_sfu(self) -> bool {
         matches!(
             self,
-            Op::RoomJoin
-                | Op::RoomLeave
-                | Op::PublishTracks
-                | Op::Ready
-                | Op::SubscribeLayer
-                | Op::TrackSet
-                | Op::IceRestart
-                | Op::Affiliation
-                | Op::Message
+            Op::RoomJoin | Op::RoomLeave | Op::PublishTracks | Op::Ready | Op::SubscribeLayer | Op::TrackSet | Op::IceRestart | Op::Affiliation | Op::Message
         )
     }
 }
@@ -196,14 +188,7 @@ mod tests {
 
     #[test]
     fn room_state_ops_share_session_lane() {
-        for op in [
-            Op::RoomEvent,
-            Op::ParticipantEvent,
-            Op::TrackEvent,
-            Op::TrackState,
-            Op::ParticipantState,
-            Op::Affiliation,
-        ] {
+        for op in [Op::RoomEvent, Op::ParticipantEvent, Op::TrackEvent, Op::TrackState, Op::ParticipantState, Op::Affiliation] {
             assert_eq!(op.lane(), Lane::Session, "연:RULE-TRN-ROOM-STATE-ONE-LANE");
         }
         assert_eq!(Op::Message.lane(), Lane::Data);

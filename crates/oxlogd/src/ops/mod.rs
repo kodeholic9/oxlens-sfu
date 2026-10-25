@@ -84,8 +84,7 @@ fn bind(path: &str) -> Result<UnixDatagram, String> {
 
 pub fn run(a: Args) -> Result<(), String> {
     let policy = match &a.policy {
-        Some(p) => Policy::parse(&std::fs::read_to_string(p).map_err(|e| format!("{p}: {e}"))?)
-            .map_err(|e| e.to_string())?,
+        Some(p) => Policy::parse(&std::fs::read_to_string(p).map_err(|e| format!("{p}: {e}"))?).map_err(|e| e.to_string())?,
         None => Policy::default(),
     };
     let inst = common::id::instance();
@@ -104,34 +103,21 @@ pub fn run(a: Args) -> Result<(), String> {
     });
     let sock = bind(&a.log_socket)?;
     let rcv = policy.logging.socket_rcvbuf_bytes as usize;
-    if let Err(e) = nix::sys::socket::setsockopt(
-        std::os::fd::AsRawFd::as_raw_fd(&sock),
-        nix::sys::socket::sockopt::RcvBuf,
-        &rcv,
-    ) {
+    if let Err(e) = nix::sys::socket::setsockopt(std::os::fd::AsRawFd::as_raw_fd(&sock), nix::sys::socket::sockopt::RcvBuf, &rcv) {
         tracing::warn!("rcvbuf {rcv}: {e}");
     }
-    let out = writer::Out::new(
-        PathBuf::from(&a.log_dir),
-        policy.logging.rotate_max_bytes,
-        policy.logging.retention_days,
-    );
-    let w = std::thread::Builder::new()
-        .name("ox-logw".into())
-        .spawn(move || writer::run(rx, out))
-        .map_err(|e| e.to_string())?;
+    let out = writer::Out::new(PathBuf::from(&a.log_dir), policy.logging.rotate_max_bytes, policy.logging.retention_days);
+    let w = std::thread::Builder::new().name("ox-logw".into()).spawn(move || writer::run(rx, out)).map_err(|e| e.to_string())?;
     let rtx = tx.clone();
     let rs = sock.try_clone().map_err(|e| e.to_string())?;
-    let _ = std::thread::Builder::new()
-        .name("ox-logr".into())
-        .spawn(move || {
-            let mut buf = vec![0u8; 65_536];
-            while let Ok(n) = rs.recv(&mut buf) {
-                if n > 0 && rtx.send(buf[..n].to_vec()).is_err() {
-                    break;
-                }
+    let _ = std::thread::Builder::new().name("ox-logr".into()).spawn(move || {
+        let mut buf = vec![0u8; 65_536];
+        while let Ok(n) = rs.recv(&mut buf) {
+            if n > 0 && rtx.send(buf[..n].to_vec()).is_err() {
+                break;
             }
-        });
+        }
+    });
     {
         let mut so = std::io::stdout().lock();
         let _ = writeln!(so, "ready epoch={inst}");
@@ -150,10 +136,7 @@ pub fn run(a: Args) -> Result<(), String> {
     );
     let mut sink = Vec::new();
     let _ = std::io::stdin().read_to_end(&mut sink);
-    common::ev!(
-        spec = "SV-STATE-UNIT-STATE",
-        "logger stopping — parent channel closed"
-    );
+    common::ev!(spec = "SV-STATE-UNIT-STATE", "logger stopping — parent channel closed");
     std::thread::sleep(std::time::Duration::from_millis(100));
     let _ = tx.send(Vec::new());
     let _ = w.join();

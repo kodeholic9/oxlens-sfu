@@ -5,10 +5,7 @@
 pub fn random_hex(bytes: usize) -> String {
     let mut b = vec![0u8; bytes];
     if getrandom::fill(&mut b).is_err() {
-        let t = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
+        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
         for (i, x) in b.iter_mut().enumerate() {
             *x = (t >> ((i % 16) * 8)) as u8 ^ (i as u8).wrapping_mul(131);
         }
@@ -31,14 +28,7 @@ pub fn uuid4() -> String {
     let v = c[16].to_digit(16).unwrap_or(0);
     c[16] = std::char::from_digit((v & 0x3) | 0x8, 16).unwrap_or('8');
     let s: String = c.into_iter().collect();
-    format!(
-        "{}-{}-{}-{}-{}",
-        &s[0..8],
-        &s[8..12],
-        &s[12..16],
-        &s[16..20],
-        &s[20..32]
-    )
+    format!("{}-{}-{}-{}-{}", &s[0..8], &s[8..12], &s[12..16], &s[16..20], &s[20..32])
 }
 
 #[cfg(test)]

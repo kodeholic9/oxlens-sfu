@@ -42,10 +42,7 @@ pub fn fingerprint(session_id: &str) -> String {
 }
 
 pub fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
 fn start() -> &'static Instant {
@@ -167,9 +164,7 @@ impl LogHandle {
     pub fn override_level(&self, to: LoggingLevel, ttl_secs: Option<u32>) -> LevelChange {
         let from = self.level();
         let until = ttl_secs.map(|t| now_ms() + u64::from(t) * 1000);
-        self.shared
-            .until
-            .store(until.unwrap_or(0), Ordering::Relaxed);
+        self.shared.until.store(until.unwrap_or(0), Ordering::Relaxed);
         self.shared.over.store(level_num(to), Ordering::Relaxed);
         LevelChange { from, to, until }
     }
@@ -190,11 +185,7 @@ fn push(s: &Shared, line: Vec<u8>) {
 
 pub enum Sink {
     Stdout,
-    Socket {
-        path: PathBuf,
-        spool: PathBuf,
-        spool_max: u64,
-    },
+    Socket { path: PathBuf, spool: PathBuf, spool_max: u64 },
     Queue(SyncSender<Vec<u8>>),
 }
 
@@ -208,10 +199,7 @@ pub struct LogOpts {
 }
 
 pub fn env_level(policy: LoggingLevel) -> LoggingLevel {
-    std::env::var("OX_LOG_LEVEL")
-        .ok()
-        .and_then(|v| parse_level(v.trim()))
-        .unwrap_or(policy)
+    std::env::var("OX_LOG_LEVEL").ok().and_then(|v| parse_level(v.trim())).unwrap_or(policy)
 }
 
 pub fn spool_path(log_dir: &str, node: &str, proc_: &str) -> PathBuf {
@@ -241,13 +229,9 @@ pub fn init(opts: LogOpts) -> LogHandle {
     if let Some(rx) = rx {
         let s2 = shared.clone();
         let sink = opts.sink;
-        let _ = std::thread::Builder::new()
-            .name("ox-log".into())
-            .spawn(move || drain(rx, sink, s2));
+        let _ = std::thread::Builder::new().name("ox-log".into()).spawn(move || drain(rx, sink, s2));
     }
-    let layer = OxLayer {
-        shared: shared.clone(),
-    };
+    let layer = OxLayer { shared: shared.clone() };
     let _ = tracing_subscriber::registry().with(layer).try_init();
     LogHandle { shared }
 }
@@ -263,11 +247,7 @@ fn drain(rx: Receiver<Vec<u8>>, sink: Sink, s: Arc<Shared>) {
                 let _ = lock.flush();
             }
         }
-        Sink::Socket {
-            path,
-            spool,
-            spool_max,
-        } => socket_loop(rx, path, spool, spool_max, &s),
+        Sink::Socket { path, spool, spool_max } => socket_loop(rx, path, spool, spool_max, &s),
     }
 }
 
@@ -280,10 +260,7 @@ fn socket_loop(rx: Receiver<Vec<u8>>, path: PathBuf, spool: PathBuf, spool_max: 
     let mut spool_bytes: u64 = std::fs::metadata(&spool).map(|m| m.len()).unwrap_or(0);
     let mut failing = false;
     let mut since_spooled: u64 = 0;
-    let drops = || {
-        s.counters.queue_full.load(Ordering::Relaxed)
-            + s.counters.spool_full.load(Ordering::Relaxed)
-    };
+    let drops = || s.counters.queue_full.load(Ordering::Relaxed) + s.counters.spool_full.load(Ordering::Relaxed);
     let mut drop_base = drops();
     while let Ok(l) = rx.recv() {
         let sent = match &sock {
@@ -320,17 +297,11 @@ fn socket_loop(rx: Receiver<Vec<u8>>, path: PathBuf, spool: PathBuf, spool_max: 
         }
         failing = true;
         if spool_f.is_none() {
-            spool_f = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&spool)
-                .ok();
+            spool_f = OpenOptions::new().create(true).append(true).open(&spool).ok();
         }
         let n = l.len() as u64 + 1;
         let wrote = match spool_f.as_mut() {
-            Some(f) if spool_bytes + n <= spool_max => {
-                f.write_all(&l).and_then(|_| f.write_all(b"\n")).is_ok()
-            }
+            Some(f) if spool_bytes + n <= spool_max => f.write_all(&l).and_then(|_| f.write_all(b"\n")).is_ok(),
             _ => false,
         };
         if wrote {
@@ -344,9 +315,7 @@ fn socket_loop(rx: Receiver<Vec<u8>>, path: PathBuf, spool: PathBuf, spool_max: 
 }
 
 fn stamp(r: &mut Record, s: &Shared, kind: Kind) {
-    let ts = chrono::Local::now()
-        .format("%Y-%m-%dT%H:%M:%S%.6f%:z")
-        .to_string();
+    let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.6f%:z").to_string();
     r.set("ts", ts);
     r.set("mono", mono_us().to_string());
     r.set("node", s.node.clone());
@@ -365,12 +334,7 @@ struct OxLayer {
 }
 
 fn ours(target: &str) -> bool {
-    OUR_CRATES.iter().any(|c| {
-        target == *c
-            || target
-                .strip_prefix(c)
-                .is_some_and(|rest| rest.starts_with("::"))
-    })
+    OUR_CRATES.iter().any(|c| target == *c || target.strip_prefix(c).is_some_and(|rest| rest.starts_with("::")))
 }
 
 impl<S: Subscriber> Layer<S> for OxLayer {
@@ -389,10 +353,7 @@ impl<S: Subscriber> Layer<S> for OxLayer {
         lv <= 2
     }
 
-    fn register_callsite(
-        &self,
-        _meta: &'static Metadata<'static>,
-    ) -> tracing::subscriber::Interest {
+    fn register_callsite(&self, _meta: &'static Metadata<'static>) -> tracing::subscriber::Interest {
         tracing::subscriber::Interest::sometimes()
     }
 
@@ -415,10 +376,7 @@ impl<S: Subscriber> Layer<S> for OxLayer {
             r.msg = format!("{t}: {}", r.msg);
         }
         stamp(&mut r, &self.shared, kind);
-        push(
-            &self.shared,
-            line::render(&r, self.shared.line_max).into_bytes(),
-        );
+        push(&self.shared, line::render(&r, self.shared.line_max).into_bytes());
     }
 }
 
@@ -481,12 +439,7 @@ pub struct Step<'a> {
 }
 
 pub fn transition(s: &Step<'_>) {
-    let ins: String = s
-        .ins
-        .iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect::<Vec<_>>()
-        .join(",");
+    let ins: String = s.ins.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(",");
     let room = s.room.unwrap_or("");
     let user = s.user.unwrap_or("");
     match s.label {
@@ -501,16 +454,7 @@ pub fn transition(s: &Step<'_>) {
             user = user,
             in_args = ins.as_str()
         ),
-        None => crate::ev!(
-            area = s.area,
-            key = s.key,
-            from = s.from,
-            cause = s.cause,
-            impossible = "1",
-            room = room,
-            user = user,
-            in_args = ins.as_str()
-        ),
+        None => crate::ev!(area = s.area, key = s.key, from = s.from, cause = s.cause, impossible = "1", room = room, user = user, in_args = ins.as_str()),
     }
 }
 

@@ -72,8 +72,7 @@ impl Keys {
 
     pub fn tail<'a>(&self, key: &'a str, kind: &str) -> Option<Vec<&'a str>> {
         let pre = format!("{}/{kind}/", self.base());
-        key.strip_prefix(pre.as_str())
-            .map(|r| r.split('/').collect())
+        key.strip_prefix(pre.as_str()).map(|r| r.split('/').collect())
     }
 }
 
@@ -131,31 +130,15 @@ pub struct ZenohOpts<'a> {
 
 pub fn zenoh_config(o: &ZenohOpts<'_>) -> Result<zenoh::Config, String> {
     let mut c = match o.base_config {
-        Some(p) if !p.is_empty() => {
-            zenoh::Config::from_file(p).map_err(|e| format!("zenoh base_config {p}: {e}"))?
-        }
+        Some(p) if !p.is_empty() => zenoh::Config::from_file(p).map_err(|e| format!("zenoh base_config {p}: {e}"))?,
         _ => zenoh::Config::default(),
     };
     let js = |v: &serde_json::Value| v.to_string();
-    let set = |c: &mut zenoh::Config, k: &str, v: String| {
-        c.insert_json5(k, &v).map_err(|e| format!("zenoh {k}: {e}"))
-    };
+    let set = |c: &mut zenoh::Config, k: &str, v: String| c.insert_json5(k, &v).map_err(|e| format!("zenoh {k}: {e}"));
     set(&mut c, "mode", js(&serde_json::Value::from(o.mode)))?;
-    set(
-        &mut c,
-        "listen/endpoints",
-        js(&serde_json::Value::from(o.listen.to_vec())),
-    )?;
-    set(
-        &mut c,
-        "connect/endpoints",
-        js(&serde_json::Value::from(o.connect.to_vec())),
-    )?;
-    set(
-        &mut c,
-        "scouting/multicast/enabled",
-        js(&serde_json::Value::from(o.multicast_scouting)),
-    )?;
+    set(&mut c, "listen/endpoints", js(&serde_json::Value::from(o.listen.to_vec())))?;
+    set(&mut c, "connect/endpoints", js(&serde_json::Value::from(o.connect.to_vec())))?;
+    set(&mut c, "scouting/multicast/enabled", js(&serde_json::Value::from(o.multicast_scouting)))?;
     set(&mut c, "transport/unicast/qos/enabled", "true".into())?;
     set(&mut c, "transport/unicast/lowlatency", "false".into())?;
     Ok(c)
@@ -189,10 +172,7 @@ mod tests {
     fn keyspace_shapes() {
         let k = Keys::new("ox");
         assert_eq!(k.room("r1", "n1", "e1"), "ox/ox/int/room/r1/n1/e1");
-        assert_eq!(
-            k.tail("ox/ox/int/room/r1/n1/e1", "room"),
-            Some(vec!["r1", "n1", "e1"])
-        );
+        assert_eq!(k.tail("ox/ox/int/room/r1/n1/e1", "room"), Some(vec!["r1", "n1", "e1"]));
         assert!(!room_id_ok("a/b"));
         assert!(room_id_ok("r-1"));
     }

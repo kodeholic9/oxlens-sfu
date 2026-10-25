@@ -32,55 +32,25 @@ pub struct Ctx {
 pub enum AdminCall {
     Rooms,
     Drops,
-    RoomSnapshot {
-        room_id: String,
-    },
+    RoomSnapshot { room_id: String },
     SfuRooms,
-    UserMedia {
-        user_id: String,
-    },
-    Reap {
-        room_id: String,
-        user_id: String,
-    },
-    Destroy {
-        room_id: String,
-        if_version: Option<String>,
-    },
+    UserMedia { user_id: String },
+    Links { users: Vec<String> },
+    Reap { room_id: String, user_id: String },
+    Destroy { room_id: String, if_version: Option<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "call", rename_all = "snake_case")]
 pub enum Call {
-    Op {
-        ctx: Ctx,
-        op: u16,
-        body: String,
-    },
-    SessionGone {
-        user_id: String,
-        session: String,
-    },
-    Resume {
-        ctx: Ctx,
-    },
-    CreateRoom {
-        room_id: String,
-        req: CreateRoomReq,
-    },
-    GetRoom {
-        room_id: String,
-        tracks: bool,
-        viewer: Option<String>,
-    },
+    Op { ctx: Ctx, op: u16, body: String },
+    SessionGone { user_id: String, session: String },
+    Resume { ctx: Ctx },
+    CreateRoom { room_id: String, req: CreateRoomReq },
+    GetRoom { room_id: String, tracks: bool, viewer: Option<String> },
     ListRooms,
-    Admin {
-        req: AdminCall,
-    },
-    LogLevel {
-        level: String,
-        ttl_secs: Option<u32>,
-    },
+    Admin { req: AdminCall },
+    LogLevel { level: String, ttl_secs: Option<u32> },
 }
 
 impl Call {
@@ -110,22 +80,16 @@ impl Reply {
     pub fn ok<T: Serialize>(v: &T) -> Reply {
         match serde_json::to_string(v) {
             Ok(body) => Reply::Ok { body },
-            Err(e) => Reply::Fail {
-                failure: Code::InternalError.failure_msg(e.to_string()),
-            },
+            Err(e) => Reply::Fail { failure: Code::InternalError.failure_msg(e.to_string()) },
         }
     }
 
     pub fn empty() -> Reply {
-        Reply::Ok {
-            body: String::new(),
-        }
+        Reply::Ok { body: String::new() }
     }
 
     pub fn fail(code: Code) -> Reply {
-        Reply::Fail {
-            failure: code.failure(),
-        }
+        Reply::Fail { failure: code.failure() }
     }
 
     pub fn failure(f: Failure) -> Reply {
@@ -133,13 +97,12 @@ impl Reply {
     }
 
     pub fn encode(&self) -> Vec<u8> {
-        serde_json::to_vec(self).unwrap_or_else(|_| b"{\"reply\":\"fail\",\"failure\":{\"code\":5003,\"name\":\"INTERNAL_ERROR\",\"permanent\":false}}".to_vec())
+        serde_json::to_vec(self)
+            .unwrap_or_else(|_| b"{\"reply\":\"fail\",\"failure\":{\"code\":5003,\"name\":\"INTERNAL_ERROR\",\"permanent\":false}}".to_vec())
     }
 
     pub fn decode(b: &[u8]) -> Reply {
-        serde_json::from_slice(b).unwrap_or_else(|e| Reply::Fail {
-            failure: Code::SfuError.failure_msg(e.to_string()),
-        })
+        serde_json::from_slice(b).unwrap_or_else(|e| Reply::Fail { failure: Code::SfuError.failure_msg(e.to_string()) })
     }
 }
 
@@ -166,10 +129,7 @@ mod tests {
                 user_id: "u1".into(),
                 session: "0a1b2c3d".into(),
                 pc_mode: PcMode::V2pc,
-                home: Home {
-                    node: "node-a".into(),
-                    inst: "h1".into(),
-                },
+                home: Home { node: "node-a".into(), inst: "h1".into() },
                 participant_type: 0,
                 hidden: false,
                 metadata: None,
