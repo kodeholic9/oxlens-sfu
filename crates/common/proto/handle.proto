@@ -1,10 +1,9 @@
 syntax = "proto3";
-
-package oxlens.b.v1;
+package oxlens.handle.v1;
 
 service Handle {
   rpc Hello(HelloReq) returns (HelloRes);
-  rpc Call(CallReq) returns (CallRes);
+  rpc Call(Envelope) returns (Envelope);
 }
 
 message HelloReq {
@@ -17,10 +16,6 @@ message HelloRes {
   string build = 2;
 }
 
-message CallReq {
-  bytes envelope = 1;
-}
-
-message CallRes {
-  bytes reply = 1;
+message Envelope {
+  bytes body = 1;
 }

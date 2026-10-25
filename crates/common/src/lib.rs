@@ -1,22 +1,20 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.2 @36d1dfd · 정:RULE-CFG-THREE-PLACES · 정:RULE-DOC-CODE-MIRROR · 정:CAND-DOC-GUARD-PLACE · model: claude-opus-5-5
-//! 공용 — 값을 두는 곳 셋 · 빌드/기동 신원 · 시계 · 로깅 · 토큰 · B 평면 · 부모 생존 · 규격 위치.
+// spec: v1.3 @d4cc756 · 정:RULE-CFG-THREE-PLACES 정:RULE-BUS-SHAPE 정:RULE-OPS-LOGGER 운영:RULE-BOOT-ARGS · model: claude-opus-5-5
+//! hub · sfud · 로거 공용 — 빌드 신원 · 정책 파일 · 시스템 파일 · 로그 보내는 쪽 · 버스 키와 배치 · node 안 Handle · 토큰 · 무작위 id.
 
-pub mod args;
 pub mod bus;
-pub mod identity;
-pub mod lifeline;
+pub mod handle;
+pub mod id;
+pub mod jwt;
 pub mod log;
 pub mod policy;
 pub mod system;
-pub mod time;
-pub mod token;
 
-pub const SPEC_ENV: &str = "OXLENS_SPEC";
+pub const BUILD_ID: &str = env!("OX_BUILD_ID");
 
-pub fn spec_root() -> std::path::PathBuf {
-    match std::env::var(SPEC_ENV) {
-        Ok(p) if !p.is_empty() => std::path::PathBuf::from(p),
-        _ => std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../context/spec"),
+pub fn build_id(label: Option<&str>) -> String {
+    match label {
+        Some(l) if !l.is_empty() => format!("{BUILD_ID}+{l}"),
+        _ => BUILD_ID.to_string(),
     }
 }
