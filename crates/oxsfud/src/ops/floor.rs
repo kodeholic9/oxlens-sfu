@@ -166,6 +166,7 @@ async fn release(sfu: &Arc<Sfu>, room: &Arc<Room>) {
     let Some(rm) = sfu.plane.room(&room.id) else { return };
     let now = now_ms();
     let mut ep_audio = 0;
+    let prev = rm.audio.bound.load_full().map(|b| b.user.clone());
     for kind in [Kind::Audio, Kind::Video] {
         let slot = rm.slot(kind);
         slot.bound.store(None);
@@ -188,7 +189,7 @@ async fn release(sfu: &Arc<Sfu>, room: &Arc<Room>) {
                 if rm.audio.episode.load(Ordering::Acquire) != ep_audio {
                     break;
                 }
-                let x = Synth { kind: Kind::Audio, key: key(ep_audio), seq: k as u16, ts: k * 960, payload: &OPUS_SILENCE, skip: None };
+                let x = Synth { kind: Kind::Audio, key: key(ep_audio), seq: k as u16, ts: k * 960, payload: &OPUS_SILENCE, skip: prev.as_deref() };
                 crate::fwd::shell::send_synth(&s2, &rm, &x);
                 tokio::time::sleep(Duration::from_millis(PRIME_MS)).await;
             }

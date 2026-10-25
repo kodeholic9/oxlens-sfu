@@ -545,6 +545,10 @@ impl Supervisor {
                         k.notify_one();
                     });
                 }
+                let until = Instant::now() + Duration::from_secs(7);
+                while Instant::now() < until && self.state_of(id).await == Some(UState::Stopping) {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
             }
             UState::Down | UState::Blocked | UState::Inactive => transition(u, UState::Stopped),
             _ => {}
