@@ -378,7 +378,7 @@ mod tests {
         assert!(n.due(100).is_empty());
         n.on_packet(11, 150);
         assert_eq!(n.due(300), vec![12]);
-        assert!(matches!(n.on_packet(400, 310), Gap::TooLarge));
+        assert!(matches!(n.on_packet(400, 310), Gap::TooLarge), "S-sym-RULE-RTCP-NACK-UP-1 128 이상 틈은 NACK 하지 않는다");
         assert!(n.due(1500).is_empty());
     }
 }

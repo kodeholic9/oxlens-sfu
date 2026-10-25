@@ -355,6 +355,6 @@ mod tests {
         f.rx("a", &M::new(T::Request, None, 0, 0), 0);
         f.observe_rtp_gated("a", 2_000, true);
         let v = f.view();
-        assert_eq!(v.timers.iter().find(|t| t.name == "T2").map(|t| t.at), Some(32_000), "T2 는 첫 RTP 부터");
+        assert_eq!(v.timers.iter().find(|t| t.name == "T2").map(|t| t.at), Some(32_000), "S-sym-IMPL-FLR-RTP-OBSERVE-1 T2 는 첫 RTP 부터");
     }
 }

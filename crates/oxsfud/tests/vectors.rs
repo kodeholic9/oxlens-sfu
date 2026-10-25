@@ -105,7 +105,7 @@ fn rtcp_rr_vectors() {
                 assert_eq!(
                     (Some(u64::from(got.fraction)), Some(i64::from(got.lost)), Some(u64::from(got.extended_max)), Some(u64::from(got.jitter))),
                     want,
-                    "{UNIT} rr {name}"
+                    "S-sym-IMPL-RTCP-TERMINATE-6 {UNIT} rr {name}"
                 );
             } else {
                 let valid = s.update(u(ev, "seq") as u16, u(ev, "ts") as u32, u(ev, "arrival_ms"), 100);

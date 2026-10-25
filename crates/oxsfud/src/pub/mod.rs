@@ -333,7 +333,7 @@ mod tests {
         let c = codecs();
         let i = AddInput { items: &items, perm: &p, is_pub_room: true, active: 0, ext: ExtIds::default(), room_codecs: &c, downlink_ssrcs: None };
         let e = check_add(&i).expect_err("deny");
-        assert_eq!(e.code, 2006, "정:IMPL-PUB-ADD ① 자격이 ③ 필수 칸보다 먼저");
+        assert_eq!(e.code, 2006, "S-sym-IMPL-PUB-ADD-3 정:IMPL-PUB-ADD ① 자격이 ③ 필수 칸보다 먼저");
         assert_eq!(e.details, Some(json!({"denied": ["publish_audio"]})));
     }
 

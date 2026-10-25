@@ -488,14 +488,7 @@ fn peer_stats(p: &Peer) {
         pli += c.pli_rx.load(Ordering::Relaxed);
     }
     if rows > 0 {
-        common::stat!(
-            user = p.user.as_str(),
-            packets_sent = sent,
-            bytes_sent = bytes,
-            retransmitted_packets_sent = rtx,
-            nack_count = nack,
-            pli_count = pli
-        );
+        common::stat!(user = p.user.as_str(), packets_sent = sent, bytes_sent = bytes, retransmitted_packets_sent = rtx, nack_count = nack, pli_count = pli);
     }
 }
 

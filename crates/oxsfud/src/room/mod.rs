@@ -278,7 +278,7 @@ mod tests {
         assert!(st.rec());
         assert!(st.participants().is_empty());
         drop(st);
-        assert!(matches!(r.sweep(9_999_999), Sweep::Live), "등록 기준 — 투명 녹화만 남은 방은 비어 있지 않다");
+        assert!(matches!(r.sweep(9_999_999), Sweep::Live), "S-sym-IMPL-ROOM-LIFE-1 등록 기준 — 투명 녹화만 남은 방은 비어 있지 않다");
     }
 
     #[test]

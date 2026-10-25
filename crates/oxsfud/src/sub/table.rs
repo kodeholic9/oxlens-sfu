@@ -563,7 +563,7 @@ mod tests {
         assert_eq!(t.finish(), Some(2));
         t.want(w("r", "b", Kind::Video, "H264", 0), 2);
         t.finish();
-        assert_eq!(t.rows.len(), 1, "같은 kind 의 빈 줄 먼저");
+        assert_eq!(t.rows.len(), 1, "S-sym-IMPL-SUB-TABLE-1 같은 kind 의 빈 줄 먼저");
         for i in 0..30 {
             t.want(w("r", &format!("v{i}"), Kind::Video, "H264", 0), 3);
         }
