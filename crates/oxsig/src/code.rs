@@ -1,145 +1,129 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.3 @d4cc756 · 연:ERR.type.Failure 연:ERR.lead 연:RULE-ERR-UNKNOWN-BY-LEAD 연:RULE-ERR-FLOOR-OUTSIDE 정:IMPL-ERR-ISSUERS · model: claude-opus-5-5
-//! 오류 코드 번호 공간 하나 — 번호 · 이름 · `permanent` · 실패 응답 body.
+// spec: v1.4 · 정:IMPL-ERR-ISSUERS · 연:RULE-ERR-FAILURE-FORM · 연:RULE-ERR-UNKNOWN-BY-LEAD · 연:DEV-ERR-LEAVE-PERMANENT-NULL · 연:RULE-ERR-ONE-NUMBER-ONE-MEANING · 연:RULE-ERR-CLOSE-EMPTY · model: claude-opus-5-5
+//! 오류 번호 공간 하나 — 실패 응답 body(`Failure`)와 `LEAVE` 사유가 같은 표를 쓴다.
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Code {
-    UnknownOp,
-    InvalidPayload,
-    MissingField,
-    VersionMismatch,
-    CodecRequired,
-    CodecMismatch,
-    FieldConflict,
-    ProtocolError,
-    NotBound,
-    TokenInvalid,
-    TokenExpired,
-    InvalidApiKey,
-    ClaimNotAllowed,
-    NotAuthorized,
-    SessionNotFound,
-    SessionRevoked,
-    DuplicateSession,
-    RoomNotFound,
-    NotInRoom,
-    RoomNotEmpty,
-    TrackNotFound,
-    TrackOpUnsupported,
-    SsrcCollision,
-    PreconditionFailed,
-    PeerNotFound,
-    NotPubRoom,
-    RoomFull,
-    TrackLimit,
-    QuotaExceeded,
-    ListenLimit,
-    MidLimit,
-    FlowTimeout,
-    FlowOverflow,
-    HeartbeatTimeout,
-    Overloaded,
-    SfuUnavailable,
-    SfuError,
-    InternalError,
-    ServerShutdown,
-}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Code(pub u16);
 
-pub const CODES: &[(Code, u16, &str, Option<bool>)] = &[
-    (Code::UnknownOp, 1001, "UNKNOWN_OP", Some(true)),
-    (Code::InvalidPayload, 1002, "INVALID_PAYLOAD", Some(true)),
-    (Code::MissingField, 1003, "MISSING_FIELD", Some(true)),
-    (Code::VersionMismatch, 1004, "VERSION_MISMATCH", Some(true)),
-    (Code::CodecRequired, 1005, "CODEC_REQUIRED", Some(true)),
-    (Code::CodecMismatch, 1006, "CODEC_MISMATCH", Some(true)),
-    (Code::FieldConflict, 1007, "FIELD_CONFLICT", Some(true)),
-    (Code::ProtocolError, 1008, "PROTOCOL_ERROR", Some(true)),
-    (Code::NotBound, 2001, "NOT_BOUND", Some(false)),
-    (Code::TokenInvalid, 2002, "TOKEN_INVALID", Some(true)),
-    (Code::TokenExpired, 2003, "TOKEN_EXPIRED", Some(false)),
-    (Code::InvalidApiKey, 2004, "INVALID_API_KEY", Some(true)),
-    (Code::ClaimNotAllowed, 2005, "CLAIM_NOT_ALLOWED", Some(true)),
-    (Code::NotAuthorized, 2006, "NOT_AUTHORIZED", Some(true)),
-    (Code::SessionNotFound, 2008, "SESSION_NOT_FOUND", Some(false)),
-    (Code::SessionRevoked, 2009, "SESSION_REVOKED", None),
-    (Code::DuplicateSession, 2010, "DUPLICATE_SESSION", None),
-    (Code::RoomNotFound, 3001, "ROOM_NOT_FOUND", Some(false)),
-    (Code::NotInRoom, 3002, "NOT_IN_ROOM", Some(false)),
-    (Code::RoomNotEmpty, 3004, "ROOM_NOT_EMPTY", Some(false)),
-    (Code::TrackNotFound, 3005, "TRACK_NOT_FOUND", Some(false)),
-    (Code::TrackOpUnsupported, 3006, "TRACK_OP_UNSUPPORTED", Some(true)),
-    (Code::SsrcCollision, 3008, "SSRC_COLLISION", Some(true)),
-    (Code::PreconditionFailed, 3009, "PRECONDITION_FAILED", Some(false)),
-    (Code::PeerNotFound, 3010, "PEER_NOT_FOUND", Some(false)),
-    (Code::NotPubRoom, 3011, "NOT_PUB_ROOM", Some(false)),
-    (Code::RoomFull, 4001, "ROOM_FULL", Some(false)),
-    (Code::TrackLimit, 4002, "TRACK_LIMIT", Some(false)),
-    (Code::QuotaExceeded, 4003, "QUOTA_EXCEEDED", Some(false)),
-    (Code::ListenLimit, 4004, "LISTEN_LIMIT", Some(false)),
-    (Code::MidLimit, 4005, "MID_LIMIT", Some(false)),
-    (Code::FlowTimeout, 4006, "FLOW_TIMEOUT", None),
-    (Code::FlowOverflow, 4007, "FLOW_OVERFLOW", None),
-    (Code::HeartbeatTimeout, 4008, "HEARTBEAT_TIMEOUT", None),
-    (Code::Overloaded, 4009, "OVERLOADED", Some(false)),
-    (Code::SfuUnavailable, 5001, "SFU_UNAVAILABLE", Some(false)),
-    (Code::SfuError, 5002, "SFU_ERROR", Some(false)),
-    (Code::InternalError, 5003, "INTERNAL_ERROR", Some(false)),
-    (Code::ServerShutdown, 5004, "SERVER_SHUTDOWN", None),
+pub const CODES: &[(u16, &str, Option<bool>)] = &[
+    (1001, "UNKNOWN_OP", Some(true)),
+    (1002, "INVALID_PAYLOAD", Some(true)),
+    (1003, "MISSING_FIELD", Some(true)),
+    (1004, "VERSION_MISMATCH", Some(true)),
+    (1005, "CODEC_REQUIRED", Some(true)),
+    (1006, "CODEC_MISMATCH", Some(true)),
+    (1007, "FIELD_CONFLICT", Some(true)),
+    (1008, "PROTOCOL_ERROR", Some(true)),
+    (2001, "NOT_BOUND", Some(false)),
+    (2002, "TOKEN_INVALID", Some(true)),
+    (2003, "TOKEN_EXPIRED", Some(false)),
+    (2004, "INVALID_API_KEY", Some(true)),
+    (2005, "CLAIM_NOT_ALLOWED", Some(true)),
+    (2006, "NOT_AUTHORIZED", Some(true)),
+    (2008, "SESSION_NOT_FOUND", Some(false)),
+    (2009, "SESSION_REVOKED", None),
+    (2010, "DUPLICATE_SESSION", None),
+    (3001, "ROOM_NOT_FOUND", Some(false)),
+    (3002, "NOT_IN_ROOM", Some(false)),
+    (3004, "ROOM_NOT_EMPTY", Some(false)),
+    (3005, "TRACK_NOT_FOUND", Some(false)),
+    (3006, "TRACK_OP_UNSUPPORTED", Some(true)),
+    (3008, "SSRC_COLLISION", Some(true)),
+    (3009, "PRECONDITION_FAILED", Some(false)),
+    (3010, "PEER_NOT_FOUND", Some(false)),
+    (3011, "NOT_PUB_ROOM", Some(false)),
+    (4001, "ROOM_FULL", Some(false)),
+    (4002, "TRACK_LIMIT", Some(false)),
+    (4003, "QUOTA_EXCEEDED", Some(false)),
+    (4004, "LISTEN_LIMIT", Some(false)),
+    (4005, "MID_LIMIT", Some(false)),
+    (4006, "FLOW_TIMEOUT", None),
+    (4007, "FLOW_OVERFLOW", None),
+    (4008, "HEARTBEAT_TIMEOUT", None),
+    (4009, "OVERLOADED", Some(false)),
+    (5001, "SFU_UNAVAILABLE", Some(false)),
+    (5002, "SFU_ERROR", Some(false)),
+    (5003, "INTERNAL_ERROR", Some(false)),
+    (5004, "SERVER_SHUTDOWN", None),
 ];
 
 pub const RETIRED: &[u16] = &[2007, 3003, 3007];
 
 impl Code {
-    fn row(self) -> &'static (Code, u16, &'static str, Option<bool>) {
-        CODES.iter().find(|r| r.0 == self).unwrap_or(&CODES[CODES.len() - 3])
-    }
+    pub const UNKNOWN_OP: Code = Code(1001);
+    pub const INVALID_PAYLOAD: Code = Code(1002);
+    pub const MISSING_FIELD: Code = Code(1003);
+    pub const VERSION_MISMATCH: Code = Code(1004);
+    pub const CODEC_REQUIRED: Code = Code(1005);
+    pub const CODEC_MISMATCH: Code = Code(1006);
+    pub const FIELD_CONFLICT: Code = Code(1007);
+    pub const PROTOCOL_ERROR: Code = Code(1008);
+    pub const NOT_BOUND: Code = Code(2001);
+    pub const TOKEN_INVALID: Code = Code(2002);
+    pub const TOKEN_EXPIRED: Code = Code(2003);
+    pub const INVALID_API_KEY: Code = Code(2004);
+    pub const CLAIM_NOT_ALLOWED: Code = Code(2005);
+    pub const NOT_AUTHORIZED: Code = Code(2006);
+    pub const SESSION_NOT_FOUND: Code = Code(2008);
+    pub const SESSION_REVOKED: Code = Code(2009);
+    pub const DUPLICATE_SESSION: Code = Code(2010);
+    pub const ROOM_NOT_FOUND: Code = Code(3001);
+    pub const NOT_IN_ROOM: Code = Code(3002);
+    pub const ROOM_NOT_EMPTY: Code = Code(3004);
+    pub const TRACK_NOT_FOUND: Code = Code(3005);
+    pub const TRACK_OP_UNSUPPORTED: Code = Code(3006);
+    pub const SSRC_COLLISION: Code = Code(3008);
+    pub const PRECONDITION_FAILED: Code = Code(3009);
+    pub const PEER_NOT_FOUND: Code = Code(3010);
+    pub const NOT_PUB_ROOM: Code = Code(3011);
+    pub const ROOM_FULL: Code = Code(4001);
+    pub const TRACK_LIMIT: Code = Code(4002);
+    pub const QUOTA_EXCEEDED: Code = Code(4003);
+    pub const LISTEN_LIMIT: Code = Code(4004);
+    pub const MID_LIMIT: Code = Code(4005);
+    pub const FLOW_TIMEOUT: Code = Code(4006);
+    pub const FLOW_OVERFLOW: Code = Code(4007);
+    pub const HEARTBEAT_TIMEOUT: Code = Code(4008);
+    pub const OVERLOADED: Code = Code(4009);
+    pub const SFU_UNAVAILABLE: Code = Code(5001);
+    pub const SFU_ERROR: Code = Code(5002);
+    pub const INTERNAL_ERROR: Code = Code(5003);
+    pub const SERVER_SHUTDOWN: Code = Code(5004);
 
-    pub fn num(self) -> u16 {
-        self.row().1
+    fn row(self) -> Option<&'static (u16, &'static str, Option<bool>)> {
+        CODES.iter().find(|r| r.0 == self.0)
     }
 
     pub fn name(self) -> &'static str {
-        self.row().2
+        self.row().map(|r| r.1).unwrap_or("UNKNOWN")
     }
 
     pub fn permanent(self) -> Option<bool> {
-        self.row().3
+        match self.row() {
+            Some(r) => r.2,
+            None => Some(self.0 / 1000 == 1),
+        }
     }
 
-    pub fn from_num(n: u16) -> Option<Code> {
-        CODES.iter().find(|r| r.1 == n).map(|r| r.0)
-    }
-
-    pub fn catalog_id(self) -> String {
-        format!("CP-CODE-{}", self.name().replace('_', "-"))
-    }
-
-    pub fn failure(self) -> Failure {
-        Failure { code: self.num(), name: self.name().to_string(), permanent: self.permanent().unwrap_or(false), message: None, details: None }
-    }
-
-    pub fn failure_msg(self, message: impl Into<String>) -> Failure {
-        Failure { message: Some(message.into()), ..self.failure() }
+    pub fn lead(self) -> u16 {
+        self.0 / 1000
     }
 
     pub fn http_status(self) -> u16 {
-        let n = self.num();
-        match self {
-            Code::NotBound | Code::TokenInvalid | Code::TokenExpired | Code::InvalidApiKey | Code::SessionNotFound => 401,
-            Code::NotAuthorized => 403,
-            Code::RoomNotFound => 404,
-            Code::PreconditionFailed => 409,
-            Code::SfuUnavailable => 503,
-            Code::SfuError => 502,
-            _ => match n / 1000 {
-                1 => 400,
-                3 => 409,
-                4 => 429,
-                5 => 500,
-                _ => 400,
-            },
+        match self.0 {
+            1000..=1999 => 400,
+            2001..=2004 | 2008 => 401,
+            2006 => 403,
+            3001 => 404,
+            3009 => 409,
+            3000..=3999 => 409,
+            4000..=4999 => 429,
+            5001 => 503,
+            5002 => 502,
+            _ => 500,
         }
     }
 }
@@ -156,13 +140,22 @@ pub struct Failure {
 }
 
 impl Failure {
-    pub fn code(&self) -> Option<Code> {
-        Code::from_num(self.code)
+    pub fn of(code: Code) -> Failure {
+        Failure { code: code.0, name: code.name().to_string(), permanent: code.permanent().unwrap_or(false), message: None, details: None }
     }
 
-    pub fn with_details(mut self, details: serde_json::Value) -> Self {
+    pub fn msg(mut self, message: impl Into<String>) -> Failure {
+        self.message = Some(message.into());
+        self
+    }
+
+    pub fn details(mut self, details: serde_json::Value) -> Failure {
         self.details = Some(details);
         self
+    }
+
+    pub fn code(&self) -> Code {
+        Code(self.code)
     }
 }
 
@@ -171,35 +164,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn table_is_total_and_unique() {
-        let mut nums: Vec<u16> = CODES.iter().map(|r| r.1).collect();
-        nums.sort_unstable();
-        nums.dedup();
-        assert_eq!(nums.len(), CODES.len());
-        for r in CODES {
-            assert_eq!(Code::from_num(r.1), Some(r.0));
-            assert!(!RETIRED.contains(&r.1));
+    fn one_number_one_name() {
+        let mut seen = std::collections::BTreeSet::new();
+        for (c, n, _) in CODES {
+            assert!(seen.insert(*c), "번호 겹침 {c}");
+            assert!(!RETIRED.contains(c), "폐기 번호 재사용 {c} {n}");
         }
     }
 
     #[test]
-    fn leave_only_codes_have_null_permanent() {
-        for c in [Code::FlowTimeout, Code::FlowOverflow, Code::HeartbeatTimeout, Code::ServerShutdown, Code::SessionRevoked, Code::DuplicateSession] {
-            assert_eq!(c.permanent(), None, "연:RULE-ERR-UNKNOWN-BY-LEAD");
+    fn leave_only_reasons_have_no_permanent() {
+        for c in [Code::FLOW_TIMEOUT, Code::FLOW_OVERFLOW, Code::HEARTBEAT_TIMEOUT, Code::SERVER_SHUTDOWN, Code::SESSION_REVOKED, Code::DUPLICATE_SESSION] {
+            assert_eq!(c.permanent(), None);
         }
-        assert_eq!(Code::ProtocolError.permanent(), Some(true));
+        assert_eq!(Code::PROTOCOL_ERROR.permanent(), Some(true));
     }
 
     #[test]
-    fn http_map_follows_impl_err_issuers() {
-        assert_eq!(Code::InvalidPayload.http_status(), 400);
-        assert_eq!(Code::SessionNotFound.http_status(), 401);
-        assert_eq!(Code::NotAuthorized.http_status(), 403);
-        assert_eq!(Code::RoomNotFound.http_status(), 404);
-        assert_eq!(Code::NotInRoom.http_status(), 409);
-        assert_eq!(Code::QuotaExceeded.http_status(), 429);
-        assert_eq!(Code::SfuUnavailable.http_status(), 503);
-        assert_eq!(Code::SfuError.http_status(), 502);
-        assert_eq!(Code::InternalError.http_status(), 500);
+    fn unknown_code_falls_back_to_lead() {
+        assert_eq!(Code(1099).permanent(), Some(true));
+        assert_eq!(Code(3099).permanent(), Some(false));
+        assert_eq!(Code(3099).http_status(), 409);
+        assert_eq!(Code::SFU_UNAVAILABLE.http_status(), 503);
     }
 }

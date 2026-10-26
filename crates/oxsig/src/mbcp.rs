@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.3 @d4cc756 · 연:RULE-FLR-HEADER 연:RULE-FLR-MSG-TYPES 연:RULE-FLR-TLV 연:RULE-FLR-TLV-EXT-RULES 연:FLR.wire 연:DEV-FLR-GRANTED-SEQ 연:DEV-FLR-ACK-SEQ 연:DEV-FLR-T21-SAME-SEQ · model: claude-opus-5-5
-//! 발언권 MBCP — 머리(V · R · A · Type) · TLV(1B id · 1B len) 부호화 · 복호 · 상수.
+// spec: v1.4 · 연:RULE-FLR-HEADER · 연:RULE-FLR-MSG-TYPES · 연:RULE-FLR-ACK-BIT · 연:RULE-FLR-TLV · 연:RULE-FLR-TLV-EXT-RULES · 연:RULE-FLR-SEQ · 연:DEV-FLR-TLV-EXT · 연:DEV-FLR-CAUSE-U8 · 연:DEV-FLR-DENY-101 · 연:DEV-FLR-DENY-102 · 연:DEV-FLR-DENY-255 · model: claude-opus-5-5
+//! 발언권 MBCP — 머리 2바이트(V · R · A · Type / TLV 개수) + TLV. 모르는 TLV 는 담아 두고, 잘리면 거기서 멈춘다.
 
 pub const REQUEST: u8 = 0;
 pub const GRANTED: u8 = 1;
@@ -9,54 +9,42 @@ pub const DENY: u8 = 3;
 pub const RELEASE: u8 = 4;
 pub const IDLE: u8 = 5;
 pub const REVOKE: u8 = 6;
-pub const QPOS_REQ: u8 = 8;
-pub const QINFO: u8 = 9;
+pub const QUEUE_POS_REQUEST: u8 = 8;
+pub const QUEUE_INFO: u8 = 9;
 pub const ACK: u8 = 10;
 
-pub mod tlv {
-    pub const PRIORITY: u8 = 0;
-    pub const DURATION: u8 = 1;
-    pub const CAUSE: u8 = 2;
-    pub const QINFO: u8 = 3;
-    pub const SPEAKER: u8 = 4;
-    pub const SEQ: u8 = 8;
-    pub const ACKTYPE: u8 = 12;
-    pub const PREV: u8 = 26;
-    pub const REASON: u8 = 27;
-    pub const ROOM: u8 = 29;
-}
+pub const F_PRIORITY: u8 = 0;
+pub const F_DURATION: u8 = 1;
+pub const F_CAUSE: u8 = 2;
+pub const F_QUEUE_INFO: u8 = 3;
+pub const F_GRANTED_PARTY: u8 = 4;
+pub const F_SEQ: u8 = 8;
+pub const F_ACK_TYPE: u8 = 12;
+pub const F_PREV_SPEAKER: u8 = 0x1a;
+pub const F_CAUSE_TEXT: u8 = 0x1b;
+pub const F_ROOM: u8 = 0x1d;
 
-pub mod timers {
-    pub const T1_MS: u64 = 4000;
-    pub const T1MAX_MS: u64 = 6000;
-    pub const T2_MS: u64 = 30000;
-    pub const T3_MS: u64 = 3000;
-    pub const T7_MS: u64 = 1000;
-    pub const T8_MS: u64 = 1000;
-    pub const T20_MS: u64 = 1000;
-    pub const T9_MS: u64 = 3000;
-    pub const T21_MS: u64 = 1000;
-    pub const T132_MS: u64 = 2000;
-    pub const C7: u8 = 10;
-    pub const C8: u8 = 3;
-    pub const C20: u8 = 3;
-    pub const C21: u8 = 3;
-}
+pub const RETIRED_TLV: &[u8] = &[7, 0x1c, 0x1e];
+pub const MAX_VALUE: usize = 255;
 
 pub mod deny {
-    pub const ONLY_ONE: u8 = 3;
-    pub const RETRY_AFTER: u8 = 4;
-    pub const RECV_ONLY: u8 = 5;
+    pub const ONLY_ONE_PARTICIPANT: u8 = 3;
+    pub const RETRY_AFTER_NOT_EXPIRED: u8 = 4;
+    pub const RECEIVE_ONLY: u8 = 5;
     pub const QUEUE_FULL: u8 = 7;
-    pub const NOT_PUBROOM: u8 = 101;
+    pub const NOT_PUB_ROOM: u8 = 101;
     pub const NO_PERMISSION: u8 = 102;
-    pub const OTHER_REASON: u8 = 255;
+    pub const OTHER: u8 = 255;
 }
 
 pub mod revoke {
+    pub const ONLY_ONE: u8 = 1;
     pub const TOO_LONG: u8 = 2;
     pub const NO_PERMISSION: u8 = 3;
     pub const PREEMPTED: u8 = 4;
+    pub const NO_RESOURCES: u8 = 6;
+    pub const BY_OTHER: u8 = 7;
+    pub const OTHER: u8 = 255;
 }
 
 pub mod qpos {
@@ -64,25 +52,17 @@ pub mod qpos {
     pub const UNKNOWN: u8 = 255;
 }
 
-pub const RETIRED: &[u8] = &[7, 28, 30];
-pub const MAX_VALUE: usize = 255;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Msg {
-    pub msg_type: u8,
-    pub ack: bool,
-    pub tlvs: Vec<(u8, Vec<u8>)>,
-}
+pub const SEQ_WRAP: u32 = 65_536;
 
 pub fn adopted(t: u8) -> bool {
-    matches!(t, REQUEST | GRANTED | TAKEN | DENY | RELEASE | IDLE | REVOKE | QPOS_REQ | QINFO | ACK)
+    matches!(t, REQUEST | GRANTED | TAKEN | DENY | RELEASE | IDLE | REVOKE | QUEUE_POS_REQUEST | QUEUE_INFO | ACK)
 }
 
 pub fn ack_allowed(t: u8) -> bool {
-    matches!(t, GRANTED | TAKEN | DENY | RELEASE | IDLE | QINFO)
+    matches!(t, GRANTED | TAKEN | DENY | RELEASE | IDLE | QUEUE_INFO)
 }
 
-pub fn name(t: u8) -> &'static str {
+pub fn type_name(t: u8) -> &'static str {
     match t {
         REQUEST => "FLOOR_REQUEST",
         GRANTED => "FLOOR_GRANTED",
@@ -91,15 +71,87 @@ pub fn name(t: u8) -> &'static str {
         RELEASE => "FLOOR_RELEASE",
         IDLE => "FLOOR_IDLE",
         REVOKE => "FLOOR_REVOKE",
-        QPOS_REQ => "FLOOR_QUEUE_POS_REQUEST",
-        QINFO => "FLOOR_QUEUE_INFO",
+        QUEUE_POS_REQUEST => "FLOOR_QUEUE_POS_REQUEST",
+        QUEUE_INFO => "FLOOR_QUEUE_INFO",
         ACK => "FLOOR_ACK",
-        _ => "FLOOR_UNKNOWN",
+        _ => "UNKNOWN",
     }
 }
 
-pub fn catalog_id(t: u8) -> String {
-    format!("CP-MSG-{}", name(t).replace('_', "-"))
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Msg {
+    pub msg_type: u8,
+    pub ack: bool,
+    pub tlvs: Vec<(u8, Vec<u8>)>,
+}
+
+impl Msg {
+    pub fn new(msg_type: u8) -> Msg {
+        Msg { msg_type, ack: false, tlvs: Vec::new() }
+    }
+
+    pub fn with_ack(mut self, ack: bool) -> Msg {
+        self.ack = ack;
+        self
+    }
+
+    pub fn put(mut self, id: u8, value: Vec<u8>) -> Msg {
+        self.tlvs.push((id, value));
+        self
+    }
+
+    pub fn put_u8spare(self, id: u8, v: u8) -> Msg {
+        self.put(id, vec![v, 0])
+    }
+
+    pub fn put_u8(self, id: u8, v: u8) -> Msg {
+        self.put(id, vec![v])
+    }
+
+    pub fn put_u16(self, id: u8, v: u16) -> Msg {
+        self.put(id, v.to_be_bytes().to_vec())
+    }
+
+    pub fn put_str(self, id: u8, v: &str) -> Msg {
+        self.put(id, v.as_bytes().to_vec())
+    }
+
+    pub fn get(&self, id: u8) -> Option<&[u8]> {
+        self.tlvs.iter().find(|(i, _)| *i == id).map(|(_, v)| v.as_slice())
+    }
+
+    pub fn get_u8spare(&self, id: u8) -> Option<u8> {
+        match self.get(id) {
+            Some([v, _]) => Some(*v),
+            _ => None,
+        }
+    }
+
+    pub fn get_u8(&self, id: u8) -> Option<u8> {
+        match self.get(id) {
+            Some([v]) => Some(*v),
+            _ => None,
+        }
+    }
+
+    pub fn get_u16(&self, id: u8) -> Option<u16> {
+        match self.get(id) {
+            Some([a, b]) => Some(u16::from_be_bytes([*a, *b])),
+            _ => None,
+        }
+    }
+
+    pub fn get_str(&self, id: u8) -> Option<String> {
+        self.get(id).and_then(|v| std::str::from_utf8(v).ok()).map(str::to_string)
+    }
+
+    pub fn room(&self) -> Option<String> {
+        self.get_str(F_ROOM)
+    }
+
+    pub fn seq(&self) -> Option<u16> {
+        self.get_u16(F_SEQ)
+    }
 }
 
 pub fn encode(m: &Msg) -> Option<Vec<u8>> {
@@ -109,7 +161,7 @@ pub fn encode(m: &Msg) -> Option<Vec<u8>> {
     if m.tlvs.len() > 255 || m.tlvs.iter().any(|(_, v)| v.len() > MAX_VALUE) {
         return None;
     }
-    let mut out = Vec::with_capacity(2 + m.tlvs.len() * 4);
+    let mut out = Vec::with_capacity(2 + m.tlvs.iter().map(|(_, v)| 2 + v.len()).sum::<usize>());
     out.push((m.msg_type & 0x0f) | if m.ack { 0x10 } else { 0 });
     out.push(m.tlvs.len() as u8);
     for (id, v) in &m.tlvs {
@@ -125,7 +177,7 @@ pub fn decode(b: &[u8]) -> Option<Msg> {
         return None;
     }
     let head = b[0];
-    if head & 0xc0 != 0x00 {
+    if head & 0xc0 != 0 {
         return None;
     }
     let t = head & 0x0f;
@@ -148,65 +200,8 @@ pub fn decode(b: &[u8]) -> Option<Msg> {
     Some(m)
 }
 
-impl Msg {
-    pub fn new(msg_type: u8, ack: bool) -> Msg {
-        Msg { msg_type, ack, tlvs: Vec::new() }
-    }
-
-    pub fn get(&self, id: u8) -> Option<&[u8]> {
-        self.tlvs.iter().find(|(i, _)| *i == id).map(|(_, v)| v.as_slice())
-    }
-
-    pub fn u8_of(&self, id: u8) -> Option<u8> {
-        self.get(id).and_then(|v| v.first().copied())
-    }
-
-    pub fn u16_of(&self, id: u8) -> Option<u16> {
-        self.get(id).filter(|v| v.len() >= 2).map(|v| u16::from_be_bytes([v[0], v[1]]))
-    }
-
-    pub fn str_of(&self, id: u8) -> Option<String> {
-        self.get(id).and_then(|v| std::str::from_utf8(v).ok()).map(str::to_string)
-    }
-
-    pub fn room(&self) -> Option<String> {
-        self.str_of(tlv::ROOM)
-    }
-
-    pub fn priority(&self) -> u8 {
-        self.u8_of(tlv::PRIORITY).unwrap_or(0)
-    }
-
-    pub fn seq(&self) -> Option<u16> {
-        self.u16_of(tlv::SEQ)
-    }
-
-    pub fn with_u8spare(mut self, id: u8, v: u8) -> Msg {
-        self.tlvs.push((id, vec![v, 0]));
-        self
-    }
-
-    pub fn with_u8(mut self, id: u8, v: u8) -> Msg {
-        self.tlvs.push((id, vec![v]));
-        self
-    }
-
-    pub fn with_u16(mut self, id: u8, v: u16) -> Msg {
-        self.tlvs.push((id, v.to_be_bytes().to_vec()));
-        self
-    }
-
-    pub fn with_pair(mut self, id: u8, a: u8, b: u8) -> Msg {
-        self.tlvs.push((id, vec![a, b]));
-        self
-    }
-
-    pub fn with_str(mut self, id: u8, s: &str) -> Msg {
-        let b = s.as_bytes();
-        let n = b.len().min(MAX_VALUE);
-        self.tlvs.push((id, b[..n].to_vec()));
-        self
-    }
+pub fn next_seq(seq: u16) -> u16 {
+    seq.wrapping_add(1)
 }
 
 #[cfg(test)]
@@ -214,28 +209,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn header_bits_follow_rule_flr_header() {
-        let m = Msg::new(TAKEN, true).with_str(tlv::SPEAKER, "u2").with_u16(tlv::SEQ, 7).with_str(tlv::ROOM, "r1");
+    fn header_bits_and_round_trip() {
+        let m = Msg::new(GRANTED).with_ack(true).put_u8spare(F_PRIORITY, 3).put_u16(F_DURATION, 30).put_u16(F_SEQ, 7).put_str(F_ROOM, "r1");
         let b = encode(&m).expect("enc");
-        assert_eq!(b[0], 0x12);
-        assert_eq!(b[1], 3);
+        assert_eq!(b[0], 0x11);
+        assert_eq!(b[1], 4);
         let d = decode(&b).expect("dec");
         assert_eq!(d, m);
+        assert_eq!(d.get_u8spare(F_PRIORITY), Some(3));
         assert_eq!(d.room().as_deref(), Some("r1"));
-        assert_eq!(d.seq(), Some(7));
     }
 
     #[test]
-    fn ack_bit_refused_where_not_allowed() {
-        assert!(encode(&Msg::new(REVOKE, true)).is_none());
-        assert!(encode(&Msg::new(REQUEST, true)).is_none());
+    fn revoke_cannot_carry_ack_bit() {
+        assert!(encode(&Msg::new(REVOKE).with_ack(true)).is_none());
     }
 
     #[test]
-    fn unadopted_and_bad_version_dropped() {
+    fn version_bits_drop_and_r_bit_is_ignored() {
+        assert!(decode(&[0x40 | REQUEST, 0]).is_none());
+        assert!(decode(&[0x20 | REQUEST, 0]).is_some());
         assert!(decode(&[7, 0]).is_none());
-        assert!(decode(&[0x40, 0]).is_none());
-        let truncated = [REQUEST, 2, tlv::ROOM, 5, b'r'];
-        assert_eq!(decode(&truncated).map(|m| m.tlvs.len()), Some(0));
+    }
+
+    #[test]
+    fn truncated_tlv_stops_and_unknown_is_kept() {
+        let d = decode(&[REQUEST, 3, 0x50, 1, 9, F_ROOM, 5, b'r']).expect("dec");
+        assert_eq!(d.tlvs, vec![(0x50, vec![9])]);
+    }
+
+    #[test]
+    fn seq_wraps() {
+        assert_eq!(next_seq(65535), 0);
+        assert_eq!(SEQ_WRAP, 65536);
     }
 }
