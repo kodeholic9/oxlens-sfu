@@ -1,153 +1,166 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.3 @d4cc756 · 정:RULE-OPS-SURFACE 정:IMPL-OPS-DESTROY-REAP 정:RULE-OPS-OBSERVE 정:RULE-FLR-SNAPSHOT 운영:RULE-READ-ROOM-DETAIL 운영:RULE-READ-NODE-ROOMS 운영:RULE-READ-USER-MEDIA 운영:RULE-READ-USERS 운영:RULE-READ-DROPS 운영:RULE-CTL-ROOM 운영:RULE-RISK-CONFIRM · model: claude-opus-5-5
-//! 운영 물음의 sfud 쪽 정본 — 방 배치 명단 · 버림 계수 · 방 상세(투명 수 · 발언권 판단 입력 · 슬롯) · 그 노드의 방 · 사용자 미디어(배정표 줄 + 재기록기) · 연결 상태 · 강제 퇴장 · 폭파(확인값).
+// spec: v1.4 · 정:RULE-OPS-SURFACE · 정:IMPL-OPS-DESTROY-REAP · 정:RULE-OPS-DROPS · 정:RULE-FLR-SNAPSHOT · 정:IMPL-AFF-FORCED · 정:CAND-BUS-HANDLE-SHAPE · 운영:RULE-READ-USERS · 운영:RULE-READ-DROPS · 운영:RULE-READ-ROOM-DETAIL · 운영:RULE-READ-USER-MEDIA · 운영:RULE-CTL-ROOM · 운영:RULE-FMT-NO-INVENT · model: claude-opus-5-5
+//! C 평면의 sfud 몫 — 게이트웨이가 `Call::Admin` 봉투로 넘긴 것: 연결(`links`) · 버림 계수 · 방 상세(정본) · 미디어 연결(배정표 · 재기록기) · 한 사람 퇴장(`reap`) · 즉시 폭파(`destroy` — 확인값 = `version`).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use oxsig::Code;
-use oxsig::envelope::{AdminCall, Reply};
-use serde::Serialize;
+use common::bus::env::Reply;
+use oxsig::code::{Code, Failure};
+use oxsig::op::Op;
 use serde_json::{Value, json};
 
-use super::Sfu;
-use crate::fwd::shell::now_ms;
+use super::floor::Exec;
+use super::{Sfu, now_ms};
 
-#[derive(Serialize)]
-struct NodeRoom {
-    room_id: String,
-    member_ids: Vec<String>,
+fn wall_of(mono: u64) -> u64 {
+    let now_m = now_ms();
+    let wall = common::time::wall_ms();
+    if mono >= now_m { wall + (mono - now_m) } else { wall.saturating_sub(now_m - mono) }
 }
 
-#[derive(Serialize)]
-struct LinkRow {
-    sfu_id: String,
-    ufrag: String,
-    state: String,
-    since: u64,
+fn http(status: u16, code: Code) -> Reply {
+    Reply::Http { status, body: serde_json::to_value(Failure::of(code)).unwrap_or_default() }
 }
 
-fn rewrite_of(e: &crate::fwd::Egress, sfu: &Sfu) -> Value {
-    let Ok(rw) = e.rw.lock() else { return Value::Null };
-    let Some(last) = rw.rewriter.last else { return Value::Null };
-    let src = e.load.load_full().and_then(|l| match &l.user {
-        Some(u) => Some(json!({ "user_id": u, "track_id": l.track_id })),
-        None => sfu.plane.room(&l.room).and_then(|rm| rm.slot(e.kind).bound.load_full()).map(|b| json!({ "user_id": b.user, "track_id": l.track_id })),
-    });
-    json!({
-        "src": src,
-        "seq_off": rw.rewriter.seq_off,
-        "ts_off": rw.rewriter.ts_off,
-        "last_seq": last.seq,
-        "last_ts": last.ts,
-        "last_at": last.at_ms,
-        "switches": rw.rewriter.switches,
-    })
-}
-
-pub async fn handle(sfu: &Arc<Sfu>, req: AdminCall) -> Reply {
-    match req {
-        AdminCall::Rooms => {
-            let v: Vec<NodeRoom> =
-                sfu.rooms.iter().map(|r| NodeRoom { room_id: r.id.clone(), member_ids: r.lock().members.keys().cloned().collect() }).collect();
-            Reply::ok(&v)
+pub fn handle(sfu: &Arc<Sfu>, method: &str, path: &str, query: &BTreeMap<String, String>, _body: Option<&Value>, exec: &mut Exec) -> Reply {
+    let seg: Vec<&str> = path.trim_matches('/').split('/').collect();
+    match (method, seg.as_slice()) {
+        ("GET", ["admin", "users", u, "links"]) => links(sfu, u),
+        ("GET", ["admin", "drops"]) => {
+            let mut b = super::drops::DROPS.body();
+            b["bus_ev_drop"] = json!(sfu.bus.dropped.load(Ordering::Relaxed) + super::drops::DROPS.bus_ev_drop.load(Ordering::Relaxed));
+            Reply::Ok { body: b }
         }
-        AdminCall::Drops => {
-            let mut m = sfu.drops.map();
-            m.insert("send_fail".into(), sfu.io.send_fail.load(Ordering::Relaxed));
-            m.insert("tcp_queue_full".into(), sfu.io.tcp_drop.load(Ordering::Relaxed));
-            m.insert("bus_put_drop".into(), sfu.bus.put_drop.load(Ordering::Relaxed));
-            m.insert("log_queue_full".into(), sfu.log.counters().queue_full.load(Ordering::Relaxed));
-            m.insert("log_spool_full".into(), sfu.log.counters().spool_full.load(Ordering::Relaxed));
-            let dc: u64 = sfu.peers.iter().map(|p| p.dc_drop.load(Ordering::Relaxed)).sum();
-            m.insert("dc_overflow".into(), dc);
-            Reply::ok(&m)
-        }
-        AdminCall::RoomSnapshot { room_id } => {
-            let Some(room) = sfu.room(&room_id) else { return Reply::fail(Code::RoomNotFound) };
-            let st = room.lock();
-            let rm = sfu.plane.room(&room_id);
-            let speaker = |k: oxsig::msg::Kind| rm.as_ref().and_then(|r| r.slot(k).bound.load_full()).map(|b| b.user.clone());
-            let body = json!({
-                "room": {
-                    "room_id": room.id,
-                    "name": room.name,
-                    "capacity": room.capacity,
-                    "user_count": st.user_count(),
-                    "rec": st.rec(),
-                    "version": room.version(st.seq),
-                    "participants": st.participants(),
-                    "hidden_count": st.hidden_count(),
-                    "tracks": crate::trk::all(&room, &st),
-                    "floor": room.floor.view(),
-                    "slots": { "audio": speaker(oxsig::msg::Kind::Audio), "video": speaker(oxsig::msg::Kind::Video) },
-                }
-            });
-            Reply::ok(&body)
-        }
-        AdminCall::SfuRooms => {
-            let mut rooms: Vec<Value> = sfu.rooms.iter().map(|r| json!({ "room_id": r.id, "members": r.lock().members.len() })).collect();
-            rooms.sort_by(|a, b| a["room_id"].as_str().cmp(&b["room_id"].as_str()));
-            Reply::ok(&json!({ "unit": sfu.cfg.node_id, "sfu_id": sfu.epoch, "total": rooms.len(), "rooms": rooms }))
-        }
-        AdminCall::UserMedia { user_id } => {
-            let Some(p) = sfu.peer(&user_id) else { return Reply::fail(Code::PeerNotFound) };
-            let rows = p.lock().table.snapshot();
-            let conn = p.sub_conn();
-            let egress = conn.egress.load_full();
-            let mlines: Vec<Value> = rows
-                .0
-                .iter()
-                .map(|r| {
-                    let e = egress.iter().find(|e| e.mid == r.mid);
-                    json!({ "entry": r.entry(), "since": r.at_ms, "rewrite": e.map(|e| rewrite_of(e, sfu)).unwrap_or(Value::Null) })
-                })
-                .collect();
-            let v = vec![json!({
-                "sfu_id": sfu.epoch,
-                "ufrag": conn.link.ufrag(),
-                "arev": rows.1,
-                "acked": conn.acked.load(Ordering::Acquire),
-                "mlines": mlines,
-            })];
-            Reply::ok(&v)
-        }
-        AdminCall::Links { users } => {
-            let mut out: BTreeMap<String, Vec<LinkRow>> = BTreeMap::new();
-            for u in users {
-                let Some(p) = sfu.peer(&u) else { continue };
-                let rows = p
-                    .conns
-                    .iter()
-                    .map(|c| {
-                        let (s, since) = c.link.state();
-                        LinkRow { sfu_id: sfu.epoch.clone(), ufrag: c.link.ufrag(), state: s.name().into(), since }
-                    })
-                    .collect();
-                out.insert(u, rows);
-            }
-            Reply::ok(&out)
-        }
-        AdminCall::Reap { room_id, user_id } => {
-            let Some(room) = sfu.room(&room_id) else { return Reply::fail(Code::RoomNotFound) };
-            let Some(p) = sfu.peer(&user_id).filter(|p| p.aff.has(&room_id)) else { return Reply::fail(Code::NotInRoom) };
-            let left = crate::gc::kick(sfu, &p, &room).await;
-            let v = room.version(room.lock().seq);
-            Reply::ok(&json!({ "room_id": room_id, "user_id": user_id, "left": left, "version": v }))
-        }
-        AdminCall::Destroy { room_id, if_version } => {
-            let Some(room) = sfu.room(&room_id) else { return Reply::fail(Code::RoomNotFound) };
-            let Some(want) = if_version else { return Reply::failure(Code::MissingField.failure_msg("if_version")) };
-            let cur = room.version(room.lock().seq);
-            let ok = crate::room::parse_version(&want).is_some_and(|(e, s)| e == cur.epoch && s == cur.seq);
-            if !ok {
-                return Reply::failure(Code::PreconditionFailed.failure().with_details(json!({ "current": format!("{}:{}", cur.epoch, cur.seq) })));
-            }
-            let _g = sfu.rooms_op.lock().await;
-            let n = crate::gc::close_room(sfu, &room).await;
-            common::ev!(spec = "SV-STATE-UNIT-STATE", room = room_id.as_str(), "room destroyed notified={n} at={}", now_ms());
-            Reply::ok(&json!({ "room_id": room_id, "destroyed": true, "notified": n }))
-        }
+        ("GET", ["admin", "rooms", r, "snapshot"]) => snapshot(sfu, r),
+        ("GET", ["admin", "users", u, "media"]) => media(sfu, u),
+        ("POST", ["admin", "rooms", r, "reap", u]) => reap(sfu, r, u, exec),
+        ("POST", ["admin", "rooms", r, "destroy"]) => destroy(sfu, r, query.get("if_version").map(String::as_str), exec),
+        _ => http(404, Code::UNKNOWN_OP),
     }
+}
+
+fn links(sfu: &Sfu, user: &str) -> Reply {
+    let Ok(st) = sfu.state.lock() else { return Reply::fail(Code::INTERNAL_ERROR) };
+    let Some(p) = st.peers.get(user) else { return Reply::Ok { body: json!({"links": []}) } };
+    let rows: Vec<Value> = p
+        .transports()
+        .iter()
+        .map(|t| {
+            let state = t.state();
+            let since = match state {
+                crate::link::PeerState::Suspect => t.suspect_since.load(Ordering::Acquire),
+                crate::link::PeerState::Alive => t.created_ms,
+            };
+            json!({"sfu_id": sfu.epoch, "ufrag": t.ufrag(), "state": state.as_str(), "since": wall_of(since), "role": t.role.as_str()})
+        })
+        .collect();
+    Reply::Ok { body: json!({"links": rows}) }
+}
+
+fn snapshot(sfu: &Sfu, room: &str) -> Reply {
+    let Ok(st) = sfu.state.lock() else { return Reply::fail(Code::INTERNAL_ERROR) };
+    let Some(r) = st.rooms.get(room) else { return http(404, Code::ROOM_NOT_FOUND) };
+    let last = r.hot.audio.speaker_last_ms.load(Ordering::Acquire).max(r.hot.video.speaker_last_ms.load(Ordering::Acquire));
+    let f = &r.floor;
+    let timers: Vec<Value> = f
+        .timers(last)
+        .into_iter()
+        .map(|(name, user, at)| match user {
+            Some(u) => json!({"name": name, "user_id": u, "at": wall_of(at)}),
+            None => json!({"name": name, "at": wall_of(at)}),
+        })
+        .collect();
+    let q: Vec<Value> = f.srv.queue.iter().map(|w| json!({"user_id": w.u, "priority": w.p})).collect();
+    let first = r.hot.audio.speaker_first_ms.load(Ordering::Acquire);
+    let floor = json!({
+        "state": f.srv.g.as_str(),
+        "speaker": f.srv.holder(),
+        "priority": if f.srv.g == crate::flr::core::G::Taken { f.srv.sprio } else { f.srv.rprio },
+        "queue": q,
+        "first_rtp_at": (first != 0).then(|| wall_of(first)),
+        "last_rtp_at": (last != 0).then(|| wall_of(last)),
+        "timers": timers,
+    });
+    let slot = |k: oxsig::types::Kind| r.hot.slot(k).bound.load().as_ref().map(|b| b.user.to_string());
+    let hidden = r.members.values().filter(|m| m.hidden).count();
+    Reply::Ok {
+        body: json!({"room": {
+            "room_id": r.id,
+            "name": r.name,
+            "capacity": r.capacity,
+            "user_count": r.user_count(),
+            "rec": r.rec(),
+            "version": r.version(),
+            "participants": r.participants(),
+            "hidden_count": hidden,
+            "tracks": r.track_entries(),
+            "floor": floor,
+            "slots": {"audio": slot(oxsig::types::Kind::Audio), "video": slot(oxsig::types::Kind::Video)},
+        }}),
+    }
+}
+
+fn media(sfu: &Sfu, user: &str) -> Reply {
+    let Ok(st) = sfu.state.lock() else { return Reply::fail(Code::INTERNAL_ERROR) };
+    let Some(p) = st.peers.get(user) else { return Reply::Ok { body: json!({"sfu_id": sfu.epoch, "error": Code::PEER_NOT_FOUND.0}) } };
+    let wire = p.table.wire();
+    let mut lines = Vec::new();
+    for e in wire.mlines {
+        let mid: u8 = e.mid.parse().unwrap_or(0);
+        let row = p.table.rows().iter().find(|r| r.mid == mid);
+        let rewrite = row.and_then(|r| {
+            let rw = r.dl.rewrite.lock().ok()?;
+            let last = rw.rw.last_seq()?;
+            let src = rw.src.as_ref().and_then(|w| w.upgrade()).and_then(|u| u.stream.upgrade()).map(|s| json!({"user_id": &*s.user, "track_id": &*s.track_id}));
+            Some(json!({"src": src, "seq_off": rw.rw.seq_off(), "ts_off": rw.rw.ts_off(), "last_seq": last, "last_ts": rw.rw.last_ts(), "last_at": rw.rw.last_at_ms().map(wall_of), "switches": rw.rw.switches()}))
+        });
+        let since = row.map(|r| wall_of(r.dl.carry_at_ms.load(Ordering::Acquire))).unwrap_or(0);
+        lines.push(json!({"entry": e, "since": since, "rewrite": rewrite}));
+    }
+    Reply::Ok { body: json!({"sfu_id": sfu.epoch, "ufrag": p.sub_transport().ufrag(), "arev": p.table.arev, "acked": p.table.ack, "mlines": lines}) }
+}
+
+fn reap(sfu: &Arc<Sfu>, room: &str, user: &str, exec: &mut Exec) -> Reply {
+    let Ok(mut guard) = sfu.state.lock() else { return Reply::fail(Code::INTERNAL_ERROR) };
+    let st = &mut *guard;
+    if !st.rooms.contains_key(room) {
+        return http(404, Code::ROOM_NOT_FOUND);
+    }
+    if !st.peers.get(user).is_some_and(|p| p.rooms.contains(room)) {
+        return http(404, Code::NOT_IN_ROOM);
+    }
+    let hidden = st.rooms.get(room).and_then(|r| r.members.get(user)).is_some_and(|m| m.hidden);
+    let sub_after: Vec<String> = st.peers.get(user).map(|p| p.rooms.iter().filter(|r| *r != room).cloned().collect()).unwrap_or_default();
+    let pub_after = st.peers.get(user).and_then(|p| p.pub_room.clone()).filter(|r| r != room);
+    let ev = oxsig::msg::RoomEventBody::Affiliation { room_id: room.to_string(), affiliation: oxsig::types::Affiliation { sub_rooms: sub_after, pub_room: pub_after }, cause: oxsig::msg::RoomEventBodyAffiliationCause::Kick };
+    sfu.notice_user(user, Op::RoomEvent, serde_json::to_value(&ev).unwrap_or_default());
+    let label = if hidden { "ROOM.S.kick_hidden" } else { "ROOM.S.kick" };
+    crate::gc::leave_seven(sfu, st, room, user, crate::gc::Path::Kick, label, exec);
+    let v = st.rooms.get(room).map(|r| r.version());
+    Reply::Ok { body: json!({"room_id": room, "user_id": user, "left": true, "version": v}) }
+}
+
+fn destroy(sfu: &Arc<Sfu>, room: &str, if_version: Option<&str>, exec: &mut Exec) -> Reply {
+    let Some(want) = if_version else { return http(400, Code::MISSING_FIELD) };
+    let Ok(mut guard) = sfu.state.lock() else { return Reply::fail(Code::INTERNAL_ERROR) };
+    let st = &mut *guard;
+    let Some(r) = st.rooms.get(room) else { return http(404, Code::ROOM_NOT_FOUND) };
+    if super::version_str(&r.version()) != want {
+        return http(409, Code::PRECONDITION_FAILED);
+    }
+    let members: Vec<String> = r.members.keys().cloned().collect();
+    for u in &members {
+        let sub_after: Vec<String> = st.peers.get(u).map(|p| p.rooms.iter().filter(|x| *x != room).cloned().collect()).unwrap_or_default();
+        let pub_after = st.peers.get(u).and_then(|p| p.pub_room.clone()).filter(|x| x != room);
+        let ev = oxsig::msg::RoomEventBody::Affiliation { room_id: room.to_string(), affiliation: oxsig::types::Affiliation { sub_rooms: sub_after, pub_room: pub_after }, cause: oxsig::msg::RoomEventBodyAffiliationCause::RoomClosed };
+        sfu.notice_user(u, Op::RoomEvent, serde_json::to_value(&ev).unwrap_or_default());
+    }
+    for u in &members {
+        crate::gc::leave_seven(sfu, st, room, u, crate::gc::Path::Destroy, "ROOM.S.close_notify", exec);
+    }
+    crate::gc::drop_room(sfu, st, room);
+    common::ev!(spec = "ROOM.S.close", area = "ROOM", key = %room, from = "open", to = "closed", cause = "destroy", room = %room);
+    Reply::Ok { body: json!({"room_id": room, "destroyed": true, "notified": members.len()}) }
 }

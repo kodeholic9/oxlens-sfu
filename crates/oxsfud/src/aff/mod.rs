@@ -1,73 +1,93 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.3 @d4cc756 · 정:RULE-AFF-ONE-SET 정:IMPL-AFF-PUB-ROOM 정:RULE-AFF-SERVER-SCOPE 정:RULE-CONC-SIX 연:RULE-AFF-PROC 연:RULE-AFF-PUB-IN-SUB 연:RULE-AFF-PARTIAL · model: claude-opus-5-5
-//! 소속 — 입장 방 집합(= 구독 집합) 하나와 `pub_room`(RCU) 하나. 두 집합을 두지 않는다.
+// spec: v1.4 · 정:RULE-AFF-ONE-SET · 정:IMPL-AFF-PUB-ROOM · 정:IMPL-AFF-PUB-MOVE · 정:IMPL-FWD-ROOM · 연:AFF.op.AFFILIATION · 연:RULE-AFF-PROC · 연:RULE-AFF-RES-FORM · 연:AFF.S · model: claude-opus-5-5
+//! 소속 — 입장 방 집합(= 구독 집합) 하나와 `pub_room`(RCU 값) 하나. 발행 RTP 는 매 패킷 이 값으로 방을 정한다.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
-use arc_swap::{ArcSwap, ArcSwapOption};
-use oxsig::msg::Affiliation;
+use arc_swap::ArcSwapOption;
+use oxsig::types::Affiliation;
 
-#[derive(Default)]
-pub struct Aff {
-    rooms: ArcSwap<BTreeSet<String>>,
-    pub_room: ArcSwapOption<String>,
+use crate::fwd::hot::RoomHot;
+
+pub struct Hot {
+    pub user: Arc<str>,
+    pub pub_room: ArcSwapOption<RoomHot>,
+    pub rtp_notify_ms: AtomicU64,
 }
 
-impl Aff {
-    pub fn rooms(&self) -> Vec<String> {
-        self.rooms.load().iter().cloned().collect()
+impl Hot {
+    pub fn new(user: &str) -> Hot {
+        Hot { user: Arc::from(user), pub_room: ArcSwapOption::empty(), rtp_notify_ms: AtomicU64::new(0) }
     }
+}
 
-    pub fn count(&self) -> usize {
-        self.rooms.load().len()
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    Reject,
+    RejectPerm,
+    Select,
+    SelectMoved,
+    Away,
+    Same,
+}
 
-    pub fn has(&self, room: &str) -> bool {
-        self.rooms.load().contains(room)
-    }
-
-    pub fn add(&self, room: &str) -> bool {
-        let cur = self.rooms.load();
-        if cur.contains(room) {
-            return false;
+impl Step {
+    pub fn label(self) -> &'static str {
+        match self {
+            Step::Reject => "AFF.S.reject",
+            Step::RejectPerm => "AFF.S.reject_perm",
+            Step::Select => "AFF.S.select",
+            Step::SelectMoved => "AFF.S.select_moved",
+            Step::Away => "AFF.S.away",
+            Step::Same => "AFF.S.same",
         }
-        let mut n = (**cur).clone();
-        n.insert(room.to_string());
-        self.rooms.store(Arc::new(n));
-        true
     }
+}
 
-    pub fn remove(&self, room: &str) -> bool {
-        let cur = self.rooms.load();
-        if !cur.contains(room) {
-            return false;
+pub fn decide(pub_room: Option<&str>, sel: Option<&str>, desel: Option<&str>, codec_bad: bool, perm_bad: bool) -> Step {
+    if codec_bad {
+        return Step::Reject;
+    }
+    if perm_bad {
+        return Step::RejectPerm;
+    }
+    match (sel, pub_room) {
+        (Some(_), None) => Step::Select,
+        (Some(s), Some(p)) if s != p => Step::SelectMoved,
+        (None, Some(p)) if desel == Some(p) => Step::Away,
+        _ => Step::Same,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinStep {
+    Select,
+    SelectMoved,
+    Listen,
+}
+
+impl JoinStep {
+    pub fn label(self) -> &'static str {
+        match self {
+            JoinStep::Select => "AFF.S.join_select",
+            JoinStep::SelectMoved => "AFF.S.join_select_moved",
+            JoinStep::Listen => "AFF.S.join_listen",
         }
-        let mut n = (**cur).clone();
-        n.remove(room);
-        self.rooms.store(Arc::new(n));
-        if self.pub_room.load().as_deref().map(String::as_str) == Some(room) {
-            self.pub_room.store(None);
-        }
-        true
     }
+}
 
-    pub fn pub_room(&self) -> Option<Arc<String>> {
-        self.pub_room.load_full()
+pub fn decide_join(pub_room: Option<&str>, room: &str, select: bool) -> JoinStep {
+    match (select, pub_room) {
+        (true, None) => JoinStep::Select,
+        (true, Some(p)) if p != room => JoinStep::SelectMoved,
+        _ => JoinStep::Listen,
     }
+}
 
-    pub fn is_pub(&self, room: &str) -> bool {
-        self.pub_room.load().as_deref().map(String::as_str) == Some(room)
-    }
-
-    pub fn set_pub(&self, room: Option<&str>) -> Option<Arc<String>> {
-        self.pub_room.swap(room.map(|r| Arc::new(r.to_string())))
-    }
-
-    pub fn snapshot(&self) -> Affiliation {
-        let pub_room = self.pub_room.load().as_deref().cloned().filter(|p| self.has(p));
-        Affiliation { sub_rooms: self.rooms(), pub_room }
-    }
+pub fn affiliation(sub: &BTreeSet<String>, pub_room: Option<&str>) -> Affiliation {
+    Affiliation { sub_rooms: sub.iter().cloned().collect(), pub_room: pub_room.map(str::to_string) }
 }
 
 #[cfg(test)]
@@ -75,15 +95,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pub_is_always_in_sub() {
-        let a = Aff::default();
-        a.add("r1");
-        a.add("r2");
-        a.set_pub(Some("r1"));
-        assert_eq!(a.snapshot().pub_room.as_deref(), Some("r1"));
-        a.remove("r1");
-        let s = a.snapshot();
-        assert_eq!(s.pub_room, None, "연:RULE-AFF-PUB-IN-SUB — 듣던 방을 나가면 발행도 풀린다");
-        assert_eq!(s.sub_rooms, vec!["r2".to_string()]);
+    fn decide_matrix() {
+        assert_eq!(decide(None, Some("r1"), None, false, false), Step::Select);
+        assert_eq!(decide(Some("r1"), Some("r3"), Some("r1"), false, false), Step::SelectMoved);
+        assert_eq!(decide(Some("r1"), None, Some("r1"), false, false), Step::Away);
+        assert_eq!(decide(Some("r1"), None, Some("r9"), false, false), Step::Same);
+        assert_eq!(decide(Some("r1"), Some("r1"), None, false, false), Step::Same);
+        assert_eq!(decide(None, Some("r1"), None, true, false), Step::Reject);
+        assert_eq!(decide_join(Some("r1"), "r2", true), JoinStep::SelectMoved);
+        assert_eq!(decide_join(Some("r1"), "r1", true), JoinStep::Listen);
     }
 }

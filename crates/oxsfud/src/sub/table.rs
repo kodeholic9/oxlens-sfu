@@ -1,455 +1,391 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.3 @d4cc756 · 정:IMPL-SUB-TABLE 정:IMPL-SUB-SUBSCRIBER-TABLE 정:CAND-SUB-ROW-CLASS 정:CAND-SUB-PAUSED-FREES-ROW 정:CAND-SUB-REASSIGN-TICK 연:SUB.type.MlineTable 연:SUB.type.MlineEntry 연:RULE-SUB-FILL 연:RULE-SUB-TABLE-SERVER 연:RULE-SUB-REMOVE-KEEPS-MID 연:RULE-SUB-ASSIGN-RECOVERED 연:RULE-LINK-DOWNLINK-SSRC 연:RULE-LINK-EGRESS-REWRITE 연:RULE-ROOM-BUDGET-SPLIT 연:RULE-ROOM-JOIN-NUMBER-TAGS 연:LINK.S.track_on 연:LINK.S.track_off 연:LINK.S.reissue 연:LINK.S.reassign · model: claude-opus-5-5
-//! 배정표 — 연결마다 하나 · 줄은 지우지 않는다 · 줄의 튜플 · 다운링크 SSRC · `stream_id` 는 줄이 생길 때 정해진다 · 바뀔 때마다 `arev` 하나 · 확인 전 그 줄로 안 보낸다.
+// spec: v1.4 · 정:IMPL-SUB-TABLE · 정:IMPL-SUB-SUBSCRIBER-TABLE · 정:IMPL-SUB-PIPELINE · 정:CAND-SUB-ROW-CLASS · 정:CAND-SUB-PAUSED-FREES-ROW · 정:CAND-SUB-REASSIGN-TICK · 연:SUB.type.MlineTable · 연:SUB.type.MlineEntry · 연:RULE-SUB-FILL · 연:RULE-SUB-EGRESS-ACKED · 연:RULE-SUB-ASSIGN-RECOVERED · 연:RULE-ROOM-BUDGET-SPLIT · 연:RULE-LINK-DOWNLINK-SSRC · 연:LINK.S.track_on · 연:LINK.S.track_off · 연:LINK.S.reissue · 연:LINK.S.reassign · 연:LINK.S.ack · model: claude-opus-5-5
+//! 배정표(연결마다 하나) — 줄 하나 = 구독 m-line 하나. mid 는 최대 뒤로만 · 빈 줄은 같은 부류 · kind · 튜플 안에서 가장 작은 mid 부터 · 줄은 지우지 않는다 · 다운링크 SSRC 는 줄이 사는 동안 그대로 · 확인된 차례(ack) 뒤의 줄만 흐른다.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
-use oxsig::msg::{ExtMap, Kind, MlineEntry, MlineTable, RoomJoinReqCodecs};
+use oxsig::code::Code;
+use oxsig::msg::RoomJoinReqCodecs;
+use oxsig::types::{Kind, MlineEntry, MlineTable};
 
-use super::ext::ExtTable;
-use crate::trk::codec;
+use crate::fwd::hot::Downlink;
 
 pub const FULL_AUDIO: usize = 25;
 pub const FULL_VIDEO: usize = 25;
+pub const SUB_1PC: usize = 96;
+pub const SUB_2PC: usize = 128;
 pub const MID_START_1PC: u16 = 32;
 pub const MID_START_2PC: u16 = 0;
-pub const MID_MAX: u16 = 255;
 
-pub const URI_MID: &str = "urn:ietf:params:rtp-hdrext:sdes:mid";
-pub const URI_AUDIO_LEVEL: &str = "urn:ietf:params:rtp-hdrext:ssrc-audio-level";
-pub const URI_ABS_SEND_TIME: &str = "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time";
-pub const URI_TWCC: &str = "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01";
-pub const URI_RID: &str = "urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id";
-pub const URI_RRID: &str = "urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id";
-
-pub fn server_extmap() -> Vec<ExtMap> {
-    [(1, URI_MID), (4, URI_AUDIO_LEVEL), (5, URI_ABS_SEND_TIME), (6, URI_TWCC), (10, URI_RID), (11, URI_RRID)]
-        .iter()
-        .map(|(id, uri)| ExtMap { id: *id, uri: (*uri).to_string() })
-        .collect()
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct SubExt {
-    pub audio: ExtTable,
-    pub video: ExtTable,
-}
-
-impl SubExt {
-    pub fn of(kind: Kind, e: &SubExt) -> ExtTable {
-        match kind {
-            Kind::Audio => e.audio,
-            Kind::Video => e.video,
-        }
-    }
-
-    pub fn build(client: Option<&[ExtMap]>) -> SubExt {
-        let server = server_extmap();
-        let id = |uri: &str| -> Option<u8> {
-            client.and_then(|c| c.iter().find(|e| e.uri == uri).map(|e| e.id)).or_else(|| server.iter().find(|e| e.uri == uri).map(|e| e.id))
-        };
-        let audio = ExtTable { mid: id(URI_MID), audio_level: id(URI_AUDIO_LEVEL), abs_send_time: id(URI_ABS_SEND_TIME), twcc: id(URI_TWCC) };
-        let video = ExtTable { audio_level: None, ..audio };
-        SubExt { audio, video }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Class {
     Full,
     Slot,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Load {
-    pub room: String,
-    pub track_id: String,
-    pub user: Option<String>,
+impl Class {
+    pub fn stream_id(self, mid: u8) -> String {
+        match self {
+            Class::Full => format!("ox-m{mid}"),
+            Class::Slot => "ox-ptt".to_string(),
+        }
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Tuple {
+    pub kind: Kind,
+    pub codec: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PtTable {
+    map: BTreeMap<Tuple, (u8, Option<u8>)>,
+    reserved: HashSet<u8>,
+}
+
+fn pt_ranges() -> impl Iterator<Item = u8> {
+    (96u8..=127).chain(35u8..=63)
+}
+
+impl PtTable {
+    pub fn seed_2pc() -> PtTable {
+        let mut t = PtTable::default();
+        t.map.insert(Tuple { kind: Kind::Audio, codec: "opus".into() }, (111, None));
+        t.map.insert(Tuple { kind: Kind::Video, codec: "VP8".into() }, (96, Some(97)));
+        t.map.insert(Tuple { kind: Kind::Video, codec: "H264".into() }, (102, Some(103)));
+        t
+    }
+
+    pub fn seed_1pc(codecs: &[RoomJoinReqCodecs]) -> PtTable {
+        let mut t = PtTable::default();
+        for c in codecs {
+            t.reserved.insert(c.pt);
+            if let Some(r) = c.rtx_pt {
+                t.reserved.insert(r);
+            }
+        }
+        for c in codecs {
+            let canon = match c.kind {
+                Kind::Audio => crate::trk::canonical_audio(&c.name),
+                Kind::Video => crate::trk::canonical_video(&c.name),
+            };
+            let Some(canon) = canon else { continue };
+            if c.kind == Kind::Video && canon == "H264" && !crate::trk::h264_profile_matches(c.fmtp.as_deref(), crate::trk::FMTP_H264) {
+                continue;
+            }
+            let key = Tuple { kind: c.kind, codec: canon.to_string() };
+            t.map.entry(key).or_insert((c.pt, c.rtx_pt));
+        }
+        t
+    }
+
+    fn used(&self) -> HashSet<u8> {
+        let mut u = self.reserved.clone();
+        for (p, r) in self.map.values() {
+            u.insert(*p);
+            if let Some(r) = r {
+                u.insert(*r);
+            }
+        }
+        u
+    }
+
+    pub fn get(&mut self, tuple: &Tuple) -> Option<(u8, Option<u8>)> {
+        if let Some(v) = self.map.get(tuple) {
+            return Some(*v);
+        }
+        let used = self.used();
+        let free: Vec<u8> = pt_ranges().filter(|p| !used.contains(p)).take(2).collect();
+        let v = match tuple.kind {
+            Kind::Audio => (*free.first()?, None),
+            Kind::Video => (*free.first()?, free.get(1).copied()),
+        };
+        self.map.insert(tuple.clone(), v);
+        Some(v)
+    }
+}
+
+#[derive(Clone)]
 pub struct Row {
     pub mid: u8,
     pub kind: Kind,
     pub class: Class,
-    pub codec: String,
+    pub tuple: Tuple,
     pub pt: u8,
     pub rtx_pt: Option<u8>,
     pub ssrc: u32,
     pub rtx_ssrc: Option<u32>,
-    pub load: Option<Load>,
+    pub track: Option<(String, String)>,
     pub since: u64,
-    pub at_ms: u64,
-    pub score: u64,
-}
-
-impl Row {
-    pub fn stream_id(&self) -> String {
-        match self.class {
-            Class::Full => format!("ox-m{}", self.mid),
-            Class::Slot => "ox-ptt".to_string(),
-        }
-    }
-
-    pub fn entry(&self) -> MlineEntry {
-        MlineEntry {
-            mid: self.mid.to_string(),
-            kind: self.kind,
-            pt: self.pt,
-            codec: self.codec.clone(),
-            fmtp: codec::row_fmtp(&self.codec).map(str::to_string),
-            rtx_pt: self.rtx_pt,
-            track_id: self.load.as_ref().map(|l| l.track_id.clone()),
-            room_id: self.load.as_ref().map(|l| l.room.clone()),
-            ssrc: self.ssrc,
-            rtx_ssrc: self.rtx_ssrc,
-            stream_id: self.stream_id(),
-        }
-    }
-
-    fn holds(&self, room: &str, track_id: &str) -> bool {
-        self.load.as_ref().is_some_and(|l| l.room == room && l.track_id == track_id)
-    }
+    pub rank: u64,
+    pub dl: Arc<Downlink>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Want {
-    pub room: String,
     pub track_id: String,
-    pub user: String,
+    pub room: String,
     pub kind: Kind,
-    pub codec: String,
-    pub score: u64,
-    pub since_ms: u64,
+    pub class: Class,
+    pub tuple: Tuple,
+    pub rank: u64,
+    pub waiting_since: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MidLimit {
-    pub limit: usize,
-    pub current: usize,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Change {
+    On { mid: u8, track_id: String, room: String, label: &'static str },
+    Off { mid: u8, track_id: String, room: String, label: &'static str },
+    Wait { track_id: String, room: String },
 }
 
 pub struct Table {
     pub sfu_id: String,
-    pub arev: u64,
-    pub rows: Vec<Row>,
-    pub waiting: Vec<Want>,
-    pub ext: SubExt,
     pub one_pc: bool,
+    pub user: Arc<str>,
+    rows: Vec<Row>,
+    pub arev: u64,
+    pub ack: u64,
     next_mid: u16,
-    pts: Vec<(String, u8, Option<u8>)>,
-    declared: BTreeSet<u8>,
-    declared_tuples: Vec<(String, u8, Option<u8>)>,
+    pub pts: PtTable,
     ssrcs: HashSet<u32>,
-    pub avoid: HashSet<u32>,
+    waiting: Vec<Want>,
     slot_budget: usize,
-    dirty: BTreeSet<usize>,
+    clock: u64,
 }
 
-fn rand_u32() -> u32 {
-    let mut b = [0u8; 4];
-    let _ = getrandom::fill(&mut b);
-    u32::from_be_bytes(b)
+fn random_ssrc(used: &HashSet<u32>) -> u32 {
+    loop {
+        let mut b = [0u8; 4];
+        let _ = getrandom::fill(&mut b);
+        let v = u32::from_be_bytes(b);
+        if v > 1 && !used.contains(&v) {
+            return v;
+        }
+    }
 }
 
 impl Table {
-    pub fn new(sfu_id: &str, one_pc: bool, slot_budget: u16, ext: SubExt) -> Table {
+    pub fn new(sfu_id: &str, one_pc: bool, user: &str, pts: PtTable, slot_budget: usize, arev_from: u64) -> Table {
         Table {
             sfu_id: sfu_id.to_string(),
-            arev: 0,
-            rows: Vec::new(),
-            waiting: Vec::new(),
-            ext,
             one_pc,
+            user: Arc::from(user),
+            rows: Vec::new(),
+            arev: arev_from,
+            ack: arev_from,
             next_mid: if one_pc { MID_START_1PC } else { MID_START_2PC },
-            pts: Vec::new(),
-            declared: BTreeSet::new(),
-            declared_tuples: Vec::new(),
+            pts,
             ssrcs: HashSet::new(),
-            avoid: HashSet::new(),
-            slot_budget: slot_budget as usize,
-            dirty: BTreeSet::new(),
+            waiting: Vec::new(),
+            slot_budget,
+            clock: 0,
         }
     }
 
-    pub fn seed(&mut self, codecs: &[RoomJoinReqCodecs]) {
-        for c in codecs {
-            self.declared.insert(c.pt);
-            if let Some(r) = c.rtx_pt {
-                self.declared.insert(r);
-            }
-            if let Some(k) = codec::tuple_key(c.kind, &c.name, c.fmtp.as_deref()) {
-                self.declared_tuples.push((k, c.pt, c.rtx_pt));
-            }
-        }
-    }
-
-    fn used(&self, pt: u8) -> bool {
-        self.declared.contains(&pt) || self.pts.iter().any(|(_, a, b)| *a == pt || *b == Some(pt))
-    }
-
-    fn free_pt(&self) -> Option<u8> {
-        (96u8..=127).chain(35u8..=63).find(|p| !self.used(*p))
-    }
-
-    fn free_pair(&self) -> Option<(u8, u8)> {
-        let pool: Vec<u8> = (96u8..=127).chain(35u8..=63).collect();
-        let mut first = None;
-        for p in &pool {
-            if self.used(*p) {
-                continue;
-            }
-            match first {
-                None => first = Some(*p),
-                Some(f) => return Some((f, *p)),
-            }
-        }
-        None
-    }
-
-    pub fn pt_for(&mut self, kind: Kind, name: &str) -> (u8, Option<u8>) {
-        let fmtp = codec::row_fmtp(name);
-        let key = codec::tuple_key(kind, name, fmtp).unwrap_or_else(|| name.to_string());
-        if let Some((_, p, r)) = self.pts.iter().find(|(k, _, _)| *k == key) {
-            return (*p, *r);
-        }
-        let video = kind == Kind::Video;
-        let chosen = if let Some((_, p, r)) = self.declared_tuples.iter().find(|(k, _, _)| *k == key) {
-            let rtx = if video { r.or_else(|| self.free_pt()) } else { None };
-            (*p, rtx)
-        } else if !self.one_pc {
-            let seed = match codec::canon(name) {
-                Some("opus") => Some((111, None)),
-                Some("VP8") => Some((96, Some(97))),
-                Some("H264") => Some((102, Some(103))),
-                _ => None,
-            };
-            match seed.filter(|(p, r)| !self.used(*p) && r.is_none_or(|x| !self.used(x))) {
-                Some(s) => s,
-                None => match self.free_pair() {
-                    Some((a, b)) => (a, video.then_some(b)),
-                    None => (self.free_pt().unwrap_or(127), None),
-                },
-            }
-        } else {
-            match self.free_pair() {
-                Some((a, b)) => (a, video.then_some(b)),
-                None => (self.free_pt().unwrap_or(127), None),
-            }
-        };
-        self.pts.push((key, chosen.0, chosen.1));
-        chosen
-    }
-
-    fn new_ssrc(&mut self) -> u32 {
-        loop {
-            let s = rand_u32();
-            if s > 1 && !self.ssrcs.contains(&s) && !self.avoid.contains(&s) {
-                self.ssrcs.insert(s);
-                return s;
-            }
-        }
+    pub fn reserve_ssrc(&mut self, s: u32) {
+        self.ssrcs.insert(s);
     }
 
     pub fn downlink_ssrcs(&self) -> HashSet<u32> {
-        self.ssrcs.clone()
-    }
-
-    fn new_row(&mut self, kind: Kind, class: Class, name: &str, now: u64) -> Option<usize> {
-        if self.next_mid > MID_MAX {
-            return None;
+        let mut v = HashSet::new();
+        for r in &self.rows {
+            v.insert(r.ssrc);
+            if let Some(x) = r.rtx_ssrc {
+                v.insert(x);
+            }
         }
-        let mid = self.next_mid as u8;
-        self.next_mid += 1;
-        let (pt, rtx_pt) = self.pt_for(kind, name);
-        let ssrc = self.new_ssrc();
-        let rtx_ssrc = rtx_pt.map(|_| self.new_ssrc());
-        self.rows.push(Row { mid, kind, class, codec: name.to_string(), pt, rtx_pt, ssrc, rtx_ssrc, load: None, since: 0, at_ms: now, score: 0 });
-        let i = self.rows.len() - 1;
-        self.dirty.insert(i);
-        Some(i)
+        v
     }
 
-    fn empty_row(&self, kind: Kind, class: Class, name: &str) -> Option<usize> {
-        self.rows
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| r.kind == kind && r.class == class && r.codec == name && r.load.is_none())
-            .min_by_key(|(_, r)| r.mid)
-            .map(|(i, _)| i)
+    pub fn rows(&self) -> &[Row] {
+        &self.rows
     }
 
-    fn put(&mut self, i: usize, load: Load, score: u64, now: u64) {
-        let r = &mut self.rows[i];
-        r.load = Some(load);
-        r.score = score;
-        r.at_ms = now;
-        self.dirty.insert(i);
+    fn cap(&self) -> usize {
+        if self.one_pc { SUB_1PC } else { SUB_2PC }
     }
 
-    fn clear(&mut self, i: usize, now: u64) {
-        let r = &mut self.rows[i];
-        r.load = None;
-        r.score = 0;
-        r.at_ms = now;
-        self.dirty.insert(i);
+    fn tick(&mut self) -> u64 {
+        self.clock += 1;
+        self.clock
     }
 
-    pub fn slot_occupied(&self) -> usize {
-        self.rows.iter().filter(|r| r.class == Class::Slot && r.load.is_some()).count()
-    }
-
-    pub fn add_slots(&mut self, room: &str, audio: &str, video: &str, now: u64) -> Result<(), MidLimit> {
-        if self.rows.iter().any(|r| r.class == Class::Slot && r.load.as_ref().is_some_and(|l| l.room == room)) {
-            return Ok(());
-        }
-        let cur = self.slot_occupied();
-        if cur + 2 > self.slot_budget {
-            return Err(MidLimit { limit: self.slot_budget, current: cur });
-        }
-        for (kind, name) in [(Kind::Audio, audio), (Kind::Video, video)] {
-            let i = match self.empty_row(kind, Class::Slot, name) {
-                Some(i) => i,
-                None => self.new_row(kind, Class::Slot, name, now).ok_or(MidLimit { limit: self.slot_budget, current: cur })?,
-            };
-            let load = Load { room: room.to_string(), track_id: crate::trk::slot_id(room, kind), user: None };
-            self.put(i, load, 0, now);
-        }
-        Ok(())
-    }
-
-    fn cap(kind: Kind) -> usize {
-        match kind {
-            Kind::Audio => FULL_AUDIO,
-            Kind::Video => FULL_VIDEO,
-        }
-    }
-
-    fn full_count(&self, kind: Kind) -> usize {
-        self.rows.iter().filter(|r| r.kind == kind && r.class == Class::Full).count()
-    }
-
-    pub fn holds(&self, room: &str, track_id: &str) -> Option<&Row> {
-        self.rows.iter().find(|r| r.holds(room, track_id))
-    }
-
-    pub fn want(&mut self, w: Want, now: u64) {
-        if self.rows.iter().any(|r| r.holds(&w.room, &w.track_id)) {
-            return;
-        }
-        self.waiting.retain(|x| !(x.room == w.room && x.track_id == w.track_id));
-        let load = Load { room: w.room.clone(), track_id: w.track_id.clone(), user: Some(w.user.clone()) };
-        if let Some(i) = self.empty_row(w.kind, Class::Full, &w.codec) {
-            self.put(i, load, w.score, now);
-            return;
-        }
-        if self.full_count(w.kind) < Self::cap(w.kind)
-            && let Some(i) = self.new_row(w.kind, Class::Full, &w.codec, now)
-        {
-            self.put(i, load, w.score, now);
-            return;
-        }
-        let same = self
+    pub fn wire(&self) -> MlineTable {
+        let mut ml: Vec<MlineEntry> = self
             .rows
             .iter()
-            .enumerate()
-            .filter(|(_, r)| r.kind == w.kind && r.class == Class::Full && r.codec == w.codec)
-            .min_by_key(|(_, r)| (r.score, r.at_ms))
-            .map(|(i, _)| i);
-        match same {
-            Some(i) if self.rows[i].score < w.score => {
-                if let Some(old) = self.rows[i].load.clone() {
-                    let kind = self.rows[i].kind;
-                    let codec = self.rows[i].codec.clone();
-                    self.waiting.push(Want {
-                        room: old.room,
-                        track_id: old.track_id,
-                        user: old.user.unwrap_or_default(),
-                        kind,
-                        codec,
-                        score: self.rows[i].score,
-                        since_ms: now,
-                    });
-                }
-                self.put(i, load, w.score, now);
+            .map(|r| MlineEntry {
+                mid: r.mid.to_string(),
+                kind: r.kind,
+                pt: r.pt,
+                codec: r.tuple.codec.clone(),
+                fmtp: crate::trk::sub_fmtp(&r.tuple.codec).map(str::to_string),
+                rtx_pt: r.rtx_pt,
+                track_id: r.track.as_ref().map(|t| t.0.clone()),
+                room_id: r.track.as_ref().map(|t| t.1.clone()),
+                ssrc: r.ssrc,
+                rtx_ssrc: r.rtx_ssrc,
+                stream_id: r.class.stream_id(r.mid),
+            })
+            .collect();
+        ml.sort_by_key(|e| e.mid.parse::<u16>().unwrap_or(0));
+        MlineTable { sfu_id: self.sfu_id.clone(), arev: self.arev, mlines: ml }
+    }
+
+    fn slot_used(&self) -> usize {
+        self.rows.iter().filter(|r| r.class == Class::Slot && r.track.is_some()).count()
+    }
+
+    fn full_rows(&self, kind: Kind) -> usize {
+        self.rows.iter().filter(|r| r.class == Class::Full && r.kind == kind).count()
+    }
+
+    pub fn slot_room_fits(&self, kinds: usize) -> bool {
+        let empty_slot = self.rows.iter().filter(|r| r.class == Class::Slot && r.track.is_none()).count();
+        let need_new = kinds.saturating_sub(empty_slot);
+        self.slot_used() + kinds <= self.slot_budget && self.rows.len() + need_new <= self.cap() && usize::from(self.next_mid) + need_new <= 256
+    }
+
+    fn new_row(&mut self, kind: Kind, class: Class, tuple: &Tuple, make: &dyn Fn(u8, Kind, bool, u32, u32, u8, u8) -> Arc<Downlink>) -> Option<usize> {
+        if self.rows.len() >= self.cap() || self.next_mid > 255 {
+            return None;
+        }
+        let (pt, rtx_pt) = self.pts.get(tuple)?;
+        let mid = self.next_mid as u8;
+        self.next_mid += 1;
+        let ssrc = random_ssrc(&self.ssrcs);
+        self.ssrcs.insert(ssrc);
+        let rtx_ssrc = if kind == Kind::Video && rtx_pt.is_some() {
+            let r = random_ssrc(&self.ssrcs);
+            self.ssrcs.insert(r);
+            Some(r)
+        } else {
+            None
+        };
+        let rtx_pt = if kind == Kind::Video { rtx_pt } else { None };
+        let dl = make(mid, kind, class == Class::Slot, ssrc, rtx_ssrc.unwrap_or(0), pt, rtx_pt.unwrap_or(0));
+        self.rows.push(Row { mid, kind, class, tuple: tuple.clone(), pt, rtx_pt, ssrc, rtx_ssrc, track: None, since: self.arev, rank: 0, dl });
+        Some(self.rows.len() - 1)
+    }
+
+    fn empty_row(&self, kind: Kind, class: Class, tuple: &Tuple) -> Option<usize> {
+        self.rows.iter().enumerate().filter(|(_, r)| r.track.is_none() && r.kind == kind && r.class == class && r.tuple == *tuple).min_by_key(|(_, r)| r.mid).map(|(i, _)| i)
+    }
+
+    fn put(&mut self, i: usize, track_id: &str, room: &str, rank: u64) {
+        self.arev += 1;
+        let r = &mut self.rows[i];
+        r.track = Some((track_id.to_string(), room.to_string()));
+        r.since = self.arev;
+        r.rank = rank;
+        r.dl.sendable.store(false, Ordering::Release);
+    }
+
+    pub fn find(&self, track_id: &str, room: &str) -> Option<&Row> {
+        self.rows.iter().find(|r| r.track.as_ref().is_some_and(|t| t.0 == track_id && t.1 == room))
+    }
+
+    pub fn find_track(&self, track_id: &str) -> Option<&Row> {
+        self.rows.iter().find(|r| r.track.as_ref().is_some_and(|t| t.0 == track_id))
+    }
+
+    pub fn waiting(&self) -> &[Want] {
+        &self.waiting
+    }
+
+    pub fn on(&mut self, w: Want, make: &dyn Fn(u8, Kind, bool, u32, u32, u8, u8) -> Arc<Downlink>) -> Result<Vec<Change>, Code> {
+        if self.find(&w.track_id, &w.room).is_some() || self.waiting.iter().any(|x| x.track_id == w.track_id && x.room == w.room) {
+            return Ok(Vec::new());
+        }
+        if let Some(i) = self.empty_row(w.kind, w.class, &w.tuple) {
+            self.put(i, &w.track_id, &w.room, w.rank);
+            return Ok(vec![Change::On { mid: self.rows[i].mid, track_id: w.track_id, room: w.room, label: "LINK.S.track_on" }]);
+        }
+        let under = match w.class {
+            Class::Slot => self.slot_used() < self.slot_budget,
+            Class::Full => self.full_rows(w.kind) < if w.kind == Kind::Audio { FULL_AUDIO } else { FULL_VIDEO },
+        };
+        if under && let Some(i) = self.new_row(w.kind, w.class, &w.tuple, make) {
+            self.put(i, &w.track_id, &w.room, w.rank);
+            return Ok(vec![Change::On { mid: self.rows[i].mid, track_id: w.track_id, room: w.room, label: "LINK.S.track_on" }]);
+        }
+        if w.class == Class::Slot {
+            return Err(Code::MID_LIMIT);
+        }
+        let victim = self.rows.iter().enumerate().filter(|(_, r)| r.class == Class::Full && r.kind == w.kind && r.tuple == w.tuple && r.track.is_some()).min_by_key(|(_, r)| r.rank).map(|(i, r)| (i, r.rank));
+        let t = self.tick();
+        match victim {
+            Some((i, rank)) if rank < w.rank => {
+                let (old_t, old_r) = self.rows[i].track.clone().unwrap_or_default();
+                self.waiting.push(Want { track_id: old_t.clone(), room: old_r.clone(), kind: w.kind, class: Class::Full, tuple: w.tuple.clone(), rank, waiting_since: t });
+                self.put(i, &w.track_id, &w.room, w.rank);
+                let mid = self.rows[i].mid;
+                Ok(vec![Change::Off { mid, track_id: old_t, room: old_r, label: "LINK.S.reassign" }, Change::On { mid, track_id: w.track_id, room: w.room, label: "LINK.S.reassign" }])
             }
-            Some(_) => self.waiting.push(w),
-            None => {
-                let lru = self
-                    .rows
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, r)| r.kind == w.kind && r.class == Class::Full)
-                    .min_by_key(|(_, r)| (r.load.is_some(), r.score, r.at_ms))
-                    .map(|(i, _)| i);
-                match lru {
-                    Some(i) if self.rows[i].load.is_none() || self.rows[i].score < w.score => {
-                        let (pt, rtx) = self.pt_for(w.kind, &w.codec);
-                        if let Some(old) = self.rows[i].load.clone() {
-                            let kind = self.rows[i].kind;
-                            let codec = self.rows[i].codec.clone();
-                            let score = self.rows[i].score;
-                            self.waiting.push(Want {
-                                room: old.room,
-                                track_id: old.track_id,
-                                user: old.user.unwrap_or_default(),
-                                kind,
-                                codec,
-                                score,
-                                since_ms: now,
-                            });
-                        }
-                        let r = &mut self.rows[i];
-                        r.codec = w.codec.clone();
-                        r.pt = pt;
-                        r.rtx_pt = rtx;
-                        self.put(i, load, w.score, now);
-                    }
-                    _ => self.waiting.push(w),
-                }
+            _ => {
+                let (track_id, room) = (w.track_id.clone(), w.room.clone());
+                self.waiting.push(Want { waiting_since: t, ..w });
+                Ok(vec![Change::Wait { track_id, room }])
             }
         }
     }
 
-    fn refill(&mut self, i: usize, now: u64) {
-        let (kind, name) = (self.rows[i].kind, self.rows[i].codec.clone());
-        if self.rows[i].class != Class::Full {
-            return;
+    pub fn off(&mut self, track_id: &str, room: &str) -> Vec<Change> {
+        self.waiting.retain(|w| !(w.track_id == track_id && w.room == room));
+        let Some(i) = self.rows.iter().position(|r| r.track.as_ref().is_some_and(|t| t.0 == track_id && t.1 == room)) else {
+            return Vec::new();
+        };
+        self.arev += 1;
+        let mid = self.rows[i].mid;
+        self.rows[i].track = None;
+        self.rows[i].since = self.arev;
+        self.rows[i].dl.sendable.store(false, Ordering::Release);
+        let mut out = vec![Change::Off { mid, track_id: track_id.to_string(), room: room.to_string(), label: "LINK.S.track_off" }];
+        let (kind, class, tuple) = (self.rows[i].kind, self.rows[i].class, self.rows[i].tuple.clone());
+        if let Some(wi) = self.waiting.iter().enumerate().filter(|(_, w)| w.kind == kind && w.class == class && w.tuple == tuple).max_by_key(|(_, w)| (w.rank, u64::MAX - w.waiting_since)).map(|(i, _)| i) {
+            let w = self.waiting.remove(wi);
+            self.put(i, &w.track_id, &w.room, w.rank);
+            out.push(Change::On { mid, track_id: w.track_id, room: w.room, label: "LINK.S.reissue" });
         }
-        let pick = self.waiting.iter().enumerate().filter(|(_, w)| w.kind == kind && w.codec == name).min_by_key(|(_, w)| w.since_ms).map(|(j, _)| j);
-        if let Some(j) = pick {
-            let w = self.waiting.remove(j);
-            let load = Load { room: w.room, track_id: w.track_id, user: Some(w.user) };
-            self.put(i, load, w.score, now);
-        }
+        out
     }
 
-    pub fn unwant(&mut self, room: &str, track_id: &str, now: u64) {
-        self.waiting.retain(|w| !(w.room == room && w.track_id == track_id));
-        let hit: Vec<usize> = self.rows.iter().enumerate().filter(|(_, r)| r.holds(room, track_id)).map(|(i, _)| i).collect();
-        for i in hit {
-            self.clear(i, now);
-            self.refill(i, now);
-        }
-    }
-
-    pub fn drop_room(&mut self, room: &str, now: u64) {
+    pub fn off_room(&mut self, room: &str) -> Vec<Change> {
+        let tracks: Vec<String> = self.rows.iter().filter_map(|r| r.track.as_ref().filter(|t| t.1 == room).map(|t| t.0.clone())).collect();
         self.waiting.retain(|w| w.room != room);
-        let hit: Vec<usize> = self.rows.iter().enumerate().filter(|(_, r)| r.load.as_ref().is_some_and(|l| l.room == room)).map(|(i, _)| i).collect();
-        for i in hit {
-            self.clear(i, now);
-            self.refill(i, now);
+        let mut out = Vec::new();
+        for t in tracks {
+            out.extend(self.off(&t, room));
+        }
+        out
+    }
+
+    pub fn set_rank(&mut self, track_id: &str, room: &str, rank: u64) {
+        for r in self.rows.iter_mut() {
+            if r.track.as_ref().is_some_and(|t| t.0 == track_id && t.1 == room) {
+                r.rank = rank;
+            }
+        }
+        for w in self.waiting.iter_mut() {
+            if w.track_id == track_id && w.room == room {
+                w.rank = rank;
+            }
         }
     }
 
-    pub fn move_room(&mut self, track_id: &str, from: &str, to: &str) {
-        for (i, r) in self.rows.iter_mut().enumerate() {
-            if let Some(l) = r.load.as_mut()
-                && l.track_id == track_id
-                && l.room == from
+    pub fn rehome(&mut self, track_id: &str, from: &str, to: &str) -> bool {
+        let mut changed = false;
+        for r in self.rows.iter_mut() {
+            if let Some(t) = r.track.as_mut()
+                && t.0 == track_id
+                && t.1 == from
             {
-                l.room = to.to_string();
-                self.dirty.insert(i);
+                t.1 = to.to_string();
+                changed = true;
             }
         }
         for w in self.waiting.iter_mut() {
@@ -457,146 +393,95 @@ impl Table {
                 w.room = to.to_string();
             }
         }
-    }
-
-    pub fn set_score(&mut self, room: &str, track_id: &str, score: u64) {
-        for r in self.rows.iter_mut() {
-            if r.holds(room, track_id) {
-                r.score = score;
-            }
+        if changed {
+            self.arev += 1;
         }
-        for w in self.waiting.iter_mut() {
-            if w.room == room && w.track_id == track_id {
-                w.score = score;
-            }
+        changed
+    }
+
+    pub fn ack(&mut self, a: u64) -> bool {
+        if a <= self.ack || a > self.arev {
+            return false;
         }
-    }
-
-    pub fn finish(&mut self) -> Option<u64> {
-        if self.dirty.is_empty() {
-            return None;
+        self.ack = a;
+        for r in &self.rows {
+            r.dl.sendable.store(r.track.is_some() && r.since <= self.ack, Ordering::Release);
         }
-        self.arev += 1;
-        let a = self.arev;
-        for i in std::mem::take(&mut self.dirty) {
-            if let Some(r) = self.rows.get_mut(i) {
-                r.since = a;
-            }
-        }
-        Some(a)
+        true
     }
 
-    pub fn discard(&mut self) {
-        self.dirty.clear();
-    }
-
-    pub fn wire(&self) -> MlineTable {
-        let mut rows: Vec<&Row> = self.rows.iter().collect();
-        rows.sort_by_key(|r| r.mid);
-        MlineTable { sfu_id: self.sfu_id.clone(), arev: self.arev, mlines: rows.iter().map(|r| r.entry()).collect() }
-    }
-
-    pub fn snapshot(&self) -> (Vec<Row>, u64) {
-        (self.rows.clone(), self.arev)
+    pub fn downlink_of(&self, mid: u8) -> Option<Arc<Downlink>> {
+        self.rows.iter().find(|r| r.mid == mid).map(|r| r.dl.clone())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sub::ext::ExtTable;
 
-    fn t2() -> Table {
-        Table::new("e", false, 40, SubExt::build(None))
+    fn mk() -> impl Fn(u8, Kind, bool, u32, u32, u8, u8) -> Arc<Downlink> {
+        |mid, kind, slot, ssrc, rtx, pt, rpt| Arc::new(Downlink::new(mid, kind, slot, ssrc, rtx, pt, rpt, Arc::from("me"), std::sync::Weak::new(), ExtTable::default()))
     }
 
-    fn w(room: &str, id: &str, kind: Kind, codec: &str, score: u64) -> Want {
-        Want { room: room.into(), track_id: id.into(), user: "u".into(), kind, codec: codec.into(), score, since_ms: 0 }
-    }
-
-    #[test]
-    fn seeds_2pc() {
-        let mut t = t2();
-        assert_eq!(t.pt_for(Kind::Audio, "opus"), (111, None));
-        assert_eq!(t.pt_for(Kind::Video, "VP8"), (96, Some(97)));
-        assert_eq!(t.pt_for(Kind::Video, "H264"), (102, Some(103)));
-        assert_eq!(t.pt_for(Kind::Video, "VP8"), (96, Some(97)), "같은 튜플은 늘 같은 PT");
+    fn want(t: &str, r: &str, kind: Kind, class: Class, rank: u64) -> Want {
+        Want { track_id: t.into(), room: r.into(), kind, class, tuple: Tuple { kind, codec: if kind == Kind::Audio { "opus".into() } else { "H264".into() } }, rank, waiting_since: 0 }
     }
 
     #[test]
-    fn seeds_1pc_avoid_declared() {
-        let mut t = Table::new("e", true, 40, SubExt::build(None));
-        t.seed(&[
-            RoomJoinReqCodecs { kind: Kind::Audio, pt: 111, name: "opus".into(), fmtp: Some("minptime=10;useinbandfec=1".into()), rtx_pt: None },
-            RoomJoinReqCodecs { kind: Kind::Video, pt: 96, name: "VP8".into(), fmtp: None, rtx_pt: Some(97) },
-            RoomJoinReqCodecs { kind: Kind::Video, pt: 98, name: "VP9".into(), fmtp: None, rtx_pt: Some(99) },
-            RoomJoinReqCodecs {
-                kind: Kind::Video,
-                pt: 109,
-                name: "H264".into(),
-                fmtp: Some("packetization-mode=1;profile-level-id=42e01f".into()),
-                rtx_pt: Some(114),
-            },
-        ]);
-        assert_eq!(t.pt_for(Kind::Audio, "opus"), (111, None));
-        assert_eq!(t.pt_for(Kind::Video, "H264"), (109, Some(114)), "같은 튜플은 그 PT 재사용");
-        assert_eq!(t.next_mid, MID_START_1PC);
+    fn rows_reuse_smallest_empty_and_keep_ssrc() {
+        let mut t = Table::new("sfu", false, "me", PtTable::seed_2pc(), 40, 0);
+        let m = mk();
+        t.on(want("a", "r", Kind::Video, Class::Full, 1), &m).expect("a");
+        t.on(want("b", "r", Kind::Video, Class::Full, 1), &m).expect("b");
+        let ssrc0 = t.rows()[0].ssrc;
+        t.off("a", "r");
+        assert!(t.rows()[0].track.is_none());
+        t.on(want("c", "r", Kind::Video, Class::Full, 1), &m).expect("c");
+        assert_eq!(t.rows()[0].track.as_ref().map(|x| x.0.as_str()), Some("c"));
+        assert_eq!(t.rows()[0].ssrc, ssrc0);
+        assert_eq!(t.rows().len(), 2);
+        assert_eq!(t.rows()[0].pt, 102);
+        assert_eq!(t.rows()[0].rtx_pt, Some(103));
+        let w = t.wire();
+        assert_eq!(w.mlines[0].stream_id, "ox-m0");
+        assert_eq!(w.arev, 4);
     }
 
     #[test]
-    fn slots_are_atomic_and_budgeted() {
-        let mut t = Table::new("e", false, 4, SubExt::build(None));
-        assert!(t.add_slots("r1", "opus", "H264", 0).is_ok());
-        assert!(t.add_slots("r2", "opus", "H264", 0).is_ok());
-        assert_eq!(t.add_slots("r3", "opus", "H264", 0), Err(MidLimit { limit: 4, current: 4 }));
-        t.drop_room("r1", 0);
-        assert!(t.add_slots("r3", "opus", "H264", 0).is_ok());
-        assert_eq!(t.rows.len(), 4, "빈 슬롯 줄을 먼저 쓴다");
-        assert!(t.rows.iter().all(|r| r.stream_id() == "ox-ptt"));
+    fn egress_only_after_ack() {
+        let mut t = Table::new("sfu", false, "me", PtTable::seed_2pc(), 40, 0);
+        let m = mk();
+        t.on(want("a", "r", Kind::Audio, Class::Full, 1), &m).expect("a");
+        assert!(!t.rows()[0].dl.sendable.load(Ordering::Acquire));
+        assert!(t.ack(1));
+        assert!(t.rows()[0].dl.sendable.load(Ordering::Acquire));
+        assert!(!t.ack(1));
+        assert!(!t.ack(9));
     }
 
     #[test]
-    fn empty_row_reused_by_same_kind_then_new_then_reassign() {
-        let mut t = t2();
-        t.want(w("r", "a", Kind::Video, "H264", 0), 0);
-        assert_eq!(t.finish(), Some(1));
-        t.unwant("r", "a", 1);
-        assert_eq!(t.finish(), Some(2));
-        t.want(w("r", "b", Kind::Video, "H264", 0), 2);
-        t.finish();
-        assert_eq!(t.rows.len(), 1, "S-sym-IMPL-SUB-TABLE-1 같은 kind 의 빈 줄 먼저");
-        for i in 0..30 {
-            t.want(w("r", &format!("v{i}"), Kind::Video, "H264", 0), 3);
+    fn slot_budget_is_mid_limit() {
+        let mut t = Table::new("sfu", true, "me", PtTable::seed_2pc(), 2, 0);
+        let m = mk();
+        t.on(want("s1", "r1", Kind::Audio, Class::Slot, 0), &m).expect("s1");
+        t.on(want("s2", "r1", Kind::Video, Class::Slot, 0), &m).expect("s2");
+        assert_eq!(t.on(want("s3", "r2", Kind::Audio, Class::Slot, 0), &m), Err(Code::MID_LIMIT));
+        assert_eq!(t.rows()[0].mid, 32);
+        assert!(!t.slot_room_fits(2));
+    }
+
+    #[test]
+    fn full_cap_reassigns_lowest_rank() {
+        let mut t = Table::new("sfu", false, "me", PtTable::seed_2pc(), 40, 0);
+        let m = mk();
+        for i in 0..FULL_VIDEO {
+            t.on(want(&format!("v{i}"), "r", Kind::Video, Class::Full, 10 + i as u64), &m).expect("v");
         }
-        assert_eq!(t.full_count(Kind::Video), FULL_VIDEO);
-        assert!(!t.waiting.is_empty());
-        t.want(w("r", "vip", Kind::Video, "H264", 9), 4);
-        assert!(t.holds("r", "vip").is_some(), "높은 priority 는 낮은 것을 밀어낸다");
-        t.unwant("r", "b", 5);
-        let refilled = t.rows.iter().filter(|r| r.load.is_some()).count();
-        assert_eq!(refilled, FULL_VIDEO, "줄이 비면 오래 기다린 것부터 다시 싣는다");
-    }
-
-    #[test]
-    fn row_keeps_ssrc_and_stream_id() {
-        let mut t = t2();
-        t.want(w("r", "a", Kind::Audio, "opus", 0), 0);
-        let s0 = t.rows[0].ssrc;
-        t.unwant("r", "a", 1);
-        t.want(w("r", "b", Kind::Audio, "opus", 0), 2);
-        assert_eq!(t.rows[0].ssrc, s0, "연:RULE-LINK-DOWNLINK-SSRC");
-        assert_eq!(t.rows[0].stream_id(), "ox-m0");
-        assert!(t.rows[0].ssrc > 1);
-    }
-
-    #[test]
-    fn move_room_changes_only_room() {
-        let mut t = t2();
-        t.want(w("r1", "a", Kind::Video, "H264", 0), 0);
-        t.finish();
-        let mid = t.rows[0].mid;
-        t.move_room("a", "r1", "r3");
-        assert_eq!(t.finish(), Some(2));
-        assert_eq!(t.rows[0].mid, mid);
-        assert_eq!(t.rows[0].load.as_ref().map(|l| l.room.as_str()), Some("r3"));
+        let ch = t.on(want("hi", "r", Kind::Video, Class::Full, 100), &m).expect("hi");
+        assert!(matches!(&ch[1], Change::On { label: "LINK.S.reassign", .. }));
+        assert_eq!(t.waiting()[0].track_id, "v0");
+        let ch = t.off("hi", "r");
+        assert!(matches!(&ch[1], Change::On { label: "LINK.S.reissue", .. }));
     }
 }

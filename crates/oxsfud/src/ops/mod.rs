@@ -1,224 +1,283 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.3 @d4cc756 · 정:RULE-DOC-PLANES 정:CAND-DOC-ORCHESTRATION-ASPECT 정:RULE-BUS-SHAPE 정:RULE-BUS-FATE 정:CAND-BUS-SELF-WATCH-VALUES 정:RULE-OPS-LOGGER 정:RULE-OPS-SURFACE 정:RULE-CFG-THREE-PLACES 정:RULE-LINK-TRANSPORT 정:CAND-LINK-UDP-BUFFER 정:IMPL-ROOM-VERSION-ISSUE 운영:RULE-LOG-SENDER 운영:RULE-BOOT-ARGS · model: claude-opus-5-5
-//! sfud 조율 — 기동(배너 · 로깅 · 인증서 · 소켓 · 버스 · Handle) · 레지스트리(방 · Peer) · 통지 내기 · 자가 감시 · 부모 생존.
+// spec: v1.4 · 정:RULE-OPS-SURFACE · 정:RULE-OPS-OBSERVE · 정:RULE-OPS-DROPS · 정:RULE-BUS-SHAPE · 정:RULE-BUS-FATE · 정:CAND-BUS-HANDLE-SHAPE · 정:CAND-BUS-SELF-WATCH-VALUES · 정:RULE-CONC-SIX · 정:CAND-DOC-ORCHESTRATION-ASPECT · 정:IMPL-LINK-PEER-STATE · 정:RULE-GC-FOUR · 운영:RULE-LOG-TRANSITION · 운영:RULE-LOG-CONTEXT · model: claude-opus-5-5
+//! 운영 — 미디어 서버 한 프로세스의 조율. 상태(방 · Peer)는 락 하나가 지키고(판정은 락 안) · 통지는 락 안에서 버스 한 줄에 줄 세우고 · 송신 · 미디어 결합은 락 밖에서 한다. gRPC Handle(`Hello` · `Call`) · 주기(RTCP · 자동 판단 · 쌍별 생존 · 방 sweep · 정체 · stat 줄) · 부모 생존 채널 · 자가 감시.
 
 pub mod admin;
-pub mod aff;
 pub mod call;
 pub mod drops;
 pub mod floor;
-pub mod handle;
-pub mod join;
 pub mod peer;
-pub mod publish;
-pub mod sub;
 
-use std::os::fd::AsRawFd;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::collections::{BTreeMap, HashMap};
+use std::net::SocketAddr;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use arc_swap::ArcSwapOption;
-use common::log::{LogHandle, LogOpts, Sink};
-use dashmap::DashMap;
-use oxsig::Op;
-use serde::Serialize;
+use common::bus::env::{Call, Notice, Reply};
+use oxsig::op::Op;
+use tokio::sync::{Notify, mpsc};
 
-use self::drops::Drops;
-use self::peer::Peer;
 use crate::bus::Bus;
-use crate::cfg::Config;
-use crate::fwd::Plane;
-use crate::link::dtls::Cert;
-use crate::link::transport::{Io, SOCKET_BUF};
-use crate::room::Room;
+use crate::cfg::SfuCfg;
+use crate::link::{DcEvent, Io, LinkSignal, PeerState};
+use crate::r#pub::{Stream, Uplink};
+use crate::trk::Room;
 
-pub const WATCHDOG_BEAT_MS: u64 = 500;
-pub const WATCHDOG_STALL_MS: u64 = 10_000;
+pub use peer::Peer;
+
+pub struct State {
+    pub rooms: BTreeMap<String, Room>,
+    pub peers: BTreeMap<String, Peer>,
+    pub arev: BTreeMap<String, u64>,
+}
 
 pub struct Sfu {
-    pub cfg: Config,
+    pub cfg: SfuCfg,
     pub epoch: String,
-    pub log: LogHandle,
-    pub bus: Arc<Bus>,
-    pub cert: Arc<Cert>,
     pub io: Arc<Io>,
-    pub plane: Plane,
-    pub rooms: DashMap<String, Arc<Room>>,
-    pub peers: DashMap<String, Arc<Peer>>,
-    pub drops: Drops,
-    pub hub_inst: ArcSwapOption<String>,
-    pub shutting: AtomicBool,
-    pub rooms_op: tokio::sync::Mutex<()>,
-    ids: AtomicU64,
-    beat: Arc<AtomicU64>,
+    pub bus: Arc<Bus>,
+    pub state: Mutex<State>,
+    pub floor_wake: Mutex<HashMap<String, Arc<Notify>>>,
+    pub udp_addr: SocketAddr,
+}
+
+pub enum Signal {
+    FirstRtp(Arc<Stream>, Arc<Uplink>),
+}
+
+static SIG: OnceLock<mpsc::UnboundedSender<Signal>> = OnceLock::new();
+
+pub fn first_rtp(s: &Arc<Stream>, u: &Arc<Uplink>) {
+    if let Some(tx) = SIG.get() {
+        let _ = tx.send(Signal::FirstRtp(s.clone(), u.clone()));
+    }
+}
+
+pub fn now_ms() -> u64 {
+    common::time::mono_ms()
 }
 
 impl Sfu {
-    pub fn next_id(&self) -> u64 {
-        self.ids.fetch_add(1, Ordering::Relaxed)
+    pub fn notice_room(&self, room: &str, op: Op, body: serde_json::Value, exclude: Vec<String>) {
+        let n = Notice { op: op.code(), body, exclude, room_id: Some(room.to_string()), sfu_id: Some(self.epoch.clone()) };
+        self.bus.put_room(room, n.encode());
     }
 
-    pub fn room(&self, id: &str) -> Option<Arc<Room>> {
-        self.rooms.get(id).map(|r| r.clone())
+    pub fn notice_user(&self, user: &str, op: Op, body: serde_json::Value) {
+        let n = Notice { op: op.code(), body, exclude: Vec::new(), room_id: None, sfu_id: Some(self.epoch.clone()) };
+        self.bus.put_user(user, n.encode());
     }
 
-    pub fn peer(&self, user: &str) -> Option<Arc<Peer>> {
-        self.peers.get(user).map(|p| p.clone())
-    }
-
-    pub fn emit_room<T: Serialize>(&self, room: &str, op: Op, body: &T, exclude: Vec<String>) {
-        if let Ok(s) = serde_json::to_string(body) {
-            self.bus.room_event(room, op.as_u16(), s, exclude);
-        }
-    }
-
-    pub fn emit_user<T: Serialize>(&self, user: &str, op: Op, body: &T, room: Option<&str>) {
-        if let Ok(s) = serde_json::to_string(body) {
-            self.bus.user_event(user, op.as_u16(), s, room);
-        }
+    pub fn mline_event(&self, p: &Peer) {
+        let body = serde_json::to_value(oxsig::msg::MlineEventBody { table: p.table.wire() }).unwrap_or_default();
+        common::ev!(spec = "CP-OP-MLINE-EVENT", user = %p.user, arev = p.table.arev, "배정표");
+        self.notice_user(&p.user, Op::MlineEvent, body);
     }
 }
 
-fn set_buf(sock: &std::net::UdpSocket) {
-    use nix::sys::socket::{setsockopt, sockopt};
-    let fd = sock.as_raw_fd();
-    let _ = setsockopt(fd, sockopt::SndBuf, &SOCKET_BUF);
-    let _ = setsockopt(fd, sockopt::RcvBuf, &SOCKET_BUF);
+pub struct Handle {
+    pub sfu: Arc<Sfu>,
 }
 
-fn parent_watch(stop: Arc<tokio::sync::Notify>) {
-    let ppid = std::os::unix::process::parent_id();
-    let fifo = std::fs::metadata("/dev/stdin").map(|m| std::os::unix::fs::FileTypeExt::is_fifo(&m.file_type())).unwrap_or(false);
-    if fifo {
-        let s2 = stop.clone();
-        let _ = std::thread::Builder::new().name("ox-parent".into()).spawn(move || {
-            let mut buf = [0u8; 256];
-            loop {
-                match std::io::Read::read(&mut std::io::stdin(), &mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {}
-                }
+#[tonic::async_trait]
+impl common::grpc::Handle for Handle {
+    async fn hello(&self, req: tonic::Request<common::grpc::HelloReq>) -> Result<tonic::Response<common::grpc::HelloRes>, tonic::Status> {
+        let r = req.into_inner();
+        tracing::info!(peer_node = %r.node, hub_inst = %r.hub_inst, "Hello");
+        Ok(tonic::Response::new(common::grpc::HelloRes { epoch: self.sfu.epoch.clone(), build: self.sfu.cfg.build.clone() }))
+    }
+
+    async fn call(&self, req: tonic::Request<common::grpc::CallReq>) -> Result<tonic::Response<common::grpc::CallRes>, tonic::Status> {
+        let env = req.into_inner().envelope;
+        let reply = match Call::decode(&env) {
+            Ok(c) => call::handle(&self.sfu, c).await,
+            Err(_) => Reply::fail(oxsig::code::Code::INVALID_PAYLOAD),
+        };
+        if let Reply::Fail { failure } = &reply {
+            drops::DROPS.code(failure.code);
+        }
+        Ok(tonic::Response::new(common::grpc::CallRes { reply: reply.encode() }))
+    }
+}
+
+async fn on_dc(sfu: Arc<Sfu>, mut rx: mpsc::UnboundedReceiver<DcEvent>) {
+    while let Some(ev) = rx.recv().await {
+        match ev {
+            DcEvent::Open(t) => {
+                t.dc_opened();
+                tracing::info!(user = &*t.user, transport = t.id, "DC 열림");
             }
-            tracing::warn!("parent channel closed — shutting down");
-            s2.notify_one();
-        });
-    }
-    let _ = std::thread::Builder::new().name("ox-orphan".into()).spawn(move || {
-        loop {
-            std::thread::sleep(Duration::from_millis(500));
-            if std::os::unix::process::parent_id() != ppid {
-                tracing::warn!("parent changed (orphan) — shutting down");
-                stop.notify_one();
-                std::thread::sleep(Duration::from_secs(3));
-                std::process::exit(0);
-            }
+            DcEvent::Message(t, b) => floor::on_dc_frame(&sfu, &t, &b).await,
         }
-    });
+    }
 }
 
-fn watchdog(beat: Arc<AtomicU64>) {
-    let _ = std::thread::Builder::new().name("ox-watchdog".into()).spawn(move || {
-        loop {
-            std::thread::sleep(Duration::from_millis(WATCHDOG_BEAT_MS));
-            let last = beat.load(Ordering::Acquire);
-            let now = common::log::now_ms();
-            if last != 0 && now.saturating_sub(last) > WATCHDOG_STALL_MS {
-                eprintln!("oxsfud watchdog: runtime stalled {} ms — exiting", now.saturating_sub(last));
-                tracing::error!("runtime stalled {} ms — self-watchdog exit", now.saturating_sub(last));
-                std::thread::sleep(Duration::from_millis(200));
-                std::process::exit(70);
+async fn on_link(sfu: Arc<Sfu>, mut rx: mpsc::UnboundedReceiver<LinkSignal>) {
+    while let Some(s) = rx.recv().await {
+        match s {
+            LinkSignal::Alive(t, dwell) => {
+                common::ev!(spec = common::log::SPEC_PEER_STATE, area = "LINK", key = t.id, from = "Suspect", to = "Alive", cause = "USE-CANDIDATE", user = &*t.user, dwell_ms = dwell);
+            }
+            LinkSignal::Promoted(t, old) => {
+                common::ev!(spec = "LINK.S.checked_new", area = "LINK", key = t.id, from = "pending", to = "use", cause = "STUN", user = &*t.user, in.g = %old);
             }
         }
-    });
+        let _ = &sfu;
+    }
 }
 
-pub async fn run(cfg: Config) -> Result<(), String> {
-    let epoch = common::id::instance();
-    let p = &cfg.policy.logging;
-    let sink = match (&cfg.log_socket, &cfg.log_dir) {
-        (Some(s), Some(d)) => Sink::Socket { path: s.into(), spool: common::log::spool_path(d, &cfg.node_id, "sfu"), spool_max: p.spool_max_bytes },
-        (Some(s), None) => Sink::Socket { path: s.into(), spool: common::log::spool_path("/tmp", &cfg.node_id, "sfu"), spool_max: p.spool_max_bytes },
-        _ => Sink::Stdout,
+async fn on_signal(sfu: Arc<Sfu>, mut rx: mpsc::UnboundedReceiver<Signal>) {
+    while let Some(s) = rx.recv().await {
+        match s {
+            Signal::FirstRtp(stream, up) => call::on_first_rtp(&sfu, &stream, &up),
+        }
+    }
+}
+
+fn liveness(sfu: &Sfu, now: u64) {
+    for t in sfu.io.transports() {
+        let (had, alive) = t.pairs.lock().map(|p| (p.path().is_some(), p.path_alive(now))).unwrap_or((false, true));
+        if had && !alive && t.state() == PeerState::Alive {
+            if t.suspect_since.compare_exchange(0, now.max(1), Ordering::AcqRel, Ordering::Acquire).is_err() {
+                continue;
+            }
+            if t.swap_state(PeerState::Suspect) == PeerState::Suspect {
+                continue;
+            }
+            let ufrag = t.ufrag();
+            common::ev!(spec = common::log::SPEC_PEER_STATE, area = "LINK", key = t.id, from = "Alive", to = "Suspect", cause = "pair_expired", user = &*t.user);
+            common::ev!(spec = "LINK.S.suspect", area = "LINK", key = t.id, from = "Alive", to = "Suspect", cause = "SSuspect", user = &*t.user);
+            let body = serde_json::to_value(oxsig::msg::LinkEventBody { type_: oxsig::msg::LinkEventBodyType::Suspect, sfu_id: sfu.epoch.clone(), ufrag }).unwrap_or_default();
+            sfu.notice_user(&t.user, Op::LinkEvent, body);
+        }
+    }
+}
+
+fn stat_lines(sfu: &Sfu) {
+    let st = match sfu.state.lock() {
+        Ok(s) => s,
+        Err(_) => return,
     };
-    let log = common::log::init(LogOpts {
-        node: cfg.node_id.clone(),
-        proc_: "sfu",
-        level: common::log::env_level(p.level),
-        line_max: p.line_max_bytes as usize,
-        queue_max: p.queue_max_lines as usize,
-        sink,
+    for p in st.peers.values() {
+        for s in p.streams.values() {
+            for u in s.uplinks.load().iter().filter(|u| !u.rtx) {
+                let (pk, by, lost, jit) = u.ingress.lock().map(|i| (i.packets, i.bytes, i.stats.received(), i.stats.jitter())).unwrap_or_default();
+                common::stat!(user = %p.user, track = &*s.track_id, ssrc = u.ssrc, dir = "rx", pkts = pk, bytes = by, received = lost, jitter = jit);
+            }
+        }
+        let (mut pk, mut by) = (0u64, 0u64);
+        for r in p.table.rows() {
+            pk += r.dl.egress_pkts.load(Ordering::Relaxed);
+            by += r.dl.egress_bytes.load(Ordering::Relaxed);
+        }
+        if !p.table.rows().is_empty() {
+            common::stat!(user = %p.user, arev = p.table.arev, dir = "tx", pkts = pk, bytes = by, rows = p.table.rows().len());
+        }
+    }
+}
+
+fn spawn_timers(sfu: &Arc<Sfu>) {
+    let s = sfu.clone();
+    tokio::spawn(async move {
+        let mut iv = tokio::time::interval(Duration::from_millis(crate::rtcp::NACK_POLL_MS));
+        let mut n: u64 = 0;
+        let max = u64::from(s.cfg.policy.media.max_bitrate_bps);
+        loop {
+            iv.tick().await;
+            n += 1;
+            let now = now_ms();
+            for t in s.io.transports() {
+                crate::rtcp::send_nacks(&t, now);
+                if n.is_multiple_of(crate::rtcp::TWCC_MS / crate::rtcp::NACK_POLL_MS) {
+                    crate::rtcp::send_twcc(&t);
+                }
+                if n.is_multiple_of(crate::rtcp::RR_MS / crate::rtcp::NACK_POLL_MS) {
+                    crate::rtcp::send_rr_remb(&t, now, max);
+                }
+                crate::sim::probe_chunk(&t, now);
+            }
+        }
     });
-    log.set_epoch(&epoch);
-    common::ev!(spec = "SV-STATE-UNIT-STATE", build = cfg.build.as_str(), "{} level={}", cfg.banner(&epoch), common::log::level_name(log.level()));
-    let cert = Arc::new(crate::link::dtls::make_cert()?);
-    let std_udp = std::net::UdpSocket::bind((cfg.bind_ip, cfg.udp_port)).map_err(|e| format!("udp bind {}:{}: {e}", cfg.bind_ip, cfg.udp_port))?;
-    set_buf(&std_udp);
-    std_udp.set_nonblocking(true).map_err(|e| e.to_string())?;
-    let udp = Arc::new(tokio::net::UdpSocket::from_std(std_udp).map_err(|e| e.to_string())?);
+    let s = sfu.clone();
+    tokio::spawn(async move {
+        let mut iv = tokio::time::interval(Duration::from_millis(crate::sim::core::TICK_MS));
+        loop {
+            iv.tick().await;
+            let now = now_ms();
+            liveness(&s, now);
+            for t in s.io.transports() {
+                crate::sim::tick(&t, now, s.cfg.policy.media.auto_layer);
+            }
+        }
+    });
+    let s = sfu.clone();
+    tokio::spawn(async move {
+        let mut iv = tokio::time::interval(Duration::from_millis(crate::room::SWEEP_MS));
+        loop {
+            iv.tick().await;
+            crate::gc::sweep_rooms(&s).await;
+            crate::gc::stall(&s, now_ms());
+        }
+    });
+    let s = sfu.clone();
+    tokio::spawn(async move {
+        let ms = u64::from(s.cfg.policy.logging.stat_interval_ms.max(100));
+        let mut iv = tokio::time::interval(Duration::from_millis(ms));
+        loop {
+            iv.tick().await;
+            stat_lines(&s);
+        }
+    });
+}
+
+pub async fn run(cfg: SfuCfg, epoch: String) -> Result<(), String> {
+    let cert = crate::link::cert::generate()?;
+    let udp_addr = SocketAddr::new(cfg.bind_ip, cfg.udp_port);
+    let udp = crate::link::io::bind_udp(udp_addr).map_err(|e| format!("UDP {udp_addr}: {e}"))?;
     let tcp = match cfg.tcp_port {
-        Some(port) => Some(tokio::net::TcpListener::bind((cfg.bind_ip, port)).await.map_err(|e| format!("tcp bind {port}: {e}"))?),
+        Some(p) => Some(tokio::net::TcpListener::bind(SocketAddr::new(cfg.bind_ip, p)).await.map_err(|e| format!("TCP {p}: {e}"))?),
         None => None,
     };
-    let bus = Bus::open(&cfg.zenoh_connect, &cfg.zenoh_namespace, &cfg.node_id, &epoch).await?;
-    let beat = Arc::new(AtomicU64::new(0));
-    let grpc = cfg.grpc_listen.clone();
-    let sfu = Arc::new(Sfu {
-        cfg,
-        epoch,
-        log,
-        bus,
-        cert,
-        io: Arc::new(Io::new(udp)),
-        plane: Plane::default(),
-        rooms: DashMap::new(),
-        peers: DashMap::new(),
-        drops: Drops::default(),
-        hub_inst: ArcSwapOption::empty(),
-        shutting: AtomicBool::new(false),
-        rooms_op: tokio::sync::Mutex::new(()),
-        ids: AtomicU64::new(1),
-        beat: beat.clone(),
-    });
-    watchdog(beat.clone());
-    let b2 = beat.clone();
-    tokio::spawn(async move {
-        loop {
-            b2.store(common::log::now_ms(), Ordering::Release);
-            tokio::time::sleep(Duration::from_millis(WATCHDOG_BEAT_MS)).await;
-        }
-    });
-    let stop = Arc::new(tokio::sync::Notify::new());
-    parent_watch(stop.clone());
-    tokio::spawn(crate::fwd::shell::udp_loop(sfu.clone()));
+    let (dc_tx, dc_rx) = mpsc::unbounded_channel();
+    let (link_tx, link_rx) = mpsc::unbounded_channel();
+    let (sig_tx, sig_rx) = mpsc::unbounded_channel();
+    let _ = SIG.set(sig_tx);
+    let io = Arc::new(Io::new(Arc::new(udp), cfg.tcp_port, cert, dc_tx, link_tx));
+    let bus = Bus::open(&cfg.zenoh_connect, &cfg.namespace, &cfg.node_id, &epoch).await?;
+    let grpc: SocketAddr = cfg.grpc_listen.parse().map_err(|e| format!("--grpc-listen {}: {e}", cfg.grpc_listen))?;
+    let sfu = Arc::new(Sfu { cfg, epoch, io: io.clone(), bus, state: Mutex::new(State { rooms: BTreeMap::new(), peers: BTreeMap::new(), arev: BTreeMap::new() }), floor_wake: Mutex::new(HashMap::new()), udp_addr });
+    tokio::spawn(crate::fwd::rx::udp_loop(io.clone()));
     if let Some(l) = tcp {
-        tokio::spawn(crate::fwd::shell::tcp_listen(sfu.clone(), l));
+        tokio::spawn(crate::link::io::tcp_serve(io.clone(), l));
+        tokio::spawn(crate::link::io::tcp_keepalive(io.clone()));
     }
-    crate::gc::start(&sfu);
-    let addr: std::net::SocketAddr = grpc.parse().map_err(|e| format!("--grpc-listen {grpc}: {e}"))?;
-    let svc = common::handle::HandleServer::new(handle::Svc { sfu: sfu.clone() });
-    let s3 = stop.clone();
-    let serve = tonic::transport::Server::builder().add_service(svc).serve_with_shutdown(addr, async move {
-        tokio::select! {
-            _ = s3.notified() => {}
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term() => {}
+    tokio::spawn(on_dc(sfu.clone(), dc_rx));
+    tokio::spawn(on_link(sfu.clone(), link_rx));
+    tokio::spawn(on_signal(sfu.clone(), sig_rx));
+    spawn_timers(&sfu);
+    tokio::spawn(crate::gc::watch_home(sfu.clone()));
+    let _beat = common::proc::self_watch("oxsfud");
+    let mut life = common::proc::lifeline();
+    let svc = common::grpc::HandleServer::new(Handle { sfu: sfu.clone() });
+    let server = tonic::transport::Server::builder().add_service(svc).serve_with_shutdown(grpc, async move {
+        loop {
+            if life.changed().await.is_err() || *life.borrow() {
+                break;
+            }
         }
     });
-    tracing::info!("sfud ready grpc={addr} udp={} epoch={}", sfu.cfg.udp_port, sfu.epoch);
-    let r = serve.await.map_err(|e| e.to_string());
-    sfu.shutting.store(true, Ordering::Release);
-    common::ev!(spec = "SV-STATE-UNIT-STATE", "sfud shutdown epoch={}", sfu.epoch);
+    common::log::boot_line(&sfu.cfg.build, &sfu.epoch, &sfu.cfg.banner().render());
+    let r = server.await.map_err(|e| format!("gRPC {grpc}: {e}"));
+    tracing::info!("부모 생존 채널 닫힘 — 끝낸다");
     sfu.bus.close().await;
-    let _ = sfu.beat.load(Ordering::Relaxed);
     r
 }
 
-async fn term() {
-    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-        Ok(mut s) => {
-            s.recv().await;
-        }
-        Err(_) => std::future::pending::<()>().await,
-    }
+pub fn reply_ok<T: serde::Serialize>(v: &T) -> Reply {
+    Reply::ok(v)
+}
+
+pub fn version_str(v: &oxsig::types::Version) -> String {
+    format!("{}:{}", v.epoch, v.seq)
 }

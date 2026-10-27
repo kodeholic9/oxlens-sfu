@@ -6,34 +6,29 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
-oxsig.workspace = true
 common.workspace = true
+oxsig.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
-tokio-util.workspace = true
-tracing.workspace = true
 tonic.workspace = true
 zenoh.workspace = true
+tracing.workspace = true
 arc-swap.workspace = true
-dashmap.workspace = true
 bytes.workspace = true
-hmac.workspace = true
-sha1.workspace = true
-sha2.workspace = true
-crc32fast.workspace = true
-rtcp.workspace = true
 dtls.workspace = true
 webrtc-srtp.workspace = true
 webrtc-util.workspace = true
 sctp-proto.workspace = true
-async-trait.workspace = true
-nix = { workspace = true, features = ["socket", "net"] }
-getrandom.workspace = true
 rcgen.workspace = true
-prost.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+sha1.workspace = true
+crc32fast.workspace = true
+getrandom.workspace = true
 uuid.workspace = true
-futures-util.workspace = true
+nix.workspace = true
+async-trait.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

@@ -1,159 +1,147 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.3 @d4cc756 · 정:RULE-DOC-OWNERSHIP 정:IMPL-BUS-HOME-LOST 정:IMPL-SES-HANDOVER 정:RULE-RTCP-NACK-DOWN 정:IMPL-AUX-DC-SEND 정:RULE-BUS-REQUEST 연:RULE-LINK-PER-SERVER-UNITS · model: claude-opus-5-5
-//! Peer — user × sfud · 홈(node, inst) · 전송 객체(1pc 하나 · 2pc 둘) · 소속 · 발행 문맥 · 연결의 배정표 · (user, 방) 게이트 · 레이어 상한 · Peer 단위 단일 큐.
+// spec: v1.4 · 정:IMPL-LINK-PEER-STATE · 정:RULE-LINK-TRANSPORT · 정:IMPL-SUB-TABLE · 정:IMPL-SUB-PIPELINE · 정:IMPL-SUB-READY-GATE · 정:IMPL-BUS-HOME-LOST · 정:RULE-AFF-ONE-SET · 정:CAND-RTCP-NACK-BUDGET-UNIT · 정:CAND-DOC-ORCHESTRATION-ASPECT · 연:RULE-LINK-SERVER-REAP · model: claude-opus-5-5
+//! Peer — 세션 × 이 미디어 서버. 수명 = 세션 수명(침묵으로 거두지 않는다). 전송 객체(`2pc` 둘 · `1pc` 하나) · 배정표 하나(구독 연결) · 입장 방 집합 · `pub_room` · 발행 · 방마다 READY 게이트. 조율은 측면(ops)에 둔다.
 
-use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 
-use arc_swap::ArcSwap;
-use oxsig::envelope::{Ctx, Home};
-use oxsig::msg::{PcMode, Permission};
-use serde_json::Value;
+use common::bus::env::SessionCtx;
+use oxsig::types::{ExtMap, PcMode};
 
-use crate::aff::Aff;
-use crate::fwd::{Conn, Ingress};
-use crate::r#pub::{Ctx as PubCtx, Stream};
-use crate::sub::table::Table;
-use crate::sub::{Gate, Prefs};
+use crate::aff::Hot;
+use crate::link::{Creds, Io, Role, Transport};
+use crate::r#pub::Stream;
+use crate::rtcp::Budget;
+use crate::sub::ext::ExtTable;
+use crate::sub::table::{PtTable, Table};
 
-pub const DC_BUFFER: usize = 64;
-
-pub struct PeerSt {
-    pub pubs: PubCtx,
-    pub table: Table,
-    pub gates: HashMap<String, Arc<Gate>>,
-    pub prefs: HashMap<(String, String), Arc<Prefs>>,
-}
-
-struct Budget {
-    start: u64,
-    used: u32,
+pub struct Prefs {
+    pub spatial: u8,
+    pub paused: bool,
+    pub priority: u8,
 }
 
 pub struct Peer {
     pub user: String,
-    pub session: std::sync::Mutex<String>,
-    pub home: ArcSwap<Home>,
-    pub pc_mode: PcMode,
-    pub ptype: u8,
-    pub hidden: bool,
-    pub metadata: Option<Value>,
-    pub token_perm: Option<Permission>,
-    pub aff: Aff,
-    pub op: tokio::sync::Mutex<()>,
-    pub st: std::sync::Mutex<PeerSt>,
-    pub conns: Vec<Arc<Conn>>,
-    pub created_at: u64,
-    budget: std::sync::Mutex<Budget>,
-    pub dc_buf: std::sync::Mutex<VecDeque<Vec<u8>>>,
-    pub gone: AtomicBool,
-    pub dc_drop: AtomicU64,
-    pub sync_lock: std::sync::Mutex<()>,
+    pub ctx: SessionCtx,
+    pub fp: String,
+    pub home: (String, String),
+    pub pc: PcMode,
+    pub publish: Arc<Transport>,
+    pub subscribe: Option<Arc<Transport>>,
+    pub table: Table,
+    pub sub_ext: ExtTable,
+    pub rooms: BTreeSet<String>,
+    pub pub_room: Option<String>,
+    pub aff: Arc<Hot>,
+    pub streams: BTreeMap<String, Arc<Stream>>,
+    pub gates: BTreeMap<String, Arc<AtomicBool>>,
+    pub first_ready: BTreeMap<String, u64>,
+    pub prefs: BTreeMap<String, Prefs>,
+    pub created_ms: u64,
+    pub sub_active: BTreeMap<u8, bool>,
+    pub kick_lock: Mutex<()>,
+}
+
+pub fn server_extmap() -> Vec<ExtMap> {
+    use crate::sub::ext::*;
+    vec![
+        ExtMap { id: 1, uri: URI_MID.into() },
+        ExtMap { id: 4, uri: URI_AUDIO_LEVEL.into() },
+        ExtMap { id: 5, uri: URI_ABS_SEND_TIME.into() },
+        ExtMap { id: 6, uri: URI_TWCC.into() },
+        ExtMap { id: 10, uri: URI_RID.into() },
+        ExtMap { id: 11, uri: URI_REPAIRED_RID.into() },
+    ]
+}
+
+pub fn sub_ext_1pc(client: &[ExtMap]) -> ExtTable {
+    let server = ExtTable::from_extmap(&server_extmap());
+    let c = ExtTable::from_extmap(client);
+    ExtTable { mid: c.mid.or(server.mid), audio_level: c.audio_level.or(server.audio_level), abs_send_time: c.abs_send_time.or(server.abs_send_time), twcc: c.twcc.or(server.twcc) }
 }
 
 impl Peer {
-    pub fn new(ctx: &Ctx, st: PeerSt, conns: Vec<Arc<Conn>>, now: u64) -> Peer {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(ctx: &SessionCtx, io: &Arc<Io>, sfu_id: &str, slot_budget: usize, codecs_1pc: Option<&[oxsig::msg::RoomJoinReqCodecs]>, ext_1pc: Option<&[ExtMap]>, arev_from: u64, now_ms: u64) -> Peer {
+        let budget = Arc::new(Budget::default());
+        let pc = ctx.pc_mode;
+        let (publish, subscribe) = match pc {
+            PcMode::V1pc => (Arc::new(Transport::new(io.next_id(), Role::Both, &ctx.user_id, &ctx.session, Creds::generate(), io, budget.clone(), now_ms)), None),
+            PcMode::V2pc => (
+                Arc::new(Transport::new(io.next_id(), Role::Publish, &ctx.user_id, &ctx.session, Creds::generate(), io, budget.clone(), now_ms)),
+                Some(Arc::new(Transport::new(io.next_id(), Role::Subscribe, &ctx.user_id, &ctx.session, Creds::generate(), io, budget.clone(), now_ms))),
+            ),
+        };
+        io.register(&publish);
+        if let Some(s) = &subscribe {
+            io.register(s);
+        }
+        let one = pc == PcMode::V1pc;
+        let pts = match (one, codecs_1pc) {
+            (true, Some(c)) => PtTable::seed_1pc(c),
+            _ => PtTable::seed_2pc(),
+        };
+        let sub_ext = match (one, ext_1pc) {
+            (true, Some(e)) => sub_ext_1pc(e),
+            _ => ExtTable::from_extmap(&server_extmap()),
+        };
         Peer {
             user: ctx.user_id.clone(),
-            session: std::sync::Mutex::new(ctx.session.clone()),
-            home: ArcSwap::from_pointee(ctx.home.clone()),
-            pc_mode: ctx.pc_mode,
-            ptype: ctx.participant_type,
-            hidden: ctx.hidden,
-            metadata: ctx.metadata.clone(),
-            token_perm: ctx.permission.clone(),
-            aff: Aff::default(),
-            op: tokio::sync::Mutex::new(()),
-            st: std::sync::Mutex::new(st),
-            conns,
-            created_at: now,
-            budget: std::sync::Mutex::new(Budget { start: now, used: 0 }),
-            dc_buf: std::sync::Mutex::new(VecDeque::new()),
-            gone: AtomicBool::new(false),
-            dc_drop: AtomicU64::new(0),
-            sync_lock: std::sync::Mutex::new(()),
+            ctx: ctx.clone(),
+            fp: ctx.session.clone(),
+            home: (ctx.home_node.clone(), ctx.home_inst.clone()),
+            pc,
+            publish,
+            subscribe,
+            table: Table::new(sfu_id, one, &ctx.user_id, pts, slot_budget, arev_from),
+            sub_ext,
+            rooms: BTreeSet::new(),
+            pub_room: None,
+            aff: Arc::new(Hot::new(&ctx.user_id)),
+            streams: BTreeMap::new(),
+            gates: BTreeMap::new(),
+            first_ready: BTreeMap::new(),
+            prefs: BTreeMap::new(),
+            created_ms: now_ms,
+            sub_active: BTreeMap::new(),
+            kick_lock: Mutex::new(()),
         }
     }
 
-    pub fn lock(&self) -> std::sync::MutexGuard<'_, PeerSt> {
-        self.st.lock().unwrap_or_else(|p| p.into_inner())
+    pub fn sub_transport(&self) -> &Arc<Transport> {
+        self.subscribe.as_ref().unwrap_or(&self.publish)
     }
 
-    pub fn session(&self) -> String {
-        self.session.lock().map(|s| s.clone()).unwrap_or_default()
-    }
-
-    pub fn pub_conn(&self) -> &Arc<Conn> {
-        &self.conns[0]
-    }
-
-    pub fn sub_conn(&self) -> &Arc<Conn> {
-        &self.conns[self.conns.len() - 1]
-    }
-
-    pub fn follow_home(&self, h: &Home) {
-        if **self.home.load() != *h {
-            self.home.store(Arc::new(h.clone()));
+    pub fn transports(&self) -> Vec<Arc<Transport>> {
+        let mut v = vec![self.publish.clone()];
+        if let Some(s) = &self.subscribe {
+            v.push(s.clone());
         }
+        v
     }
 
-    pub fn streams(&self) -> Vec<Arc<Stream>> {
-        self.lock().pubs.streams.clone()
+    pub fn gate(&mut self, room: &str) -> Arc<AtomicBool> {
+        self.gates.entry(room.to_string()).or_insert_with(|| Arc::new(AtomicBool::new(false))).clone()
     }
 
-    pub fn ingress_by_ssrc(&self, ssrc: u32) -> Option<Arc<Ingress>> {
-        self.pub_conn().ingress_of(ssrc)
-    }
-
-    pub fn ingress_of_track(&self, track: &str) -> Vec<Arc<Ingress>> {
-        self.pub_conn().ingress.load().values().filter(|i| i.stream.track_id == track).cloned().collect()
-    }
-
-    pub fn rtx_budget(&self, now: u64) -> bool {
-        let Ok(mut b) = self.budget.lock() else { return false };
-        if now.saturating_sub(b.start) >= crate::rtcp::shell::RTX_WINDOW_MS {
-            b.start = now;
-            b.used = 0;
-        }
-        if b.used >= crate::rtcp::shell::RTX_BUDGET {
-            return false;
-        }
-        b.used += 1;
-        true
-    }
-
-    pub fn dc_push(&self, frame: Vec<u8>) {
-        let link = &self.pub_conn().link;
-        if link.dc_open.load(Ordering::Acquire) && self.dc_buf.lock().map(|b| b.is_empty()).unwrap_or(true) {
-            if !link.dc_send(frame) {
-                self.dc_drop.fetch_add(1, Ordering::Relaxed);
-            }
-            return;
-        }
-        if let Ok(mut b) = self.dc_buf.lock() {
-            if b.len() >= DC_BUFFER {
-                b.pop_front();
-                self.dc_drop.fetch_add(1, Ordering::Relaxed);
-            }
-            b.push_back(frame);
-        }
-    }
-
-    pub fn dc_flush(&self) {
-        let link = &self.pub_conn().link;
-        if !link.dc_open.load(Ordering::Acquire) {
-            return;
-        }
-        let frames: Vec<Vec<u8>> = self.dc_buf.lock().map(|mut b| b.drain(..).collect()).unwrap_or_default();
-        for f in frames {
-            if !link.dc_send(f) {
-                self.dc_drop.fetch_add(1, Ordering::Relaxed);
+    pub fn refresh_downlinks(&self) {
+        let mut m = HashMap::new();
+        for r in self.table.rows() {
+            m.insert(r.ssrc, r.dl.clone());
+            if let Some(x) = r.rtx_ssrc {
+                m.insert(x, r.dl.clone());
             }
         }
+        self.sub_transport().downlinks.store(Arc::new(m));
     }
 
-    pub fn gate(&self, room: &str) -> Option<Arc<Gate>> {
-        self.lock().gates.get(room).cloned()
+    pub fn uplink_ssrcs(&self) -> Vec<u32> {
+        self.publish.uplinks.load().keys().copied().collect()
+    }
+
+    pub fn active_tracks(&self) -> usize {
+        self.streams.len()
     }
 }

@@ -1,43 +1,43 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.3 @d4cc756 · 정:RULE-LINK-TRANSPORT 정:RULE-CONC-SANS-IO 정:RULE-DOC-FIXED-PARTS · model: claude-opus-5-5
-//! RFC 4571 — 2바이트 BE 길이 접두 · 최대 65,535 · 길이 0 허용(keepalive) · 부분 수신은 보류.
+// spec: v1.4 · 정:RULE-LINK-TRANSPORT · 정:RULE-CONC-SANS-IO · model: claude-opus-5-5
+//! ICE-TCP 프레이밍(순수) — RFC 4571: 2바이트 BE 길이 접두 · 최대 65,535 · 길이 0 허용(keepalive) · 부분 수신은 보류.
 
-#[derive(Debug, Default)]
+pub const IDENTIFY_MS: u64 = 10_000;
+pub const KEEPALIVE_MS: u64 = 20_000;
+
+#[derive(Debug, Clone, Default)]
 pub struct Deframer {
     buf: Vec<u8>,
 }
 
 impl Deframer {
-    pub fn push(&mut self, data: &[u8]) {
-        self.buf.extend_from_slice(data);
+    pub fn new() -> Deframer {
+        Deframer::default()
     }
 
-    pub fn next_frame(&mut self) -> Option<Vec<u8>> {
-        if self.buf.len() < 2 {
-            return None;
+    pub fn push(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
+        self.buf.extend_from_slice(data);
+        let mut out = Vec::new();
+        let mut i = 0;
+        while self.buf.len() >= i + 2 {
+            let len = usize::from(u16::from_be_bytes([self.buf[i], self.buf[i + 1]]));
+            if self.buf.len() < i + 2 + len {
+                break;
+            }
+            out.push(self.buf[i + 2..i + 2 + len].to_vec());
+            i += 2 + len;
         }
-        let len = u16::from_be_bytes([self.buf[0], self.buf[1]]) as usize;
-        if self.buf.len() < 2 + len {
-            return None;
-        }
-        let f = self.buf[2..2 + len].to_vec();
-        self.buf.drain(..2 + len);
-        Some(f)
+        self.buf.drain(..i);
+        out
     }
 }
 
 pub fn frame(payload: &[u8]) -> Option<Vec<u8>> {
-    if payload.len() > u16::MAX as usize {
-        return None;
-    }
-    let mut out = Vec::with_capacity(payload.len() + 2);
-    out.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    let len = u16::try_from(payload.len()).ok()?;
+    let mut out = Vec::with_capacity(2 + payload.len());
+    out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(payload);
     Some(out)
-}
-
-pub fn demux_ok(first: u8) -> bool {
-    first < 4 || (20..=63).contains(&first) || (128..=191).contains(&first)
 }
 
 #[cfg(test)]
@@ -45,15 +45,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn partial_frames_wait() {
-        let mut d = Deframer::default();
-        let f = frame(&[1, 2, 3]).expect("frame");
-        d.push(&f[..3]);
-        assert!(d.next_frame().is_none());
-        d.push(&f[3..]);
-        d.push(&[0, 0]);
-        assert_eq!(d.next_frame(), Some(vec![1, 2, 3]));
-        assert_eq!(d.next_frame(), Some(vec![]));
-        assert!(d.next_frame().is_none());
+    fn partial_and_zero_length() {
+        let mut d = Deframer::new();
+        let mut wire = frame(b"abc").expect("f");
+        wire.extend_from_slice(&frame(b"").expect("ka"));
+        wire.extend_from_slice(&[0, 4, b'x']);
+        let got = d.push(&wire);
+        assert_eq!(got, vec![b"abc".to_vec(), Vec::new()]);
+        assert_eq!(d.push(b"yzw"), vec![b"xyzw".to_vec()]);
+        assert!(frame(&vec![0u8; 70_000]).is_none());
     }
 }

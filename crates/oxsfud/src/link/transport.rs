@@ -1,86 +1,45 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.3 @d4cc756 · 정:RULE-LINK-TRANSPORT 정:IMPL-LINK-PEER-STATE 정:RULE-LINK-PAIR-LIVENESS 정:IMPL-LINK-ICE-RESTART 정:RULE-CONC-SIX 정:RULE-CONC-STATE-VOCAB 정:CAND-LINK-UDP-BUFFER 연:LINK.S.suspect 연:LINK.S.checked_new 연:RULE-LINK-EVENT-CONTRACT · model: claude-opus-5-5
-//! 전송 객체 — 신원은 이것이다(ufrag · 주소는 찾는 키) · 쌍별 생존 · 지명된 경로 · PeerState(Alive · Suspect) · SRTP 문맥 · DC 통로.
+// spec: v1.4 · 정:RULE-LINK-TRANSPORT · 정:IMPL-LINK-PEER-STATE · 정:RULE-LINK-PAIR-LIVENESS · 정:RULE-CONC-STATE-VOCAB · 정:RULE-CONC-PERF-AXES · 정:CAND-LINK-UDP-BUFFER · 연:RULE-LINK-RECOVERY-UNIT · model: claude-opus-5-5
+//! 전송 객체 — 자격 한 벌 = 연결 하나(신원). ufrag · 주소는 찾는 열쇠일 뿐이다. 쌍별 생존 · PeerState · SRTP 문맥 · DC 송신 · 업링크/다운링크 색인(RCU).
 
-use std::io::ErrorKind;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 
-use arc_swap::ArcSwapOption;
-use dashmap::DashMap;
-use tokio::net::UdpSocket;
+use arc_swap::ArcSwap;
+use bytes::Bytes;
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
+use webrtc_srtp::context::Context;
 
-use super::ice::{Checked, Cred, CredSet};
+use super::ice::{Creds, Ledger, Pairs, Via};
+use super::io::Io;
+use crate::ops::drops::{DROPS, bump};
 
-pub const UDP_PAIR_TTL_MS: u64 = 30_000;
-pub const TCP_IDENTIFY_MS: u64 = 10_000;
-pub const TCP_KEEPALIVE_MS: u64 = 20_000;
-pub const SOCKET_BUF: usize = 4 * 1024 * 1024;
+pub const DC_BACKLOG: usize = 64;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Path {
-    Udp(SocketAddr),
-    Tcp(u64),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    Publish,
+    Subscribe,
+    Both,
 }
 
-impl Path {
-    pub fn is_tcp(&self) -> bool {
-        matches!(self, Path::Tcp(_))
-    }
-}
-
-impl std::fmt::Display for Path {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Role {
+    pub fn as_str(self) -> &'static str {
         match self {
-            Path::Udp(a) => write!(f, "udp:{a}"),
-            Path::Tcp(i) => write!(f, "tcp:{i}"),
+            Role::Publish => "publish",
+            Role::Subscribe => "subscribe",
+            Role::Both => "1pc",
         }
     }
-}
 
-pub struct Io {
-    pub udp: Arc<UdpSocket>,
-    pub tcp: DashMap<u64, mpsc::Sender<Vec<u8>>>,
-    pub send_fail: AtomicU64,
-    pub tcp_drop: AtomicU64,
-}
-
-impl Io {
-    pub fn new(udp: Arc<UdpSocket>) -> Io {
-        Io { udp, tcp: DashMap::new(), send_fail: AtomicU64::new(0), tcp_drop: AtomicU64::new(0) }
+    pub fn publishes(self) -> bool {
+        matches!(self, Role::Publish | Role::Both)
     }
 
-    pub fn send(&self, path: &Path, b: &[u8]) -> bool {
-        match path {
-            Path::Udp(a) => {
-                for _ in 0..3 {
-                    match self.udp.try_send_to(b, *a) {
-                        Ok(_) => return true,
-                        Err(e) if e.kind() == ErrorKind::WouldBlock => std::thread::yield_now(),
-                        Err(_) => break,
-                    }
-                }
-                self.send_fail.fetch_add(1, Ordering::Relaxed);
-                false
-            }
-            Path::Tcp(id) => {
-                let Some(framed) = super::tcp::frame(b) else { return false };
-                match self.tcp.get(id) {
-                    Some(tx) => {
-                        if tx.try_send(framed).is_ok() {
-                            true
-                        } else {
-                            self.tcp_drop.fetch_add(1, Ordering::Relaxed);
-                            false
-                        }
-                    }
-                    None => false,
-                }
-            }
-        }
+    pub fn subscribes(self) -> bool {
+        matches!(self, Role::Subscribe | Role::Both)
     }
 }
 
@@ -91,7 +50,7 @@ pub enum PeerState {
 }
 
 impl PeerState {
-    pub fn name(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             PeerState::Alive => "Alive",
             PeerState::Suspect => "Suspect",
@@ -99,242 +58,120 @@ impl PeerState {
     }
 }
 
-#[derive(Debug, Clone)]
-struct Pair {
-    path: Path,
-    last_ok_ms: u64,
-    closed: bool,
-}
-
-impl Pair {
-    fn live(&self, now: u64) -> bool {
-        match self.path {
-            Path::Udp(_) => now.saturating_sub(self.last_ok_ms) <= UDP_PAIR_TTL_MS,
-            Path::Tcp(_) => !self.closed,
-        }
-    }
-}
-
-#[derive(Debug)]
-struct Link {
-    pairs: Vec<Pair>,
-    nominated: Option<Path>,
-    state: PeerState,
-    since_ms: u64,
-}
-
-pub struct CheckOutcome {
-    pub promoted: Option<String>,
-    pub path_changed: bool,
-    pub alive_again: Option<u64>,
-}
-
-pub struct SuspectEvent {
-    pub ufrag: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Role {
-    Both,
-    Publish,
-    Subscribe,
+pub struct Srtp {
+    pub rx: Mutex<Context>,
+    pub tx: Mutex<Context>,
 }
 
 pub struct Transport {
     pub id: u64,
     pub role: Role,
-    pub io: Arc<Io>,
-    creds: std::sync::Mutex<CredSet>,
-    link: std::sync::Mutex<Link>,
-    path: ArcSwapOption<Path>,
+    pub user: Arc<str>,
+    pub session: Arc<str>,
+    pub ledger: Mutex<Ledger>,
+    pub pairs: Mutex<Pairs>,
+    state: AtomicU8,
     pub suspect_since: AtomicU64,
-    pub srtp_rx: std::sync::Mutex<Option<webrtc_srtp::context::Context>>,
-    pub srtp_tx: std::sync::Mutex<Option<webrtc_srtp::context::Context>>,
-    pub srtp_ready: AtomicBool,
-    pub dtls_in: std::sync::Mutex<Option<mpsc::Sender<Vec<u8>>>>,
+    pub created_ms: u64,
+    pub dtls_tx: Mutex<Option<mpsc::Sender<Vec<u8>>>>,
     pub dtls_started: AtomicBool,
+    pub srtp: arc_swap::ArcSwapOption<Srtp>,
+    pub dc_tx: Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>,
     pub dc_open: AtomicBool,
-    pub dc_out: mpsc::Sender<Vec<u8>>,
-    pub dc_out_rx: std::sync::Mutex<Option<mpsc::Receiver<Vec<u8>>>>,
-    pub dc_in_tx: mpsc::Sender<Vec<u8>>,
-    pub dc_in: std::sync::Mutex<Option<mpsc::Receiver<Vec<u8>>>>,
-    pub cancel: CancellationToken,
-    pub rx_bytes: AtomicU64,
-    pub tx_bytes: AtomicU64,
+    pub dc_backlog: Mutex<VecDeque<Vec<u8>>>,
+    pub dc_dropped: AtomicU64,
+    pub tasks: Mutex<Vec<tokio::task::AbortHandle>>,
+    pub twcc_out: AtomicU32,
+    pub io: Weak<Io>,
+    pub closed: AtomicBool,
+    pub uplinks: ArcSwap<HashMap<u32, Arc<crate::r#pub::Uplink>>>,
+    pub downlinks: ArcSwap<HashMap<u32, Arc<crate::fwd::hot::Downlink>>>,
+    pub ingress: Mutex<crate::rtcp::Ingress>,
+    pub ext: ArcSwap<crate::r#pub::IngressExt>,
+    pub pending_sim: ArcSwap<Vec<Arc<crate::r#pub::Stream>>>,
+    pub nack_budget: Arc<crate::rtcp::Budget>,
+    pub sim: Mutex<crate::sim::State>,
 }
 
-pub const DC_QUEUE: usize = 1024;
-
 impl Transport {
-    pub fn new(id: u64, role: Role, io: Arc<Io>, now: u64) -> Transport {
-        let (dc_out, dc_out_rx) = mpsc::channel(DC_QUEUE);
-        let (dc_in_tx, dc_in) = mpsc::channel(DC_QUEUE);
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(id: u64, role: Role, user: &str, session: &str, creds: Creds, io: &Arc<Io>, budget: Arc<crate::rtcp::Budget>, now_ms: u64) -> Transport {
         Transport {
             id,
             role,
-            io,
-            creds: std::sync::Mutex::new(CredSet::new()),
-            link: std::sync::Mutex::new(Link { pairs: Vec::new(), nominated: None, state: PeerState::Alive, since_ms: now }),
-            path: ArcSwapOption::empty(),
+            user: Arc::from(user),
+            session: Arc::from(session),
+            ledger: Mutex::new(Ledger::new(creds)),
+            pairs: Mutex::new(Pairs::new()),
+            state: AtomicU8::new(0),
             suspect_since: AtomicU64::new(0),
-            srtp_rx: std::sync::Mutex::new(None),
-            srtp_tx: std::sync::Mutex::new(None),
-            srtp_ready: AtomicBool::new(false),
-            dtls_in: std::sync::Mutex::new(None),
+            created_ms: now_ms,
+            dtls_tx: Mutex::new(None),
             dtls_started: AtomicBool::new(false),
+            srtp: arc_swap::ArcSwapOption::empty(),
+            dc_tx: Mutex::new(None),
             dc_open: AtomicBool::new(false),
-            dc_out,
-            dc_out_rx: std::sync::Mutex::new(Some(dc_out_rx)),
-            dc_in_tx,
-            dc_in: std::sync::Mutex::new(Some(dc_in)),
-            cancel: CancellationToken::new(),
-            rx_bytes: AtomicU64::new(0),
-            tx_bytes: AtomicU64::new(0),
+            dc_backlog: Mutex::new(VecDeque::new()),
+            dc_dropped: AtomicU64::new(0),
+            tasks: Mutex::new(Vec::new()),
+            twcc_out: AtomicU32::new(0),
+            io: Arc::downgrade(io),
+            closed: AtomicBool::new(false),
+            uplinks: ArcSwap::from_pointee(HashMap::new()),
+            downlinks: ArcSwap::from_pointee(HashMap::new()),
+            ingress: Mutex::new(crate::rtcp::Ingress::default()),
+            ext: ArcSwap::from_pointee(crate::r#pub::IngressExt::default()),
+            pending_sim: ArcSwap::from_pointee(Vec::new()),
+            nack_budget: budget,
+            sim: Mutex::new(crate::sim::State::new(now_ms)),
         }
     }
 
-    pub fn cred(&self) -> Cred {
-        self.creds.lock().map(|c| c.current.clone()).unwrap_or_else(|p| p.into_inner().current.clone())
+    pub fn state(&self) -> PeerState {
+        if self.state.load(Ordering::Acquire) == 0 { PeerState::Alive } else { PeerState::Suspect }
+    }
+
+    pub fn swap_state(&self, next: PeerState) -> PeerState {
+        let prev = self.state.swap(if next == PeerState::Alive { 0 } else { 1 }, Ordering::AcqRel);
+        if prev == 0 { PeerState::Alive } else { PeerState::Suspect }
     }
 
     pub fn ufrag(&self) -> String {
-        self.cred().ufrag
+        self.ledger.lock().map(|l| l.current().ufrag.clone()).unwrap_or_default()
     }
 
-    pub fn ufrags(&self) -> Vec<String> {
-        self.creds.lock().map(|c| c.ufrags()).unwrap_or_default()
+    pub fn creds(&self) -> Option<Creds> {
+        self.ledger.lock().ok().map(|l| l.current().clone())
     }
 
-    pub fn pwd_of(&self, ufrag: &str) -> Option<String> {
-        self.creds.lock().ok().and_then(|c| c.pwd_of(ufrag).map(str::to_string))
+    pub fn path(&self) -> Option<Via> {
+        self.pairs.lock().ok().and_then(|p| p.path())
     }
 
-    pub fn restart(&self) -> (Cred, Option<String>) {
-        match self.creds.lock() {
-            Ok(mut c) => c.restart(),
-            Err(p) => p.into_inner().restart(),
-        }
+    pub fn path_addr(&self) -> Option<SocketAddr> {
+        self.path().map(|v| v.addr())
     }
 
-    pub fn on_check(&self, path: Path, ufrag: &str, nominate: bool, now: u64) -> CheckOutcome {
-        let promoted = match self.creds.lock() {
-            Ok(mut c) => match c.checked(ufrag) {
-                Checked::Promoted { dropped } => Some(dropped),
-                _ => None,
-            },
-            Err(_) => None,
+    pub fn send_raw(&self, bytes: &[u8]) -> bool {
+        let now = common::time::mono_ms();
+        let via = match self.pairs.lock() {
+            Ok(p) if p.path_alive(now) => p.path(),
+            _ => None,
         };
-        let mut out = CheckOutcome { promoted: promoted.clone(), path_changed: false, alive_again: None };
-        let Ok(mut l) = self.link.lock() else { return out };
-        match l.pairs.iter_mut().find(|p| p.path == path) {
-            Some(p) => {
-                p.last_ok_ms = now;
-                p.closed = false;
-            }
-            None => l.pairs.push(Pair { path, last_ok_ms: now, closed: false }),
-        }
-        if nominate {
-            if l.nominated != Some(path) {
-                l.nominated = Some(path);
-                self.path.store(Some(Arc::new(path)));
-                out.path_changed = true;
-            }
-            if l.state == PeerState::Suspect {
-                let since = self.suspect_since.swap(0, Ordering::AcqRel);
-                l.state = PeerState::Alive;
-                l.since_ms = now;
-                out.alive_again = Some(now.saturating_sub(since));
-            }
-        } else if l.nominated.is_none() {
-            l.nominated = Some(path);
-            self.path.store(Some(Arc::new(path)));
-            out.path_changed = true;
-        }
-        let keep = l.nominated;
-        l.pairs.retain(|p| p.live(now) || Some(p.path) == keep);
-        out
+        let (Some(via), Some(io)) = (via, self.io.upgrade()) else { return false };
+        io.send_via(via, bytes)
     }
 
-    pub fn tcp_closed(&self, id: u64) {
-        if let Ok(mut l) = self.link.lock() {
-            for p in l.pairs.iter_mut() {
-                if p.path == Path::Tcp(id) {
-                    p.closed = true;
-                }
-            }
-        }
+    pub fn protect_rtp(&self, plain: &[u8]) -> Option<Bytes> {
+        let s = self.srtp.load_full()?;
+        let mut tx = s.tx.lock().ok()?;
+        tx.encrypt_rtp(plain).ok()
     }
 
-    pub fn liveness(&self, now: u64) -> Option<SuspectEvent> {
-        let mut l = self.link.lock().ok()?;
-        let nominated = l.nominated?;
-        let live = l.pairs.iter().any(|p| p.path == nominated && p.live(now));
-        if live || l.state == PeerState::Suspect {
-            return None;
-        }
-        let _ = self.suspect_since.compare_exchange(0, now.max(1), Ordering::AcqRel, Ordering::Acquire);
-        l.state = PeerState::Suspect;
-        l.since_ms = now;
-        drop(l);
-        Some(SuspectEvent { ufrag: self.ufrag() })
-    }
-
-    pub fn state(&self) -> (PeerState, u64) {
-        self.link.lock().map(|l| (l.state, l.since_ms)).unwrap_or((PeerState::Suspect, 0))
-    }
-
-    pub fn path(&self) -> Option<Path> {
-        self.path.load().as_deref().copied()
-    }
-
-    pub fn live_tcp_pairs(&self, now: u64) -> Vec<u64> {
-        self.link
-            .lock()
-            .map(|l| {
-                l.pairs
-                    .iter()
-                    .filter(|p| p.live(now))
-                    .filter_map(|p| match p.path {
-                        Path::Tcp(i) => Some(i),
-                        Path::Udp(_) => None,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    pub fn known_paths(&self) -> Vec<Path> {
-        self.link.lock().map(|l| l.pairs.iter().map(|p| p.path).collect()).unwrap_or_default()
-    }
-
-    pub fn send_raw(&self, b: &[u8]) -> bool {
-        let Some(p) = self.path() else { return false };
-        if self.io.send(&p, b) {
-            self.tx_bytes.fetch_add(b.len() as u64, Ordering::Relaxed);
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn protect_rtp(&self, plain: &[u8]) -> Option<bytes::Bytes> {
-        let mut g = self.srtp_tx.lock().ok()?;
-        g.as_mut()?.encrypt_rtp(plain).ok()
-    }
-
-    pub fn protect_rtcp(&self, plain: &[u8]) -> Option<bytes::Bytes> {
-        let mut g = self.srtp_tx.lock().ok()?;
-        g.as_mut()?.encrypt_rtcp(plain).ok()
-    }
-
-    pub fn unprotect_rtp(&self, enc: &[u8]) -> Option<bytes::Bytes> {
-        let mut g = self.srtp_rx.lock().ok()?;
-        g.as_mut()?.decrypt_rtp(enc).ok()
-    }
-
-    pub fn unprotect_rtcp(&self, enc: &[u8]) -> Option<bytes::Bytes> {
-        let mut g = self.srtp_rx.lock().ok()?;
-        g.as_mut()?.decrypt_rtcp(enc).ok()
+    pub fn protect_rtcp(&self, plain: &[u8]) -> Option<Bytes> {
+        let s = self.srtp.load_full()?;
+        let mut tx = s.tx.lock().ok()?;
+        tx.encrypt_rtcp(plain).ok()
     }
 
     pub fn send_rtp(&self, plain: &[u8]) -> bool {
@@ -351,52 +188,95 @@ impl Transport {
         }
     }
 
-    pub fn dc_send(&self, msg: Vec<u8>) -> bool {
-        self.dc_out.try_send(msg).is_ok()
+    pub fn unprotect_rtp(&self, cipher: &[u8]) -> Option<Bytes> {
+        let Some(s) = self.srtp.load_full() else {
+            bump(&DROPS.srtp_not_ready);
+            return None;
+        };
+        let r = s.rx.lock().ok()?.decrypt_rtp(cipher);
+        match r {
+            Ok(b) => Some(b),
+            Err(_) => {
+                bump(&DROPS.srtp_fail);
+                None
+            }
+        }
+    }
+
+    pub fn unprotect_rtcp(&self, cipher: &[u8]) -> Option<Bytes> {
+        let Some(s) = self.srtp.load_full() else {
+            bump(&DROPS.srtp_not_ready);
+            return None;
+        };
+        let r = s.rx.lock().ok()?.decrypt_rtcp(cipher);
+        match r {
+            Ok(b) => Some(b),
+            Err(_) => {
+                bump(&DROPS.srtcp_fail);
+                None
+            }
+        }
+    }
+
+    pub fn dc_send(&self, frame: Vec<u8>) {
+        if self.dc_open.load(Ordering::Acquire)
+            && let Ok(g) = self.dc_tx.lock()
+            && let Some(tx) = g.as_ref()
+        {
+            if tx.send(frame).is_err() {
+                self.dc_dropped.fetch_add(1, Ordering::Relaxed);
+            }
+            return;
+        }
+        if let Ok(mut b) = self.dc_backlog.lock() {
+            if b.len() >= DC_BACKLOG {
+                b.pop_front();
+                self.dc_dropped.fetch_add(1, Ordering::Relaxed);
+            }
+            b.push_back(frame);
+        }
+    }
+
+    pub fn dc_opened(&self) {
+        let backlog: Vec<Vec<u8>> = self.dc_backlog.lock().map(|mut b| b.drain(..).collect()).unwrap_or_default();
+        self.dc_open.store(true, Ordering::Release);
+        if let Ok(g) = self.dc_tx.lock()
+            && let Some(tx) = g.as_ref()
+        {
+            for f in backlog {
+                let _ = tx.send(f);
+            }
+        }
+    }
+
+    pub fn add_task(&self, h: tokio::task::AbortHandle) {
+        if let Ok(mut t) = self.tasks.lock() {
+            t.push(h);
+        }
     }
 
     pub fn close(&self) {
-        self.cancel.cancel();
-        if let Ok(mut g) = self.dtls_in.lock() {
-            g.take();
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if let Ok(mut d) = self.dtls_tx.lock() {
+            d.take();
+        }
+        if let Ok(mut d) = self.dc_tx.lock() {
+            d.take();
+        }
+        if let Ok(mut t) = self.tasks.lock() {
+            for h in t.drain(..) {
+                h.abort();
+            }
         }
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    async fn t() -> Transport {
-        let s = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
-        Transport::new(1, Role::Both, Arc::new(Io::new(Arc::new(s))), 0)
+    pub fn next_twcc(&self) -> u32 {
+        self.twcc_out.fetch_add(1, Ordering::Relaxed)
     }
 
-    #[tokio::test]
-    async fn nominated_pair_drives_state() {
-        let t = t().await;
-        let u = t.ufrag();
-        let a: SocketAddr = "127.0.0.1:4000".parse().expect("a");
-        t.on_check(Path::Udp(a), &u, true, 1000);
-        assert_eq!(t.path(), Some(Path::Udp(a)));
-        assert!(t.liveness(20_000).is_none());
-        let ev = t.liveness(31_001 + 1000).expect("suspect");
-        assert_eq!(ev.ufrag, u);
-        assert!(t.liveness(40_000).is_none(), "통지를 되풀이하지 않는다");
-        let b: SocketAddr = "127.0.0.1:4001".parse().expect("b");
-        let o = t.on_check(Path::Udp(b), &u, true, 41_000);
-        assert!(o.path_changed && o.alive_again.is_some());
-        assert_eq!(t.state().0, PeerState::Alive);
-    }
-
-    #[tokio::test]
-    async fn backup_check_does_not_move_path() {
-        let t = t().await;
-        let u = t.ufrag();
-        let a: SocketAddr = "127.0.0.1:4000".parse().expect("a");
-        let b: SocketAddr = "127.0.0.1:4001".parse().expect("b");
-        t.on_check(Path::Udp(a), &u, true, 1);
-        t.on_check(Path::Udp(b), &u, false, 2);
-        assert_eq!(t.path(), Some(Path::Udp(a)));
+    pub fn note_send_fail() {
+        bump(&DROPS.send_fail);
     }
 }

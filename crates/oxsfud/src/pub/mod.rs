@@ -1,86 +1,155 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.3 @d4cc756 · 정:RULE-PUB-TWO-LAYERS 정:RULE-PUB-STATE 정:IMPL-PUB-ADD 정:IMPL-PUB-ACCEPT 정:IMPL-PUB-REMOVE 정:IMPL-PUB-TRACK-SET 정:CAND-PUB-NOT-PUB-ROOM-ORDER 정:IMPL-PUB-RID-SPATIAL 정:CAND-PUB-RID-EXTRA 연:RULE-PUB-PUBLISH-PROC 연:RULE-PUB-REMOVE-FORM 연:RULE-ROOM-PERMISSION-MAP 연:RULE-ROOM-SOURCE-TRUSTED 연:PUB.S.add_2006 연:PUB.S.add_3011 연:PUB.S.add_4002 · model: claude-opus-5-5
-//! 발행 — 논리(`track_id` · 신고 메타) 하나에 물리(업링크 스트림) 여럿 · `PUBLISH_TRACKS{add}` 검사 차례 ①자격 ①′발행 방 ②수 ③칸 ④SSRC ⑤코덱.
+// spec: v1.4 · 정:RULE-PUB-TWO-LAYERS · 정:RULE-PUB-STATE · 정:IMPL-PUB-ADD · 정:IMPL-PUB-REMOVE · 정:IMPL-PUB-ACCEPT · 정:IMPL-PUB-TRACK-SET · 정:IMPL-PUB-RID-SPATIAL · 정:CAND-PUB-H264-PROFILE · 정:CAND-PUB-NOT-PUB-ROOM-ORDER · 정:CAND-PUB-RID-EXTRA · 정:CAND-PUB-INGRESS-STATS-OWNER · 연:PUB.op.PUBLISH_TRACKS · 연:RULE-PUB-PUBLISH-PROC · 연:RULE-PUB-SET-PROC · 연:RULE-PUB-RID-TO-SPATIAL · 연:RULE-ROOM-PERMISSION-MAP · 연:PUB.S · model: claude-opus-5-5
+//! 발행 — 논리 `Stream`(트랙 하나 · 식별 · 메타 · 구독자 목록) · 물리 `Uplink`(업링크 스트림 하나 · 캐시 · NACK · 수신 통계). 검사 차례(자격 → 발행 방 → 수 → 필수 칸 → SSRC → 코덱)는 순수 함수다.
 
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 
+use arc_swap::ArcSwap;
 use oxsig::code::{Code, Failure};
-use oxsig::msg::{Duplex, Kind, MediaCodecs, Permission, Publication, PublishTrack, Source};
-use serde_json::{Value, json};
+use oxsig::types::{Duplex, Kind, Permission, PublishTrack, Source};
 
-use crate::trk::codec;
+use crate::fwd::hot::{Downlink, Ingress};
+use crate::rtcp::core::NackUp;
 
-pub const MAX_PER_REQ: usize = 8;
-pub const MAX_ACTIVE: usize = 16;
+pub const REQ_MAX: usize = 8;
+pub const ACTIVE_MAX: usize = 16;
+pub const CACHE: usize = 1_024;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ExtIds {
-    pub twcc: Option<u8>,
-    pub rid: Option<u8>,
-    pub rrid: Option<u8>,
+pub struct IngressExt {
     pub mid: Option<u8>,
+    pub rid: Option<u8>,
+    pub repaired_rid: Option<u8>,
     pub audio_level: Option<u8>,
+    pub twcc: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum State {
+pub enum PublishState {
     Created,
     Intended,
     Active,
 }
 
-pub struct Stream {
-    pub track_id: String,
-    pub user: String,
-    pub room_id: String,
+impl PublishState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PublishState::Created => "Created",
+            PublishState::Intended => "Intended",
+            PublishState::Active => "Active",
+        }
+    }
+}
+
+pub struct RtpCache {
+    slots: Vec<Option<(u16, Vec<u8>)>>,
+}
+
+impl Default for RtpCache {
+    fn default() -> RtpCache {
+        RtpCache { slots: vec![None; CACHE] }
+    }
+}
+
+impl RtpCache {
+    pub fn put(&mut self, seq: u16, pkt: &[u8]) {
+        self.slots[usize::from(seq) % CACHE] = Some((seq, pkt.to_vec()));
+    }
+
+    pub fn get(&self, seq: u16) -> Option<&[u8]> {
+        match &self.slots[usize::from(seq) % CACHE] {
+            Some((s, p)) if *s == seq => Some(p),
+            _ => None,
+        }
+    }
+}
+
+pub struct Uplink {
+    pub ssrc: u32,
+    pub rtx: bool,
+    pub layer: Option<u8>,
     pub kind: Kind,
-    pub mid: String,
+    pub clock: u32,
+    pub stream: Weak<Stream>,
+    pub cache: Mutex<RtpCache>,
+    pub nack: Mutex<NackUp>,
+    pub ingress: Mutex<Ingress>,
+    pub pt_checked: AtomicBool,
+    pub last_pli_ms: AtomicU64,
+    pub first_rtp_ms: AtomicU64,
+}
+
+impl Uplink {
+    pub fn new(ssrc: u32, rtx: bool, layer: Option<u8>, kind: Kind, stream: &Arc<Stream>) -> Uplink {
+        let clock = crate::trk::clock(kind);
+        Uplink {
+            ssrc,
+            rtx,
+            layer,
+            kind,
+            clock,
+            stream: Arc::downgrade(stream),
+            cache: Mutex::new(RtpCache::default()),
+            nack: Mutex::new(NackUp::new()),
+            ingress: Mutex::new(Ingress::new(clock)),
+            pt_checked: AtomicBool::new(false),
+            last_pli_ms: AtomicU64::new(0),
+            first_rtp_ms: AtomicU64::new(0),
+        }
+    }
+}
+
+pub struct Stream {
+    pub track_id: Arc<str>,
+    pub user: Arc<str>,
+    pub kind: Kind,
+    pub mid: Arc<str>,
     pub pt: u8,
     pub rtx_pt: Option<u8>,
-    pub ssrc: u32,
-    pub rtx_ssrc: Option<u32>,
-    pub codec: Option<String>,
+    pub codec: Arc<str>,
     pub fmtp: Option<String>,
     pub source: Option<Source>,
     pub simulcast: bool,
-    pub ext: ExtIds,
+    pub ssrc: u32,
+    pub rtx_ssrc: Option<u32>,
     duplex: AtomicU8,
-    muted: AtomicBool,
-    state: AtomicU8,
-    pub first_rtp_ms: AtomicU64,
-    pub last_loud_ms: AtomicU64,
-    pub pt_checked: AtomicBool,
+    pub muted: AtomicBool,
+    pub aff: Arc<crate::aff::Hot>,
+    pub subs: ArcSwap<Vec<Weak<Downlink>>>,
+    pub uplinks: ArcSwap<Vec<Arc<Uplink>>>,
     pub listed: AtomicBool,
+    pub last_voice_ms: AtomicU64,
+    state: AtomicU8,
+    pub transport: Weak<crate::link::Transport>,
 }
 
 impl Stream {
-    pub fn new(user: &str, room_id: &str, t: &PublishTrack, ext: ExtIds, track_id: String) -> Stream {
-        let d = t.duplex.unwrap_or(Duplex::Full);
-        let simulcast = t.simulcast.unwrap_or(false) && d == Duplex::Full;
+    pub fn new(track_id: &str, user: &str, t: &PublishTrack, codec: &str, aff: Arc<crate::aff::Hot>, transport: Weak<crate::link::Transport>) -> Stream {
+        let duplex = t.duplex.unwrap_or(Duplex::Full);
         Stream {
-            track_id,
-            user: user.to_string(),
-            room_id: room_id.to_string(),
+            track_id: Arc::from(track_id),
+            user: Arc::from(user),
             kind: t.kind,
-            mid: t.mid.clone(),
+            mid: Arc::from(t.mid.as_str()),
             pt: t.pt,
             rtx_pt: t.rtx_pt,
+            codec: Arc::from(codec),
+            fmtp: t.fmtp.clone(),
+            source: t.source,
+            simulcast: t.simulcast.unwrap_or(false) && duplex == Duplex::Full,
             ssrc: t.ssrc,
             rtx_ssrc: t.rtx_ssrc,
-            codec: t.codec.as_deref().and_then(codec::canon).map(str::to_string),
-            fmtp: t.fmtp.clone(),
-            source: if t.kind == Kind::Video { Some(t.source.unwrap_or(Source::Camera)) } else { None },
-            simulcast,
-            ext,
-            duplex: AtomicU8::new(if d == Duplex::Half { 1 } else { 0 }),
+            duplex: AtomicU8::new(if duplex == Duplex::Half { 1 } else { 0 }),
             muted: AtomicBool::new(false),
-            state: AtomicU8::new(1),
-            first_rtp_ms: AtomicU64::new(0),
-            last_loud_ms: AtomicU64::new(0),
-            pt_checked: AtomicBool::new(false),
+            aff,
+            subs: ArcSwap::from_pointee(Vec::new()),
+            uplinks: ArcSwap::from_pointee(Vec::new()),
             listed: AtomicBool::new(false),
+            last_voice_ms: AtomicU64::new(0),
+            state: AtomicU8::new(0),
+            transport,
         }
     }
 
@@ -88,100 +157,81 @@ impl Stream {
         if self.duplex.load(Ordering::Acquire) == 1 { Duplex::Half } else { Duplex::Full }
     }
 
-    pub fn swap_duplex(&self, d: Duplex) -> Duplex {
-        let prev = self.duplex.swap(if d == Duplex::Half { 1 } else { 0 }, Ordering::AcqRel);
-        if prev == 1 { Duplex::Half } else { Duplex::Full }
+    pub fn set_duplex(&self, d: Duplex) {
+        self.duplex.store(if d == Duplex::Half { 1 } else { 0 }, Ordering::Release);
     }
 
-    pub fn half(&self) -> bool {
-        self.duplex() == Duplex::Half
-    }
-
-    pub fn muted(&self) -> bool {
-        self.muted.load(Ordering::Acquire)
-    }
-
-    pub fn swap_muted(&self, m: bool) -> bool {
-        self.muted.swap(m, Ordering::AcqRel)
-    }
-
-    pub fn state(&self) -> State {
+    pub fn state(&self) -> PublishState {
         match self.state.load(Ordering::Acquire) {
-            0 => State::Created,
-            1 => State::Intended,
-            _ => State::Active,
+            0 => PublishState::Created,
+            1 => PublishState::Intended,
+            _ => PublishState::Active,
         }
     }
 
-    pub fn first_rtp(&self, now: u64) -> bool {
-        self.state.store(2, Ordering::Release);
-        self.first_rtp_ms.compare_exchange(0, now.max(1), Ordering::AcqRel, Ordering::Acquire).is_ok()
+    pub fn swap_state(&self, s: PublishState) -> PublishState {
+        let v = match s {
+            PublishState::Created => 0,
+            PublishState::Intended => 1,
+            PublishState::Active => 2,
+        };
+        match self.state.swap(v, Ordering::AcqRel) {
+            0 => PublishState::Created,
+            1 => PublishState::Intended,
+            _ => PublishState::Active,
+        }
     }
 
-    pub fn codec_name(&self) -> &str {
-        self.codec.as_deref().unwrap_or(match self.kind {
-            Kind::Audio => codec::AUDIO,
-            Kind::Video => "",
-        })
+    pub fn attach(&self, d: &Arc<Downlink>) {
+        let mut v: Vec<Weak<Downlink>> = self.subs.load().iter().filter(|w| w.strong_count() > 0).cloned().collect();
+        if !v.iter().any(|w| w.as_ptr() == Arc::as_ptr(d)) {
+            v.push(Arc::downgrade(d));
+        }
+        self.subs.store(Arc::new(v));
     }
 
-    pub fn publication(&self) -> Publication {
-        Publication {
-            track_id: self.track_id.clone(),
-            room_id: self.room_id.clone(),
+    pub fn detach(&self, d: &Arc<Downlink>) {
+        let v: Vec<Weak<Downlink>> = self.subs.load().iter().filter(|w| w.strong_count() > 0 && w.as_ptr() != Arc::as_ptr(d)).cloned().collect();
+        self.subs.store(Arc::new(v));
+    }
+
+    pub fn add_uplink(&self, u: Arc<Uplink>) {
+        let mut v: Vec<Arc<Uplink>> = self.uplinks.load().iter().cloned().collect();
+        v.push(u);
+        self.uplinks.store(Arc::new(v));
+    }
+
+    pub fn uplink_of_layer(&self, layer: Option<u8>) -> Option<Arc<Uplink>> {
+        self.uplinks.load().iter().find(|u| !u.rtx && u.layer == layer).cloned()
+    }
+
+    pub fn primary(&self) -> Option<Arc<Uplink>> {
+        let ups = self.uplinks.load();
+        ups.iter().filter(|u| !u.rtx).max_by_key(|u| u.layer.unwrap_or(0)).cloned()
+    }
+
+    pub fn publication(&self, room: &str) -> oxsig::types::Publication {
+        oxsig::types::Publication {
+            track_id: self.track_id.to_string(),
+            room_id: room.to_string(),
             kind: self.kind,
             duplex: self.duplex(),
-            codec: if self.kind == Kind::Video { self.codec.clone() } else { None },
+            codec: Some(self.codec.to_string()),
             fmtp: self.fmtp.clone(),
             simulcast: self.simulcast,
         }
     }
 }
 
-#[derive(Default)]
-pub struct Ctx {
-    pub streams: Vec<Arc<Stream>>,
-}
-
-impl Ctx {
-    pub fn by_id(&self, track_id: &str) -> Option<Arc<Stream>> {
-        self.streams.iter().find(|s| s.track_id == track_id).cloned()
-    }
-
-    pub fn by_ssrc(&self, ssrc: u32) -> Option<Arc<Stream>> {
-        self.streams.iter().find(|s| s.ssrc == ssrc && ssrc != 0).cloned()
-    }
-
-    pub fn remove(&mut self, track_id: &str) -> Option<Arc<Stream>> {
-        let i = self.streams.iter().position(|s| s.track_id == track_id)?;
-        Some(self.streams.remove(i))
-    }
-
-    pub fn half_kinds(&self) -> Vec<Kind> {
-        let mut v: Vec<Kind> = self.streams.iter().filter(|s| s.half()).map(|s| s.kind).collect();
-        v.dedup();
-        v
-    }
-
-    pub fn has_half(&self) -> bool {
-        self.streams.iter().any(|s| s.half())
-    }
-
-    pub fn uplink_ssrcs(&self) -> HashSet<u32> {
-        let mut h = HashSet::new();
-        for s in &self.streams {
-            if s.ssrc != 0 {
-                h.insert(s.ssrc);
-            }
-            if let Some(r) = s.rtx_ssrc {
-                h.insert(r);
-            }
-        }
-        h
+pub fn rid_layer(rid: &[u8]) -> Option<u8> {
+    match rid {
+        b"l" => Some(0),
+        b"h" => Some(1),
+        _ => None,
     }
 }
 
-pub fn bit_of(kind: Kind, source: Option<Source>) -> &'static str {
+pub fn perm_bit(kind: Kind, source: Option<Source>) -> &'static str {
     match (kind, source) {
         (Kind::Audio, _) => "publish_audio",
         (Kind::Video, Some(Source::Screen)) => "publish_screen",
@@ -194,187 +244,115 @@ pub fn allowed(p: &Permission, bit: &str) -> bool {
         "publish_audio" => p.publish_audio,
         "publish_video" => p.publish_video,
         "publish_screen" => p.publish_screen,
-        "floor_request" => p.floor_request,
-        _ => false,
+        _ => p.floor_request,
     }
 }
 
-fn kind_of(v: &Value) -> Result<Kind, Failure> {
-    match v.get("kind") {
-        None | Some(Value::Null) => Err(Code::MissingField.failure_msg("kind")),
-        Some(k) => serde_json::from_value(k.clone()).map_err(|_| Code::InvalidPayload.failure_msg("kind")),
-    }
-}
-
-fn source_of(v: &Value, kind: Kind) -> Result<Option<Source>, Failure> {
-    match v.get("source") {
-        None | Some(Value::Null) => Ok(None),
-        Some(s) => {
-            if kind == Kind::Audio {
-                return Err(Code::InvalidPayload.failure_msg("audio 항목의 source"));
-            }
-            serde_json::from_value::<Source>(s.clone()).map(Some).map_err(|_| Code::InvalidPayload.failure_msg("모르는 source"))
-        }
-    }
-}
-
-fn duplex_of(v: &Value) -> Result<Duplex, Failure> {
-    match v.get("duplex") {
-        None | Some(Value::Null) => Ok(Duplex::Full),
-        Some(d) => serde_json::from_value(d.clone()).map_err(|_| Code::InvalidPayload.failure_msg("duplex")),
-    }
-}
-
-pub struct AddInput<'a> {
-    pub items: &'a [Value],
-    pub perm: &'a Permission,
-    pub is_pub_room: bool,
+#[derive(Debug, Clone)]
+pub struct AddCtx<'a> {
+    pub room: &'a str,
+    pub pub_room: Option<&'a str>,
+    pub perm: Permission,
     pub active: usize,
-    pub ext: ExtIds,
-    pub room_codecs: &'a MediaCodecs,
-    pub downlink_ssrcs: Option<&'a HashSet<u32>>,
+    pub downlink_ssrcs: &'a HashSet<u32>,
+    pub one_pc: bool,
+    pub room_audio: &'a str,
+    pub room_video: &'a str,
 }
 
-pub fn check_add(i: &AddInput<'_>) -> Result<Vec<PublishTrack>, Failure> {
-    let mut denied: Vec<&'static str> = Vec::new();
-    let mut duplexes = Vec::with_capacity(i.items.len());
-    for v in i.items {
-        let kind = kind_of(v)?;
-        let src = source_of(v, kind)?;
-        let bit = bit_of(kind, src);
-        if !allowed(i.perm, bit) && !denied.contains(&bit) {
-            denied.push(bit);
-        }
-        duplexes.push(duplex_of(v)?);
-    }
+pub fn check_add(c: &AddCtx<'_>, tracks: &[PublishTrack]) -> Result<Vec<String>, Failure> {
+    let denied: Vec<&str> = tracks.iter().map(|t| perm_bit(t.kind, t.source)).filter(|b| !allowed(&c.perm, b)).collect();
     if !denied.is_empty() {
-        return Err(Code::NotAuthorized.failure().with_details(json!({ "denied": denied })));
+        let mut d: Vec<&str> = denied;
+        d.sort();
+        d.dedup();
+        return Err(Failure::of(Code::NOT_AUTHORIZED).details(serde_json::json!({ "denied": d })));
     }
-    if duplexes.contains(&Duplex::Full) && !i.is_pub_room {
-        return Err(Code::NotPubRoom.failure());
+    if tracks.iter().any(|t| t.duplex.unwrap_or(Duplex::Full) == Duplex::Full) && c.pub_room != Some(c.room) {
+        return Err(Failure::of(Code::NOT_PUB_ROOM));
     }
-    if i.items.len() > MAX_PER_REQ {
-        return Err(Code::TrackLimit.failure().with_details(json!({ "limit": MAX_PER_REQ, "current": i.items.len() })));
+    if tracks.len() > REQ_MAX || c.active + tracks.len() > ACTIVE_MAX {
+        return Err(Failure::of(Code::TRACK_LIMIT));
     }
-    if i.active + i.items.len() > MAX_ACTIVE {
-        return Err(Code::TrackLimit.failure().with_details(json!({ "limit": MAX_ACTIVE, "current": i.active })));
-    }
-    let mut tracks = Vec::with_capacity(i.items.len());
-    for v in i.items {
-        for f in ["ssrc", "mid", "pt"] {
-            if v.get(f).is_none_or(Value::is_null) {
-                return Err(Code::MissingField.failure_msg(format!("tracks[].{f}")));
-            }
+    for t in tracks {
+        if t.mid.is_empty() || (t.ssrc == 0 && !t.simulcast.unwrap_or(false)) {
+            return Err(Failure::of(Code::MISSING_FIELD));
         }
-        let t: PublishTrack = serde_json::from_value(v.clone()).map_err(|e| Code::InvalidPayload.failure_msg(e.to_string()))?;
-        let sim = t.simulcast.unwrap_or(false);
-        if sim && t.kind == Kind::Audio {
-            return Err(Code::InvalidPayload.failure_msg("audio 시뮬캐스트"));
+        if t.kind == Kind::Audio && t.source.is_some() {
+            return Err(Failure::of(Code::INVALID_PAYLOAD));
         }
-        if sim != (t.ssrc == 0) {
-            return Err(Code::MissingField.failure_msg("simulcast 와 ssrc 가 어긋난다"));
+        if t.rtx_pt.is_some() != t.rtx_ssrc.is_some() && !t.simulcast.unwrap_or(false) {
+            return Err(Failure::of(Code::MISSING_FIELD));
         }
-        if sim && i.ext.rid.is_none() {
-            return Err(Code::MissingField.failure_msg("rid_extmap_id"));
-        }
-        tracks.push(t);
     }
-    if let Some(down) = i.downlink_ssrcs {
-        for t in &tracks {
+    if c.one_pc {
+        for t in tracks {
             for s in [Some(t.ssrc), t.rtx_ssrc].into_iter().flatten() {
-                if s != 0 && down.contains(&s) {
-                    return Err(Code::SsrcCollision.failure().with_details(json!({ "ssrc": s })));
+                if s != 0 && c.downlink_ssrcs.contains(&s) {
+                    return Err(Failure::of(Code::SSRC_COLLISION).details(serde_json::json!({ "ssrc": s })));
                 }
             }
         }
     }
-    for t in &tracks {
-        let room = match t.kind {
-            Kind::Audio => i.room_codecs.audio.as_deref().unwrap_or(codec::AUDIO),
-            Kind::Video => i.room_codecs.video.as_deref().unwrap_or("H264"),
+    let mut codecs = Vec::with_capacity(tracks.len());
+    for t in tracks {
+        let name = t.codec.clone().unwrap_or_default();
+        let canon = match t.kind {
+            Kind::Video => crate::trk::canonical_video(&name),
+            Kind::Audio => crate::trk::canonical_audio(&name),
         };
-        if t.kind == Kind::Video && t.codec.as_deref().and_then(codec::supported_video).is_none() {
-            return Err(Code::CodecRequired.failure().with_details(json!({ "supported": codec::SUPPORTED_VIDEO })));
+        let Some(canon) = canon else {
+            let supported: Vec<&str> = if t.kind == Kind::Video { crate::trk::SUPPORTED_VIDEO.to_vec() } else { crate::trk::SUPPORTED_AUDIO.to_vec() };
+            return Err(Failure::of(Code::CODEC_REQUIRED).details(serde_json::json!({ "supported": supported })));
+        };
+        let room_codec = if t.kind == Kind::Video { c.room_video } else { c.room_audio };
+        if !crate::trk::codec_matches(t.kind, canon, t.fmtp.as_deref(), room_codec) {
+            return Err(Failure::of(Code::CODEC_MISMATCH).details(serde_json::json!({ "codec": room_codec, "fmtp": crate::trk::sub_fmtp(room_codec) })));
         }
-        if !codec::same_as_room(t.kind, room, t.codec.as_deref(), t.fmtp.as_deref()) {
-            return Err(Code::CodecMismatch.failure().with_details(json!({ "codec": room, "fmtp": codec::row_fmtp(room) })));
-        }
+        codecs.push(canon.to_string());
     }
-    Ok(tracks)
+    Ok(codecs)
 }
 
-pub fn rid_layer(rid: &str) -> Option<u8> {
-    match rid {
-        "l" => Some(0),
-        "h" => Some(1),
-        _ => None,
+pub fn move_check(streams: &BTreeMap<String, Arc<Stream>>, perm: &Permission, room_audio: &str, room_video: &str) -> (bool, bool) {
+    let mut bad = false;
+    let mut noperm = false;
+    for s in streams.values() {
+        let room_codec = if s.kind == Kind::Video { room_video } else { room_audio };
+        if !crate::trk::codec_matches(s.kind, &s.codec, s.fmtp.as_deref(), room_codec) {
+            bad = true;
+        }
+        if !allowed(perm, perm_bit(s.kind, s.source)) {
+            noperm = true;
+        }
     }
+    (bad, noperm)
 }
-
-pub const SCALABILITY: &str = "L2T1";
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn all() -> Permission {
-        Permission { publish_audio: true, publish_video: true, publish_screen: true, floor_request: true }
-    }
-
-    fn codecs() -> MediaCodecs {
-        MediaCodecs { audio: Some("opus".into()), video: Some("H264".into()) }
+    fn tr(kind: Kind, codec: &str, duplex: Duplex) -> PublishTrack {
+        PublishTrack { kind, ssrc: 11, mid: "0".into(), codec: Some(codec.into()), fmtp: Some("packetization-mode=1;profile-level-id=42e01f".into()), pt: 111, rtx_pt: None, rtx_ssrc: None, source: None, duplex: Some(duplex), simulcast: None }
     }
 
     #[test]
-    fn order_permission_before_fields() {
-        let mut p = all();
-        p.publish_audio = false;
-        let items = vec![json!({"kind": "audio"})];
-        let c = codecs();
-        let i = AddInput { items: &items, perm: &p, is_pub_room: true, active: 0, ext: ExtIds::default(), room_codecs: &c, downlink_ssrcs: None };
-        let e = check_add(&i).expect_err("deny");
-        assert_eq!(e.code, 2006, "S-sym-IMPL-PUB-ADD-3 정:IMPL-PUB-ADD ① 자격이 ③ 필수 칸보다 먼저");
-        assert_eq!(e.details, Some(json!({"denied": ["publish_audio"]})));
-    }
-
-    #[test]
-    fn not_pub_room_after_perm_before_count() {
-        let items: Vec<Value> = (0..9).map(|_| json!({"kind": "audio"})).collect();
-        let c = codecs();
-        let p = all();
-        let i = AddInput { items: &items, perm: &p, is_pub_room: false, active: 0, ext: ExtIds::default(), room_codecs: &c, downlink_ssrcs: None };
-        assert_eq!(check_add(&i).expect_err("3011").code, 3011);
-        let i2 = AddInput { is_pub_room: true, ..i };
-        assert_eq!(check_add(&i2).expect_err("4002").code, 4002);
-    }
-
-    #[test]
-    fn active_count_blocks_repeat_calls() {
-        let items = vec![json!({"kind": "audio", "ssrc": 1, "mid": "0", "pt": 111})];
-        let c = codecs();
-        let p = all();
-        let i = AddInput { items: &items, perm: &p, is_pub_room: true, active: 16, ext: ExtIds::default(), room_codecs: &c, downlink_ssrcs: None };
-        assert_eq!(check_add(&i).expect_err("limit").code, 4002);
-    }
-
-    #[test]
-    fn codec_checks() {
-        let c = codecs();
-        let p = all();
-        let vp9 = vec![json!({"kind": "video", "ssrc": 1, "mid": "1", "pt": 98, "codec": "VP9"})];
-        let i = AddInput { items: &vp9, perm: &p, is_pub_room: true, active: 0, ext: ExtIds::default(), room_codecs: &c, downlink_ssrcs: None };
-        assert_eq!(check_add(&i).expect_err("1005").code, 1005);
-        let vp8 = vec![json!({"kind": "video", "ssrc": 1, "mid": "1", "pt": 96, "codec": "VP8"})];
-        let i = AddInput { items: &vp8, ..i };
-        let e = check_add(&i).expect_err("1006");
-        assert_eq!(e.code, 1006);
-        assert_eq!(e.details.as_ref().and_then(|d| d.get("codec")).and_then(Value::as_str), Some("H264"));
-    }
-
-    #[test]
-    fn rid_only_l_h() {
-        assert_eq!(rid_layer("l"), Some(0));
-        assert_eq!(rid_layer("h"), Some(1));
-        assert_eq!(rid_layer("q"), None, "정:CAND-PUB-RID-EXTRA");
+    fn order_permission_before_count_and_fields() {
+        let none = HashSet::new();
+        let c = AddCtx { room: "r", pub_room: Some("r"), perm: Permission { publish_audio: false, ..Permission::default() }, active: 0, downlink_ssrcs: &none, one_pc: false, room_audio: "opus", room_video: "H264" };
+        let mut bad = tr(Kind::Audio, "opus", Duplex::Full);
+        bad.mid = String::new();
+        let e = check_add(&c, &[bad]).expect_err("perm");
+        assert_eq!(e.code, Code::NOT_AUTHORIZED.0);
+        let c2 = AddCtx { perm: Permission::default(), pub_room: None, ..c.clone() };
+        assert_eq!(check_add(&c2, &[tr(Kind::Audio, "opus", Duplex::Full)]).expect_err("pub").code, Code::NOT_PUB_ROOM.0);
+        assert!(check_add(&c2, &[tr(Kind::Audio, "opus", Duplex::Half)]).is_ok());
+        let c3 = AddCtx { perm: Permission::default(), active: 16, ..c.clone() };
+        assert_eq!(check_add(&c3, &[tr(Kind::Audio, "opus", Duplex::Full)]).expect_err("lim").code, Code::TRACK_LIMIT.0);
+        let c4 = AddCtx { perm: Permission::default(), ..c.clone() };
+        assert_eq!(check_add(&c4, &[tr(Kind::Video, "VP9", Duplex::Full)]).expect_err("codec").code, Code::CODEC_REQUIRED.0);
+        assert_eq!(check_add(&c4, &[tr(Kind::Video, "VP8", Duplex::Full)]).expect_err("mm").code, Code::CODEC_MISMATCH.0);
+        assert_eq!(rid_layer(b"q"), None);
     }
 }
