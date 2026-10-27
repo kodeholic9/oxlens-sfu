@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.4 · 정:RULE-LINK-TRANSPORT · 정:IMPL-LINK-ICE-RESTART · 정:RULE-LINK-PAIR-LIVENESS · 정:IMPL-LINK-PEER-STATE · 정:RULE-CONC-SANS-IO · 연:LINK.S.restart · 연:LINK.S.checked_new · model: claude-opus-5-5
+// spec: v1.4 · 정:RULE-LINK-TRANSPORT · 정:IMPL-LINK-ICE-RESTART · 정:RULE-LINK-PAIR-LIVENESS · 정:IMPL-LINK-PEER-STATE · 정:RULE-CONC-SANS-IO · 연:LINK.S.restart · 연:LINK.S.checked_new · 연:RULE-LINK-ICE-LITE · 연:RULE-LINK-EVENT-TYPES · model: claude-opus-5-5
 //! ICE-lite 장부(순수) — 자격 한 벌마다 최대 둘(지금 · 대기) · 대기분 교체 · 새 ufrag 첫 검증 검사에 옛 것 내림 · 쌍별 생존 · 경로 = 지명이 실린 검증된 검사가 마지막으로 온 쌍. 검사는 MESSAGE-INTEGRITY 검증 뒤에만 무엇이든 바꾼다.
 
 use std::net::SocketAddr;

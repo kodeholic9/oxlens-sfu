@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.4 · 정:IMPL-FLR-LOCK · 정:IMPL-FLR-RTP-OBSERVE · 정:IMPL-FLR-MEDIA-BIND · 정:IMPL-FLR-FIRST-NOTICE · 정:CAND-FWD-PRIME-SOURCE · 정:CAND-FWD-PRIME-EPISODE · 정:CAND-FLR-RELEASE-SILENCE-SPEAKER · 정:CAND-RTCP-RTX-GATE-WINDOW · 정:IMPL-AUX-DC-SEND · 정:RULE-CONC-SIX · 연:RULE-FLR-TRANSPORT-DC · 연:RULE-FLR-MSG-ACK · 연:RULE-FLR-ROOM-KEY · 연:TRN.frame.DC · 운영:RULE-LOG-TRANSITION · model: claude-opus-5-5
+// spec: v1.4 · 정:IMPL-FLR-LOCK · 정:IMPL-FLR-RTP-OBSERVE · 정:IMPL-FLR-MEDIA-BIND · 정:IMPL-FLR-FIRST-NOTICE · 정:CAND-FWD-PRIME-SOURCE · 정:CAND-FWD-PRIME-EPISODE · 정:CAND-FLR-RELEASE-SILENCE-SPEAKER · 정:CAND-RTCP-RTX-GATE-WINDOW · 정:IMPL-AUX-DC-SEND · 정:RULE-CONC-SIX · 연:RULE-FLR-TRANSPORT-DC · 연:RULE-FLR-MSG-ACK · 연:RULE-FLR-ROOM-KEY · 연:TRN.frame.DC · 운영:RULE-LOG-TRANSITION · 연:RULE-FLR-SLOT-SPEAKER · 연:RULE-FLR-PREEMPT · 연:DEV-FLR-ROOM-GONE · model: claude-opus-5-5
 //! 발언권 집행 — 판정(락 안)이 돌려준 보낼 것 · 효과를 락 밖에서 집행한다: DC 송신 · 미디어 결합(번호 규칙 · 예열 CN · 해제 무음 · PLI burst · RTX 게이트) · 방마다 타이머 구동(가장 이른 만료에 깨어난다) · RTP 관측 알림(사람마다 500ms).
 
 use std::sync::Arc;

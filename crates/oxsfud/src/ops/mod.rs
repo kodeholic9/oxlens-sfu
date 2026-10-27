@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.4 · 정:RULE-OPS-SURFACE · 정:RULE-OPS-OBSERVE · 정:RULE-OPS-DROPS · 정:RULE-BUS-SHAPE · 정:RULE-BUS-FATE · 정:CAND-BUS-HANDLE-SHAPE · 정:CAND-BUS-SELF-WATCH-VALUES · 정:RULE-CONC-SIX · 정:CAND-DOC-ORCHESTRATION-ASPECT · 정:IMPL-LINK-PEER-STATE · 정:RULE-GC-FOUR · 운영:RULE-LOG-TRANSITION · 운영:RULE-LOG-CONTEXT · model: claude-opus-5-5
+// spec: v1.4 · 정:RULE-OPS-SURFACE · 정:CAND-OPS-SERVER-TRANSITION-SPEC · 정:RULE-OPS-OBSERVE · 정:RULE-OPS-DROPS · 정:RULE-BUS-SHAPE · 정:RULE-BUS-FATE · 정:CAND-BUS-HANDLE-SHAPE · 정:CAND-BUS-SELF-WATCH-VALUES · 정:RULE-CONC-SIX · 정:CAND-DOC-ORCHESTRATION-ASPECT · 정:IMPL-LINK-PEER-STATE · 정:RULE-GC-FOUR · 운영:RULE-LOG-TRANSITION · 운영:RULE-LOG-CONTEXT · model: claude-opus-5-5
 //! 운영 — 미디어 서버 한 프로세스의 조율. 상태(방 · Peer)는 락 하나가 지키고(판정은 락 안) · 통지는 락 안에서 버스 한 줄에 줄 세우고 · 송신 · 미디어 결합은 락 밖에서 한다. gRPC Handle(`Hello` · `Call`) · 주기(RTCP · 자동 판단 · 쌍별 생존 · 방 sweep · 정체 · stat 줄) · 부모 생존 채널 · 자가 감시.
 
 pub mod admin;

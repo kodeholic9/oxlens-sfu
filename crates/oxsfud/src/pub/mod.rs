@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.4 · 정:RULE-PUB-TWO-LAYERS · 정:RULE-PUB-STATE · 정:IMPL-PUB-ADD · 정:IMPL-PUB-REMOVE · 정:IMPL-PUB-ACCEPT · 정:IMPL-PUB-TRACK-SET · 정:IMPL-PUB-RID-SPATIAL · 정:CAND-PUB-H264-PROFILE · 정:CAND-PUB-NOT-PUB-ROOM-ORDER · 정:CAND-PUB-RID-EXTRA · 정:CAND-PUB-INGRESS-STATS-OWNER · 연:PUB.op.PUBLISH_TRACKS · 연:RULE-PUB-PUBLISH-PROC · 연:RULE-PUB-SET-PROC · 연:RULE-PUB-RID-TO-SPATIAL · 연:RULE-ROOM-PERMISSION-MAP · 연:PUB.S · model: claude-opus-5-5
+// spec: v1.4 · 정:RULE-PUB-SERVER-SCOPE · 정:RULE-PUB-TWO-LAYERS · 정:RULE-PUB-STATE · 정:IMPL-PUB-ADD · 정:IMPL-PUB-REMOVE · 정:IMPL-PUB-ACCEPT · 정:IMPL-PUB-TRACK-SET · 정:IMPL-PUB-RID-SPATIAL · 정:CAND-PUB-H264-PROFILE · 정:CAND-PUB-NOT-PUB-ROOM-ORDER · 정:CAND-PUB-RID-EXTRA · 정:CAND-PUB-INGRESS-STATS-OWNER · 연:PUB.op.PUBLISH_TRACKS · 연:RULE-PUB-PUBLISH-PROC · 연:RULE-PUB-SET-PROC · 연:RULE-PUB-RID-TO-SPATIAL · 연:RULE-ROOM-PERMISSION-MAP · 연:PUB.S · model: claude-opus-5-5
 //! 발행 — 논리 `Stream`(트랙 하나 · 식별 · 메타 · 구독자 목록) · 물리 `Uplink`(업링크 스트림 하나 · 캐시 · NACK · 수신 통계). 검사 차례(자격 → 발행 방 → 수 → 필수 칸 → SSRC → 코덱)는 순수 함수다.
 
 use std::collections::{BTreeMap, HashSet};

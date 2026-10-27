@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.4 · 정:RULE-LINK-TRANSPORT · 정:CAND-LINK-DTLS-VALUES · 정:RULE-GC-LEAVE-SEVEN · 연:RULE-LINK-SDP-DC-OPENER · 연:TRN.frame.DC · model: claude-opus-5-5
+// spec: v1.4 · 정:RULE-LINK-TRANSPORT · 정:RULE-DOC-FIXED-PARTS · 정:CAND-LINK-DTLS-VALUES · 정:RULE-GC-LEAVE-SEVEN · 연:RULE-LINK-SDP-DC-OPENER · 연:TRN.frame.DC · model: claude-opus-5-5
 //! DTLS(passive) → SRTP 키 → SCTP 연합 → DCEP · 채널 `"unreliable"` 하나. 연합 수명 ≥ Peer 수명(데이터 재전송 한도 없음) · transmit 은 datagram 단위 레코드 · 태스크는 Peer 회수가 직접 끊는다.
 
 use std::net::SocketAddr;

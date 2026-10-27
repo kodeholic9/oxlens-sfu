@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.4 · 정:RULE-AFF-ONE-SET · 정:IMPL-AFF-PUB-ROOM · 정:IMPL-AFF-PUB-MOVE · 정:IMPL-FWD-ROOM · 연:AFF.op.AFFILIATION · 연:RULE-AFF-PROC · 연:RULE-AFF-RES-FORM · 연:AFF.S · model: claude-opus-5-5
+// spec: v1.4 · 정:RULE-AFF-SERVER-SCOPE · 정:RULE-AFF-ONE-SET · 정:IMPL-AFF-PUB-ROOM · 정:IMPL-AFF-PUB-MOVE · 정:IMPL-FWD-ROOM · 연:AFF.op.AFFILIATION · 연:RULE-AFF-PROC · 연:RULE-AFF-RES-FORM · 연:AFF.S · model: claude-opus-5-5
 //! 소속 — 입장 방 집합(= 구독 집합) 하나와 `pub_room`(RCU 값) 하나. 발행 RTP 는 매 패킷 이 값으로 방을 정한다.
 
 use std::collections::BTreeSet;

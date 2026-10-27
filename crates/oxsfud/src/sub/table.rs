@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.4 · 정:IMPL-SUB-TABLE · 정:IMPL-SUB-SUBSCRIBER-TABLE · 정:IMPL-SUB-PIPELINE · 정:CAND-SUB-ROW-CLASS · 정:CAND-SUB-PAUSED-FREES-ROW · 정:CAND-SUB-REASSIGN-TICK · 연:SUB.type.MlineTable · 연:SUB.type.MlineEntry · 연:RULE-SUB-FILL · 연:RULE-SUB-EGRESS-ACKED · 연:RULE-SUB-ASSIGN-RECOVERED · 연:RULE-ROOM-BUDGET-SPLIT · 연:RULE-LINK-DOWNLINK-SSRC · 연:LINK.S.track_on · 연:LINK.S.track_off · 연:LINK.S.reissue · 연:LINK.S.reassign · 연:LINK.S.ack · model: claude-opus-5-5
+// spec: v1.4 · 정:IMPL-SUB-TABLE · 정:IMPL-SUB-SUBSCRIBER-TABLE · 정:IMPL-SUB-PIPELINE · 정:CAND-SUB-ROW-CLASS · 정:CAND-SUB-PAUSED-FREES-ROW · 정:CAND-SUB-REASSIGN-TICK · 연:SUB.type.MlineTable · 연:SUB.type.MlineEntry · 연:RULE-SUB-FILL · 연:RULE-SUB-EGRESS-ACKED · 연:RULE-SUB-ASSIGN-RECOVERED · 연:RULE-ROOM-BUDGET-SPLIT · 연:RULE-LINK-DOWNLINK-SSRC · 연:LINK.S.track_on · 연:LINK.S.track_off · 연:LINK.S.reissue · 연:LINK.S.reassign · 연:LINK.S.ack · 연:RULE-SUB-ROW-ONE-MLINE · 연:RULE-SUB-NO-ASSIGN-NO-SDP · 연:RULE-SUB-ASSIGN-TIER · 연:DEV-SUB-MLINE-TABLE · model: claude-opus-5-5
 //! 배정표(연결마다 하나) — 줄 하나 = 구독 m-line 하나. mid 는 최대 뒤로만 · 빈 줄은 같은 부류 · kind · 튜플 안에서 가장 작은 mid 부터 · 줄은 지우지 않는다 · 다운링크 SSRC 는 줄이 사는 동안 그대로 · 확인된 차례(ack) 뒤의 줄만 흐른다.
 
 use std::collections::{BTreeMap, HashSet};

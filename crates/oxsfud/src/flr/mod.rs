@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.4 · 정:RULE-FLR-SERVER-SCOPE · 정:IMPL-FLR-LOCK · 정:IMPL-FLR-RTP-OBSERVE · 정:IMPL-FLR-POLICY · 정:IMPL-FLR-MEDIA-BIND · 정:RULE-FLR-SNAPSHOT · 정:RULE-CONC-SIX · 연:RULE-FLR-TIMERS · 연:FLR.wire · model: claude-opus-5-5
+// spec: v1.4 · 정:RULE-FLR-SERVER-SCOPE · 정:IMPL-FLR-LOCK · 정:IMPL-FLR-RTP-OBSERVE · 정:IMPL-FLR-POLICY · 정:IMPL-FLR-MEDIA-BIND · 정:RULE-FLR-SNAPSHOT · 정:RULE-CONC-SIX · 연:RULE-FLR-TIMERS · 연:FLR.wire · 연:RULE-FLR-HEADER · 연:RULE-FLR-MSG-TYPES · 연:RULE-FLR-ACK-BIT · 연:RULE-FLR-TLV · 연:RULE-FLR-TLV-EXT-RULES · 연:RULE-FLR-TLV-MATRIX · 연:RULE-FLR-SEQ · 연:RULE-FLR-MSG-GRANTED · 연:RULE-FLR-MSG-DENY · 연:RULE-FLR-MSG-IDLE · 연:RULE-FLR-MSG-TAKEN · 연:RULE-FLR-MSG-REVOKE · 연:RULE-FLR-MSG-QUEUE · 연:RULE-FLR-MSG-ACK · 연:DEV-FLR-ACK-SEQ · model: claude-opus-5-5
 //! 발언권 — 판정 로직(`core`) 둘레의 방마다 그릇: 허가 번호(`grant_no` · 0 에서 · 허가마다 +1) · 타이머 만료 시각(가장 이른 것에 깨어난다 · `T1` 은 마지막 RTP 부터 · `T2` 는 첫 RTP 부터) · MBCP 와 판정 메시지 사이 번역.
 
 pub mod bind;

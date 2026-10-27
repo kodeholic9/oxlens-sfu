@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.4 · 정:IMPL-ROOM-LIFE · 정:IMPL-ROOM-DERIVED · 정:IMPL-ROOM-JOIN · 정:IMPL-ROOM-PERMISSION · 정:IMPL-ROOM-VERSION-ISSUE · 정:IMPL-ROOM-EMIT · 정:IMPL-ROOM-STALL · 정:CAND-ROOM-TTL-PERMANENT-MARK · 정:CAND-ROOM-STALL-COOL-UNIT · 정:CAND-ROOM-JOIN-AGAIN-EDGE · 연:ROOM.type.MemberInfo · 연:ROOM.type.Version · 연:RULE-ROOM-HIDDEN-ONLY-FOUR · 연:RULE-ROOM-HIDDEN-NO-SEQ · 연:RULE-ROOM-SEQ-CONTENT · 연:RULE-ROOM-MEDIA-CODECS · 연:RULE-ROOM-PERMISSION-MAP · 연:ROOM.ledger.TStall · 연:ROOM.S · model: claude-opus-5-5
+// spec: v1.4 · 정:RULE-ROOM-SERVER-SCOPE · 정:IMPL-ROOM-LIFE · 정:IMPL-ROOM-DERIVED · 정:IMPL-ROOM-JOIN · 정:IMPL-ROOM-PERMISSION · 정:IMPL-ROOM-VERSION-ISSUE · 정:IMPL-ROOM-EMIT · 정:IMPL-ROOM-STALL · 정:CAND-ROOM-TTL-PERMANENT-MARK · 정:CAND-ROOM-STALL-COOL-UNIT · 정:CAND-ROOM-JOIN-AGAIN-EDGE · 연:ROOM.type.MemberInfo · 연:ROOM.type.Version · 연:RULE-ROOM-HIDDEN-ONLY-FOUR · 연:RULE-ROOM-HIDDEN-NO-SEQ · 연:RULE-ROOM-SEQ-CONTENT · 연:RULE-ROOM-MEDIA-CODECS · 연:RULE-ROOM-PERMISSION-MAP · 연:ROOM.ledger.TStall · 연:ROOM.S · model: claude-opus-5-5
 //! 방 — 빈 그릇과 수명(TTL 둘 · 영구 표지 `u32::MAX`) · 명단(투명도 등록) · `version{epoch, seq}` · 권한 오버라이드 표 · 개인 트랙 목록 · 슬롯 둘(핫패스) · 발언권 판정 그릇.
 
 use std::collections::BTreeMap;

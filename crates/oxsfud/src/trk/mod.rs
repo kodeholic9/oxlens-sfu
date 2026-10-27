@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.4 · 정:IMPL-TRK-FROM-PUB · 정:IMPL-TRK-CODEC-REGISTRY · 정:CAND-PUB-CODEC-REGISTRY-PLACE · 연:TRK.type.TrackEntry · 연:RULE-TRK-PUB-TO-TRACK · 연:RULE-TRK-SLOT-LIFE · 연:RULE-ROOM-MEDIA-CODECS · 연:RULE-TRK-TRACK-STATE-TO-ALL · model: claude-opus-5-5
+// spec: v1.4 · 정:IMPL-TRK-FROM-PUB · 정:IMPL-TRK-CODEC-REGISTRY · 정:CAND-PUB-CODEC-REGISTRY-PLACE · 연:TRK.type.TrackEntry · 연:RULE-TRK-PUB-TO-TRACK · 연:RULE-TRK-SLOT-LIFE · 연:RULE-ROOM-MEDIA-CODECS · 연:RULE-TRK-TRACK-STATE-TO-ALL · 연:RULE-TRK-FIELDS-BY-TYPE · 연:RULE-TRK-FOUR-PATHS · 연:RULE-TRK-HALF-NOT-IN-SNAPSHOT · 연:RULE-TRK-ELEMENT-HAS-ROOM-ID · 연:RULE-TRK-PER-PATH · 연:RULE-TRK-ROOM-ID-ONLY-MEANS · 연:RULE-TRK-TRACK-STATE-TYPES · 연:RULE-SUB-FMTP-MUST · model: claude-opus-5-5
 //! 트랙 층 — 코덱 등록부 하나(지원 = 키프레임 판정기가 있는 것) · 구독 줄의 고정 fmtp · 슬롯 트랙 id · 트랙 목록 항목.
 
 use oxsig::types::{Kind, Source, TrackEntry, TrackEntryType};
