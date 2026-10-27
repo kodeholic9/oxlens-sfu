@@ -1,219 +1,443 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.3 @d4cc756 · 정:RULE-OPS-SURFACE 정:RULE-OPS-LOGGER 정:RULE-BUS-FATE 정:RULE-BUS-SHAPE 정:IMPL-BUS-FAULTS 정:RULE-CFG-THREE-PLACES 정:CAND-BUS-NO-ZENOH-BOOT 정:CAND-DOC-ORCHESTRATION-ASPECT 운영:RULE-BOOT-ARGS 운영:RULE-AUTH-THREE 연:DEV-TRN-WS-ORIGIN · model: claude-opus-5-5
-//! hub 기동과 종료 — 로거 → zenoh → sfu 차례로 세우고 · 버스 사건 · node 사이 질의를 나눠 주고 · 종료는 ①클라 `LEAVE 5004` ②유닛 ③hub.
+// spec: v1.4 · 정:RULE-OPS-SURFACE · 정:RULE-OPS-OBSERVE · 정:RULE-OPS-DROPS · 정:CAND-DOC-ORCHESTRATION-ASPECT · 정:RULE-GC-FOUR · 정:IMPL-SES-DATA · 정:RULE-BUS-EVENTS · model: claude-opus-5-5
+//! hub 의 조율 — 한 요청이 세션 · 방 · 버스를 차례로 건드리는 길(op 길 · 세션 폐기 · 통지 배달)은 가로지르는 이 영역이 든다.
 
 pub mod admin;
-pub mod bind;
-pub mod conn;
-pub mod hub;
-pub mod rooms;
+pub mod http;
+pub mod query;
 pub mod route;
-pub mod sess;
-pub mod shape;
-pub mod supervisor;
+pub mod sup;
+pub mod ws;
 
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
-use axum::Router;
-use axum::extract::{State, WebSocketUpgrade};
-use axum::http::{HeaderMap, StatusCode, header};
-use axum::response::{IntoResponse, Response};
-use axum::routing::get;
-use common::log::{LogOpts, Sink};
-use common::system::UnitRole;
-use oxsig::Code;
-use tokio::sync::{Mutex, Notify};
+use common::bus::env::{Call, Notice};
+use common::bus::keys::KeySpace;
+use common::bus::place::Candidates;
+use oxsig::code::Code;
+use oxsig::op::Op;
+use tokio::sync::{Notify, OnceCell, mpsc};
+use tokio::task::JoinHandle;
+use zenoh::liveliness::LivelinessToken;
 
-use crate::bus::{Bus, QueryIn};
-use crate::cfg::Config;
-use bind::HubQ;
-use hub::{Hub, RemoteCall};
-use supervisor::Supervisor;
+use crate::aux::Probes;
+use crate::bus::Bus;
+use crate::cfg::HubCfg;
+use crate::room::{Interest, RoomMap};
+use crate::ses::{OutQueue, SessionTable, core::Push};
 
-static SHUTDOWN: std::sync::OnceLock<Arc<Notify>> = std::sync::OnceLock::new();
+#[derive(Debug)]
+pub enum Out {
+    Frame(Vec<u8>),
+    Leave(Code),
+}
 
-pub fn begin_shutdown(hub: &Hub) {
-    hub.shutting_down.store(true, Ordering::Relaxed);
-    if let Some(n) = SHUTDOWN.get() {
-        n.notify_waiters();
-        n.notify_one();
+#[derive(Clone)]
+pub struct SockTx {
+    pub out: mpsc::UnboundedSender<Out>,
+    pub q: Arc<Mutex<OutQueue>>,
+    pub wake: Arc<Notify>,
+}
+
+#[derive(Default)]
+pub struct Drops {
+    pub notice_no_socket: AtomicU64,
+    pub bus_ev_drop: AtomicU64,
+    pub codes: Mutex<BTreeMap<u16, u64>>,
+}
+
+impl Drops {
+    pub fn code(&self, c: u16) {
+        if let Ok(mut m) = self.codes.lock() {
+            m.entry(c).and_modify(|v| *v += 1).or_insert(1);
+        }
     }
 }
 
-async fn ws(State(hub): State<Arc<Hub>>, h: HeaderMap, up: WebSocketUpgrade) -> Response {
-    let origin = h.get(header::ORIGIN).and_then(|v| v.to_str().ok());
-    let host = h.get(header::HOST).and_then(|v| v.to_str().ok());
-    if !conn::origin_ok(&hub, origin, host) {
-        return (StatusCode::FORBIDDEN, "origin").into_response();
-    }
-    if hub.stopping() {
-        return (StatusCode::SERVICE_UNAVAILABLE, "stopping").into_response();
-    }
-    up.max_message_size(oxsig::frame::WS_MAX_FRAME + 1).on_upgrade(move |sock| conn::run(hub, sock))
+pub struct Hub {
+    pub cfg: HubCfg,
+    pub epoch: String,
+    pub ks: KeySpace,
+    pub bus: OnceCell<Arc<Bus>>,
+    pub sessions: Mutex<SessionTable>,
+    pub socks: Mutex<HashMap<u64, SockTx>>,
+    pub next_sock: AtomicU64,
+    pub rooms: Mutex<RoomMap>,
+    pub cands: Mutex<Candidates>,
+    pub interest: Mutex<Interest>,
+    pub joining: Mutex<HashMap<String, BTreeSet<String>>>,
+    pub room_subs: tokio::sync::Mutex<HashMap<String, JoinHandle<()>>>,
+    pub user_subs: tokio::sync::Mutex<HashMap<String, (u32, JoinHandle<()>)>>,
+    pub sess_tokens: tokio::sync::Mutex<HashMap<String, LivelinessToken>>,
+    pub node_token: tokio::sync::Mutex<Option<LivelinessToken>>,
+    pub sup: sup::Supervisor,
+    pub drops: Drops,
+    pub admission: Mutex<(u64, u32)>,
+    pub probes: Probes,
+    pub shutting: AtomicBool,
+    pub shutdown: Notify,
 }
 
-async fn dispatch(hub: Arc<Hub>, q: QueryIn) {
-    let reply: Vec<u8> = match q.what.as_str() {
-        "call" => match serde_json::from_slice::<RemoteCall>(&q.body) {
-            Ok(rc) => {
-                let r = match hub.sup.sfu_client(rc.inst.as_deref()).await {
-                    Some(mut c) => common::handle::call(&mut c, &rc.call).await,
-                    None => oxsig::envelope::Reply::fail(Code::SfuUnavailable),
-                };
-                r.encode()
+pub type HubRef = Arc<Hub>;
+
+impl Hub {
+    pub fn new(cfg: HubCfg) -> HubRef {
+        let epoch = common::build::new_epoch();
+        let ks = KeySpace::new(&cfg.system.zenoh.namespace);
+        let me = cfg.node_id.clone();
+        let sup = sup::Supervisor::new(&cfg);
+        Arc::new(Hub {
+            epoch,
+            ks,
+            bus: OnceCell::new(),
+            sessions: Mutex::new(SessionTable::default()),
+            socks: Mutex::new(HashMap::new()),
+            next_sock: AtomicU64::new(1),
+            rooms: Mutex::new(RoomMap::new(&me)),
+            cands: Mutex::new(Candidates::new(&me)),
+            interest: Mutex::new(Interest::default()),
+            joining: Mutex::new(HashMap::new()),
+            room_subs: tokio::sync::Mutex::new(HashMap::new()),
+            user_subs: tokio::sync::Mutex::new(HashMap::new()),
+            sess_tokens: tokio::sync::Mutex::new(HashMap::new()),
+            node_token: tokio::sync::Mutex::new(None),
+            sup,
+            drops: Drops::default(),
+            admission: Mutex::new((0, 0)),
+            probes: Probes::default(),
+            shutting: AtomicBool::new(false),
+            shutdown: Notify::new(),
+            cfg,
+        })
+    }
+
+    pub fn me(&self) -> &str {
+        &self.cfg.node_id
+    }
+
+    pub fn bus(&self) -> Option<Arc<Bus>> {
+        self.bus.get().cloned()
+    }
+
+    pub fn grace_ms(&self) -> u64 {
+        self.cfg.system.supervisor.node_grace_secs * 1000
+    }
+
+    pub fn node_live(&self, node: &str) -> bool {
+        if node == self.me() {
+            return self.sup.node_declared();
+        }
+        self.cands.lock().map(|c| c.live(node)).unwrap_or(false)
+    }
+
+    pub fn sock(&self, id: u64) -> Option<SockTx> {
+        self.socks.lock().ok().and_then(|s| s.get(&id).cloned())
+    }
+
+    pub fn push_frame(&self, sock: u64, op: u16, body: &serde_json::Value) {
+        let Some(tx) = self.sock(sock) else {
+            self.drops.notice_no_socket.fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        let lane = Op::from_u16(op).map(|o| o.lane()).unwrap_or(oxsig::op::Lane::Session);
+        let bytes = oxsig::frame::to_body(body);
+        let r = tx.q.lock().map(|mut q| q.push(lane, op, bytes)).unwrap_or(Push::Overflow);
+        match r {
+            Push::Queued => tx.wake.notify_one(),
+            Push::Overflow => {
+                let _ = tx.out.send(Out::Leave(Code::FLOW_OVERFLOW));
             }
-            Err(e) => oxsig::envelope::Reply::failure(Code::InvalidPayload.failure_msg(e.to_string())).encode(),
-        },
-        "hub" => match serde_json::from_slice::<HubQ>(&q.body) {
-            Ok(HubQ::Sess { sid }) => serde_json::to_vec(&bind::hand_out(&hub, &sid).await).unwrap_or_default(),
-            Ok(HubQ::Evict { user }) => {
-                if let Some(s) = hub.ses.of_user(&user) {
-                    sess::destroy(&hub, &s, crate::ses::Gone::Evicted, Some(Code::DuplicateSession)).await;
+        }
+    }
+
+    pub fn send_leave(&self, sock: u64, code: Code) {
+        if let Some(tx) = self.sock(sock) {
+            let _ = tx.out.send(Out::Leave(code));
+        }
+    }
+
+    pub fn deliver_room(&self, room: &str, n: &Notice) {
+        let mut targets: Vec<(String, Option<u64>, String)> = Vec::new();
+        if let Ok(t) = self.sessions.lock() {
+            for s in t.all() {
+                let member = s.data.servers.values().any(|r| r.rooms.contains(room));
+                let joining = self.joining.lock().map(|j| j.get(&s.data.sid).is_some_and(|x| x.contains(room))).unwrap_or(false);
+                if member || joining {
+                    targets.push((s.data.sid.clone(), s.sock, s.data.user_id.clone()));
                 }
-                b"{}".to_vec()
             }
-            Ok(HubQ::Cut { user }) => serde_json::to_vec(&admin::local_cut(&hub, &user).await).unwrap_or_default(),
-            Ok(HubQ::Probe { user }) => serde_json::to_vec(&admin::local_probe(&hub, &user).await).unwrap_or_default(),
-            Ok(HubQ::Users) => serde_json::to_vec(&admin::local_users(&hub).await).unwrap_or_default(),
-            Ok(HubQ::Bus) => serde_json::to_vec(&admin::bus_body(&hub).await).unwrap_or_default(),
-            Ok(HubQ::Drops) => serde_json::to_vec(&admin::hub_drops(&hub).await).unwrap_or_default(),
-            Err(_) => b"null".to_vec(),
-        },
-        _ => b"null".to_vec(),
-    };
-    let key = q.query.key_expr().clone();
-    if let Err(e) = q.query.reply(key, reply).await {
-        tracing::warn!("query reply: {e}");
+        }
+        for (_, sock, user) in targets {
+            if n.exclude.contains(&user) {
+                continue;
+            }
+            match sock {
+                Some(k) => self.push_frame(k, n.op, &n.body),
+                None => {
+                    self.drops.notice_no_socket.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
     }
-}
 
-async fn serve(hub: Arc<Hub>, app: Router) -> Result<(), String> {
-    let listener = tokio::net::TcpListener::bind(&hub.cfg.listen).await.map_err(|e| format!("listen {}: {e}", hub.cfg.listen))?;
-    match hub.cfg.sys.hub.tls.clone() {
-        None => {
+    pub fn deliver_user(self: &Arc<Self>, user: &str, n: &Notice) {
+        if n.exclude.iter().any(|u| u == user) {
+            return;
+        }
+        let target = self.sessions.lock().ok().and_then(|t| t.of_user(user).map(|s| (s.data.sid.clone(), s.sock)));
+        let Some((sid, sock)) = target else { return };
+        if n.op == Op::RoomEvent.code()
+            && n.body.get("type").and_then(|v| v.as_str()) == Some("affiliation")
+            && let (Some(sfu), Some(sub)) = (n.sfu_id.clone(), n.body.pointer("/affiliation/sub_rooms").and_then(|v| v.as_array()))
+        {
+            let rooms: BTreeSet<String> = sub.iter().filter_map(|v| v.as_str().map(str::to_string)).collect();
+            let node = self.node_of_sfu(&sfu).unwrap_or_else(|| self.me().to_string());
+            self.set_server_rooms(&sid, &sfu, &node, rooms);
+        }
+        match sock {
+            Some(k) => self.push_frame(k, n.op, &n.body),
+            None => {
+                self.drops.notice_no_socket.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub fn node_of_sfu(&self, sfu_id: &str) -> Option<String> {
+        if self.sup.unit_by_epoch(sfu_id).is_some() {
+            return Some(self.me().to_string());
+        }
+        self.rooms.lock().ok().and_then(|r| r.node_of_inst(sfu_id))
+    }
+
+    pub fn set_server_rooms(self: &Arc<Self>, sid: &str, sfu_id: &str, node: &str, rooms: BTreeSet<String>) {
+        let (before, after) = {
+            let Ok(mut t) = self.sessions.lock() else { return };
+            let Some(s) = t.get_mut(sid) else { return };
+            let before = s.data.all_rooms();
+            s.data.set_server_rooms(sfu_id, node, rooms);
+            (before, s.data.all_rooms())
+        };
+        let added: Vec<String> = after.difference(&before).cloned().collect();
+        let removed: Vec<String> = before.difference(&after).cloned().collect();
+        let mut first = Vec::new();
+        let mut last = Vec::new();
+        if let Ok(mut i) = self.interest.lock() {
+            for r in &added {
+                if i.inc(r) {
+                    first.push(r.clone());
+                }
+            }
+            for r in &removed {
+                if i.dec(r) {
+                    last.push(r.clone());
+                }
+            }
+        }
+        if !first.is_empty() || !last.is_empty() {
+            let me = self.clone();
             tokio::spawn(async move {
-                let _ = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await;
+                for r in first {
+                    me.declare_room_interest(&r).await;
+                }
+                for r in last {
+                    me.drop_room_interest(&r).await;
+                }
             });
         }
-        Some(tls) => {
-            let acceptor = tls_acceptor(&tls.cert, &tls.key)?;
-            tokio::spawn(async move {
-                loop {
-                    let Ok((tcp, peer)) = listener.accept().await else {
-                        continue;
-                    };
-                    let acc = acceptor.clone();
-                    let svc = app.clone().layer(axum::Extension(axum::extract::ConnectInfo(peer)));
-                    tokio::spawn(async move {
-                        let Ok(stream) = acc.accept(tcp).await else {
-                            return;
-                        };
-                        let hs = hyper_util::service::TowerToHyperService::new(svc);
-                        let _ = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
-                            .serve_connection_with_upgrades(hyper_util::rt::TokioIo::new(stream), hs)
-                            .await;
-                    });
-                }
-            });
+    }
+
+    pub async fn interest_inc(self: &Arc<Self>, room: &str) {
+        let first = self.interest.lock().map(|mut i| i.inc(room)).unwrap_or(false);
+        if first {
+            self.declare_room_interest(room).await;
         }
     }
-    Ok(())
+
+    pub async fn interest_dec(self: &Arc<Self>, room: &str) {
+        let last = self.interest.lock().map(|mut i| i.dec(room)).unwrap_or(false);
+        if last {
+            self.drop_room_interest(room).await;
+        }
+    }
+
+    pub async fn declare_room_interest(self: &Arc<Self>, room: &str) {
+        let Some(bus) = self.bus() else { return };
+        if self.room_subs.lock().await.contains_key(room) {
+            return;
+        }
+        let key = self.ks.ev_room(room);
+        let Ok(sub) = bus.subscribe(&key).await else { return };
+        let me = self.clone();
+        let r = room.to_string();
+        let h = tokio::spawn(async move {
+            while let Ok(s) = sub.recv_async().await {
+                match Notice::decode(&s.payload().to_bytes()) {
+                    Ok(n) => me.deliver_room(&r, &n),
+                    Err(_) => {
+                        me.drops.bus_ev_drop.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+        });
+        let mut subs = self.room_subs.lock().await;
+        if let Some(old) = subs.insert(room.to_string(), h) {
+            old.abort();
+        }
+    }
+
+    pub async fn drop_room_interest(&self, room: &str) {
+        let still = self.interest.lock().map(|i| i.held(room)).unwrap_or(false);
+        if still {
+            return;
+        }
+        if let Some(h) = self.room_subs.lock().await.remove(room) {
+            h.abort();
+        }
+    }
+
+    pub async fn user_interest(self: &Arc<Self>, user: &str) {
+        let Some(bus) = self.bus() else { return };
+        let mut subs = self.user_subs.lock().await;
+        if let Some(e) = subs.get_mut(user) {
+            e.0 += 1;
+            return;
+        }
+        let Ok(sub) = bus.subscribe(&self.ks.ev_user(user)).await else { return };
+        let me = self.clone();
+        let u = user.to_string();
+        let h = tokio::spawn(async move {
+            while let Ok(s) = sub.recv_async().await {
+                match Notice::decode(&s.payload().to_bytes()) {
+                    Ok(n) => me.deliver_user(&u, &n),
+                    Err(_) => {
+                        me.drops.bus_ev_drop.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+        });
+        subs.insert(user.to_string(), (1, h));
+    }
+
+    pub async fn user_interest_drop(&self, user: &str) {
+        let mut subs = self.user_subs.lock().await;
+        let gone = match subs.get_mut(user) {
+            Some(e) if e.0 > 1 => {
+                e.0 -= 1;
+                false
+            }
+            Some(_) => true,
+            None => false,
+        };
+        if gone && let Some((_, h)) = subs.remove(user) {
+            h.abort();
+        }
+    }
+
+    pub async fn discard_session(self: &Arc<Self>, sid: &str, code: Code) {
+        let s = self.sessions.lock().ok().and_then(|mut t| t.remove(sid));
+        let Some(s) = s else { return };
+        if let Some(sock) = s.sock
+            && matches!(code, Code::SESSION_REVOKED | Code::DUPLICATE_SESSION | Code::SERVER_SHUTDOWN)
+        {
+            self.send_leave(sock, code);
+        }
+        for r in s.data.all_rooms() {
+            self.interest_dec(&r).await;
+        }
+        if let Ok(mut j) = self.joining.lock() {
+            j.remove(sid);
+        }
+        self.sess_tokens.lock().await.remove(sid);
+        self.user_interest_drop(&s.data.user_id).await;
+        let fp = s.data.fingerprint();
+        let mut targets: BTreeMap<String, String> = BTreeMap::new();
+        for (sfu, r) in &s.data.servers {
+            targets.insert(sfu.clone(), r.node.clone());
+        }
+        for (sfu, node) in targets {
+            let call = Call::SessionGone { user_id: s.data.user_id.clone(), session: fp.clone(), code: code.0 };
+            let _ = route::call(self, &route::Target { node, inst: Some(sfu) }, &call).await;
+        }
+        let spec = match code {
+            Code::SESSION_REVOKED => "CP-CODE-SESSION-REVOKED",
+            Code::DUPLICATE_SESSION => "CP-CODE-DUPLICATE-SESSION",
+            Code::SERVER_SHUTDOWN => "CP-CODE-SERVER-SHUTDOWN",
+            Code(0) => "SES.S.TWindow",
+            _ => "CP-OP-LEAVE",
+        };
+        common::ev!(spec = spec, session = %fp, user = %s.data.user_id, code = code.0, "세션 폐기");
+    }
+
+    pub fn admit_join(&self, now_ms: u64) -> Result<(), u64> {
+        let cap = self.cfg.policy.hub.join_admit_per_sec;
+        if cap == 0 {
+            return Ok(());
+        }
+        let sec = now_ms / 1000;
+        let Ok(mut a) = self.admission.lock() else { return Ok(()) };
+        if a.0 != sec {
+            a.0 = sec;
+            a.1 = 0;
+        }
+        if a.1 >= cap {
+            let base = u64::from(self.cfg.policy.hub.join_retry_after_ms);
+            let mut b = [0u8; 8];
+            let _ = getrandom::fill(&mut b);
+            return Err(base + u64::from_le_bytes(b) % base.max(1));
+        }
+        a.1 += 1;
+        Ok(())
+    }
 }
 
-fn tls_acceptor(cert: &str, key: &str) -> Result<tokio_rustls::TlsAcceptor, String> {
-    let mut cr = std::io::BufReader::new(std::fs::File::open(cert).map_err(|e| format!("tls cert {cert}: {e}"))?);
-    let certs: Vec<_> = rustls_pemfile::certs(&mut cr).filter_map(Result::ok).collect();
-    let mut kr = std::io::BufReader::new(std::fs::File::open(key).map_err(|e| format!("tls key {key}: {e}"))?);
-    let k = rustls_pemfile::private_key(&mut kr).map_err(|e| format!("tls key {key}: {e}"))?.ok_or_else(|| format!("tls key {key}: 없음"))?;
-    let sc = tokio_rustls::rustls::ServerConfig::builder().with_no_client_auth().with_single_cert(certs, k).map_err(|e| format!("tls: {e}"))?;
-    Ok(tokio_rustls::TlsAcceptor::from(Arc::new(sc)))
+pub fn now_ms() -> u64 {
+    common::time::mono_ms()
 }
 
-pub async fn run(cfg: Config) -> Result<(), String> {
-    let inst = common::id::instance();
-    let sink = match (&cfg.log_socket, &cfg.log_dir) {
-        (Some(s), Some(d)) => {
-            Sink::Socket { path: s.into(), spool: common::log::spool_path(d, &cfg.node_id, "hub"), spool_max: cfg.policy.logging.spool_max_bytes }
-        }
-        (Some(s), None) => {
-            Sink::Socket { path: s.into(), spool: common::log::spool_path("/tmp", &cfg.node_id, "hub"), spool_max: cfg.policy.logging.spool_max_bytes }
-        }
-        _ => Sink::Stdout,
-    };
-    let log = common::log::init(LogOpts {
-        node: cfg.node_id.clone(),
-        proc_: "hub",
-        level: common::log::env_level(cfg.policy.logging.level),
-        line_max: cfg.policy.logging.line_max_bytes as usize,
-        queue_max: cfg.policy.logging.queue_max_lines as usize,
-        sink,
-    });
-    common::ev!(spec = "SV-STATE-UNIT-STATE", build = cfg.build.as_str(), "{} inst={inst} level={}", cfg.banner(), common::log::level_name(log.level()));
-    let shutdown = SHUTDOWN.get_or_init(|| Arc::new(Notify::new())).clone();
-    let sup = Supervisor::new(&cfg, &inst);
-    sup.start_role(Some(UnitRole::Log)).await;
-    let grace = Duration::from_secs(cfg.sys.supervisor.node_grace_secs);
-    let opened = Bus::open(&cfg.sys.zenoh, &cfg.node_id, &inst, grace).await?;
-    sup.zenoh_running().await;
-    sup.set_bus(opened.bus.clone());
-    let hub = Arc::new(Hub {
-        cfg: cfg.clone(),
-        inst: inst.clone(),
-        log,
-        bus: opened.bus.clone(),
-        ses: Default::default(),
-        sup: sup.clone(),
-        aux: Default::default(),
-        codes: Mutex::new(Default::default()),
-        shutting_down: Default::default(),
-        joins: Mutex::new((0, 0)),
-        ev_lost: Default::default(),
-    });
-    let mut events = opened.events;
+pub async fn begin_shutdown(hub: &HubRef, why: &str) {
+    if hub.shutting.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    tracing::warn!(why, "종료 시작");
+    let socks: Vec<u64> = hub.socks.lock().map(|s| s.keys().copied().collect()).unwrap_or_default();
+    for s in socks {
+        hub.send_leave(s, Code::SERVER_SHUTDOWN);
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(common::bus::SHUTDOWN_LEAVE_WAIT_MS)).await;
+    sup::stop_all(hub, false).await;
+    hub.node_token.lock().await.take();
+    hub.sess_tokens.lock().await.clear();
+    if let Some(b) = hub.bus() {
+        let _ = b.z.close().await;
+    }
+    sup::stop_all(hub, true).await;
+    hub.shutdown.notify_waiters();
+    hub.shutdown.notify_one();
+}
+
+pub async fn run(hub: HubRef) -> Result<(), String> {
+    sup::start_all(&hub);
+    let h = hub.clone();
+    let server = tokio::spawn(async move { http::serve(h).await });
     let h = hub.clone();
     tokio::spawn(async move {
-        while let Some(e) = events.recv().await {
-            sess::deliver(&h, e).await;
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+        let int = tokio::signal::ctrl_c();
+        tokio::select! {
+            _ = async { match term.as_mut() { Some(t) => { t.recv().await; } None => std::future::pending::<()>().await } } => {}
+            _ = int => {}
         }
+        begin_shutdown(&h, "signal").await;
     });
-    let mut queries = opened.queries;
-    let h = hub.clone();
-    tokio::spawn(async move {
-        while let Some(q) = queries.recv().await {
-            tokio::spawn(dispatch(h.clone(), q));
-        }
-    });
-    tokio::spawn(sess::sweep(hub.clone()));
-    sup.start_role(Some(UnitRole::Sfu)).await;
-    let base = cfg.sys.hub.base_path.trim_end_matches('/').to_string();
-    let app = Router::new().merge(rooms::routes(&base)).route(&format!("{base}/ws"), get(ws)).merge(admin::routes(hub.clone())).with_state(hub.clone());
-    serve(hub.clone(), app).await?;
-    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map_err(|e| e.to_string())?;
     tokio::select! {
-        _ = term.recv() => {}
-        _ = tokio::signal::ctrl_c() => {}
-        _ = shutdown.notified() => {}
-        _ = sup.zenoh_down_wait() => {
-            common::ev!(spec = "SV-STATE-UNIT-STATE", "zenoh unit down — the whole node goes down");
+        r = server => {
+            if let Ok(Err(e)) = r {
+                return Err(e);
+            }
         }
+        _ = hub.shutdown.notified() => {}
     }
-    hub.shutting_down.store(true, Ordering::Relaxed);
-    common::ev!(spec = "CP-CODE-SERVER-SHUTDOWN", "shutdown ① clients LEAVE 5004");
-    for s in hub.ses.all() {
-        s.send(crate::ses::Out::Leave(Code::ServerShutdown)).await;
-    }
-    tokio::time::sleep(common::bus::LEAVE_FLUSH).await;
-    for s in hub.ses.all() {
-        sess::destroy(&hub, &s, crate::ses::Gone::Shutdown, None).await;
-    }
-    common::ev!(spec = "SV-STATE-UNIT-STATE", "shutdown ② units");
-    sup.shutdown_units().await;
-    hub.bus.close().await;
-    common::ev!(spec = "SV-STATE-UNIT-STATE", "shutdown ③ hub — logger last");
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    sup.stop_logger().await;
     Ok(())
 }
