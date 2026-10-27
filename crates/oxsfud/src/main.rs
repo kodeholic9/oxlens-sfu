@@ -35,7 +35,7 @@ fn main() {
     let code = rt.block_on(async move {
         let epoch = common::build::new_epoch();
         let sink = common::log::sink_for("sfu", &cfg.node_id, cfg.log_dir.as_deref(), cfg.log_socket.as_deref(), &cfg.policy.logging);
-        common::log::init(common::log::Init { node: cfg.node_id.clone(), proc_: "sfu", epoch: None, logging: cfg.policy.logging.clone(), sink });
+        common::log::init(common::log::Init { node: cfg.node_id.clone(), proc_: "sfu", epoch: Some(epoch.clone()), logging: cfg.policy.logging.clone(), sink });
         match oxsfud::ops::run(cfg, epoch).await {
             Ok(()) => 0,
             Err(e) => {

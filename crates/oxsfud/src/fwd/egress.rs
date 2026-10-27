@@ -108,7 +108,9 @@ pub fn retransmit(t: &Arc<Transport>, dl: &Arc<Downlink>, out_seq: u16, now_ms: 
     let (block, twcc) = ext_for(dl, t, None);
     let rseq = dl.rtx_seq.fetch_add(1, Ordering::Relaxed);
     let pkt = rtp::rtx_wrap(&r, dl.rtx_ssrc, rseq, r.ts.wrapping_add(ts_off), rtx_pt, out_seq, &block);
-    send(dl, t, &pkt, twcc);
+    if send(dl, t, &pkt, twcc) {
+        dl.rtx_sent.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 pub fn forward_pli(dl: &Arc<Downlink>, now_ms: u64, infra: bool) {

@@ -79,6 +79,8 @@ pub struct Uplink {
     pub pt_checked: AtomicBool,
     pub last_pli_ms: AtomicU64,
     pub first_rtp_ms: AtomicU64,
+    pub nacks_sent: AtomicU64,
+    pub plis_sent: AtomicU64,
 }
 
 impl Uplink {
@@ -97,6 +99,8 @@ impl Uplink {
             pt_checked: AtomicBool::new(false),
             last_pli_ms: AtomicU64::new(0),
             first_rtp_ms: AtomicU64::new(0),
+            nacks_sent: AtomicU64::new(0),
+            plis_sent: AtomicU64::new(0),
         }
     }
 }

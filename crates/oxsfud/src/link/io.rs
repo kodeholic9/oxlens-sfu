@@ -229,6 +229,7 @@ impl Io {
         let alive_now = t.pairs.lock().map(|p| p.path_alive(now_ms)).unwrap_or(false);
         if msg.use_candidate() && alive_now && t.state() == PeerState::Suspect {
             let since = t.suspect_since.swap(0, Ordering::AcqRel);
+            t.alive_since.store(now_ms, Ordering::Release);
             t.swap_state(PeerState::Alive);
             let _ = self.signals.send(LinkSignal::Alive(t.clone(), now_ms.saturating_sub(since)));
         }

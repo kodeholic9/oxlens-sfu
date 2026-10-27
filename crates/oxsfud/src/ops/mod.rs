@@ -162,17 +162,25 @@ fn stat_lines(sfu: &Sfu) {
     for p in st.peers.values() {
         for s in p.streams.values() {
             for u in s.uplinks.load().iter().filter(|u| !u.rtx) {
-                let (pk, by, lost, jit) = u.ingress.lock().map(|i| (i.packets, i.bytes, i.stats.received(), i.stats.jitter())).unwrap_or_default();
-                common::stat!(user = %p.user, track = &*s.track_id, ssrc = u.ssrc, dir = "rx", pkts = pk, bytes = by, received = lost, jitter = jit);
+                let (pk, by, lost, jit) = u.ingress.lock().map(|i| (i.packets, i.bytes, i.stats.lost(), i.stats.jitter_secs())).unwrap_or((0, 0, 0, 0.0));
+                let nack = u.nacks_sent.load(Ordering::Relaxed);
+                let pli = u.plis_sent.load(Ordering::Relaxed);
+                match u.layer {
+                    Some(l) => common::stat!(user = %p.user, track = &*s.track_id, ssrc = u.ssrc, packets_received = pk, packets_lost = lost, jitter = jit, bytes_received = by, nack_count = nack, pli_count = pli, rid = if l == 0 { "l" } else { "h" }),
+                    None => common::stat!(user = %p.user, track = &*s.track_id, ssrc = u.ssrc, packets_received = pk, packets_lost = lost, jitter = jit, bytes_received = by, nack_count = nack, pli_count = pli),
+                }
             }
         }
-        let (mut pk, mut by) = (0u64, 0u64);
+        let (mut pk, mut by, mut rtx, mut nack, mut pli) = (0u64, 0u64, 0u64, 0u64, 0u64);
         for r in p.table.rows() {
             pk += r.dl.egress_pkts.load(Ordering::Relaxed);
             by += r.dl.egress_bytes.load(Ordering::Relaxed);
+            rtx += r.dl.rtx_sent.load(Ordering::Relaxed);
+            nack += r.dl.nacks_recv.load(Ordering::Relaxed);
+            pli += r.dl.plis_recv.load(Ordering::Relaxed);
         }
         if !p.table.rows().is_empty() {
-            common::stat!(user = %p.user, arev = p.table.arev, dir = "tx", pkts = pk, bytes = by, rows = p.table.rows().len());
+            common::stat!(user = %p.user, packets_sent = pk, bytes_sent = by, retransmitted_packets_sent = rtx, nack_count = nack, pli_count = pli);
         }
     }
 }

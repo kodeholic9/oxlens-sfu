@@ -97,6 +97,7 @@ pub fn on_rtcp(t: &Arc<Transport>, plain: &[u8], now_ms: u64) {
                         ing.nacks.pop_front();
                     }
                 }
+                d.nacks_recv.fetch_add(seqs.len() as u64, Ordering::Relaxed);
                 if d.kind == Kind::Audio {
                     for _ in &seqs {
                         bump(&DROPS.nack_audio);
@@ -108,7 +109,10 @@ pub fn on_rtcp(t: &Arc<Transport>, plain: &[u8], now_ms: u64) {
                 }
             }
             Packet::Pli { media } => match find_downlink(t, media) {
-                Some(d) => crate::fwd::egress::forward_pli(&d, now_ms, false),
+                Some(d) => {
+                    d.plis_recv.fetch_add(1, Ordering::Relaxed);
+                    crate::fwd::egress::forward_pli(&d, now_ms, false);
+                }
                 None => bump(&DROPS.rtcp_unresolved),
             },
             Packet::Fir { media } => {
@@ -203,6 +207,7 @@ pub fn send_nacks(t: &Transport, now_ms: u64) {
         }
         let due = u.nack.lock().map(|mut n| n.due(now_ms)).unwrap_or_default();
         if !due.is_empty() {
+            u.nacks_sent.fetch_add(due.len() as u64, Ordering::Relaxed);
             t.send_rtcp(&pkt::nack(u.ssrc, &due));
         }
     }
@@ -216,6 +221,7 @@ pub fn request_keyframe(u: &crate::r#pub::Uplink, now_ms: u64, infra: bool) -> b
         return false;
     }
     u.last_pli_ms.store(now_ms.max(1), Ordering::Release);
+    u.plis_sent.fetch_add(1, Ordering::Relaxed);
     let Some(s) = u.stream.upgrade() else { return false };
     let Some(t) = s.transport.upgrade() else { return false };
     t.send_rtcp(&pkt::pli(u.ssrc))

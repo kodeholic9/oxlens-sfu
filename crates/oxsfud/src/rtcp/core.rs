@@ -124,6 +124,17 @@ impl RecvStats {
         self.received
     }
 
+    pub fn lost(&self) -> i64 {
+        if !self.started() {
+            return 0;
+        }
+        i64::from(self.extended_max()) - i64::from(self.base_seq) + 1 - i64::from(self.received)
+    }
+
+    pub fn jitter_secs(&self) -> f64 {
+        self.jitter / f64::from(self.clock.max(1))
+    }
+
     pub fn started(&self) -> bool {
         self.started && self.probation == 0
     }

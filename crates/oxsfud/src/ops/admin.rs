@@ -51,7 +51,7 @@ fn links(sfu: &Sfu, user: &str) -> Reply {
             let state = t.state();
             let since = match state {
                 crate::link::PeerState::Suspect => t.suspect_since.load(Ordering::Acquire),
-                crate::link::PeerState::Alive => t.created_ms,
+                crate::link::PeerState::Alive => t.alive_since.load(Ordering::Acquire),
             };
             json!({"sfu_id": sfu.epoch, "ufrag": t.ufrag(), "state": state.as_str(), "since": wall_of(since), "role": t.role.as_str()})
         })

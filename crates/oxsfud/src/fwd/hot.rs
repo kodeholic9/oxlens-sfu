@@ -59,6 +59,9 @@ pub struct Downlink {
     pub stall_from: AtomicU64,
     pub stall_pkts: AtomicU64,
     pub carry_at_ms: AtomicU64,
+    pub rtx_sent: AtomicU64,
+    pub nacks_recv: AtomicU64,
+    pub plis_recv: AtomicU64,
 }
 
 pub const LAYER_NONE: u8 = 255;
@@ -96,6 +99,9 @@ impl Downlink {
             stall_from: AtomicU64::new(0),
             stall_pkts: AtomicU64::new(0),
             carry_at_ms: AtomicU64::new(0),
+            rtx_sent: AtomicU64::new(0),
+            nacks_recv: AtomicU64::new(0),
+            plis_recv: AtomicU64::new(0),
         }
     }
 
