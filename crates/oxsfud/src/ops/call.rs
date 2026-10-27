@@ -90,7 +90,8 @@ fn op_call(sfu: &Arc<Sfu>, ctx: &SessionCtx, op: u16, body: &Value, exec: &mut E
         _ => Err(fail(Code::UNKNOWN_OP)),
     };
     if let Err(f) = &r {
-        common::ev!(spec = "CP-CODE", area = "OPS", user = %ctx.user_id, op = o.name(), code = f.code, "실패 응답");
+        let spec = format!("CP-CODE-{}", Code(f.code).name().replace('_', "-"));
+        common::ev!(spec = %spec, area = "OPS", user = %ctx.user_id, op = o.name(), code = f.code, "실패 응답");
     }
     r
 }
@@ -217,9 +218,37 @@ pub fn apply_changes(st: &mut State, user: &str, changes: &[Change]) -> bool {
     changed
 }
 
+fn pub_reg(st: &State, user: &str) -> &'static str {
+    if st.peers.get(user).is_some_and(|p| !p.streams.is_empty()) { "registered" } else { "-" }
+}
+
+fn refresh_audio_ranks(st: &mut State, user: &str) {
+    let Some(p) = st.peers.get(user) else { return };
+    let keys: Vec<(String, String)> = p
+        .table
+        .rows()
+        .iter()
+        .filter(|r| r.kind == Kind::Audio && r.class == Class::Full)
+        .filter_map(|r| r.track.clone())
+        .chain(p.table.waiting().iter().filter(|w| w.kind == Kind::Audio && w.class == Class::Full).map(|w| (w.track_id.clone(), w.room.clone())))
+        .collect();
+    let ranks: Vec<(String, String, u64)> = keys.into_iter().map(|(t, r)| {
+        let rank = rank_of(st, user, &t, Kind::Audio);
+        (t, r, rank)
+    }).collect();
+    if let Some(p) = st.peers.get_mut(user) {
+        for (t, r, rank) in ranks {
+            p.table.set_rank(&t, &r, rank);
+        }
+    }
+}
+
 pub fn rows_on(st: &mut State, user: &str, wants: Vec<Want>) -> Result<bool, Code> {
     let mut all = Vec::new();
     for w in wants {
+        if w.kind == Kind::Audio && w.class == Class::Full {
+            refresh_audio_ranks(st, user);
+        }
         let Some(p) = st.peers.get_mut(user) else { return Ok(false) };
         let ch = p.table.on(w, &make_dl(p))?;
         all.extend(ch);
@@ -228,6 +257,7 @@ pub fn rows_on(st: &mut State, user: &str, wants: Vec<Want>) -> Result<bool, Cod
 }
 
 pub fn rows_off(st: &mut State, user: &str, track_id: &str, room: &str) -> bool {
+    refresh_audio_ranks(st, user);
     let Some(p) = st.peers.get_mut(user) else { return false };
     let ch = p.table.off(track_id, room);
     apply_changes(st, user, &ch)
@@ -297,7 +327,7 @@ fn join(sfu: &Arc<Sfu>, ctx: &SessionCtx, body: &Value, exec: &mut Exec) -> Res 
     let mut guard = sfu.state.lock().map_err(|_| fail(Code::INTERNAL_ERROR))?;
     let st = &mut *guard;
     if !st.rooms.contains_key(&room_id) {
-        common::ev!(spec = "ROOM.S.join_3001", area = "ROOM", key = %room_id, cause = "ROOM_JOIN", impossible = 1, user = %user);
+        common::ev!(spec = "ROOM.S.join_3001", area = "ROOM", key = %room_id, from = "-", to = "-", cause = "ROOM_JOIN", user = %user);
         return Err(fail(Code::ROOM_NOT_FOUND));
     }
     let mut again = false;
@@ -311,7 +341,7 @@ fn join(sfu: &Arc<Sfu>, ctx: &SessionCtx, body: &Value, exec: &mut Exec) -> Res 
     let hidden = ctx.hidden;
     let full = st.rooms.get(&room_id).is_some_and(|r| r.full_for(hidden));
     if !again && full {
-        common::ev!(spec = "ROOM.S.join_4001", area = "ROOM", key = %room_id, cause = "ROOM_JOIN", impossible = 1, user = %user);
+        common::ev!(spec = "ROOM.S.join_4001", area = "ROOM", key = %room_id, from = "-", to = "-", cause = "ROOM_JOIN", user = %user);
         return Err(fail(Code::ROOM_FULL));
     }
     let created = !st.peers.contains_key(&user);
@@ -527,7 +557,7 @@ fn leave(sfu: &Arc<Sfu>, ctx: &SessionCtx, body: &Value, exec: &mut Exec) -> Res
     let st = &mut *guard;
     let member = st.peers.get(&ctx.user_id).is_some_and(|p| p.rooms.contains(&req.room_id));
     if !member {
-        common::ev!(spec = "ROOM.S.leave_3002", area = "ROOM", key = %req.room_id, cause = "ROOM_LEAVE", impossible = 1, user = %ctx.user_id);
+        common::ev!(spec = "ROOM.S.leave_3002", area = "ROOM", key = %req.room_id, from = "-", to = "-", cause = "ROOM_LEAVE", user = %ctx.user_id);
         return Err(fail(Code::NOT_IN_ROOM));
     }
     let label = if ctx.hidden { "ROOM.S.leave_hidden" } else { "ROOM.S.leave" };
@@ -537,7 +567,7 @@ fn leave(sfu: &Arc<Sfu>, ctx: &SessionCtx, body: &Value, exec: &mut Exec) -> Res
 }
 
 fn publish(sfu: &Arc<Sfu>, ctx: &SessionCtx, body: &Value, exec: &mut Exec) -> Res {
-    let req: PublishTracksReq = parse(body)?;
+    let req: crate::r#pub::PublishIn = parse(body)?;
     let user = ctx.user_id.clone();
     let now = now_ms();
     let mut guard = sfu.state.lock().map_err(|_| fail(Code::INTERNAL_ERROR))?;
@@ -547,10 +577,11 @@ fn publish(sfu: &Arc<Sfu>, ctx: &SessionCtx, body: &Value, exec: &mut Exec) -> R
         return Err(fail(Code::NOT_IN_ROOM));
     }
     match req {
-        PublishTracksReq::Remove { track_ids, .. } => {
+        crate::r#pub::PublishIn::Remove { track_ids, .. } => {
             let own = st.peers.get(&user).is_some_and(|p| track_ids.iter().all(|t| p.streams.contains_key(t)));
             if !own || track_ids.is_empty() {
-                common::ev!(spec = "PUB.S.remove_3005", area = "PUB", key = %user, cause = "PUBLISH_TRACKS", impossible = 1, user = %user);
+                let reg = pub_reg(st, &user);
+                common::ev!(spec = "PUB.S.remove_3005", area = "PUB", key = %user, from = reg, to = reg, cause = "PUBLISH_TRACKS", user = %user);
                 return Err(fail(Code::TRACK_NOT_FOUND));
             }
             for t in &track_ids {
@@ -559,17 +590,15 @@ fn publish(sfu: &Arc<Sfu>, ctx: &SessionCtx, body: &Value, exec: &mut Exec) -> R
             common::ev!(spec = "PUB.S.remove", area = "PUB", key = %user, from = "registered", to = "-", cause = "PUBLISH_TRACKS", user = %user, room = %room_id);
             Ok(to_val(&PublishTracksRes::Remove {}))
         }
-        PublishTracksReq::Add { tracks, twcc_extmap_id, rid_extmap_id, repair_rid_extmap_id, mid_extmap_id, audio_level_extmap_id, .. } => {
+        crate::r#pub::PublishIn::Add(add) => {
             let (perm, pub_room, active, downs, one, ra, rv) = {
                 let p = st.peers.get(&user).ok_or_else(|| fail(Code::INTERNAL_ERROR))?;
                 let r = st.rooms.get(&room_id).ok_or_else(|| fail(Code::ROOM_NOT_FOUND))?;
                 (r.permission_of(&user, p.ctx.permission), p.pub_room.clone(), p.active_tracks(), p.table.downlink_ssrcs(), p.pc == PcMode::V1pc, r.audio_codec.clone(), r.video_codec.clone())
             };
-            if tracks.iter().any(|t| t.simulcast.unwrap_or(false)) && (rid_extmap_id.is_none() || mid_extmap_id.is_none()) {
-                return Err(fail(Code::MISSING_FIELD));
-            }
+            let crate::r#pub::AddIn { twcc_extmap_id, rid_extmap_id, repair_rid_extmap_id, mid_extmap_id, audio_level_extmap_id, .. } = add;
             let actx = crate::r#pub::AddCtx { room: &room_id, pub_room: pub_room.as_deref(), perm, active, downlink_ssrcs: &downs, one_pc: one, room_audio: &ra, room_video: &rv };
-            let codecs = match crate::r#pub::check_add(&actx, &tracks) {
+            let (tracks, codecs) = match crate::r#pub::check_add_req(&actx, &add) {
                 Ok(c) => c,
                 Err(f) => {
                     let label = match f.code {
@@ -578,7 +607,8 @@ fn publish(sfu: &Arc<Sfu>, ctx: &SessionCtx, body: &Value, exec: &mut Exec) -> R
                         4002 => "PUB.S.add_4002",
                         _ => "PUB.S.add",
                     };
-                    common::ev!(spec = label, area = "PUB", key = %user, cause = "PUBLISH_TRACKS", impossible = 1, user = %user, code = f.code);
+                    let reg = pub_reg(st, &user);
+                    common::ev!(spec = label, area = "PUB", key = %user, from = reg, to = reg, cause = "PUBLISH_TRACKS", user = %user, code = f.code);
                     return Err(f);
                 }
             };
@@ -734,13 +764,13 @@ fn track_set(sfu: &Arc<Sfu>, ctx: &SessionCtx, body: &Value, exec: &mut Exec) ->
         _ => None,
     };
     let Some(s) = stream else {
-        common::ev!(spec = "PUB.S.set_3005", area = "PUB", key = %user, cause = "TRACK_SET", impossible = 1, user = %user);
+        common::ev!(spec = "PUB.S.set_3005", area = "PUB", key = %user, from = "-", to = "-", cause = "TRACK_SET", user = %user);
         return Err(fail(Code::TRACK_NOT_FOUND));
     };
     let ssrc = s.ssrc;
     if let Some(m) = req.muted {
         if s.duplex() == Duplex::Half {
-            common::ev!(spec = "PUB.S.mute_3006", area = "PUB", key = %user, cause = "TRACK_SET", impossible = 1, user = %user);
+            common::ev!(spec = "PUB.S.mute_3006", area = "PUB", key = %user, from = "registered", to = "registered", cause = "TRACK_SET", user = %user);
             return Err(fail(Code::TRACK_OP_UNSUPPORTED));
         }
         if s.muted.load(Ordering::Acquire) == m {
@@ -769,7 +799,7 @@ fn track_set(sfu: &Arc<Sfu>, ctx: &SessionCtx, body: &Value, exec: &mut Exec) ->
     }
     let pub_room = p.pub_room.clone();
     if d == Duplex::Full && pub_room.as_deref() != Some(req.room_id.as_str()) {
-        common::ev!(spec = "PUB.S.set_3011", area = "PUB", key = %user, cause = "TRACK_SET", impossible = 1, user = %user);
+        common::ev!(spec = "PUB.S.set_3011", area = "PUB", key = %user, from = "registered", to = "registered", cause = "TRACK_SET", user = %user);
         return Err(fail(Code::NOT_PUB_ROOM));
     }
     if s.duplex() == d {
@@ -920,7 +950,7 @@ fn ice_restart(sfu: &Arc<Sfu>, ctx: &SessionCtx, body: &Value) -> Res {
     }
     let guard = sfu.state.lock().map_err(|_| fail(Code::INTERNAL_ERROR))?;
     let Some(p) = guard.peers.get(&ctx.user_id) else {
-        common::ev!(spec = "LINK.S.restart_3010", area = "LINK", key = %ctx.user_id, cause = "ICE_RESTART", impossible = 1, user = %ctx.user_id);
+        common::ev!(spec = "LINK.S.restart_3010", area = "LINK", key = %ctx.user_id, from = "-", to = "-", cause = "ICE_RESTART", user = %ctx.user_id);
         return Err(fail(Code::PEER_NOT_FOUND));
     };
     let mut creds = Vec::new();

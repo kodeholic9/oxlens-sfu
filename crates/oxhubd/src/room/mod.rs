@@ -85,7 +85,7 @@ impl RoomMap {
     }
 
     pub fn settle_due(&self, now_ms: u64) -> bool {
-        !self.pending.is_empty() && now_ms.saturating_sub(self.last_ms) >= SETTLE_MS
+        (!self.pending.is_empty() || (self.isolated.is_some() && self.others_alive())) && now_ms.saturating_sub(self.last_ms) >= SETTLE_MS
     }
 
     pub fn settle(&mut self, now_ms: u64, wall_ms: u64) -> Settled {

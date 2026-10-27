@@ -65,7 +65,7 @@ pub fn on_rtcp(t: &Arc<Transport>, plain: &[u8], now_ms: u64) {
                     continue;
                 };
                 if let Ok(mut ing) = u.ingress.lock() {
-                    ing.last_sr = Some((pkt::ntp_mid(ntp), now_ms));
+                    ing.last_sr = Some((pkt::ntp_mid(ntp), common::time::mono_us()));
                     ing.sr = Some(crate::fwd::core::SrIn { ssrc, ntp, rtp_ts });
                 }
                 crate::fwd::egress::relay_sr(&u, ntp, rtp_ts);
@@ -156,7 +156,7 @@ pub fn record_ingress_twcc(t: &Transport, ssrc: u32, seq: u16) {
     }
 }
 
-pub fn send_rr_remb(t: &Transport, now_ms: u64, max_bitrate_bps: u64) {
+pub fn send_rr_remb(t: &Transport, now_us: u64, max_bitrate_bps: u64) {
     let ups = t.uplinks.load();
     let mut ssrcs = Vec::new();
     for u in ups.values() {
@@ -171,7 +171,7 @@ pub fn send_rr_remb(t: &Transport, now_ms: u64, max_bitrate_bps: u64) {
             }
             let r = ing.stats.report();
             let (lsr, dlsr) = match ing.last_sr {
-                Some((mid, at)) => (mid, pkt::dlsr(now_ms.saturating_sub(at))),
+                Some((mid, at_us)) => (mid, pkt::dlsr_us(now_us.saturating_sub(at_us))),
                 None => (0, 0),
             };
             pkt::ReportBlock { ssrc: u.ssrc, fraction: r.fraction, lost: r.lost, ext_max: r.extended_max, jitter: r.jitter, lsr, dlsr }

@@ -53,7 +53,7 @@ fn links(sfu: &Sfu, user: &str) -> Reply {
                 crate::link::PeerState::Suspect => t.suspect_since.load(Ordering::Acquire),
                 crate::link::PeerState::Alive => t.alive_since.load(Ordering::Acquire),
             };
-            json!({"sfu_id": sfu.epoch, "ufrag": t.ufrag(), "state": state.as_str(), "since": wall_of(since), "role": t.role.as_str()})
+            json!({"sfu_id": sfu.epoch, "ufrag": t.ufrag(), "state": state.as_str(), "since": wall_of(since)})
         })
         .collect();
     Reply::Ok { body: json!({"links": rows}) }
@@ -147,8 +147,9 @@ fn destroy(sfu: &Arc<Sfu>, room: &str, if_version: Option<&str>, exec: &mut Exec
     let Ok(mut guard) = sfu.state.lock() else { return Reply::fail(Code::INTERNAL_ERROR) };
     let st = &mut *guard;
     let Some(r) = st.rooms.get(room) else { return http(404, Code::ROOM_NOT_FOUND) };
-    if super::version_str(&r.version()) != want {
-        return http(409, Code::PRECONDITION_FAILED);
+    let actual = super::version_str(&r.version());
+    if actual != want {
+        return Reply::Http { status: 409, body: serde_json::to_value(Failure::of(Code::PRECONDITION_FAILED).details(json!({"expected": want, "actual": actual}))).unwrap_or_default() };
     }
     let members: Vec<String> = r.members.keys().cloned().collect();
     for u in &members {

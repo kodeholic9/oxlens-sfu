@@ -392,7 +392,7 @@ pub async fn cut_local(hub: &HubRef, user: &str) -> Vec<Value> {
     let sid = hub.sessions.lock().ok().and_then(|t| t.of_user(user).map(|s| s.data.sid.clone()));
     let Some(sid) = sid else { return Vec::new() };
     let fp = common::log::fingerprint(&sid);
-    hub.discard_session(&sid, Code::SESSION_REVOKED).await;
+    hub.discard_session(&sid, Code::SESSION_REVOKED, super::GoneBy::Server).await;
     vec![json!({"session": fp, "code": Code::SESSION_REVOKED.0})]
 }
 
@@ -435,7 +435,14 @@ async fn room_destroy(State(hub): State<HubRef>, ConnectInfo(p): ConnectInfo<Soc
     let mut query = BTreeMap::new();
     query.insert("if_version".to_string(), v);
     let call = Call::Admin { method: "POST".into(), path: format!("/admin/rooms/{room}/destroy"), query, body: None };
-    reply_resp(route::call(&hub, &t, &call).await)
+    let r = route::call(&hub, &t, &call).await;
+    if matches!(&r, Reply::Ok { .. }) || matches!(&r, Reply::Http { status, .. } if *status < 300) {
+        let until = super::now_ms() + common::bus::SETTLE_MS + super::http::CREATE_WAIT_MS;
+        while super::now_ms() < until && route::room_target(&hub, &room).is_some() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+    reply_resp(r)
 }
 
 #[derive(serde::Deserialize)]

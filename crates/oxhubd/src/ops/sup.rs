@@ -405,7 +405,7 @@ async fn unit_task(hub: HubRef, id: String, mut rx: mpsc::Receiver<Cmd>, mut rea
         }
         if cfg.kind == UnitKind::Inproc && down_cause != "start_fail" {
             hub.sup.set(&id, UnitState::Down, down_cause);
-            super::begin_shutdown(&hub, "zenoh unit down").await;
+            super::fault_shutdown(&hub, "zenoh unit down").await;
             return;
         }
         hub.sup.set(&id, UnitState::Down, down_cause);
@@ -414,7 +414,7 @@ async fn unit_task(hub: HubRef, id: String, mut rx: mpsc::Receiver<Cmd>, mut rea
         if blocked {
             hub.sup.set(&id, UnitState::Blocked, "intensity");
             if cfg.kind == UnitKind::Inproc {
-                super::begin_shutdown(&hub, "zenoh unit blocked").await;
+                super::fault_shutdown(&hub, "zenoh unit blocked").await;
                 return;
             }
             if !park(&hub, &id, &mut rx, UnitState::Blocked).await {
@@ -548,7 +548,7 @@ async fn declare_node(hub: &HubRef) {
     match bus.declare_node().await {
         Ok(t) => {
             hub.node_token.lock().await.replace(t);
-            common::ev!(spec = "SV-STATE-UNIT-STATE", "node 토큰 선언");
+            tracing::info!("node 토큰 선언");
         }
         Err(e) => tracing::error!(error = %e, "node 토큰 선언 실패"),
     }

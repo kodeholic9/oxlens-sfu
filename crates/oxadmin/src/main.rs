@@ -18,13 +18,14 @@ struct Opts {
     api_key: Option<String>,
     api_secret: Option<String>,
     ttl: Option<u64>,
+    interval_ms: u64,
     all: bool,
     rest: Vec<String>,
 }
 
 fn parse_args(argv: Vec<String>) -> Result<Opts, String> {
     let mut hub: Option<String> = None;
-    let mut o = Opts { hub: String::new(), source: "기본값", json: false, api_key: None, api_secret: None, ttl: None, all: false, rest: Vec::new() };
+    let mut o = Opts { hub: String::new(), source: "기본값", json: false, api_key: None, api_secret: None, ttl: None, interval_ms: 1000, all: false, rest: Vec::new() };
     let mut i = 0;
     while i < argv.len() {
         let a = argv[i].as_str();
@@ -39,6 +40,7 @@ fn parse_args(argv: Vec<String>) -> Result<Opts, String> {
             "--api-key" => o.api_key = Some(val()?),
             "--api-secret" => o.api_secret = Some(val()?),
             "--ttl" => o.ttl = Some(val()?.parse().map_err(|_| "--ttl 은 초(정수)".to_string())?),
+            "--interval" => o.interval_ms = val()?.parse().map_err(|_| "--interval 은 밀리초(정수)".to_string())?,
             _ => o.rest.push(argv[i].clone()),
         }
         i += 1;
@@ -145,7 +147,7 @@ fn show(o: &Opts, r: &Resp, render: impl Fn(&Value) -> String) -> i32 {
     if o.json {
         println!("{}", serde_json::to_string_pretty(&r.body).unwrap_or_default());
     } else if r.status >= 400 {
-        println!("실패 status={} {}", r.status, kv(&r.body));
+        eprintln!("실패 status={} {}", r.status, kv(&r.body));
     } else {
         println!("{}", render(&r.body));
     }
@@ -159,21 +161,21 @@ fn arr(v: &Value, k: &str) -> Vec<Value> {
 fn user_media(o: &Opts, user: &str) -> Result<i32, String> {
     let path = format!("/admin/users/{user}/media");
     let a = request(o, "GET", &path, None)?;
-    std::thread::sleep(Duration::from_secs(1));
+    std::thread::sleep(Duration::from_millis(o.interval_ms));
     let b = request(o, "GET", &path, None)?;
     if o.json {
         println!("{}", serde_json::to_string_pretty(&json!({"first": a.body, "second": b.body})).unwrap_or_default());
         return Ok(if b.status >= 400 { 1 } else { 0 });
     }
     if b.status >= 400 {
-        println!("실패 status={} {}", b.status, kv(&b.body));
+        eprintln!("실패 status={} {}", b.status, kv(&b.body));
         return Ok(1);
     }
     let mut rows = Vec::new();
     for (li, link) in arr(&b.body, "links").iter().enumerate() {
         let before = arr(&a.body, "links").get(li).cloned().unwrap_or(Value::Null);
         if let Some(e) = link.get("error") {
-            rows.push(json!({"sfu_id": link.get("sfu_id"), "mid": "-", "track_id": "-", "last_seq": "-", "Δseq": "-", "Δat_ms": "-", "error": e}));
+            rows.push(json!({"sfu_id": link.get("sfu_id"), "mid": "-", "track_id": "-", "last_seq": "-", "Δseq": "-", "last_at": "-", "Δat_ms": "-", "error": e}));
             continue;
         }
         for (mi, m) in arr(link, "mlines").iter().enumerate() {
@@ -190,13 +192,44 @@ fn user_media(o: &Opts, user: &str) -> Result<i32, String> {
                 "track_id": m.pointer("/entry/track_id"),
                 "last_seq": rw.get("last_seq"),
                 "Δseq": d("last_seq"),
+                "last_at": rw.get("last_at"),
                 "Δat_ms": d("last_at"),
                 "error": Value::Null,
             }));
         }
     }
-    println!("{}", table(&rows, &["sfu_id", "mid", "track_id", "last_seq", "Δseq", "Δat_ms", "error"]));
+    println!("{}", table(&rows, &["sfu_id", "mid", "track_id", "error", "last_seq", "Δseq", "last_at", "Δat_ms"]));
     Ok(0)
+}
+
+struct BusView {
+    node: String,
+    failed: bool,
+    nodes: std::collections::BTreeSet<(String, String)>,
+    rooms: std::collections::BTreeSet<(String, String, String)>,
+}
+
+impl BusView {
+    fn of(n: &Value, bus: &Value) -> BusView {
+        let s = |v: &Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+        BusView {
+            node: s(n, "node"),
+            failed: n.get("error").is_some_and(|e| !e.is_null()),
+            nodes: arr(bus, "nodes").iter().map(|x| (s(x, "node"), s(x, "inst"))).collect(),
+            rooms: arr(bus, "rooms_seen").iter().map(|x| (s(x, "room_id"), s(x, "node"), s(x, "inst"))).collect(),
+        }
+    }
+
+    fn rooms_outside(&self, a: &str, b: &str) -> std::collections::BTreeSet<(String, String, String)> {
+        self.rooms.iter().filter(|r| r.1 != a && r.1 != b).cloned().collect()
+    }
+}
+
+fn bus_agree(views: &[BusView]) -> bool {
+    if views.is_empty() || views.iter().any(|v| v.failed || v.nodes != views[0].nodes || v.rooms.iter().any(|r| r.1 == v.node)) {
+        return false;
+    }
+    views.iter().enumerate().all(|(i, a)| views[i + 1..].iter().all(|b| a.rooms_outside(&a.node, &b.node) == b.rooms_outside(&a.node, &b.node)))
 }
 
 fn bus_all(o: &Opts) -> Result<i32, String> {
@@ -205,17 +238,17 @@ fn bus_all(o: &Opts) -> Result<i32, String> {
         return Ok(show(o, &r, kv));
     }
     let nodes = arr(&r.body, "nodes");
-    let mut views = Vec::new();
+    let mut views: Vec<BusView> = Vec::new();
     let mut rows = Vec::new();
     for n in &nodes {
         let bus = n.get("bus").cloned().unwrap_or(Value::Null);
         let seen: Vec<String> = arr(&bus, "nodes").iter().map(|x| x.get("node").map(cell).unwrap_or_else(|| cell(x))).collect();
         let rooms = bus.get("rooms_seen").cloned().unwrap_or(Value::Null);
-        views.push((seen.clone(), rooms.to_string(), n.get("error").is_some()));
+        views.push(BusView::of(n, &bus));
         rows.push(json!({"node": n.get("node"), "nodes_seen": seen.join(","), "rooms_seen": rooms, "isolated": bus.get("isolated"), "error": n.get("error")}));
     }
     println!("{}", table(&rows, &["node", "nodes_seen", "rooms_seen", "isolated", "error"]));
-    let agree = !views.is_empty() && views.iter().all(|v| !v.2 && v.0 == views[0].0 && v.1 == views[0].1);
+    let agree = bus_agree(&views);
     if agree {
         println!("합의: 전 node 가 같은 것을 본다");
     } else {
@@ -260,7 +293,7 @@ fn shutdown(o: &Opts) -> Result<i32, String> {
 }
 
 fn usage() -> &'static str {
-    "oxadmin [--hub <host:port|URL>] [--json] [--api-key K --api-secret S] <명령>\n  sfus · sfu <id> · rooms · room <id> · users · user <id> · snapshot · drops · bus [--all]\n  unit list · unit show <id> · load <id> · stop <id> · kill <id> · shutdown\n  probe <user> · user-cut <user> · reap <room> <user> · destroy <room> · log-level <level> [--ttl <secs>]"
+    "oxadmin [--hub <host:port|URL>] [--json] [--api-key K --api-secret S] <명령>\n  sfus · sfu <id> · rooms · room <id> · users · user <id> [--interval <ms>] · snapshot · drops · bus [--all]\n  unit list · unit show <id> · load <id> · stop <id> · kill <id> · shutdown\n  probe <user> · user-cut <user> · reap <room> <user> · destroy <room> · log-level <level> [--ttl <secs>]"
 }
 
 fn run(o: &Opts) -> Result<i32, String> {

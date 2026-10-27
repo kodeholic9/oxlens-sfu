@@ -196,13 +196,22 @@ pub fn tick(t: &Arc<Transport>, now_ms: u64, mode: common::policy::MediaAutolaye
         st.probe = None;
         match p.measured_bps() {
             Some(m) if m >= p.demand_bps => {
+                st.aimd.set_estimate(m, now_ms);
                 st.est = Some((m, now_ms));
             }
             _ => st.policy.restart_clean_window(now_ms),
         }
     }
     let demand = f64::from(sig.streams) * core::LAYER_H_BPS * core::HEADROOM;
-    if mode == common::policy::MediaAutolayer::V2 && st.policy.layer == Layer::Low && d == Decision::Stay && st.probe.is_none() && est.is_some_and(|e| e < demand) && sig.loss_pct.is_none_or(|l| l <= core::LOSS_CLEAN) {
+    if mode == common::policy::MediaAutolayer::V2
+        && st.policy.layer == Layer::Low
+        && d == Decision::Stay
+        && st.probe.is_none()
+        && st.policy.backoff_elapsed(now_ms)
+        && est.is_some_and(|e| e < demand)
+        && sig.loss_pct.is_none_or(|l| l <= core::LOSS_CLEAN)
+        && !sig.overusing
+    {
         let rate = (demand * core::PROBE_FACTOR).min(core::PROBE_MAX_BPS);
         st.probe = Some(Probe { start_ms: now_ms, until_ms: now_ms + core::PROBE_DURATION_MS, judge_ms: now_ms + core::PROBE_JUDGE_MS, rate_bps: rate, demand_bps: demand, seqs: Vec::new(), acked_bytes: 0, first_us: None, last_us: None });
     }

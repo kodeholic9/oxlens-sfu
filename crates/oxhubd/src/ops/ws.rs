@@ -13,9 +13,36 @@ use futures_util::{SinkExt, StreamExt};
 use oxsig::code::{Code, Failure};
 use oxsig::frame::{Frame, FrameError, FrameKind};
 use oxsig::msg::{
-    AffiliationReq, BindReq, BindRes, IceRestartReq, LeaveBody, MessageReq, PublishTracksReq, ReadyReq, RoomJoinReq, RoomLeaveReq, SubscribeLayerReq,
-    TaskReq, TrackSetReq,
+    AffiliationReq, BindRes, IceRestartReq, LeaveBody, MessageReq, ReadyReq, RoomJoinReq, RoomLeaveReq, SubscribeLayerReq, TaskReq,
+    TrackSetReq,
 };
+
+#[derive(serde::Deserialize)]
+struct BindIn {
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    client_ver: Option<u32>,
+    #[serde(default)]
+    pc_mode: Option<PcMode>,
+}
+
+#[derive(serde::Deserialize)]
+struct PublishGate {
+    room_id: String,
+    #[serde(default)]
+    tracks: Option<Vec<serde::de::IgnoredAny>>,
+    #[serde(default)]
+    track_ids: Option<Vec<String>>,
+}
+
+impl PublishGate {
+    fn room(&self) -> Option<String> {
+        (self.tracks.is_some() || self.track_ids.is_some()).then(|| self.room_id.clone())
+    }
+}
 use oxsig::op::Op;
 use oxsig::types::PcMode;
 use serde::de::DeserializeOwned;
@@ -87,6 +114,7 @@ pub async fn serve(hub: HubRef, socket: WebSocket) {
                 o = out_rx.recv() => match o {
                     Some(Out::Frame(b)) => { if sink.send(Message::Binary(b)).await.is_err() { return; } }
                     Some(Out::Leave(c)) => leave = Some(c),
+                    Some(Out::Close) => { let _ = sink.close().await; return; }
                     None => return,
                 },
                 _ = wake.notified() => {}
@@ -190,7 +218,7 @@ pub async fn serve(hub: HubRef, socket: WebSocket) {
                 conn.state.store(CLOSED, Ordering::Relaxed);
                 let code = f.parse::<LeaveBody>().map(|b| Code(b.code)).unwrap_or(Code(0));
                 if let Some(sid) = conn.sid() {
-                    hub.discard_session(&sid, code).await;
+                    hub.discard_session(&sid, code, super::GoneBy::ClientLeave).await;
                 }
                 break;
             }
@@ -202,6 +230,7 @@ pub async fn serve(hub: HubRef, socket: WebSocket) {
     drop(proc_tx);
     conn.state.store(CLOSED, Ordering::Relaxed);
     processor.abort();
+    let _ = conn.tx.out.send(Out::Close);
     if let Ok(mut s) = hub.socks.lock() {
         s.remove(&id);
     }
@@ -242,7 +271,7 @@ async fn handle(hub: &HubRef, c: &Arc<Conn>, f: Frame) {
         Op::Task => task(hub, &sid, &f),
         Op::RoomJoin => join(hub, &sid, &f).await,
         Op::RoomLeave => room_op::<RoomLeaveReq>(hub, &sid, &f, |r| r.room_id.clone()).await,
-        Op::PublishTracks => room_op::<PublishTracksReq>(hub, &sid, &f, |r| r.room_id().to_string()).await,
+        Op::PublishTracks => room_op::<PublishGate>(hub, &sid, &f, |r| r.room().unwrap_or_default()).await,
         Op::Ready => room_op::<ReadyReq>(hub, &sid, &f, |r| r.room_id.clone()).await,
         Op::SubscribeLayer => room_op::<SubscribeLayerReq>(hub, &sid, &f, |r| r.room_id.clone()).await,
         Op::TrackSet => room_op::<TrackSetReq>(hub, &sid, &f, |r| r.room_id.clone()).await,
@@ -395,7 +424,7 @@ async fn resume(hub: &HubRef, c: &Arc<Conn>, sid: &str) -> Result<Value, Failure
 }
 
 async fn bind(hub: &HubRef, c: &Arc<Conn>, f: &Frame) -> Result<BindRes, Code> {
-    let req: BindReq = parse(f)?;
+    let req: BindIn = parse(f)?;
     if req.client_ver.unwrap_or(1) != oxsig::WIRE_VERSION {
         return Err(Code::VERSION_MISMATCH);
     }
@@ -426,7 +455,7 @@ async fn bind(hub: &HubRef, c: &Arc<Conn>, f: &Frame) -> Result<BindRes, Code> {
         Branch::Token => {}
     }
     let secrets = token::secrets(&hub.cfg.system.hub.auth.api_keys, hub.cfg.system.hub.auth.jwt_secret.as_deref());
-    let id = token::verify(&req.token, &secrets)?;
+    let id = token::verify(req.token.as_deref().ok_or(Code::MISSING_FIELD)?, &secrets)?;
     let max = hub.cfg.policy.quota.max_sessions;
     if max != 0 {
         let n = match hub.bus() {

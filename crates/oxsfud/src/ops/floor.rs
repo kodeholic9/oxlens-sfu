@@ -39,9 +39,11 @@ pub struct Exec {
 }
 
 pub fn log_step(room: &str, entry: &str, user: Option<&str>, s: &Stepped) {
-    match s.r.labels.first() {
-        Some(l) => common::ev!(spec = *l, area = "FLR", key = %room, from = s.from.as_str(), to = s.to.as_str(), cause = %entry, room = %room, in.u = user.unwrap_or("-")),
-        None => common::ev!(area = "FLR", key = %room, cause = %entry, impossible = 1, room = %room, in.u = user.unwrap_or("-")),
+    match (s.r.labels.first(), user) {
+        (Some(l), Some(u)) => common::ev!(spec = *l, area = "FLR", key = %room, from = s.from.as_str(), to = s.to.as_str(), cause = %entry, room = %room, in.u = u),
+        (Some(l), None) => common::ev!(spec = *l, area = "FLR", key = %room, from = s.from.as_str(), to = s.to.as_str(), cause = %entry, room = %room),
+        (None, Some(u)) => common::ev!(area = "FLR", key = %room, cause = %entry, impossible = 1, room = %room, in.u = u),
+        (None, None) => common::ev!(area = "FLR", key = %room, cause = %entry, impossible = 1, room = %room),
     }
 }
 

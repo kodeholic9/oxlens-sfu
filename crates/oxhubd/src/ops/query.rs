@@ -127,7 +127,7 @@ pub async fn start(hub: &HubRef) {
                 if let Some(user) = v.get("evict_user").and_then(|x| x.as_str()) {
                     let sid = h.sessions.lock().ok().and_then(|t| t.of_user(user).map(|s| s.data.sid.clone()));
                     if let Some(sid) = sid {
-                        h.discard_session(&sid, Code::DUPLICATE_SESSION).await;
+                        h.discard_session(&sid, Code::DUPLICATE_SESSION, super::GoneBy::Server).await;
                     }
                 }
             }
@@ -176,7 +176,7 @@ pub async fn start(hub: &HubRef) {
             let win = u64::from(h.cfg.policy.hub.resume_window_ms);
             let expired: BTreeSet<String> = h.sessions.lock().map(|t| t.expired(now_ms(), win).into_iter().collect()).unwrap_or_default();
             for sid in expired {
-                h.discard_session(&sid, Code(0)).await;
+                h.discard_session(&sid, Code(0), super::GoneBy::Window).await;
             }
         }
     });

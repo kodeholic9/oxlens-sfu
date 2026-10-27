@@ -264,33 +264,130 @@ pub struct AddCtx<'a> {
     pub room_video: &'a str,
 }
 
-pub fn check_add(c: &AddCtx<'_>, tracks: &[PublishTrack]) -> Result<Vec<String>, Failure> {
-    let denied: Vec<&str> = tracks.iter().map(|t| perm_bit(t.kind, t.source)).filter(|b| !allowed(&c.perm, b)).collect();
-    if !denied.is_empty() {
-        let mut d: Vec<&str> = denied;
-        d.sort();
-        d.dedup();
-        return Err(Failure::of(Code::NOT_AUTHORIZED).details(serde_json::json!({ "denied": d })));
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct TrackIn {
+    #[serde(default)]
+    pub kind: Option<Kind>,
+    #[serde(default)]
+    pub ssrc: Option<u32>,
+    #[serde(default)]
+    pub mid: Option<String>,
+    #[serde(default)]
+    pub codec: Option<String>,
+    #[serde(default)]
+    pub fmtp: Option<String>,
+    #[serde(default)]
+    pub pt: Option<u8>,
+    #[serde(default)]
+    pub rtx_pt: Option<u8>,
+    #[serde(default)]
+    pub rtx_ssrc: Option<u32>,
+    #[serde(default)]
+    pub source: Option<Source>,
+    #[serde(default)]
+    pub duplex: Option<Duplex>,
+    #[serde(default)]
+    pub simulcast: Option<bool>,
+}
+
+impl From<&PublishTrack> for TrackIn {
+    fn from(t: &PublishTrack) -> TrackIn {
+        TrackIn {
+            kind: Some(t.kind),
+            ssrc: Some(t.ssrc),
+            mid: Some(t.mid.clone()),
+            codec: t.codec.clone(),
+            fmtp: t.fmtp.clone(),
+            pt: Some(t.pt),
+            rtx_pt: t.rtx_pt,
+            rtx_ssrc: t.rtx_ssrc,
+            source: t.source,
+            duplex: t.duplex,
+            simulcast: t.simulcast,
+        }
     }
-    if tracks.iter().any(|t| t.duplex.unwrap_or(Duplex::Full) == Duplex::Full) && c.pub_room != Some(c.room) {
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct AddIn {
+    pub room_id: String,
+    pub tracks: Vec<TrackIn>,
+    #[serde(default)]
+    pub twcc_extmap_id: Option<u8>,
+    #[serde(default)]
+    pub rid_extmap_id: Option<u8>,
+    #[serde(default)]
+    pub repair_rid_extmap_id: Option<u8>,
+    #[serde(default)]
+    pub mid_extmap_id: Option<u8>,
+    #[serde(default)]
+    pub audio_level_extmap_id: Option<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(untagged)]
+pub enum PublishIn {
+    Remove { action: oxsig::msg::PublishTracksReqRemoveAction, room_id: String, track_ids: Vec<String> },
+    Add(AddIn),
+}
+
+impl PublishIn {
+    pub fn room_id(&self) -> &str {
+        match self {
+            PublishIn::Remove { room_id, .. } => room_id,
+            PublishIn::Add(a) => &a.room_id,
+        }
+    }
+}
+
+fn fill(t: &TrackIn) -> Result<PublishTrack, Failure> {
+    let missing = || Failure::of(Code::MISSING_FIELD);
+    let kind = t.kind.ok_or_else(missing)?;
+    let mid = t.mid.clone().filter(|m| !m.is_empty()).ok_or_else(missing)?;
+    let pt = t.pt.ok_or_else(missing)?;
+    let ssrc = t.ssrc.ok_or_else(missing)?;
+    let sim = t.simulcast.unwrap_or(false);
+    if kind == Kind::Audio && (t.source.is_some() || sim) {
+        return Err(Failure::of(Code::INVALID_PAYLOAD));
+    }
+    if sim != (ssrc == 0) {
+        return Err(missing());
+    }
+    Ok(PublishTrack { kind, ssrc, mid, codec: t.codec.clone(), fmtp: t.fmtp.clone(), pt, rtx_pt: t.rtx_pt, rtx_ssrc: t.rtx_ssrc, source: t.source, duplex: t.duplex, simulcast: t.simulcast })
+}
+
+pub fn check_add(c: &AddCtx<'_>, tracks: &[PublishTrack]) -> Result<Vec<String>, Failure> {
+    let items: Vec<TrackIn> = tracks.iter().map(TrackIn::from).collect();
+    check_add_in(c, &items).map(|(_, codecs)| codecs)
+}
+
+pub fn check_add_in(c: &AddCtx<'_>, items: &[TrackIn]) -> Result<(Vec<PublishTrack>, Vec<String>), Failure> {
+    check_inner(c, items, true)
+}
+
+pub fn check_add_req(c: &AddCtx<'_>, req: &AddIn) -> Result<(Vec<PublishTrack>, Vec<String>), Failure> {
+    check_inner(c, &req.tracks, req.rid_extmap_id.is_some() && req.mid_extmap_id.is_some())
+}
+
+fn check_inner(c: &AddCtx<'_>, items: &[TrackIn], sim_ext: bool) -> Result<(Vec<PublishTrack>, Vec<String>), Failure> {
+    let mut denied: Vec<&str> = items.iter().filter_map(|t| t.kind.map(|k| perm_bit(k, t.source))).filter(|b| !allowed(&c.perm, b)).collect();
+    if !denied.is_empty() {
+        denied.sort();
+        denied.dedup();
+        return Err(Failure::of(Code::NOT_AUTHORIZED).details(serde_json::json!({ "denied": denied })));
+    }
+    if items.iter().any(|t| t.duplex.unwrap_or(Duplex::Full) == Duplex::Full) && c.pub_room != Some(c.room) {
         return Err(Failure::of(Code::NOT_PUB_ROOM));
     }
-    if tracks.len() > REQ_MAX || c.active + tracks.len() > ACTIVE_MAX {
+    if items.len() > REQ_MAX || c.active + items.len() > ACTIVE_MAX {
         return Err(Failure::of(Code::TRACK_LIMIT));
     }
-    for t in tracks {
-        if t.mid.is_empty() || (t.ssrc == 0 && !t.simulcast.unwrap_or(false)) {
-            return Err(Failure::of(Code::MISSING_FIELD));
-        }
-        if t.kind == Kind::Audio && t.source.is_some() {
-            return Err(Failure::of(Code::INVALID_PAYLOAD));
-        }
-        if t.rtx_pt.is_some() != t.rtx_ssrc.is_some() && !t.simulcast.unwrap_or(false) {
-            return Err(Failure::of(Code::MISSING_FIELD));
-        }
+    let tracks = items.iter().map(fill).collect::<Result<Vec<_>, _>>()?;
+    if !sim_ext && tracks.iter().any(|t| t.simulcast.unwrap_or(false)) {
+        return Err(Failure::of(Code::MISSING_FIELD));
     }
     if c.one_pc {
-        for t in tracks {
+        for t in &tracks {
             for s in [Some(t.ssrc), t.rtx_ssrc].into_iter().flatten() {
                 if s != 0 && c.downlink_ssrcs.contains(&s) {
                     return Err(Failure::of(Code::SSRC_COLLISION).details(serde_json::json!({ "ssrc": s })));
@@ -299,11 +396,11 @@ pub fn check_add(c: &AddCtx<'_>, tracks: &[PublishTrack]) -> Result<Vec<String>,
         }
     }
     let mut codecs = Vec::with_capacity(tracks.len());
-    for t in tracks {
-        let name = t.codec.clone().unwrap_or_default();
-        let canon = match t.kind {
-            Kind::Video => crate::trk::canonical_video(&name),
-            Kind::Audio => crate::trk::canonical_audio(&name),
+    for t in &tracks {
+        let canon = match (t.kind, t.codec.as_deref()) {
+            (Kind::Video, name) => crate::trk::canonical_video(name.unwrap_or_default()),
+            (Kind::Audio, Some(name)) => crate::trk::canonical_audio(name),
+            (Kind::Audio, None) => crate::trk::canonical_audio(c.room_audio),
         };
         let Some(canon) = canon else {
             let supported: Vec<&str> = if t.kind == Kind::Video { crate::trk::SUPPORTED_VIDEO.to_vec() } else { crate::trk::SUPPORTED_AUDIO.to_vec() };
@@ -315,7 +412,7 @@ pub fn check_add(c: &AddCtx<'_>, tracks: &[PublishTrack]) -> Result<Vec<String>,
         }
         codecs.push(canon.to_string());
     }
-    Ok(codecs)
+    Ok((tracks, codecs))
 }
 
 pub fn move_check(streams: &BTreeMap<String, Arc<Stream>>, perm: &Permission, room_audio: &str, room_video: &str) -> (bool, bool) {

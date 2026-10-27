@@ -88,6 +88,11 @@ impl Aimd {
         Aimd { bitrate: start_bps, state: RateState::Hold, last_change_ms: None, link: LinkCapacity::default() }
     }
 
+    pub fn set_estimate(&mut self, bps: f64, now_ms: u64) {
+        self.bitrate = bps.max(FLOOR_BPS);
+        self.last_change_ms = Some(now_ms);
+    }
+
     pub fn bitrate_bps(&self) -> u64 {
         self.bitrate as u64
     }
@@ -427,6 +432,10 @@ impl Policy {
 
     pub fn restart_clean_window(&mut self, now_ms: u64) {
         self.last_demote_ms = now_ms;
+    }
+
+    pub fn backoff_elapsed(&self, now_ms: u64) -> bool {
+        now_ms.saturating_sub(self.last_demote_ms) >= self.backoff_ms
     }
 }
 

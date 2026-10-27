@@ -219,7 +219,11 @@ pub fn ntp_mid(ntp: u64) -> u32 {
 }
 
 pub fn dlsr(held_ms: u64) -> u32 {
-    ((held_ms.saturating_mul(65_536)) / 1_000).min(u64::from(u32::MAX)) as u32
+    dlsr_us(held_ms.saturating_mul(1_000))
+}
+
+pub fn dlsr_us(held_us: u64) -> u32 {
+    ((held_us.saturating_mul(65_536)) / 1_000_000).min(u64::from(u32::MAX)) as u32
 }
 
 #[cfg(test)]

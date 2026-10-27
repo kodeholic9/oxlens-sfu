@@ -201,7 +201,7 @@ fn spawn_timers(sfu: &Arc<Sfu>) {
                     crate::rtcp::send_twcc(&t);
                 }
                 if n.is_multiple_of(crate::rtcp::RR_MS / crate::rtcp::NACK_POLL_MS) {
-                    crate::rtcp::send_rr_remb(&t, now, max);
+                    crate::rtcp::send_rr_remb(&t, common::time::mono_us(), max);
                 }
                 crate::sim::probe_chunk(&t, now);
             }

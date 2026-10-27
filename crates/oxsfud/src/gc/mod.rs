@@ -105,7 +105,11 @@ pub fn leave_seven(sfu: &Sfu, st: &mut State, room: &str, user: &str, path: Path
         sfu.notice_room(room, Op::ParticipantEvent, serde_json::to_value(&ev).unwrap_or_default(), vec![user.to_string()]);
     }
     let seq = st.rooms.get(room).map(|r| r.seq).unwrap_or(0);
-    common::ev!(spec = label, area = "ROOM", key = %room, from = "member", to = "-", cause = path.as_str(), room = %room, user = %user, seq = seq, in.hidden = member.hidden, peer_state = state);
+    if path == Path::Destroy {
+        common::ev!(spec = label, area = "ROOM", key = %room, from = "member", to = "-", cause = path.as_str(), room = %room, user = %user, seq = seq, peer_state = state);
+    } else {
+        common::ev!(spec = label, area = "ROOM", key = %room, from = "member", to = "-", cause = path.as_str(), room = %room, user = %user, seq = seq, in.hidden = member.hidden, peer_state = state);
+    }
     true
 }
 

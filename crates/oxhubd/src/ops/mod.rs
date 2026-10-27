@@ -28,10 +28,18 @@ use crate::cfg::HubCfg;
 use crate::room::{Interest, RoomMap};
 use crate::ses::{OutQueue, SessionTable, core::Push};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoneBy {
+    Window,
+    ClientLeave,
+    Server,
+}
+
 #[derive(Debug)]
 pub enum Out {
     Frame(Vec<u8>),
     Leave(Code),
+    Close,
 }
 
 #[derive(Clone)]
@@ -77,6 +85,7 @@ pub struct Hub {
     pub admission: Mutex<(u64, u32)>,
     pub probes: Probes,
     pub shutting: AtomicBool,
+    pub fault: Mutex<Option<String>>,
     pub shutdown: Notify,
 }
 
@@ -108,6 +117,7 @@ impl Hub {
             admission: Mutex::new((0, 0)),
             probes: Probes::default(),
             shutting: AtomicBool::new(false),
+            fault: Mutex::new(None),
             shutdown: Notify::new(),
             cfg,
         })
@@ -335,7 +345,7 @@ impl Hub {
         }
     }
 
-    pub async fn discard_session(self: &Arc<Self>, sid: &str, code: Code) {
+    pub async fn discard_session(self: &Arc<Self>, sid: &str, code: Code, by: GoneBy) {
         let s = self.sessions.lock().ok().and_then(|mut t| t.remove(sid));
         let Some(s) = s else { return };
         if let Some(sock) = s.sock
@@ -360,14 +370,19 @@ impl Hub {
             let call = Call::SessionGone { user_id: s.data.user_id.clone(), session: fp.clone(), code: code.0 };
             let _ = route::call(self, &route::Target { node, inst: Some(sfu) }, &call).await;
         }
-        let spec = match code {
-            Code::SESSION_REVOKED => "CP-CODE-SESSION-REVOKED",
-            Code::DUPLICATE_SESSION => "CP-CODE-DUPLICATE-SESSION",
-            Code::SERVER_SHUTDOWN => "CP-CODE-SERVER-SHUTDOWN",
-            Code(0) => "SES.S.TWindow",
-            _ => "CP-OP-LEAVE",
-        };
-        common::ev!(spec = spec, session = %fp, user = %s.data.user_id, code = code.0, "세션 폐기");
+        match by {
+            GoneBy::Window => common::ev!(spec = "SES.S.TWindow", area = "SES", key = %fp, from = "DETACHED", to = "-", cause = "TWindow", session = %fp, user = %s.data.user_id, "세션 폐기"),
+            GoneBy::ClientLeave => common::ev!(spec = "SES.S.leave", area = "SES", key = %fp, from = "BOUND", to = "-", cause = "LEAVE", session = %fp, user = %s.data.user_id, "세션 폐기"),
+            GoneBy::Server => {
+                let spec = match code {
+                    Code::SESSION_REVOKED => "CP-CODE-SESSION-REVOKED",
+                    Code::DUPLICATE_SESSION => "CP-CODE-DUPLICATE-SESSION",
+                    Code::SERVER_SHUTDOWN => "CP-CODE-SERVER-SHUTDOWN",
+                    _ => "CP-OP-LEAVE",
+                };
+                common::ev!(spec = spec, session = %fp, user = %s.data.user_id, code = code.0, "세션 폐기");
+            }
+        }
     }
 
     pub fn admit_join(&self, now_ms: u64) -> Result<(), u64> {
@@ -396,11 +411,18 @@ pub fn now_ms() -> u64 {
     common::time::mono_ms()
 }
 
+pub async fn fault_shutdown(hub: &HubRef, why: &str) {
+    if let Ok(mut f) = hub.fault.lock() {
+        f.get_or_insert_with(|| why.to_string());
+    }
+    begin_shutdown(hub, why).await;
+}
+
 pub async fn begin_shutdown(hub: &HubRef, why: &str) {
     if hub.shutting.swap(true, Ordering::Relaxed) {
         return;
     }
-    tracing::warn!(why, "종료 시작");
+    common::ev!(spec = "CP-CODE-SERVER-SHUTDOWN", why, "종료 시작");
     let socks: Vec<u64> = hub.socks.lock().map(|s| s.keys().copied().collect()).unwrap_or_default();
     for s in socks {
         hub.send_leave(s, Code::SERVER_SHUTDOWN);
@@ -439,5 +461,8 @@ pub async fn run(hub: HubRef) -> Result<(), String> {
         }
         _ = hub.shutdown.notified() => {}
     }
-    Ok(())
+    match hub.fault.lock().ok().and_then(|f| f.clone()) {
+        Some(why) => Err(why),
+        None => Ok(()),
+    }
 }
