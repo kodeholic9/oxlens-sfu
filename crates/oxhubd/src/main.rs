@@ -33,10 +33,16 @@ fn main() {
         }
     };
     let code = rt.block_on(async move {
-        let sink = common::log::sink_for("hub", &cfg.node_id, cfg.log_dir.as_deref(), cfg.log_socket.as_deref(), &cfg.policy.logging);
+        let (sink, gate) = common::log::hub_sink(&cfg.node_id, cfg.log_dir.as_deref(), cfg.log_socket.as_deref(), &cfg.policy.logging);
         common::log::init(common::log::Init { node: cfg.node_id.clone(), proc_: "hub", epoch: None, logging: cfg.policy.logging.clone(), sink });
         let hub = ops::Hub::new(cfg);
-        common::log::boot_line(&hub.cfg.build, &hub.epoch, &hub.cfg.banner().render());
+        if let Some(g) = gate {
+            let _ = hub.log_gate.set(g);
+        }
+        if let Err(e) = common::log::boot_lines(&hub.cfg.build, &hub.epoch, &hub.cfg.banner()) {
+            eprintln!("oxhubd: {e}");
+            return 1;
+        }
         match ops::run(hub).await {
             Ok(()) => 0,
             Err(e) => {

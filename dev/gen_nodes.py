@@ -5,7 +5,7 @@
 
     python3 dev/gen_nodes.py 3
 
-로그 — node 마다 로거 유닛 하나(정:RULE-OPS-LOGGER) · {LOG_ROOT}/{node}/ox.log.{날짜} · 소켓 {LOG_ROOT}/{node}/log.sock
+로그 — node 마다 로거 유닛 하나(hub 안 inproc — 정:RULE-OPS-LOGGER) · {LOG_ROOT}/{node}/ox.log.{날짜} · 소켓 {LOG_ROOT}/{node}/log.sock
 포트 — hub HTTP 1974+i · sfu gRPC 50061+i · sfu UDP 20000+i · sfu TCP 20000+i(정:IMPL — TCP 전송로 · 설정됐을 때만 광고) · zenoh 7447+i
 """
 import sys
@@ -57,10 +57,9 @@ log_socket = "{logs}/log.sock"
 {AUTH}
 [[unit]]
 id = "log-{me}"
-kind = "process"
+kind = "inproc"
 order = 1
 role = "log"
-cmd = ["./target/debug/oxlogd", "--policy", "policy.toml"]
 
 [[unit]]
 id = "{me}"

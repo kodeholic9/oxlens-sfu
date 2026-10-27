@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.4 · 운영:RULE-LOG-SENDER · 운영:RULE-LOG-CONTEXT · 운영:RULE-LOG-LEVEL · 정:RULE-OPS-LOGGER · 정:CAND-OPS-FOREIGN-LOG · model: claude-opus-5-5
-//! `tracing` Layer 하나 — span 칸(session · room · user · epoch)을 줄에 붙이고 줄을 지어 보내는 쪽 채널에 넣는다. 남의 크레이트는 `warn` 이상 · zenoh 는 `info` 까지.
+// spec: v1.4 · 운영:RULE-LOG-SENDER · 운영:RULE-LOG-CONTEXT · 운영:RULE-LOG-LEVEL · 운영:RULE-LOG-KEYS · 정:RULE-OPS-LOGGER · 정:CAND-OPS-FOREIGN-LOG · model: claude-opus-5-5
+//! `tracing` Layer 하나 — span 칸(session · room · user · epoch)을 줄에 붙이고 줄을 지어 보내는 쪽 채널에 넣는다. 남의 크레이트는 `warn` 이상 · zenoh 는 `info` 까지 · hub 안 zenoh 유닛이 낸 줄은 상관 키 `unit=zenoh`.
 
 use std::fmt::Write as _;
 
@@ -15,7 +15,8 @@ use super::sender::Tx;
 
 pub const EV_TARGET: &str = "ox::ev";
 pub const STAT_TARGET: &str = "ox::stat";
-const OURS: &[&str] = &["ox::", "oxhubd", "oxsfud", "oxlogd", "oxadmin", "common", "oxsig"];
+const OURS: &[&str] = &["ox::", "oxhubd", "oxsfud", "oxadmin", "common", "oxsig"];
+pub const HUB_ZENOH_UNIT: &str = "zenoh";
 
 pub fn ours(target: &str) -> bool {
     OURS.iter().any(|p| target.starts_with(p))
@@ -136,6 +137,9 @@ where
         let mut f = Fields::default();
         event.record(&mut f);
         fields.extend(f.0);
+        if self.head.proc_ == "hub" && m.target().starts_with("zenoh") && !fields.iter().any(|(k, _)| k == "unit") {
+            fields.push(("unit".to_string(), HUB_ZENOH_UNIT.to_string()));
+        }
         let ts = crate::time::iso_now();
         let line = render(&self.head, &Record { ts: &ts, mono: crate::time::mono_us(), kind, fields: &fields, msg: f.1.as_deref() }, self.line_max);
         self.tx.send(line);

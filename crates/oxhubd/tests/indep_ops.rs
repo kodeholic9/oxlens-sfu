@@ -2,7 +2,7 @@
 // spec: v1.4 · 운영:RULE-LOG-LOGGER · model: claude-opus-5-5
 //! 독립 1층 시험(B′ 맹검) — 로거 회전(날짜 경계 ∨ 크기 상한) · 보존(일 단위) · 파일 이름 ox.log.{날짜}.
 
-use oxlogd::ops::{expired, file_name, needs_rotate};
+use oxhubd::ops::logger::{expired, file_name, needs_rotate};
 
 #[test]
 fn rotate_on_date_boundary_or_size_cap() {

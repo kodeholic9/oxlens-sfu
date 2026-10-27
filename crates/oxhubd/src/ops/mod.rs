@@ -4,6 +4,7 @@
 
 pub mod admin;
 pub mod http;
+pub mod logger;
 pub mod query;
 pub mod route;
 pub mod sup;
@@ -87,6 +88,7 @@ pub struct Hub {
     pub shutting: AtomicBool,
     pub fault: Mutex<Option<String>>,
     pub shutdown: Notify,
+    pub log_gate: std::sync::OnceLock<Arc<common::log::sender::Gate>>,
 }
 
 pub type HubRef = Arc<Hub>;
@@ -119,6 +121,7 @@ impl Hub {
             shutting: AtomicBool::new(false),
             fault: Mutex::new(None),
             shutdown: Notify::new(),
+            log_gate: std::sync::OnceLock::new(),
             cfg,
         })
     }

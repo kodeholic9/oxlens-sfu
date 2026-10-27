@@ -197,7 +197,6 @@ impl Default for Hook {
 pub enum Reader {
     Hub,
     Sfud,
-    Log,
 }
 
 impl Policy {

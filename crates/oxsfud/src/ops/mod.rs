@@ -275,7 +275,7 @@ pub async fn run(cfg: SfuCfg, epoch: String) -> Result<(), String> {
             }
         }
     });
-    common::log::boot_line(&sfu.cfg.build, &sfu.epoch, &sfu.cfg.banner().render());
+    common::log::boot_lines(&sfu.cfg.build, &sfu.epoch, &sfu.cfg.banner())?;
     let r = server.await.map_err(|e| format!("gRPC {grpc}: {e}"));
     tracing::info!("부모 생존 채널 닫힘 — 끝낸다");
     sfu.bus.close().await;

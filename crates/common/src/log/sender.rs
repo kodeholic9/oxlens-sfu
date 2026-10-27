@@ -1,12 +1,13 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.4 · 운영:RULE-LOG-SENDER · 운영:RULE-LOG-LOGGER · 정:RULE-OPS-LOGGER · 정:RULE-OPS-DROPS · model: claude-opus-5-5
-//! 보내는 쪽 — 유한 채널 → 전담 스레드 하나 → DGRAM 소켓(비차단) · 실패 즉시 spool · 소켓 미설정이면 stdout · 회복 첫 줄 `kind=stat spooled=N dropped=M`.
+//! 보내는 쪽 — 유한 채널 → 전담 스레드 하나 → DGRAM 소켓(비차단 · sfud) 또는 hub 안 로거 유닛의 채널(hub 줄 — 소켓을 안 거친다 · 유닛이 `Running` 이 아니면 spool) · 실패 즉시 spool · 소켓 미설정이면 stdout · 회복 첫 줄 `kind=stat spooled=N dropped=M`.
 
 use std::io::Write;
 use std::os::unix::net::UnixDatagram;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
+use std::sync::{Arc, Mutex};
 
 pub static QUEUE_FULL: AtomicU64 = AtomicU64::new(0);
 pub static SPOOL_FULL: AtomicU64 = AtomicU64::new(0);
@@ -20,6 +21,34 @@ pub enum Sink {
     Stdout,
     Socket { path: PathBuf, spool: PathBuf, spool_max: u64 },
     Channel(SyncSender<String>),
+    Hub { gate: Arc<Gate>, spool: PathBuf, spool_max: u64 },
+}
+
+#[derive(Debug, Default)]
+pub struct Gate {
+    tx: Mutex<Option<SyncSender<String>>>,
+}
+
+impl Gate {
+    pub fn new() -> Arc<Gate> {
+        Arc::new(Gate::default())
+    }
+
+    pub fn open(&self, tx: SyncSender<String>) {
+        if let Ok(mut g) = self.tx.lock() {
+            g.replace(tx);
+        }
+    }
+
+    pub fn close(&self) {
+        if let Ok(mut g) = self.tx.lock() {
+            g.take();
+        }
+    }
+
+    fn current(&self) -> Option<SyncSender<String>> {
+        self.tx.lock().ok().and_then(|g| g.clone())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +165,27 @@ fn run(sink: Sink, rx: Receiver<String>) {
                 }
             }
         }
+        Sink::Hub { gate, spool, spool_max } => {
+            let mut sp = Spool { path: spool, max: spool_max, file: None, size: 0, spooled: 0, dropped: 0 };
+            let mut failing = false;
+            for line in rx {
+                let next = gate.current();
+                let sent = next.as_ref().is_some_and(|n| n.send(line.clone()).is_ok());
+                if sent {
+                    if failing {
+                        failing = false;
+                        if let Some(n) = next {
+                            let _ = n.send(super::recovery_line(sp.spooled, sp.dropped));
+                        }
+                        sp.spooled = 0;
+                        sp.dropped = 0;
+                    }
+                } else {
+                    failing = true;
+                    sp.write(&line);
+                }
+            }
+        }
         Sink::Socket { path, spool, spool_max } => {
             let sock = UnixDatagram::unbound().ok();
             if let Some(s) = &sock {
@@ -182,6 +232,29 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(std::fs::read_to_string(&spool).expect("spool").contains("msg=x"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hub_lines_go_to_logger_channel_not_socket_and_spool_when_unit_not_running() {
+        let dir = std::env::temp_dir().join(format!("oxhubgate-{}", std::process::id()));
+        let spool = dir.join("n.hub.spool.log");
+        let gate = Gate::new();
+        let tx = start(Sink::Hub { gate: gate.clone(), spool: spool.clone(), spool_max: 1 << 20 }, 16);
+        tx.send("ts=T kind=diag msg=before".into());
+        for _ in 0..50 {
+            if std::fs::read_to_string(&spool).map(|s| s.contains("msg=before")).unwrap_or(false) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(std::fs::read_to_string(&spool).expect("spool").contains("msg=before"), "O-sym-RULE-LOG-LOGGER-3 로거 유닛이 Running 이 아니면 hub 줄은 spool");
+        let (ltx, lrx) = std::sync::mpsc::sync_channel::<String>(16);
+        gate.open(ltx);
+        tx.send("ts=T kind=diag msg=after".into());
+        let got: Vec<String> = (0..2).filter_map(|_| lrx.recv_timeout(std::time::Duration::from_secs(2)).ok()).collect();
+        assert!(got.iter().any(|l| l.contains("spooled=1")), "O-sym-RULE-LOG-LOGGER-3 회복 첫 줄 — {got:?}");
+        assert!(got.iter().any(|l| l.ends_with("msg=after")), "O-sym-RULE-LOG-LOGGER-3 hub 줄은 소켓을 안 거치고 로거 채널로 — {got:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

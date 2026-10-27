@@ -27,10 +27,9 @@ hook_allowed = false
 
 [[unit]]
 id = "log-node-b"
-kind = "process"
+kind = "inproc"
 order = 1
 role = "log"
-cmd = ["./target/debug/oxlogd", "--policy", "policy.toml"]
 
 [[unit]]
 id = "node-b"

@@ -213,6 +213,9 @@ impl SystemFile {
             if u.kind == UnitKind::Process && u.cmd.is_empty() {
                 return Err(format!("system: unit {} — process 인데 cmd 가 없다", u.id));
             }
+            if u.role == UnitRole::Log && u.kind != UnitKind::Inproc {
+                return Err(format!("system: unit {} — 로거(role = log)는 kind = inproc 이다(정:RULE-OPS-LOGGER)", u.id));
+            }
             if u.role == UnitRole::Sfu {
                 crate::bus::keys::check_fragment("unit.id", &u.id)?;
             }

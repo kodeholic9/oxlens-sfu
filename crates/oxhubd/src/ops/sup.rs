@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.4 · 정:RULE-OPS-SUPERVISOR · 정:RULE-OPS-SURFACE · 정:RULE-OPS-LOGGER · 정:RULE-BUS-FATE · 정:IMPL-BUS-FAULTS · 정:CAND-OPS-SUPERVISOR-DEFAULTS · 정:CAND-OPS-SHUTDOWN-NO-RESTART · 정:CAND-OPS-SUPERVISOR-EXTRA-TRANSITIONS · 정:CAND-OPS-ZENOH-UNIT-DOWN · 정:CAND-OPS-UNIT-STATE-LINE · 정:IMPL-CFG-SYSTEM-FILE · 운영:RULE-CTL-SUPERVISOR · model: claude-opus-5-5
-//! supervisor — 유닛 종류 셋(process · remote · inproc) · `UnitState` 여덟 · backoff · 폭주 창 · 기동 핸드셰이크 · 순서 속성(로거 → zenoh → sfu · 정지는 역순).
+//! supervisor — 유닛 종류 셋(process · remote · inproc — zenoh · 로거) · `UnitState` 여덟 · backoff · 폭주 창 · 기동 핸드셰이크 · 순서 속성(로거 → zenoh → sfu · 정지는 역순) · `log_socket` 이 없으면 로거 유닛을 세우지 않는다.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,7 +11,6 @@ use common::grpc::{HandleClient, HelloReq};
 use common::system::{Unit, UnitKind, UnitRole};
 use oxsig::code::Code;
 use serde_json::json;
-use tokio::io::AsyncBufReadExt;
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::{mpsc, oneshot};
 use tonic::transport::Channel;
@@ -99,6 +98,7 @@ impl Supervisor {
     pub fn new(cfg: &HubCfg) -> Supervisor {
         let units = ordered(&cfg.system.units)
             .into_iter()
+            .filter(|u| u.role != UnitRole::Log || cfg.log_socket.is_some())
             .map(|u| {
                 let state = if u.enabled { UnitState::Inactive } else { UnitState::Disabled };
                 UnitRt { cfg: u, state, epoch: None, restarts: 0, next_retry_at_ms: None, starts: VecDeque::new(), backoff_i: 0 }
@@ -266,26 +266,10 @@ async fn start_process(hub: &HubRef, u: &Unit) -> Result<(Proc, String, Option<H
     }
     let (prog, rest) = u.cmd.split_first().ok_or("cmd 가 비었다")?;
     let mut cmd = tokio::process::Command::new(prog);
-    cmd.args(rest).args(extra_args(&hub.cfg, u)).env(common::proc::LIFELINE_ENV, "stdin").stdin(std::process::Stdio::piped()).stderr(std::process::Stdio::inherit());
-    cmd.stdout(if u.role == UnitRole::Log { std::process::Stdio::piped() } else { std::process::Stdio::inherit() });
+    cmd.args(rest).args(extra_args(&hub.cfg, u)).env(common::proc::LIFELINE_ENV, "stdin").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::inherit()).stderr(std::process::Stdio::inherit());
     let mut child = cmd.spawn().map_err(|e| format!("exec {prog}: {e}"))?;
     let stdin = child.stdin.take();
     let timeout = hub.cfg.system.supervisor.hello_timeout_ms;
-    if u.role == UnitRole::Log {
-        let out = child.stdout.take().ok_or("stdout 없음")?;
-        let mut lines = tokio::io::BufReader::new(out).lines();
-        let line = tokio::time::timeout(Duration::from_millis(timeout), lines.next_line()).await;
-        let epoch = match line {
-            Ok(Ok(Some(l))) => l.strip_prefix("ready epoch=").map(str::trim).map(str::to_string),
-            _ => None,
-        };
-        let Some(epoch) = epoch else {
-            let _ = child.start_kill();
-            return Err("로거 준비 신호 없음".into());
-        };
-        tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
-        return Ok((Proc { child, stdin }, epoch, None));
-    }
     let Some(addr) = &u.addr else { return Ok((Proc { child, stdin }, common::build::new_epoch(), None)) };
     match hello(hub, addr, timeout).await {
         Some((c, epoch)) => Ok((Proc { child, stdin }, epoch, Some(c))),
@@ -317,11 +301,28 @@ async fn graceful_stop(mut p: Proc) {
 enum Started {
     Proc(Box<Proc>),
     Inproc,
+    Logger(super::logger::Running),
     Remote,
+}
+
+fn logger_cfg(cfg: &HubCfg) -> Option<super::logger::Config> {
+    let sock = cfg.log_socket.as_deref()?;
+    let dir = cfg.log_dir.clone().map(std::path::PathBuf::from).or_else(|| std::path::Path::new(sock).parent().map(std::path::Path::to_path_buf)).unwrap_or_else(std::env::temp_dir);
+    let l = &cfg.policy.logging;
+    Some(super::logger::Config { dir, socket: sock.into(), rotate_max_bytes: l.rotate_max_bytes, retention_days: l.retention_days, rcvbuf: l.socket_rcvbuf_bytes, queue_max: l.queue_max_lines as usize })
 }
 
 async fn start_unit(hub: &HubRef, u: &Unit) -> Result<(Started, String, Option<HandleClient<Channel>>), String> {
     match u.kind {
+        UnitKind::Inproc if u.role == UnitRole::Log => {
+            let lc = logger_cfg(&hub.cfg).ok_or("로거 유닛인데 log_socket 이 없다")?;
+            let id = u.id.clone();
+            let r = tokio::task::spawn_blocking(move || super::logger::start(lc, &id)).await.map_err(|e| format!("로거 기동: {e}"))??;
+            if let Some(g) = hub.log_gate.get() {
+                g.open(r.tx.clone());
+            }
+            Ok((Started::Logger(r), hub.epoch.clone(), None))
+        }
         UnitKind::Inproc => {
             let bus = crate::bus::Bus::open(&hub.cfg.system.zenoh, hub.me(), &hub.epoch).await?;
             let _ = hub.bus.set(Arc::new(bus));
@@ -376,11 +377,13 @@ async fn unit_task(hub: HubRef, id: String, mut rx: mpsc::Receiver<Cmd>, mut rea
                 if cfg.role == UnitRole::Sfu && cfg.kind != UnitKind::Inproc && !hub.sup.node_declared.swap(true, Ordering::Relaxed) {
                     declare_node(&hub).await;
                 }
+                let mut logger = None;
                 match s {
                     Started::Proc(p) => proc_ = Some(*p),
+                    Started::Logger(l) => logger = Some(l),
                     Started::Inproc | Started::Remote => {}
                 }
-                let r = run(&hub, &id, &cfg, &mut rx, proc_.take()).await;
+                let r = run(&hub, &id, &cfg, &mut rx, proc_.take(), logger).await;
                 match r {
                     Exit::Stopped => {
                         if !park(&hub, &id, &mut rx, UnitState::Stopped).await {
@@ -403,7 +406,7 @@ async fn unit_task(hub: HubRef, id: String, mut rx: mpsc::Receiver<Cmd>, mut rea
         if hub.shutting.load(Ordering::Relaxed) {
             return;
         }
-        if cfg.kind == UnitKind::Inproc && down_cause != "start_fail" {
+        if cfg.id == ZENOH_UNIT && down_cause != "start_fail" {
             hub.sup.set(&id, UnitState::Down, down_cause);
             super::fault_shutdown(&hub, "zenoh unit down").await;
             return;
@@ -413,7 +416,7 @@ async fn unit_task(hub: HubRef, id: String, mut rx: mpsc::Receiver<Cmd>, mut rea
         let blocked = hub.sup.with(&id, |x| over_intensity(&x.starts, now, sv.intensity_window_secs * 1000, sv.intensity_max)).unwrap_or(false);
         if blocked {
             hub.sup.set(&id, UnitState::Blocked, "intensity");
-            if cfg.kind == UnitKind::Inproc {
+            if cfg.id == ZENOH_UNIT {
                 super::fault_shutdown(&hub, "zenoh unit blocked").await;
                 return;
             }
@@ -460,24 +463,46 @@ enum Exit {
     Shutdown,
 }
 
-async fn run(hub: &HubRef, id: &str, cfg: &Unit, rx: &mut mpsc::Receiver<Cmd>, proc_: Option<Proc>) -> Exit {
+async fn stop_logger(hub: &HubRef, l: &mut super::logger::Running) {
+    if let Some(g) = hub.log_gate.get() {
+        g.close();
+    }
+    l.stop();
+    let _ = tokio::time::timeout(Duration::from_millis(STOP_GRACE_MS), &mut l.done).await;
+}
+
+async fn run(hub: &HubRef, id: &str, cfg: &Unit, rx: &mut mpsc::Receiver<Cmd>, proc_: Option<Proc>, logger: Option<super::logger::Running>) -> Exit {
     let mut p = proc_;
+    let mut lg = logger;
     loop {
         let exited = async {
-            match p.as_mut() {
-                Some(pp) => {
+            match (p.as_mut(), lg.as_mut()) {
+                (Some(pp), _) => {
                     let _ = pp.child.wait().await;
                 }
-                None => std::future::pending::<()>().await,
+                (None, Some(l)) => {
+                    let _ = (&mut l.done).await;
+                }
+                (None, None) => std::future::pending::<()>().await,
             }
         };
         tokio::select! {
             _ = exited => {
+                if let Some(g) = hub.log_gate.get().filter(|_| lg.is_some()) {
+                    g.close();
+                }
                 return if hub.shutting.load(Ordering::Relaxed) { Exit::Shutdown } else { Exit::Down("exit") };
             }
             c = rx.recv() => match c {
                 None => return Exit::Shutdown,
                 Some(Cmd::Stop(r)) => {
+                    if let Some(l) = lg.as_mut() {
+                        hub.sup.set(id, UnitState::Stopping, "stop");
+                        stop_logger(hub, l).await;
+                        hub.sup.set(id, UnitState::Stopped, "stop");
+                        let _ = r.send(Ok((UnitState::Running, UnitState::Stopped)));
+                        return Exit::Stopped;
+                    }
                     if cfg.kind == UnitKind::Inproc {
                         let _ = r.send(Ok((UnitState::Running, UnitState::Stopped)));
                         super::begin_shutdown(hub, "zenoh unit stop").await;
@@ -497,6 +522,11 @@ async fn run(hub: &HubRef, id: &str, cfg: &Unit, rx: &mut mpsc::Receiver<Cmd>, p
                     if cur.as_deref() != Some(epoch.as_str()) {
                         let _ = r.send(Err(Code::PRECONDITION_FAILED));
                         continue;
+                    }
+                    if let Some(l) = lg.as_mut() {
+                        stop_logger(hub, l).await;
+                        let _ = r.send(Ok((UnitState::Running, UnitState::Down)));
+                        return Exit::Down("kill");
                     }
                     if cfg.kind == UnitKind::Inproc {
                         let _ = r.send(Ok((UnitState::Running, UnitState::Down)));
@@ -557,7 +587,7 @@ async fn declare_node(hub: &HubRef) {
 pub async fn stop_all(hub: &HubRef, loggers: bool) {
     let units = hub.sup.snapshot();
     for u in units.iter().rev() {
-        if u.state != UnitState::Running || u.cfg.kind == UnitKind::Inproc || (u.cfg.role == UnitRole::Log) != loggers {
+        if u.state != UnitState::Running || u.cfg.id == ZENOH_UNIT || (u.cfg.role == UnitRole::Log) != loggers {
             continue;
         }
         let tx = hub.sup.cmds.lock().ok().and_then(|c| c.get(&u.cfg.id).cloned());
