@@ -2,9 +2,8 @@
 // spec: v1.4 · 정:RULE-OPS-LOGGER · 운영:RULE-LOG-LOGGER · 운영:RULE-BOOT-ARGS · 정:RULE-CFG-THREE-PLACES · model: claude-opus-5-5
 //! 로거 유닛 `oxlogd` — DGRAM 소켓을 bind 한 뒤 stdout 에 `ready epoch=` 한 줄 · 파일 하나 · 회전 · 보존 · stdin 닫힘이면 남은 것을 쓰고 끝낸다.
 
-mod ops;
-
 use common::args::{Args, Spec, flag, opt};
+use oxlogd::ops;
 use common::banner::Banner;
 use common::policy::{Policy, Reader};
 

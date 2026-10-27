@@ -2,14 +2,8 @@
 // spec: v1.4 · 정:RULE-DOC-PLANES · 정:RULE-DOC-OWNERSHIP · 정:RULE-BUS-FATE · 정:RULE-OPS-SURFACE · 운영:RULE-BOOT-ARGS · model: claude-opus-5-5
 //! 게이트웨이 `oxhubd` — 세션 · 배치 · op 라우팅 · C 평면 · supervisor · zenoh router.
 
-mod aux;
-mod bus;
-mod cfg;
-mod ops;
-mod room;
-mod ses;
-
 use common::args::Args;
+use oxhubd::{cfg, ops};
 
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
