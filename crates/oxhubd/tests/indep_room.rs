@@ -138,7 +138,6 @@ fn solo_node_is_never_isolated() {
 }
 
 #[test]
-#[ignore = "server defect: S-sym-RULE-BUS-EVENTS-7 — 가라앉기 안에 Delete 뒤 같은 키로 다시 선언된(산) 방을 settle 이 거둔다"]
 fn reappearing_room_within_settle_is_kept() {
     let mut m = three_nodes();
     m.room("Rb1", "b", false, 10_000);

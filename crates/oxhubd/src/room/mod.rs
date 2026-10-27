@@ -58,6 +58,7 @@ impl RoomMap {
         self.last_event = Some(LastEvent { at_ms: wall_ms, put, key: key.to_string() });
         match ev {
             TokenEv::RoomPut(t) => {
+                self.pending.retain(|p| !matches!(p, TokenEv::RoomDel(d) if d.room == t.room && d.node == t.node && d.inst == t.inst));
                 let locs = self.rooms.entry(t.room.clone()).or_default();
                 locs.insert(RoomLoc { node: t.node.clone(), inst: t.inst.clone() });
                 let nodes: BTreeSet<&String> = locs.iter().map(|l| &l.node).collect();
@@ -72,6 +73,7 @@ impl RoomMap {
                 if t.node != self.me {
                     self.seen_others = true;
                 }
+                self.pending.retain(|p| !matches!(p, TokenEv::NodeDel(d) if d.node == t.node && d.inst == t.inst));
                 self.nodes.entry(t.node).or_default().insert(t.inst);
             }
             other => self.pending.push(other),

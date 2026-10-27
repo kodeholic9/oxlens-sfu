@@ -253,9 +253,10 @@ impl TwccRecv {
         while seq <= end {
             let base = seq;
             let Some(first_at) = self.arrivals.range(base..=end).next().map(|(_, t)| *t) else { break };
-            let reference = (first_at.div_euclid(64_000)) & 0x00ff_ffff;
+            let ref_units = first_at.div_euclid(64_000);
+            let reference = ref_units & 0x00ff_ffff;
             let mut prev_ticks: i64 = 0;
-            let ref_us = reference * 64_000;
+            let ref_us = ref_units * 64_000;
             let mut symbols = Vec::new();
             let mut deltas = Vec::new();
             let mut next = base;

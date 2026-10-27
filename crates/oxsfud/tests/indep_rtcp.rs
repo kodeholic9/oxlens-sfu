@@ -353,7 +353,6 @@ fn twcc_random_windows_match_oracle() {
 }
 
 #[test]
-#[ignore = "server defect: S-sym-IMPL-RTCP-TERMINATE-6 — 도착 시각이 64ms·2^24(약 12.4일)를 넘으면 TWCC 피드백을 하나도 안 짓는다(기준 시각 mod 감김)"]
 fn twcc_reference_time_wraps_at_24_bits_deltas_unchanged() {
     let wrap = 64_000i64 << 24;
     let mut seen = vec![];
