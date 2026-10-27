@@ -157,7 +157,7 @@ pub fn send_probe(t: &Arc<Transport>, dl: &Arc<Downlink>) -> Option<u16> {
     }
     let (osn, ts) = {
         let rw = dl.rewrite.lock().ok()?;
-        (rw.rw.last_seq()?, 0u32)
+        (rw.rw.last_seq()?, rw.rw.last_ts()?)
     };
     let table = dl.ext.load();
     table.twcc?;
