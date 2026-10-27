@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/oxsig", "crates/common"]
+members = ["crates/oxsig", "crates/common", "crates/oxlogd"]
 resolver = "3"
 
 [workspace.package]
@@ -16,7 +16,7 @@ toml = "0.8"
 jsonwebtoken = "9"
 chrono = "0.4"
 tokio = { version = "1", features = ["full"] }
-nix = { version = "0.26", features = ["signal"] }
+nix = { version = "0.26", features = ["signal", "socket"] }
 axum = { version = "0.7", features = ["ws"] }
 tower-http = { version = "0.5", features = ["cors"] }
 futures-util = "0.3"

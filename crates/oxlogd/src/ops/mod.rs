@@ -1,145 +1,223 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.3 @d4cc756 · 정:RULE-OPS-LOGGER 운영:RULE-LOG-LOGGER 운영:RULE-LOG-LINE 운영:RULE-BOOT-ARGS 정:RULE-CFG-THREE-PLACES 정책:logging.socket_rcvbuf_bytes 정책:logging.rotate_max_bytes 정책:logging.retention_days · model: claude-opus-5-5
-//! 로거 — Unix DGRAM 소켓 하나로 받고 · 파일 하나(`{log_dir}/ox.log.{날짜}`)에 도착순으로 쓴다 · 자기 줄은 같은 파일로.
+// spec: v1.4 · 정:RULE-OPS-LOGGER · 운영:RULE-LOG-LOGGER · 운영:RULE-LOG-SENDER · model: claude-opus-5-5
+//! 로거 — 받은 datagram 과 제 줄(`proc=log`)을 도착순으로 파일 하나에 쓴다. 회전 = 날짜 경계 ∨ 크기 상한(쓰는 순간 판정) · 보존 = 닫힌 파일만 센다 · fsync 없음 · spool 재흡수 없음.
 
-mod writer;
-
-use std::io::{Read as _, Write as _};
+use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixDatagram;
-use std::path::PathBuf;
-use std::sync::mpsc::sync_channel;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, SyncSender};
+use std::time::{Duration, SystemTime};
 
-use common::log::{LogOpts, Sink};
-use common::policy::Policy;
+const DATAGRAM_MAX: usize = 65_536;
+const DAY_SECS: u64 = 86_400;
 
-pub struct Args {
-    pub policy: Option<String>,
-    pub id: String,
-    pub build: Option<String>,
-    pub log_dir: String,
-    pub log_socket: String,
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub dir: PathBuf,
+    pub socket: Option<PathBuf>,
+    pub rotate_max_bytes: u64,
+    pub retention_days: u16,
+    pub rcvbuf: u32,
 }
 
-pub enum Parsed {
-    Version(Option<String>),
-    Run(Args),
+pub struct Logger {
+    cfg: Config,
+    sock: Option<UnixDatagram>,
+    tx: SyncSender<String>,
 }
 
-impl Args {
-    pub fn parse(argv: &[String]) -> Result<Parsed, String> {
-        let mut policy = None;
-        let mut id = None;
-        let mut build = None;
-        let mut log_dir = None;
-        let mut log_socket = None;
-        let mut version = false;
-        let mut i = 0;
-        while i < argv.len() {
-            let a = argv[i].as_str();
-            let mut val = || -> Result<String, String> {
-                i += 1;
-                argv.get(i).cloned().ok_or_else(|| format!("{a} 값이 없다"))
-            };
-            match a {
-                "--version" => version = true,
-                "--policy" => policy = Some(val()?),
-                "--id" => id = Some(val()?),
-                "--build" => build = Some(val()?),
-                "--log-dir" => log_dir = Some(val()?),
-                "--log-socket" => log_socket = Some(val()?),
-                "--zenoh-namespace" | "--zenoh-connect" => {
-                    val()?;
+pub fn announce_ready(epoch: &str) {
+    let mut o = std::io::stdout();
+    let _ = writeln!(o, "ready epoch={epoch}");
+    let _ = o.flush();
+}
+
+pub fn needs_rotate(today: &str, file_date: &str, size: u64, add: u64, max: u64) -> bool {
+    today != file_date || size + add > max
+}
+
+pub fn expired(age_secs: u64, retention_days: u16) -> bool {
+    retention_days != 0 && age_secs >= u64::from(retention_days) * DAY_SECS
+}
+
+pub fn file_name(date: &str) -> String {
+    format!("ox.log.{date}")
+}
+
+struct LogFile {
+    dir: PathBuf,
+    date: String,
+    file: Option<std::fs::File>,
+    size: u64,
+    max: u64,
+    retention_days: u16,
+}
+
+impl LogFile {
+    fn open(&mut self, date: &str) {
+        let path = self.dir.join(file_name(date));
+        self.file = std::fs::OpenOptions::new().create(true).append(true).open(&path).ok();
+        self.size = self.file.as_ref().and_then(|f| f.metadata().ok()).map(|m| m.len()).unwrap_or(0);
+        self.date = date.to_string();
+    }
+
+    fn rotate(&mut self, today: &str) {
+        if let Some(mut f) = self.file.take() {
+            let _ = f.flush();
+        }
+        if today == self.date {
+            let cur = self.dir.join(file_name(&self.date));
+            let mut n = 1;
+            while self.dir.join(format!("{}.{n}", file_name(&self.date))).exists() {
+                n += 1;
+            }
+            let _ = std::fs::rename(&cur, self.dir.join(format!("{}.{n}", file_name(&self.date))));
+        }
+        self.open(today);
+        sweep(&self.dir, &file_name(today), self.retention_days);
+    }
+
+    fn write(&mut self, line: &str) {
+        let today = common::time::today();
+        let add = line.len() as u64 + 1;
+        if self.file.is_none() {
+            self.open(&today);
+        } else if needs_rotate(&today, &self.date, self.size, add, self.max) {
+            self.rotate(&today);
+        }
+        if let Some(f) = self.file.as_mut()
+            && f.write_all(line.as_bytes()).and_then(|_| f.write_all(b"\n")).is_ok()
+        {
+            self.size += add;
+        }
+    }
+
+    fn flush(&mut self) {
+        if let Some(f) = self.file.as_mut() {
+            let _ = f.flush();
+        }
+    }
+}
+
+fn sweep(dir: &Path, current: &str, retention_days: u16) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let now = SystemTime::now();
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        let closed = (name.starts_with("ox.log.") && name != current) || name.ends_with(".spool.log");
+        if !closed {
+            continue;
+        }
+        let age = e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| now.duration_since(t).ok()).map(|d| d.as_secs()).unwrap_or(0);
+        if expired(age, retention_days) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+impl Logger {
+    pub fn bind(cfg: Config, tx: SyncSender<String>) -> Result<Logger, String> {
+        std::fs::create_dir_all(&cfg.dir).map_err(|e| format!("log-dir {}: {e}", cfg.dir.display()))?;
+        let sock = match &cfg.socket {
+            None => None,
+            Some(p) => {
+                if p.exists() {
+                    let _ = std::fs::remove_file(p);
                 }
-                other => return Err(format!("모르는 인자 {other}")),
+                if let Some(parent) = p.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let s = UnixDatagram::bind(p).map_err(|e| format!("log-socket {}: {e}", p.display()))?;
+                let _ = nix::sys::socket::setsockopt(s.as_raw_fd(), nix::sys::socket::sockopt::RcvBuf, &(cfg.rcvbuf as usize));
+                Some(s)
             }
-            i += 1;
-        }
-        if version {
-            return Ok(Parsed::Version(build));
-        }
-        Ok(Parsed::Run(Args {
-            policy,
-            id: id.unwrap_or_else(|| "local".to_string()),
-            build,
-            log_dir: log_dir.ok_or("--log-dir 가 없다")?,
-            log_socket: log_socket.ok_or("--log-socket 가 없다")?,
-        }))
+        };
+        sweep(&cfg.dir, &file_name(&common::time::today()), cfg.retention_days);
+        Ok(Logger { cfg, sock, tx })
     }
-}
 
-fn bind(path: &str) -> Result<UnixDatagram, String> {
-    match UnixDatagram::bind(path) {
-        Ok(s) => Ok(s),
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            let probe = UnixDatagram::unbound().map_err(|e| e.to_string())?;
-            if probe.send_to(b"", path).is_ok() {
-                return Err(format!("{path} — 다른 로거가 이 소켓을 쓰고 있다"));
+    pub fn serve(self, rx: Receiver<String>) -> Result<(), String> {
+        if let Some(sock) = self.sock.as_ref().and_then(|s| s.try_clone().ok()) {
+            let tx = self.tx.clone();
+            let _ = std::thread::Builder::new().name("ox-log-rx".into()).spawn(move || {
+                let mut buf = vec![0u8; DATAGRAM_MAX];
+                loop {
+                    match sock.recv(&mut buf) {
+                        Ok(0) => continue,
+                        Ok(n) => {
+                            let line = String::from_utf8_lossy(&buf[..n]).trim_end_matches('\n').to_string();
+                            if !line.is_empty() && tx.send(line).is_err() {
+                                return;
+                            }
+                        }
+                        Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                    }
+                }
+            });
+        }
+        let tx = self.tx.clone();
+        let _ = std::thread::Builder::new().name("ox-log-stdin".into()).spawn(move || {
+            let mut b = [0u8; 256];
+            let mut stdin = std::io::stdin();
+            while let Ok(n) = stdin.read(&mut b) {
+                if n == 0 {
+                    break;
+                }
             }
-            std::fs::remove_file(path).map_err(|e| format!("{path} 낡은 소켓 지우기: {e}"))?;
-            UnixDatagram::bind(path).map_err(|e| format!("{path} bind: {e}"))
-        }
-        Err(e) => Err(format!("{path} bind: {e}")),
-    }
-}
-
-pub fn run(a: Args) -> Result<(), String> {
-    let policy = match &a.policy {
-        Some(p) => Policy::parse(&std::fs::read_to_string(p).map_err(|e| format!("{p}: {e}"))?).map_err(|e| e.to_string())?,
-        None => Policy::default(),
-    };
-    let inst = common::id::instance();
-    std::fs::create_dir_all(&a.log_dir).map_err(|e| format!("{}: {e}", a.log_dir))?;
-    if let Some(parent) = PathBuf::from(&a.log_socket).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let (tx, rx) = sync_channel::<Vec<u8>>(policy.logging.queue_max_lines as usize);
-    let log = common::log::init(LogOpts {
-        node: a.id.clone(),
-        proc_: "log",
-        level: common::log::env_level(policy.logging.level),
-        line_max: policy.logging.line_max_bytes as usize,
-        queue_max: policy.logging.queue_max_lines as usize,
-        sink: Sink::Queue(tx.clone()),
-    });
-    let sock = bind(&a.log_socket)?;
-    let rcv = policy.logging.socket_rcvbuf_bytes as usize;
-    if let Err(e) = nix::sys::socket::setsockopt(std::os::fd::AsRawFd::as_raw_fd(&sock), nix::sys::socket::sockopt::RcvBuf, &rcv) {
-        tracing::warn!("rcvbuf {rcv}: {e}");
-    }
-    let out = writer::Out::new(PathBuf::from(&a.log_dir), policy.logging.rotate_max_bytes, policy.logging.retention_days);
-    let w = std::thread::Builder::new().name("ox-logw".into()).spawn(move || writer::run(rx, out)).map_err(|e| e.to_string())?;
-    let rtx = tx.clone();
-    let rs = sock.try_clone().map_err(|e| e.to_string())?;
-    let _ = std::thread::Builder::new().name("ox-logr".into()).spawn(move || {
-        let mut buf = vec![0u8; 65_536];
-        while let Ok(n) = rs.recv(&mut buf) {
-            if n > 0 && rtx.send(buf[..n].to_vec()).is_err() {
+            let _ = tx.send(String::new());
+        });
+        let mut file = LogFile { dir: self.cfg.dir.clone(), date: String::new(), file: None, size: 0, max: self.cfg.rotate_max_bytes, retention_days: self.cfg.retention_days };
+        for line in rx.iter() {
+            if line.is_empty() {
                 break;
             }
+            file.write(&line);
         }
-    });
-    {
-        let mut so = std::io::stdout().lock();
-        let _ = writeln!(so, "ready epoch={inst}");
-        let _ = so.flush();
+        while let Ok(line) = rx.try_recv() {
+            if !line.is_empty() {
+                file.write(&line);
+            }
+        }
+        file.flush();
+        if let Some(p) = &self.cfg.socket {
+            let _ = std::fs::remove_file(p);
+        }
+        Ok(())
     }
-    let build = common::build_id(a.build.as_deref());
-    common::ev!(
-        spec = "SV-STATE-UNIT-STATE",
-        build = build.as_str(),
-        "logger ready inst={inst} log_dir={} log_socket={} level={} rotate_max_bytes={} retention_days={} rcvbuf={rcv}",
-        a.log_dir,
-        a.log_socket,
-        common::log::level_name(log.level()),
-        policy.logging.rotate_max_bytes,
-        policy.logging.retention_days
-    );
-    let mut sink = Vec::new();
-    let _ = std::io::stdin().read_to_end(&mut sink);
-    common::ev!(spec = "SV-STATE-UNIT-STATE", "logger stopping — parent channel closed");
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    let _ = tx.send(Vec::new());
-    let _ = w.join();
-    let _ = std::fs::remove_file(&a.log_socket);
-    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rotation_is_date_or_size() {
+        assert!(!needs_rotate("2026-10-27", "2026-10-27", 10, 5, 100));
+        assert!(needs_rotate("2026-10-28", "2026-10-27", 10, 5, 100));
+        assert!(needs_rotate("2026-10-27", "2026-10-27", 96, 5, 100));
+    }
+
+    #[test]
+    fn retention_zero_keeps_forever() {
+        assert!(!expired(10 * DAY_SECS, 0));
+        assert!(expired(14 * DAY_SECS, 14));
+        assert!(!expired(14 * DAY_SECS - 1, 14));
+    }
+
+    #[test]
+    fn writes_and_rotates_by_size() {
+        let dir = std::env::temp_dir().join(format!("oxlogd-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let mut f = LogFile { dir: dir.clone(), date: String::new(), file: None, size: 0, max: 40, retention_days: 0 };
+        f.write("a".repeat(30).as_str());
+        f.write("b".repeat(30).as_str());
+        f.flush();
+        let today = common::time::today();
+        let cur = std::fs::read_to_string(dir.join(file_name(&today))).expect("cur");
+        let old = std::fs::read_to_string(dir.join(format!("{}.1", file_name(&today)))).expect("old");
+        assert!(cur.starts_with('b') && old.starts_with('a'));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

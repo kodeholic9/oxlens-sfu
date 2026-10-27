@@ -82,6 +82,6 @@ pub fn unit_transition(unit: &str, from: &str, to: &str, cause: &str) {
     crate::ev!(spec = SPEC_UNIT_STATE, unit = unit, area = "OPS", key = unit, from = from, to = to, cause = cause);
 }
 
-pub fn boot_line(build: &str, banner: &str) {
-    crate::ev!(spec = SPEC_UNIT_STATE, build = build, "{banner}");
+pub fn boot_line(build: &str, epoch: &str, banner: &str) {
+    crate::ev!(spec = SPEC_UNIT_STATE, epoch = epoch, build = build, "{banner}");
 }
