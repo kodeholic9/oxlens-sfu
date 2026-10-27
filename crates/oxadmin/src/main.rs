@@ -1,75 +1,72 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.3 @d4cc756 · 운영:RULE-TOOL-ONE 운영:RULE-TOOL-CONTRACT 운영:RULE-RISK-CONFIRM 운영:RULE-AUTH-THREE 운영:RULE-FMT-NO-INVENT 운영:RULE-READ-BUS-ALL 운영:RULE-READ-USER-MEDIA 운영:RULE-CTL-SUPERVISOR 운영:RULE-CTL-ROOM 운영:RULE-CTL-CUT 운영:RULE-CTL-LOG-LEVEL 운영:RULE-BOOT-PORTS 정:RULE-OPS-TOKEN 정:CAND-OPS-ADMIN-OUTPUT 정:CAND-OPS-TOOL-HUB-FORM · model: claude-opus-5-5
-//! oxadmin — 도구는 하나 · 사람이 읽는 표가 기본(`--json` raw) · 붙은 곳을 stderr 첫 줄에 · 확인값은 도구가 먼저 읽어 되싣는다 · 모르는 값은 `-`.
+// spec: v1.4 · 운영:RULE-TOOL-ONE · 운영:RULE-TOOL-CONTRACT · 운영:RULE-AUTH-THREE · 운영:RULE-RISK-CONFIRM · 운영:RULE-READ-USER-MEDIA · 운영:RULE-READ-BUS-ALL · 운영:RULE-FMT-NO-INVENT · 정:CAND-OPS-TOOL-HUB-FORM · 정:CAND-OPS-ADMIN-OUTPUT · 정:RULE-OPS-TOKEN · model: claude-opus-5-5
+//! 운영 도구 `oxadmin` — 하나뿐인 도구 · 명령은 표를 넘지 않는다. 붙은 곳을 매번 stderr 첫 줄에 적는다(`--hub` > `OXADMIN_URL` > 기본값 · `host:port` 도 받는다) · 원격이면 그 자리에서 운영 토큰을 서명한다 · 확인값은 먼저 읽어 되싣는다 · 서버가 안 내는 값은 `-`.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 const DEFAULT_HUB: &str = "http://127.0.0.1:1974";
-const OPS_TTL_SECS: u64 = 60;
+const TOKEN_TTL_SECS: u64 = 60;
 
 struct Opts {
     hub: String,
+    source: &'static str,
     json: bool,
     api_key: Option<String>,
     api_secret: Option<String>,
-    interval_ms: u64,
-    ttl: Option<u32>,
+    ttl: Option<u64>,
+    all: bool,
     rest: Vec<String>,
 }
 
-fn usage() -> ! {
-    eprintln!(
-        "usage: oxadmin [--hub URL] [--json] [--api-key K --api-secret S] <cmd>\n  sfus | sfu <id> | rooms | room <id> | users | user <id> [--interval ms] | snapshot | drops | bus [--all]\n  unit list | unit show <id> | load <id> | stop <id> | kill <id> | shutdown\n  probe <user> | user-cut <user> | reap <room> <user> | destroy <room> | log-level <level> [--ttl secs]"
-    );
-    std::process::exit(2)
-}
-
-fn parse() -> Opts {
-    let mut o = Opts { hub: String::new(), json: false, api_key: None, api_secret: None, interval_ms: 1000, ttl: None, rest: Vec::new() };
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-    let mut hub_flag = None;
-    let mut all = false;
+fn parse_args(argv: Vec<String>) -> Result<Opts, String> {
+    let mut hub: Option<String> = None;
+    let mut o = Opts { hub: String::new(), source: "기본값", json: false, api_key: None, api_secret: None, ttl: None, all: false, rest: Vec::new() };
     let mut i = 0;
     while i < argv.len() {
         let a = argv[i].as_str();
-        let mut val = || -> String {
+        let mut val = || -> Result<String, String> {
             i += 1;
-            argv.get(i).cloned().unwrap_or_else(|| usage())
+            argv.get(i).cloned().ok_or(format!("{a} 뒤에 값이 없다"))
         };
         match a {
-            "--hub" => hub_flag = Some(val()),
+            "--hub" => hub = Some(val()?),
             "--json" => o.json = true,
-            "--api-key" => o.api_key = Some(val()),
-            "--api-secret" => o.api_secret = Some(val()),
-            "--interval" => o.interval_ms = val().parse().unwrap_or(1000),
-            "--ttl" => o.ttl = val().parse().ok(),
-            "--all" => all = true,
-            "-h" | "--help" => usage(),
+            "--all" => o.all = true,
+            "--api-key" => o.api_key = Some(val()?),
+            "--api-secret" => o.api_secret = Some(val()?),
+            "--ttl" => o.ttl = Some(val()?.parse().map_err(|_| "--ttl 은 초(정수)".to_string())?),
             _ => o.rest.push(argv[i].clone()),
         }
         i += 1;
     }
-    if all {
-        o.rest.push("--all".into());
-    }
-    let (hub, src) = match (hub_flag, std::env::var("OXADMIN_URL").ok().filter(|s| !s.is_empty())) {
+    let (h, src) = match (hub, std::env::var("OXADMIN_URL").ok().filter(|v| !v.is_empty())) {
         (Some(h), _) => (h, "--hub"),
         (None, Some(e)) => (e, "OXADMIN_URL"),
         (None, None) => (DEFAULT_HUB.to_string(), "기본값"),
     };
-    eprintln!("[oxadmin] hub={hub} ({src})");
-    o.hub = hub.trim_end_matches('/').to_string();
-    o
+    o.hub = normalize(&h);
+    o.source = src;
+    Ok(o)
+}
+
+fn normalize(h: &str) -> String {
+    let h = h.trim_end_matches('/');
+    if h.contains("://") { h.to_string() } else { format!("http://{h}") }
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 fn token(o: &Opts) -> Option<String> {
     let (k, s) = (o.api_key.as_ref()?, o.api_secret.as_ref()?);
-    let now = common::jwt::now_secs();
-    common::jwt::sign(&common::jwt::OpsClaims { iss: k.clone(), ops: true, iat: now, exp: now + OPS_TTL_SECS }, s).ok()
+    let now = now_secs();
+    let claims = json!({"iss": k, "ops": true, "iat": now, "exp": now + TOKEN_TTL_SECS});
+    jsonwebtoken::encode(&jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256), &claims, &jsonwebtoken::EncodingKey::from_secret(s.as_bytes())).ok()
 }
 
 struct Resp {
@@ -77,366 +74,294 @@ struct Resp {
     body: Value,
 }
 
-fn http(o: &Opts, method: &str, path: &str, body: Option<&Value>) -> Result<Resp, String> {
-    let rest = match o.hub.split_once("://") {
-        Some(("http", r)) => r,
-        Some(_) => return Err(format!("http:// 만 지원한다: {}", o.hub)),
-        None => o.hub.as_str(),
-    };
-    let (host, base) = match rest.find('/') {
+fn request(o: &Opts, method: &str, path: &str, body: Option<&Value>) -> Result<Resp, String> {
+    let rest = o.hub.strip_prefix("http://").ok_or_else(|| format!("스킴을 지원하지 않는다: {} (http 만)", o.hub))?;
+    let (authority, base) = match rest.find('/') {
         Some(i) => (&rest[..i], &rest[i..]),
         None => (rest, ""),
     };
-    let mut s = TcpStream::connect(host).map_err(|e| format!("connect {host}: {e}"))?;
-    let _ = s.set_read_timeout(Some(Duration::from_secs(30)));
+    let base = base.trim_end_matches("/media");
+    let mut s = TcpStream::connect(authority).map_err(|e| format!("{authority} 에 못 붙었다: {e}"))?;
+    let _ = s.set_read_timeout(Some(Duration::from_secs(15)));
     let payload = body.map(|b| b.to_string()).unwrap_or_default();
-    let auth = token(o).map(|t| format!("authorization: Bearer {t}\r\n")).unwrap_or_default();
-    let req = format!(
-        "{method} {base}{path} HTTP/1.1\r\nhost: {host}\r\nconnection: close\r\ncontent-type: application/json\r\ncontent-length: {}\r\n{auth}\r\n{payload}",
-        payload.len()
-    );
+    let mut req = format!("{method} {base}{path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\nContent-Length: {}\r\n", payload.len());
+    if body.is_some() {
+        req.push_str("Content-Type: application/json\r\n");
+    }
+    if let Some(t) = token(o) {
+        req.push_str(&format!("Authorization: Bearer {t}\r\n"));
+    }
+    req.push_str("\r\n");
+    req.push_str(&payload);
     s.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
     let mut raw = Vec::new();
     s.read_to_end(&mut raw).map_err(|e| e.to_string())?;
     let text = String::from_utf8_lossy(&raw).to_string();
-    let (head, rest) = text.split_once("\r\n\r\n").ok_or("응답 형식")?;
-    let status: u16 = head.split_whitespace().nth(1).and_then(|x| x.parse().ok()).ok_or("상태 줄")?;
-    let chunked = head.lines().any(|l| l.to_ascii_lowercase().starts_with("transfer-encoding:") && l.to_ascii_lowercase().contains("chunked"));
-    let body_text = if chunked { dechunk(rest) } else { rest.to_string() };
-    let body = serde_json::from_str(&body_text).unwrap_or(Value::Null);
-    Ok(Resp { status, body })
+    let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
+    let status = head.split_whitespace().nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
+    let body = if head.to_ascii_lowercase().contains("transfer-encoding: chunked") { dechunk(body) } else { body.to_string() };
+    Ok(Resp { status, body: serde_json::from_str(&body).unwrap_or(Value::String(body)) })
 }
 
 fn dechunk(s: &str) -> String {
     let mut out = String::new();
     let mut rest = s;
-    while let Some((len, after)) = rest.split_once("\r\n") {
-        let n = usize::from_str_radix(len.trim(), 16).unwrap_or(0);
-        if n == 0 || after.len() < n {
+    while let Some((size, tail)) = rest.split_once("\r\n") {
+        let n = usize::from_str_radix(size.trim(), 16).unwrap_or(0);
+        if n == 0 || tail.len() < n {
             break;
         }
-        out.push_str(&after[..n]);
-        rest = after[n..].trim_start_matches("\r\n");
+        out.push_str(&tail[..n]);
+        rest = tail[n..].trim_start_matches("\r\n");
     }
     out
 }
 
-fn call(o: &Opts, method: &str, path: &str, body: Option<&Value>) -> Value {
-    match http(o, method, path, body) {
-        Ok(r) if (200..300).contains(&r.status) => r.body,
-        Ok(r) => {
-            let code = r.body.get("code").map(|c| c.to_string()).unwrap_or_else(|| "-".into());
-            let name = r.body.get("name").and_then(Value::as_str).unwrap_or("-");
-            eprintln!("[oxadmin] {method} {path} → {} {code} {name}", r.status);
-            if o.json {
-                println!("{}", r.body);
-            }
-            std::process::exit(1);
-        }
-        Err(e) => {
-            eprintln!("[oxadmin] {method} {path} 실패: {e}");
-            std::process::exit(1);
-        }
+fn cell(v: &Value) -> String {
+    match v {
+        Value::Null => "-".to_string(),
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
     }
 }
 
-fn s(v: &Value, k: &str) -> String {
-    match v.get(k) {
-        None | Some(Value::Null) => "-".into(),
-        Some(Value::String(x)) => x.clone(),
-        Some(x) => x.to_string(),
-    }
-}
-
-fn table(head: &[&str], rows: &[Vec<String>]) {
-    let mut w: Vec<usize> = head.iter().map(|h| h.chars().count()).collect();
+fn table(rows: &[Value], cols: &[&str]) -> String {
+    let mut grid: Vec<Vec<String>> = vec![cols.iter().map(|c| c.to_string()).collect()];
     for r in rows {
-        for (i, c) in r.iter().enumerate() {
-            if i < w.len() {
-                w[i] = w[i].max(c.chars().count());
-            }
-        }
+        grid.push(cols.iter().map(|c| cell(r.get(*c).unwrap_or(&Value::Null))).collect());
     }
-    let line = |cells: Vec<String>| {
-        let parts: Vec<String> = cells.iter().enumerate().map(|(i, c)| format!("{c:<width$}", width = w.get(i).copied().unwrap_or(0))).collect();
-        println!("{}", parts.join("  ").trim_end());
-    };
-    line(head.iter().map(|h| h.to_string()).collect());
-    for r in rows {
-        line(r.clone());
+    let widths: Vec<usize> = (0..cols.len()).map(|i| grid.iter().map(|r| r[i].chars().count()).max().unwrap_or(0)).collect();
+    grid.iter().map(|r| r.iter().enumerate().map(|(i, c)| format!("{c:<w$}", w = widths[i])).collect::<Vec<_>>().join("  ").trim_end().to_string()).collect::<Vec<_>>().join("\n")
+}
+
+fn kv(v: &Value) -> String {
+    match v {
+        Value::Object(m) => m.iter().map(|(k, x)| format!("{k}={}", cell(x))).collect::<Vec<_>>().join("\n"),
+        other => cell(other),
     }
 }
 
-fn arr<'a>(v: &'a Value, k: &str) -> Vec<&'a Value> {
-    v.get(k).and_then(Value::as_array).map(|a| a.iter().collect()).unwrap_or_default()
-}
-
-fn out(o: &Opts, v: &Value, human: impl FnOnce(&Value)) {
+fn show(o: &Opts, r: &Resp, render: impl Fn(&Value) -> String) -> i32 {
     if o.json {
-        println!("{v}");
+        println!("{}", serde_json::to_string_pretty(&r.body).unwrap_or_default());
+    } else if r.status >= 400 {
+        println!("실패 status={} {}", r.status, kv(&r.body));
     } else {
-        human(v);
+        println!("{}", render(&r.body));
     }
+    if r.status >= 400 { 1 } else { 0 }
 }
 
-fn kv(v: &Value) {
-    if let Some(m) = v.as_object() {
-        for (k, x) in m {
-            println!("{k}: {}", if let Value::String(s) = x { s.clone() } else { x.to_string() });
-        }
-    }
+fn arr(v: &Value, k: &str) -> Vec<Value> {
+    v.get(k).and_then(Value::as_array).cloned().unwrap_or_default()
 }
 
-fn media_rows(v: &Value) -> Vec<(String, String, String, u64, u64)> {
+fn user_media(o: &Opts, user: &str) -> Result<i32, String> {
+    let path = format!("/admin/users/{user}/media");
+    let a = request(o, "GET", &path, None)?;
+    std::thread::sleep(Duration::from_secs(1));
+    let b = request(o, "GET", &path, None)?;
+    if o.json {
+        println!("{}", serde_json::to_string_pretty(&json!({"first": a.body, "second": b.body})).unwrap_or_default());
+        return Ok(if b.status >= 400 { 1 } else { 0 });
+    }
+    if b.status >= 400 {
+        println!("실패 status={} {}", b.status, kv(&b.body));
+        return Ok(1);
+    }
     let mut rows = Vec::new();
-    for l in arr(v, "links") {
-        let sfu = s(l, "sfu_id");
-        for m in arr(l, "mlines") {
-            let e = m.get("entry").cloned().unwrap_or(Value::Null);
+    for (li, link) in arr(&b.body, "links").iter().enumerate() {
+        let before = arr(&a.body, "links").get(li).cloned().unwrap_or(Value::Null);
+        if let Some(e) = link.get("error") {
+            rows.push(json!({"sfu_id": link.get("sfu_id"), "mid": "-", "track_id": "-", "last_seq": "-", "Δseq": "-", "Δat_ms": "-", "error": e}));
+            continue;
+        }
+        for (mi, m) in arr(link, "mlines").iter().enumerate() {
+            let p = before.get("mlines").and_then(|x| x.get(mi)).cloned().unwrap_or(Value::Null);
             let rw = m.get("rewrite").cloned().unwrap_or(Value::Null);
-            let last_seq = rw.get("last_seq").and_then(Value::as_u64).unwrap_or(0);
-            let last_at = rw.get("last_at").and_then(Value::as_u64).unwrap_or(0);
-            rows.push((sfu.clone(), s(&e, "mid"), format!("{} {} {}", s(&e, "kind"), s(&e, "track_id"), s(&e, "room_id")), last_seq, last_at));
+            let prw = p.get("rewrite").cloned().unwrap_or(Value::Null);
+            let d = |k: &str| match (rw.get(k).and_then(Value::as_i64), prw.get(k).and_then(Value::as_i64)) {
+                (Some(x), Some(y)) => json!(x - y),
+                _ => Value::Null,
+            };
+            rows.push(json!({
+                "sfu_id": link.get("sfu_id"),
+                "mid": m.pointer("/entry/mid"),
+                "track_id": m.pointer("/entry/track_id"),
+                "last_seq": rw.get("last_seq"),
+                "Δseq": d("last_seq"),
+                "Δat_ms": d("last_at"),
+                "error": Value::Null,
+            }));
         }
     }
-    rows
+    println!("{}", table(&rows, &["sfu_id", "mid", "track_id", "last_seq", "Δseq", "Δat_ms", "error"]));
+    Ok(0)
+}
+
+fn bus_all(o: &Opts) -> Result<i32, String> {
+    let r = request(o, "GET", "/admin/bus?all=1", None)?;
+    if o.json || r.status >= 400 {
+        return Ok(show(o, &r, kv));
+    }
+    let nodes = arr(&r.body, "nodes");
+    let mut views = Vec::new();
+    let mut rows = Vec::new();
+    for n in &nodes {
+        let bus = n.get("bus").cloned().unwrap_or(Value::Null);
+        let seen: Vec<String> = arr(&bus, "nodes").iter().map(|x| x.get("node").map(cell).unwrap_or_else(|| cell(x))).collect();
+        let rooms = bus.get("rooms_seen").cloned().unwrap_or(Value::Null);
+        views.push((seen.clone(), rooms.to_string(), n.get("error").is_some()));
+        rows.push(json!({"node": n.get("node"), "nodes_seen": seen.join(","), "rooms_seen": rooms, "isolated": bus.get("isolated"), "error": n.get("error")}));
+    }
+    println!("{}", table(&rows, &["node", "nodes_seen", "rooms_seen", "isolated", "error"]));
+    let agree = !views.is_empty() && views.iter().all(|v| !v.2 && v.0 == views[0].0 && v.1 == views[0].1);
+    if agree {
+        println!("합의: 전 node 가 같은 것을 본다");
+    } else {
+        println!("불일치: node 마다 본 것이 다르다");
+    }
+    Ok(if agree { 0 } else { 1 })
+}
+
+fn destroy(o: &Opts, room: &str) -> Result<i32, String> {
+    let snap = request(o, "GET", &format!("/admin/rooms/{room}/snapshot"), None)?;
+    if snap.status >= 400 {
+        return Ok(show(o, &snap, kv));
+    }
+    let v = snap.body.pointer("/room/version").cloned().unwrap_or(Value::Null);
+    let (Some(e), Some(s)) = (v.get("epoch").and_then(Value::as_str), v.get("seq").and_then(Value::as_u64)) else {
+        return Err("방 상세에 version 이 없다".into());
+    };
+    let iv = format!("{e}:{s}");
+    eprintln!("if_version={iv}");
+    let r = request(o, "POST", &format!("/admin/rooms/{room}/destroy?if_version={iv}"), None)?;
+    Ok(show(o, &r, |b| {
+        let yes = b.get("destroyed").and_then(Value::as_bool).unwrap_or(false);
+        format!("destroyed={}\nnotified={}", if yes { "yes" } else { "no" }, cell(b.get("notified").unwrap_or(&Value::Null)))
+    }))
+}
+
+fn kill(o: &Opts, id: &str) -> Result<i32, String> {
+    let st = request(o, "GET", "/admin/supervisor/status", None)?;
+    let epoch = arr(&st.body, "units").iter().find(|u| u.get("id").and_then(Value::as_str) == Some(id)).and_then(|u| u.get("epoch").and_then(Value::as_str).map(str::to_string));
+    let Some(epoch) = epoch else { return Err(format!("유닛 {id} 의 epoch 를 읽지 못했다(돌고 있지 않다)")) };
+    eprintln!("if_epoch={epoch}");
+    let r = request(o, "POST", &format!("/admin/supervisor/kill/{id}?if_epoch={epoch}"), None)?;
+    Ok(show(o, &r, kv))
+}
+
+fn shutdown(o: &Opts) -> Result<i32, String> {
+    let s = request(o, "GET", "/admin/snapshot", None)?;
+    let Some(hub_id) = s.body.get("hub_id").and_then(Value::as_str).map(str::to_string) else { return Err("hub_id 를 읽지 못했다".into()) };
+    eprintln!("confirm={hub_id}");
+    let r = request(o, "POST", &format!("/admin/supervisor/shutdown?confirm={hub_id}"), None)?;
+    Ok(show(o, &r, kv))
+}
+
+fn usage() -> &'static str {
+    "oxadmin [--hub <host:port|URL>] [--json] [--api-key K --api-secret S] <명령>\n  sfus · sfu <id> · rooms · room <id> · users · user <id> · snapshot · drops · bus [--all]\n  unit list · unit show <id> · load <id> · stop <id> · kill <id> · shutdown\n  probe <user> · user-cut <user> · reap <room> <user> · destroy <room> · log-level <level> [--ttl <secs>]"
+}
+
+fn run(o: &Opts) -> Result<i32, String> {
+    let r: Vec<&str> = o.rest.iter().map(String::as_str).collect();
+    let get = |p: &str| request(o, "GET", p, None);
+    let post = |p: &str, b: Option<&Value>| request(o, "POST", p, b);
+    Ok(match r.as_slice() {
+        ["sfus"] => show(o, &get("/admin/sfus")?, |b| table(&arr(b, "sfus"), &["unit", "sfu_id", "unit_state", "live", "node_live", "addr"])),
+        ["sfu", id] => show(o, &get(&format!("/admin/sfus/{id}/rooms"))?, |b| format!("unit={} sfu_id={} total={}\n{}", cell(&b["unit"]), cell(&b["sfu_id"]), cell(&b["total"]), table(&arr(b, "rooms"), &["room_id", "members"]))),
+        ["rooms"] => show(o, &get("/admin/rooms")?, |b| format!("{}\ntotal={}", table(&arr(b, "rooms"), &["room_id", "node", "sfu_id", "members"]), cell(&b["total"]))),
+        ["room", id] => show(o, &get(&format!("/admin/rooms/{id}/snapshot"))?, |b| {
+            let r = &b["room"];
+            format!(
+                "room_id={} name={} user_count={} hidden_count={} rec={} version={}:{}\nfloor state={} speaker={} queue={}\nslots audio={} video={}\n{}",
+                cell(&r["room_id"]),
+                cell(&r["name"]),
+                cell(&r["user_count"]),
+                cell(&r["hidden_count"]),
+                cell(&r["rec"]),
+                cell(&r["version"]["epoch"]),
+                cell(&r["version"]["seq"]),
+                cell(&r["floor"]["state"]),
+                cell(&r["floor"]["speaker"]),
+                cell(&r["floor"]["queue"]),
+                cell(&r["slots"]["audio"]),
+                cell(&r["slots"]["video"]),
+                table(&arr(r, "tracks"), &["type", "track_id", "kind", "user_id", "active", "muted"])
+            )
+        }),
+        ["users"] => show(o, &get("/admin/users")?, |b| {
+            let rows: Vec<Value> = arr(b, "users").iter().map(|u| json!({"session": u["session"], "user_id": u["user_id"], "participant_type": u["participant_type"], "hidden": u["hidden"], "links": arr(u, "links").iter().map(|l| format!("{}:{}:{}", cell(&l["sfu_id"]), cell(&l["ufrag"]), cell(&l["state"]))).collect::<Vec<_>>().join(" ")})).collect();
+            format!("{}\ntotal={}", table(&rows, &["session", "user_id", "participant_type", "hidden", "links"]), cell(&b["total"]))
+        }),
+        ["user", id] => user_media(o, id)?,
+        ["snapshot"] => show(o, &get("/admin/snapshot")?, |b| format!("hub_id={} ready={} build={}\n{}", cell(&b["hub_id"]), cell(&b["ready"]), cell(&b["build"]), table(&arr(b, "sfus"), &["unit", "sfu_id", "unit_state", "live"]))),
+        ["drops"] => show(o, &get("/admin/drops")?, |b| {
+            arr(b, "units")
+                .iter()
+                .map(|u| {
+                    let mut kvs: Vec<String> = u.as_object().map(|m| m.iter().filter(|(k, _)| *k != "unit" && *k != "sfu_id").map(|(k, v)| format!("{k}={}", cell(v))).collect()).unwrap_or_default();
+                    kvs.sort();
+                    format!("[{} {}]\n{}", cell(&u["unit"]), cell(u.get("sfu_id").unwrap_or(&Value::Null)), kvs.join("\n"))
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }),
+        ["bus"] if o.all => bus_all(o)?,
+        ["bus"] => show(o, &get("/admin/bus")?, kv),
+        ["unit", "list"] => show(o, &get("/admin/supervisor/status")?, |b| table(&arr(b, "units"), &["id", "kind", "order", "state", "restarts", "epoch", "next_retry_ms"])),
+        ["unit", "show", id] => show(o, &get("/admin/supervisor/status")?, |b| arr(b, "units").into_iter().find(|u| u.get("id").and_then(Value::as_str) == Some(id)).map(|u| kv(&u)).unwrap_or_else(|| format!("유닛 없음 {id}"))),
+        ["load", id] => show(o, &post(&format!("/admin/supervisor/load/{id}"), None)?, kv),
+        ["stop", id] => show(o, &post(&format!("/admin/supervisor/stop/{id}"), None)?, kv),
+        ["kill", id] => kill(o, id)?,
+        ["shutdown"] => shutdown(o)?,
+        ["probe", u] => show(o, &get(&format!("/admin/users/{u}/probe"))?, |b| serde_json::to_string_pretty(b).unwrap_or_default()),
+        ["user-cut", u] => show(o, &post(&format!("/admin/users/{u}/cut"), None)?, |b| format!("{}\ntotal={}", table(&arr(b, "cut"), &["session", "code"]), cell(&b["total"]))),
+        ["reap", room, u] => show(o, &post(&format!("/admin/rooms/{room}/reap/{u}"), None)?, kv),
+        ["destroy", room] => destroy(o, room)?,
+        ["log-level", level] => {
+            let body = match o.ttl {
+                Some(t) => json!({"level": level, "ttl_secs": t}),
+                None => json!({"level": level}),
+            };
+            show(o, &post("/admin/log-level", Some(&body))?, kv)
+        }
+        _ => {
+            eprintln!("{}", usage());
+            2
+        }
+    })
 }
 
 fn main() {
-    let o = parse();
-    let cmd: Vec<&str> = o.rest.iter().map(String::as_str).collect();
-    match cmd.as_slice() {
-        ["sfus"] => {
-            let v = call(&o, "GET", "/admin/sfus", None);
-            out(&o, &v, |v| {
-                let rows: Vec<Vec<String>> =
-                    arr(v, "sfus").iter().map(|x| vec![s(x, "unit"), s(x, "sfu_id"), s(x, "unit_state"), s(x, "live"), s(x, "node_live")]).collect();
-                table(&["unit", "sfu_id", "state", "live", "node_live"], &rows);
-            });
+    let o = match parse_args(std::env::args().skip(1).collect()) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("oxadmin: {e}");
+            std::process::exit(2);
         }
-        ["sfu", id] => {
-            let v = call(&o, "GET", &format!("/admin/sfus/{id}/rooms"), None);
-            out(&o, &v, |v| {
-                println!("unit={} sfu_id={} total={}", s(v, "unit"), s(v, "sfu_id"), s(v, "total"));
-                let rows: Vec<Vec<String>> = arr(v, "rooms").iter().map(|x| vec![s(x, "room_id"), s(x, "members")]).collect();
-                table(&["room_id", "members"], &rows);
-            });
+    };
+    eprintln!("[oxadmin] hub={} ({})", o.hub, o.source);
+    let code = match run(&o) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("oxadmin: {e}");
+            1
         }
-        ["rooms"] => {
-            let v = call(&o, "GET", "/admin/rooms", None);
-            out(&o, &v, |v| {
-                let rows: Vec<Vec<String>> = arr(v, "rooms").iter().map(|x| vec![s(x, "room_id"), s(x, "node"), s(x, "sfu_id"), s(x, "members")]).collect();
-                table(&["room_id", "node", "sfu_id", "members"], &rows);
-            });
-        }
-        ["room", id] => {
-            let v = call(&o, "GET", &format!("/admin/rooms/{id}/snapshot"), None);
-            out(&o, &v, |v| {
-                let r = v.get("room").cloned().unwrap_or(Value::Null);
-                let ver = r.get("version").cloned().unwrap_or(Value::Null);
-                println!(
-                    "room={} name={} capacity={} user_count={} hidden_count={} rec={} version={}:{}",
-                    s(&r, "room_id"),
-                    s(&r, "name"),
-                    s(&r, "capacity"),
-                    s(&r, "user_count"),
-                    s(&r, "hidden_count"),
-                    s(&r, "rec"),
-                    s(&ver, "epoch"),
-                    s(&ver, "seq")
-                );
-                let rows: Vec<Vec<String>> =
-                    arr(&r, "participants").iter().map(|x| vec![s(x, "user_id"), s(x, "role"), s(x, "select"), s(x, "participant_type")]).collect();
-                table(&["user_id", "role", "select", "ptype"], &rows);
-                let rows: Vec<Vec<String>> = arr(&r, "tracks")
-                    .iter()
-                    .map(|x| vec![s(x, "track_id"), s(x, "type"), s(x, "kind"), s(x, "user_id"), s(x, "active"), s(x, "muted")])
-                    .collect();
-                table(&["track_id", "type", "kind", "user_id", "active", "muted"], &rows);
-                let f = r.get("floor").cloned().unwrap_or(Value::Null);
-                println!(
-                    "floor state={} speaker={} priority={} first_rtp_at={} last_rtp_at={}",
-                    s(&f, "state"),
-                    s(&f, "speaker"),
-                    s(&f, "priority"),
-                    s(&f, "first_rtp_at"),
-                    s(&f, "last_rtp_at")
-                );
-                for q in arr(&f, "queue") {
-                    println!("  queue {} p={}", s(q, "user_id"), s(q, "priority"));
-                }
-                for t in arr(&f, "timers") {
-                    println!("  timer {} user={} at={}", s(t, "name"), s(t, "user_id"), s(t, "at"));
-                }
-                let sl = r.get("slots").cloned().unwrap_or(Value::Null);
-                println!("slots audio={} video={}", s(&sl, "audio"), s(&sl, "video"));
-            });
-        }
-        ["users"] => {
-            let v = call(&o, "GET", "/admin/users", None);
-            out(&o, &v, |v| {
-                let mut rows = Vec::new();
-                for u in arr(v, "users") {
-                    let links: Vec<String> = arr(u, "links").iter().map(|l| format!("{}:{}:{}", s(l, "sfu_id"), s(l, "ufrag"), s(l, "state"))).collect();
-                    rows.push(vec![
-                        s(u, "session"),
-                        s(u, "user_id"),
-                        s(u, "participant_type"),
-                        s(u, "hidden"),
-                        if links.is_empty() { "-".into() } else { links.join(",") },
-                    ]);
-                }
-                table(&["session", "user_id", "ptype", "hidden", "links"], &rows);
-            });
-        }
-        ["user", id] => {
-            let a = call(&o, "GET", &format!("/admin/users/{id}/media"), None);
-            std::thread::sleep(Duration::from_millis(o.interval_ms));
-            let b = call(&o, "GET", &format!("/admin/users/{id}/media"), None);
-            if o.json {
-                println!("{}", serde_json::json!([a, b]));
-                return;
-            }
-            let (ra, rb) = (media_rows(&a), media_rows(&b));
-            let mut rows = Vec::new();
-            for (sfu, mid, what, seq, at) in &rb {
-                let prev = ra.iter().find(|x| x.0 == *sfu && x.1 == *mid);
-                let (ds, da) = match prev {
-                    Some(p) => ((*seq as i64 - p.3 as i64).to_string(), (*at as i64 - p.4 as i64).to_string()),
-                    None => ("-".into(), "-".into()),
-                };
-                rows.push(vec![sfu.clone(), mid.clone(), what.clone(), seq.to_string(), ds, at.to_string(), da]);
-            }
-            println!("user={id} interval_ms={}", o.interval_ms);
-            table(&["sfu_id", "mid", "kind track room", "last_seq", "Δseq", "last_at", "Δat"], &rows);
-        }
-        ["snapshot"] => {
-            let v = call(&o, "GET", "/admin/snapshot", None);
-            out(&o, &v, kv);
-        }
-        ["drops"] => {
-            let v = call(&o, "GET", "/admin/drops", None);
-            out(&o, &v, |v| {
-                for u in arr(v, "units") {
-                    println!("[{}] sfu_id={} error={}", s(u, "unit"), s(u, "sfu_id"), s(u, "error"));
-                    if let Some(m) = u.as_object() {
-                        for (k, x) in m {
-                            if !["unit", "sfu_id", "error"].contains(&k.as_str()) && x.as_u64().is_some_and(|n| n > 0) {
-                                println!("  {k}={x}");
-                            }
-                        }
-                    }
-                }
-            });
-        }
-        ["bus"] => {
-            let v = call(&o, "GET", "/admin/bus", None);
-            out(&o, &v, kv);
-        }
-        ["bus", "--all"] => {
-            let v = call(&o, "GET", "/admin/bus?all=1", None);
-            out(&o, &v, |v| {
-                let mut views: Vec<(String, String)> = Vec::new();
-                let mut rows = Vec::new();
-                for n in arr(v, "nodes") {
-                    let b = n.get("bus").cloned().unwrap_or(Value::Null);
-                    let mut nodes: Vec<String> = arr(&b, "nodes").iter().map(|x| format!("{}/{}", s(x, "node"), s(x, "inst"))).collect();
-                    nodes.sort();
-                    rows.push(vec![s(n, "node"), s(&b, "inst"), nodes.join(","), arr(&b, "rooms_seen").len().to_string(), s(n, "error")]);
-                    if n.get("error").is_none() {
-                        views.push((s(n, "node"), nodes.join(",")));
-                    }
-                }
-                table(&["node", "inst", "nodes_seen", "rooms_seen", "error"], &rows);
-                let same = views.windows(2).all(|w| w[0].1 == w[1].1) && views.len() == arr(v, "nodes").len();
-                if same {
-                    println!("합의: 전 node 가 같은 것을 본다");
-                } else {
-                    println!("불일치: node 마다 본 것이 다르다");
-                }
-            });
-        }
-        ["unit", "list"] => {
-            let v = call(&o, "GET", "/admin/supervisor/status", None);
-            out(&o, &v, |v| {
-                let rows: Vec<Vec<String>> = arr(v, "units")
-                    .iter()
-                    .map(|x| vec![s(x, "id"), s(x, "kind"), s(x, "order"), s(x, "state"), s(x, "restarts"), s(x, "epoch"), s(x, "next_retry_ms")])
-                    .collect();
-                table(&["id", "kind", "order", "state", "restarts", "epoch", "next_retry_ms"], &rows);
-            });
-        }
-        ["unit", "show", id] => {
-            let v = call(&o, "GET", "/admin/supervisor/status", None);
-            let u = arr(&v, "units").into_iter().find(|x| s(x, "id") == *id).cloned().unwrap_or(Value::Null);
-            out(&o, &u, kv);
-        }
-        [op @ ("load" | "stop"), id] => {
-            let v = call(&o, "POST", &format!("/admin/supervisor/{op}/{id}"), None);
-            out(&o, &v, |v| println!("{} {} → {}", s(v, "id"), s(v, "from"), s(v, "to")));
-        }
-        ["kill", id] => {
-            let st = call(&o, "GET", "/admin/supervisor/status", None);
-            let epoch = arr(&st, "units").into_iter().find(|x| s(x, "id") == *id).map(|x| s(x, "epoch")).unwrap_or_else(|| "-".into());
-            eprintln!("if_epoch={epoch}");
-            let v = call(&o, "POST", &format!("/admin/supervisor/kill/{id}?if_epoch={epoch}"), None);
-            out(&o, &v, |v| println!("{} {} → {}", s(v, "id"), s(v, "from"), s(v, "to")));
-        }
-        ["shutdown"] => {
-            let snap = call(&o, "GET", "/admin/snapshot", None);
-            let hub = s(&snap, "hub_id");
-            eprintln!("confirm={hub}");
-            let v = call(&o, "POST", &format!("/admin/supervisor/shutdown?confirm={hub}"), None);
-            out(&o, &v, kv);
-        }
-        ["probe", user] => {
-            let v = call(&o, "GET", &format!("/admin/users/{user}/probe"), None);
-            out(&o, &v, |v| {
-                for x in arr(v, "sessions") {
-                    let r = if x.get("timeout").and_then(Value::as_bool) == Some(true) {
-                        "timeout".to_string()
-                    } else {
-                        x.get("result").map(Value::to_string).unwrap_or_else(|| "-".into())
-                    };
-                    println!("{} {}", s(x, "session"), r);
-                }
-            });
-        }
-        ["user-cut", user] => {
-            let v = call(&o, "POST", &format!("/admin/users/{user}/cut"), None);
-            out(&o, &v, |v| {
-                for c in arr(v, "cut") {
-                    println!("cut session={} code={}", s(c, "session"), s(c, "code"));
-                }
-                println!("total={}", s(v, "total"));
-            });
-        }
-        ["reap", room, user] => {
-            let v = call(&o, "POST", &format!("/admin/rooms/{room}/reap/{user}"), None);
-            out(&o, &v, |v| {
-                let ver = v.get("version").cloned().unwrap_or(Value::Null);
-                println!("reaped room={} user={} left={} version={}:{}", s(v, "room_id"), s(v, "user_id"), s(v, "left"), s(&ver, "epoch"), s(&ver, "seq"));
-            });
-        }
-        ["destroy", room] => {
-            let snap = call(&o, "GET", &format!("/admin/rooms/{room}/snapshot"), None);
-            let ver = snap.get("room").and_then(|r| r.get("version")).cloned().unwrap_or(Value::Null);
-            let iv = format!("{}:{}", s(&ver, "epoch"), s(&ver, "seq"));
-            eprintln!("if_version={iv}");
-            let v = call(&o, "POST", &format!("/admin/rooms/{room}/destroy?if_version={iv}"), None);
-            out(&o, &v, |v| {
-                let d = if v.get("destroyed").and_then(Value::as_bool) == Some(true) { "yes" } else { "no" };
-                println!("destroyed={d} room={} notified={}", s(v, "room_id"), s(v, "notified"));
-            });
-        }
-        ["log-level", level] => {
-            let mut b = serde_json::json!({ "level": level });
-            if let Some(t) = o.ttl {
-                b["ttl_secs"] = t.into();
-            }
-            let v = call(&o, "POST", "/admin/log-level", Some(&b));
-            out(&o, &v, |v| println!("log-level {} → {} until={} units={}", s(v, "from"), s(v, "to"), s(v, "until"), s(v, "units")));
-        }
-        _ => usage(),
+    };
+    std::process::exit(code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hub_forms() {
+        assert_eq!(normalize("127.0.0.1:1974"), "http://127.0.0.1:1974");
+        assert_eq!(normalize("http://h:1/"), "http://h:1");
+        assert_eq!(dechunk("5\r\nhello\r\n0\r\n\r\n"), "hello");
+        let t = table(&[json!({"a": 1, "b": null})], &["a", "b"]);
+        assert!(t.contains('-'));
     }
 }
