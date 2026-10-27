@@ -1,28 +1,10 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.3 @d4cc756 · 운영:RULE-LOG-LINE 운영:RULE-LOG-KEYS 운영:RULE-LOG-KIND 운영:RULE-LOG-TRANSITION 운영:RULE-LOG-SENDER 운영:LOG.log.LINE 운영:LOG.log.TRANSITION · model: claude-opus-5-5
-//! 줄 하나 조립 — 칸 차례 고정(머리 → 상관 키 → 레코드 값 → `msg`) · 없는 키 생략 · 줄 상한 넘으면 `msg` 자르고 `truncated=1`.
+// spec: v1.4 · 운영:RULE-LOG-LINE · 운영:RULE-LOG-KEYS · 운영:RULE-LOG-KIND · 운영:RULE-LOG-TRANSITION · 운영:LOG.log.LINE · 운영:LOG.log.TRANSITION · 연:DEV-TRN-SESSION-SECRET · model: claude-opus-5-5
+//! 줄 하나 = 레코드 하나 = datagram 하나. 칸 차례 고정 — 머리(ts · mono · node · proc · kind · spec) → 상관 키 → 레코드별 값 → `msg`.
 
-use std::fmt::Write as _;
+use sha2::{Digest, Sha256};
 
-pub const HEAD: &[&str] = &["ts", "mono", "node", "proc", "kind", "spec"];
-pub const CORR: &[&str] = &["session", "room", "user", "epoch", "track", "ssrc", "seq", "floor_sequence", "mbcp_seq", "arev"];
-pub const REST_LINE: &[&str] = &[
-    "build",
-    "truncated",
-    "spooled",
-    "dropped",
-    "packets_received",
-    "packets_lost",
-    "jitter",
-    "bytes_received",
-    "packets_sent",
-    "bytes_sent",
-    "retransmitted_packets_sent",
-    "nack_count",
-    "pli_count",
-    "rid",
-];
-pub const REST_TRANSITION: &[&str] = &["area", "key", "from", "to", "cause", "impossible"];
+pub const CORRELATION: &[&str] = &["session", "room", "user", "epoch", "unit", "track", "ssrc", "seq", "floor_sequence", "mbcp_seq", "arev"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -41,35 +23,15 @@ impl Kind {
     }
 }
 
-#[derive(Debug, Default, Clone)]
-pub struct Record {
-    pub fields: Vec<(String, String)>,
-    pub ins: Vec<(String, String)>,
-    pub msg: String,
-}
-
-impl Record {
-    pub fn set(&mut self, k: &str, v: impl Into<String>) {
-        let v = v.into();
-        if let Some(slot) = self.fields.iter_mut().find(|(n, _)| n == k) {
-            slot.1 = v;
-        } else {
-            self.fields.push((k.to_string(), v));
-        }
-    }
-
-    pub fn get(&self, k: &str) -> Option<&str> {
-        self.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str())
-    }
-
-    fn take(&self, k: &str) -> Option<&str> {
-        self.get(k).filter(|v| !v.is_empty())
-    }
+#[derive(Debug, Clone, Default)]
+pub struct Head {
+    pub node: String,
+    pub proc_: String,
+    pub epoch: Option<String>,
 }
 
 pub fn quote(v: &str) -> String {
-    let needs = v.is_empty() || v.chars().any(|c| c.is_whitespace() || c == '"' || c == '=' || c.is_control());
-    if !needs {
+    if !v.is_empty() && !v.chars().any(|c| c.is_whitespace() || c == '"' || c == '=') {
         return v.to_string();
     }
     let mut s = String::with_capacity(v.len() + 2);
@@ -79,83 +41,91 @@ pub fn quote(v: &str) -> String {
             '"' => s.push_str("\\\""),
             '\\' => s.push_str("\\\\"),
             '\n' => s.push_str("\\n"),
-            '\r' => s.push_str("\\r"),
-            '\t' => s.push_str("\\t"),
-            c if c.is_control() => {
-                let _ = write!(s, "\\u{{{:x}}}", c as u32);
-            }
-            c => s.push(c),
+            _ => s.push(c),
         }
     }
     s.push('"');
     s
 }
 
-fn push(out: &mut String, k: &str, v: &str) {
-    if !out.is_empty() {
-        out.push(' ');
-    }
-    out.push_str(k);
-    out.push('=');
-    out.push_str(&quote(v));
+pub fn fingerprint(session_id: &str) -> String {
+    let d = Sha256::digest(session_id.as_bytes());
+    d.iter().take(4).map(|b| format!("{b:02x}")).collect()
 }
 
-pub fn render(r: &Record, max: usize) -> String {
-    let transition = r.take("area").is_some();
-    let rest: &[&str] = if transition { REST_TRANSITION } else { REST_LINE };
-    let known: Vec<&str> = HEAD.iter().chain(CORR).chain(REST_LINE).chain(REST_TRANSITION).copied().collect();
-    let mut extra = String::new();
-    for (k, v) in &r.fields {
-        if !known.contains(&k.as_str()) && !v.is_empty() {
-            if !extra.is_empty() {
-                extra.push(' ');
-            }
-            extra.push_str(k);
-            extra.push('=');
-            extra.push_str(v);
+pub struct Record<'a> {
+    pub ts: &'a str,
+    pub mono: u64,
+    pub kind: Kind,
+    pub fields: &'a [(String, String)],
+    pub msg: Option<&'a str>,
+}
+
+pub fn render(head: &Head, r: &Record<'_>, line_max: usize) -> String {
+    let mut out = String::with_capacity(256);
+    out.push_str("ts=");
+    out.push_str(r.ts);
+    out.push_str(" mono=");
+    out.push_str(&r.mono.to_string());
+    out.push_str(" node=");
+    out.push_str(&quote(&head.node));
+    out.push_str(" proc=");
+    out.push_str(&head.proc_);
+    out.push_str(" kind=");
+    out.push_str(r.kind.as_str());
+    if r.kind == Kind::Ev
+        && let Some((_, v)) = r.fields.iter().find(|(k, _)| k == "spec")
+    {
+        out.push_str(" spec=");
+        out.push_str(&quote(v));
+    }
+    for key in CORRELATION {
+        let v = r.fields.iter().rev().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
+        let v = match (v, *key) {
+            (Some(v), _) => Some(v),
+            (None, "epoch") => head.epoch.as_deref(),
+            _ => None,
+        };
+        if let Some(v) = v
+            && !v.is_empty()
+        {
+            out.push(' ');
+            out.push_str(key);
+            out.push('=');
+            out.push_str(&quote(v));
         }
     }
-    let msg = match (r.msg.is_empty(), extra.is_empty()) {
-        (true, true) => String::new(),
-        (false, true) => r.msg.clone(),
-        (true, false) => extra,
-        (false, false) => format!("{} {}", r.msg, extra),
-    };
-    let mut head = String::with_capacity(256);
-    for k in HEAD.iter().chain(CORR).chain(rest) {
-        if *k == "truncated" {
+    let mut seen: Vec<&str> = Vec::new();
+    for (k, v) in r.fields {
+        if k == "spec" || k == "message" || CORRELATION.contains(&k.as_str()) || seen.contains(&k.as_str()) || v.is_empty() {
             continue;
         }
-        if let Some(v) = r.take(k) {
-            push(&mut head, k, v);
+        seen.push(k);
+        out.push(' ');
+        out.push_str(k);
+        out.push('=');
+        out.push_str(&quote(v));
+    }
+    let Some(msg) = r.msg.filter(|m| !m.is_empty()) else {
+        return out;
+    };
+    let tail = format!(" msg={}", quote(msg));
+    if out.len() + tail.len() <= line_max {
+        out.push_str(&tail);
+        return out;
+    }
+    let mark = " truncated=1";
+    let room = line_max.saturating_sub(out.len() + mark.len() + " msg=\"\"".len() + 8);
+    let mut cut = String::new();
+    for c in msg.chars() {
+        if quote(&cut).len() + c.len_utf8() + 2 > room {
+            break;
         }
+        cut.push(c);
     }
-    if transition {
-        for (k, v) in &r.ins {
-            push(&mut head, &format!("in.{k}"), v);
-        }
-    }
-    let full = if msg.is_empty() { head.clone() } else { format!("{head} msg={}", quote(&msg)) };
-    if full.len() <= max {
-        return full;
-    }
-    let budget = max.saturating_sub(head.len() + " truncated=1 msg=\"\"".len() + 8);
-    let mut cut = msg.len().min(budget);
-    while cut > 0 && !msg.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    let mut out = head;
-    push(&mut out, "truncated", "1");
-    let q = quote(&msg[..cut]);
+    out.push_str(mark);
     out.push_str(" msg=");
-    out.push_str(&q);
-    if out.len() > max {
-        let mut c = max;
-        while c > 0 && !out.is_char_boundary(c) {
-            c -= 1;
-        }
-        out.truncate(c);
-    }
+    out.push_str(&quote(&cut));
     out
 }
 
@@ -163,60 +133,41 @@ pub fn render(r: &Record, max: usize) -> String {
 mod tests {
     use super::*;
 
-    fn rec(pairs: &[(&str, &str)], msg: &str) -> Record {
-        let mut r = Record { msg: msg.into(), ..Default::default() };
-        for (k, v) in pairs {
-            r.set(k, *v);
-        }
-        r
+    fn f(v: &[(&str, &str)]) -> Vec<(String, String)> {
+        v.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
     }
 
     #[test]
-    fn order_is_fixed_and_absent_keys_skipped() {
-        let r = rec(
-            &[("user", "u1"), ("kind", "ev"), ("node", "n"), ("proc", "hub"), ("ts", "T"), ("mono", "5"), ("spec", "CP-OP-BIND"), ("room", "")],
-            "bound ok",
-        );
-        assert_eq!(render(&r, 1024), "ts=T mono=5 node=n proc=hub kind=ev spec=CP-OP-BIND user=u1 msg=\"bound ok\"");
+    fn order_is_head_then_correlation_then_record_then_msg() {
+        let h = Head { node: "node-a".into(), proc_: "sfu".into(), epoch: Some("e1".into()) };
+        let fields = f(&[("from", "Idle"), ("room", "r1"), ("spec", "FLR.S.x"), ("session", "abcd1234"), ("area", "FLR")]);
+        let r = Record { ts: "T", mono: 5, kind: Kind::Ev, fields: &fields, msg: Some("a b") };
+        assert_eq!(render(&h, &r, 1024), "ts=T mono=5 node=node-a proc=sfu kind=ev spec=FLR.S.x session=abcd1234 room=r1 epoch=e1 from=Idle area=FLR msg=\"a b\"");
     }
 
     #[test]
-    fn unknown_keys_fold_into_msg() {
-        let r = rec(&[("ts", "T"), ("mono", "1"), ("node", "n"), ("proc", "sfu"), ("kind", "diag"), ("why", "x")], "m");
-        assert_eq!(render(&r, 1024), "ts=T mono=1 node=n proc=sfu kind=diag msg=\"m why=x\"");
+    fn diag_has_no_spec_and_absent_keys_are_omitted() {
+        let h = Head { node: "n".into(), proc_: "hub".into(), epoch: None };
+        let fields = f(&[("spec", "X"), ("track", "")]);
+        let r = Record { ts: "T", mono: 0, kind: Kind::Diag, fields: &fields, msg: None };
+        assert_eq!(render(&h, &r, 1024), "ts=T mono=0 node=n proc=hub kind=diag");
     }
 
     #[test]
-    fn transition_line_order() {
-        let mut r = rec(
-            &[
-                ("ts", "T"),
-                ("mono", "1"),
-                ("node", "n"),
-                ("proc", "sfu"),
-                ("kind", "ev"),
-                ("spec", "FLR.S.IDLE.req"),
-                ("room", "r1"),
-                ("area", "FLR"),
-                ("key", "r1"),
-                ("from", "IDLE"),
-                ("to", "TAKEN"),
-                ("cause", "REQUEST"),
-            ],
-            "",
-        );
-        r.ins.push(("priority".into(), "0".into()));
-        assert_eq!(
-            render(&r, 1024),
-            "ts=T mono=1 node=n proc=sfu kind=ev spec=FLR.S.IDLE.req room=r1 area=FLR key=r1 from=IDLE to=TAKEN cause=REQUEST in.priority=0"
-        );
+    fn long_msg_is_cut_and_marked() {
+        let h = Head { node: "n".into(), proc_: "hub".into(), epoch: None };
+        let long = "x".repeat(5000);
+        let r = Record { ts: "T", mono: 0, kind: Kind::Diag, fields: &[], msg: Some(&long) };
+        let s = render(&h, &r, 300);
+        assert!(s.len() <= 300, "{}", s.len());
+        assert!(s.contains(" truncated=1 msg="));
     }
 
     #[test]
-    fn long_msg_truncated_with_mark() {
-        let r = rec(&[("ts", "T"), ("mono", "1"), ("node", "n"), ("proc", "hub"), ("kind", "diag")], &"가".repeat(800));
-        let s = render(&r, 300);
-        assert!(s.len() <= 300);
-        assert!(s.contains("truncated=1 msg="));
+    fn fingerprint_is_eight_hex() {
+        let fp = fingerprint("secret-session");
+        assert_eq!(fp.len(), 8);
+        assert!(fp.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(!fp.contains("secret"));
     }
 }
