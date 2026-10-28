@@ -113,7 +113,7 @@ curl http://127.0.0.1:1974/healthz/ready
 - TLA+ 모형, 시험 벡터, 코드 일부를 생성합니다.
 - 없는 라벨 인용과 문서 사이의 값 사본을 막습니다.
 
-규격은 별도 저장소에 있고 아직 비공개입니다.
+그 가운데 클라와 서버의 계약인 연동규격서(wire 메시지 · 클라와 서버 상태기 · 타이머 · 흐름 · 오류 코드 · 발언권)를 여기 공개합니다: [docs/protocol/README.md](docs/protocol/README.md). 나머지 규격 문서와 원천은 별도 저장소에 있고 공개하지 않습니다.
 
 **재생성 회차**마다 새 AI 에이전트가 규격만 보고 이 서버를 짓습니다. 앞 회차의 코드와 생성 산문은 읽지 못합니다. 그다음에 잽니다.
 - 단위 · 헤드리스 · 브라우저 시험
@@ -144,6 +144,7 @@ curl http://127.0.0.1:1974/healthz/ready
 
 ## 관련 저장소
 
+- [연동규격서](docs/protocol/README.md) — 공개한 클라 ↔ 서버 계약(규격 원천에서 생성)
 - [oxlens-sdk-web](https://github.com/kodeholic9/oxlens-sdk-web) — 브라우저 SDK(TypeScript)와 브라우저 시험 층
 
 ## 라이선스

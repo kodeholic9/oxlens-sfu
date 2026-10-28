@@ -108,7 +108,7 @@ Every value lives in exactly one of three places, and the boot banner prints the
 
 ## How it is built
 
-The specification is a set of documents generated from structured sources: the client protocol, the server spec, the SDK spec, the operations spec, and the policy. A build checks that the documents agree with one another, generates the TLA+ models, test vectors and part of the code, and refuses dangling references or values copied between documents. The specification is kept in a separate repository and is not public yet.
+The specification is a set of documents generated from structured sources: the client protocol, the server spec, the SDK spec, the operations spec, and the policy. A build checks that the documents agree with one another, generates the TLA+ models, test vectors and part of the code, and refuses dangling references or values copied between documents. The client protocol — the contract between client and server (wire messages, client and server state machines, timers, flows, error codes, floor control) — is published here: [docs/protocol/README.md](docs/protocol/README.md) (Korean). The other specification documents and the sources are kept in a separate repository and are not public.
 
 Each **regeneration round** asks a fresh AI agent to build this server from the specification alone. It may not read the previous round's code or the generated prose. The round is then measured:
 
@@ -137,6 +137,7 @@ In round 6, blind independent tests caught 50 of 52 planted symptoms (96 %). Tes
 
 ## Related repositories
 
+- [Client protocol](docs/protocol/README.md) — the published protocol contract (Korean, generated from the spec sources).
 - [oxlens-sdk-web](https://github.com/kodeholic9/oxlens-sdk-web) — browser SDK (TypeScript) and the browser test layer.
 
 ## License
