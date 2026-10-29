@@ -88,7 +88,7 @@ impl Default for Logging {
             queue_max_lines: 8_192,
             spool_max_bytes: 67_108_864,
             socket_rcvbuf_bytes: 4_194_304,
-            stat_interval_ms: 1_000,
+            stat_interval_ms: 5_000,
         }
     }
 }
