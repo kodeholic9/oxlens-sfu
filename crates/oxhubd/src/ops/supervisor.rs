@@ -424,6 +424,7 @@ impl Supervisor {
                 }
             }
         };
+        let _parent_channel = child.stdin.take();
         loop {
             tokio::select! {
                 _ = child.wait() => return Outcome::Exited,

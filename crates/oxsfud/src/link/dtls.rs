@@ -13,7 +13,6 @@ use sctp_proto::{
     ReliabilityType, ServerConfig, StreamEvent, StreamId,
 };
 use tokio::sync::{Mutex as AMutex, mpsc};
-use webrtc_util::KeyingMaterialExporter;
 
 use super::Transport;
 
@@ -128,7 +127,6 @@ async fn srtp_keys(tr: &Transport, conn: &dtls::conn::DTLSConn) -> Result<(), St
     if let Ok(mut g) = tr.srtp_rx.lock() {
         g.replace(rx);
     }
-    let _ = KeyingMaterialExporter::export_keying_material;
     Ok(())
 }
 

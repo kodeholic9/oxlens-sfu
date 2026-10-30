@@ -89,6 +89,19 @@ pub struct Transport {
     pub dc_rx: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>>>,
     pub dc_open: AtomicBool,
     pub stop: tokio::sync::watch::Sender<bool>,
+    pub ingress: arc_swap::ArcSwap<std::collections::HashMap<u32, Arc<crate::r#pub::PubTrack>>>,
+    pub ext_ids: arc_swap::ArcSwap<ExtIds>,
+    pub pub_room: ArcSwapOption<String>,
+    pub rtc: crate::rtcp::ConnRtcp,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExtIds {
+    pub mid: u8,
+    pub rid: u8,
+    pub repair_rid: u8,
+    pub twcc: u8,
+    pub audio_level: u8,
 }
 
 impl Transport {
@@ -120,6 +133,10 @@ impl Transport {
             dc_rx: Mutex::new(Some(dc_rx)),
             dc_open: AtomicBool::new(false),
             stop,
+            ingress: arc_swap::ArcSwap::from_pointee(std::collections::HashMap::new()),
+            ext_ids: arc_swap::ArcSwap::from_pointee(ExtIds::default()),
+            pub_room: ArcSwapOption::empty(),
+            rtc: crate::rtcp::ConnRtcp::default(),
         })
     }
 

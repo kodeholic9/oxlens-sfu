@@ -127,7 +127,7 @@ fn attr(out: &mut Vec<u8>, ty: u16, v: &[u8]) {
     out.extend_from_slice(&ty.to_be_bytes());
     out.extend_from_slice(&(v.len() as u16).to_be_bytes());
     out.extend_from_slice(v);
-    while out.len() % 4 != 0 {
+    while !out.len().is_multiple_of(4) {
         out.push(0);
     }
 }
