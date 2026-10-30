@@ -58,7 +58,7 @@ impl Banner<'_> {
         for (k, v) in self.fields {
             let mut one = String::new();
             push_kv(&mut one, k, v);
-            let need = one.len() + 1;
+            let need = one.len() + one.matches(['"', '\\']).count() + 1;
             let part = groups.len();
             let room = self.line_max.saturating_sub(self.overhead(part));
             if need > self.line_max.saturating_sub(self.overhead(2).max(self.overhead(1))) && need > room {
@@ -84,8 +84,7 @@ impl Banner<'_> {
             .enumerate()
             .map(|(i, g)| {
                 let mut l = self.base(i + 1).rec("part", i + 1).rec("parts", parts);
-                l.raw = Some(super::line::kvs(&g));
-                l.msg = Some(self.msg.to_string());
+                l.msg = Some(format!("{} {}", self.msg, super::line::kvs(&g)));
                 l
             })
             .collect())
@@ -104,7 +103,7 @@ mod tests {
         let b = Banner { head: &head, epoch: None, build: "abc.1", unit: None, msg: "boot", fields: &fields, line_max: 1024 };
         let lines = b.lines().unwrap();
         assert!(lines.len() > 1);
-        let n: usize = lines.iter().map(|l| l.raw.as_ref().map(|r| r.matches("].cmd=").count()).unwrap_or(0)).sum();
+        let n: usize = lines.iter().map(|l| l.msg.as_ref().map(|r| r.matches("].cmd=").count()).unwrap_or(0)).sum();
         assert_eq!(n, 80);
         for (i, l) in lines.iter().enumerate() {
             let s = l.render(&head, &super::super::line::ts_now(), 123_456_789, 1024);

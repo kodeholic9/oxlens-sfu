@@ -303,7 +303,13 @@ impl Policy {
     }
 
     pub fn banner_fields_sfu(&self) -> Vec<(String, String)> {
-        let mut v = self.logging_fields();
+        let h = &self.hub;
+        let mut v = vec![
+            ("hub.room_unused_ttl_secs".to_string(), h.room_unused_ttl_secs.to_string()),
+            ("hub.room_departure_ttl_secs".to_string(), h.room_departure_ttl_secs.to_string()),
+            ("hub.room_default_capacity".to_string(), h.room_default_capacity.to_string()),
+        ];
+        v.extend(self.logging_fields());
         v.extend(self.media_fields());
         v.push(("floor.queue_max".into(), self.floor.queue_max.to_string()));
         v.push(("floor.t2_stop_talking_secs".into(), self.floor.t2_stop_talking_secs.to_string()));
