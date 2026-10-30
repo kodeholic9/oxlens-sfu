@@ -442,10 +442,17 @@ pub fn snapshot(room: &Room) -> serde_json::Value {
         }
         Err(_) => ("IDLE", None, 0, Vec::new()),
     };
-    let (first, last, timers) = match of(&room.id).and_then(|rf| rf.clock.lock().ok().map(|c| (c.first_rtp_at, c.last_rtp_at, c.timers.clone()))) {
-        Some((a, b, t)) => (a, b, t),
-        None => (None, None, BTreeMap::new()),
+    let (first, last, mut timers, granted) = match of(&room.id).and_then(|rf| rf.clock.lock().ok().map(|c| (c.first_rtp_at, c.last_rtp_at, c.timers.clone(), c.granted_at))) {
+        Some((a, b, t, g)) => (a, b, t, g),
+        None => (None, None, BTreeMap::new(), 0),
     };
+    let last = last_rtp_ms(room).filter(|t| *t >= granted).max(last);
+    if let (Some(at), Some(lr)) = (timers.get_mut(&("T1", None)), last) {
+        let pushed = lr.max(granted) + T1_MS;
+        if pushed > *at {
+            let _old = std::mem::replace(at, pushed);
+        }
+    }
     let timers: Vec<serde_json::Value> = timers
         .into_iter()
         .map(|((n, u), at)| {

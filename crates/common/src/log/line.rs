@@ -69,7 +69,8 @@ impl Line {
     }
 
     pub fn msg(mut self, m: impl Into<String>) -> Line {
-        self.msg = Some(m.into());
+        let m = m.into();
+        self.msg = if m.is_empty() { None } else { Some(m) };
         self
     }
 

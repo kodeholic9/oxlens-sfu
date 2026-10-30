@@ -28,7 +28,7 @@ struct Collect {
 impl Collect {
     fn put(&mut self, name: &str, v: String) {
         match name {
-            "message" => self.line.msg = Some(v),
+            "message" => self.line.msg = if v.is_empty() { None } else { Some(v) },
             "kind" => {
                 if let Some(k) = Kind::parse(&v) {
                     self.line.kind = k;
