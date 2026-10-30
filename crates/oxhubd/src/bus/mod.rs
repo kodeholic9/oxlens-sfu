@@ -160,6 +160,13 @@ impl Bus {
                     Err(_) => Vec::new(),
                 };
                 for r in dropped {
+                    if let Some((node, inst)) = b.room_token(&r).await {
+                        if let Ok(mut v) = b.view.lock() {
+                            v.on_token(TokenEv::RoomPut { room: r.clone(), node, inst }, common::now_ms());
+                        }
+                        tracing::info!(kind = "diag", room = %r, "room token delete was stale — token still stands, routing kept");
+                        continue;
+                    }
                     tracing::info!(kind = "diag", room = %r, "room token gone — local routing dropped");
                     let _ = b.tx.send(BusEvent::RoomDropped(r));
                 }
@@ -224,6 +231,18 @@ impl Bus {
                 && let Some(Parsed::Sess { user, node, .. }) = self.keys.parse(s.key_expr().as_str())
             {
                 return Some((user, node));
+            }
+        }
+        None
+    }
+
+    pub async fn room_token(&self, room: &str) -> Option<(String, String)> {
+        let replies = self.session.liveliness().get(self.keys.room_where(room)).timeout(SESS_GET_TIMEOUT).await.ok()?;
+        while let Ok(r) = replies.recv_async().await {
+            if let Ok(s) = r.result()
+                && let Some(Parsed::Room { node, inst, .. }) = self.keys.parse(s.key_expr().as_str())
+            {
+                return Some((node, inst));
             }
         }
         None
