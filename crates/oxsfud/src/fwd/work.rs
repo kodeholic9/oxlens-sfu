@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.4 · 정:RULE-FWD-MEDIA-WORKERS · 정:RULE-CONC-PERF-AXES · 정:RULE-OPS-DROPS · 정:IMPL-RTCP-TERMINATE · 정:IMPL-FLR-MEDIA-BIND · 정:RULE-OPS-TRANSIT · model: claude-opus-5-5
-//! 미디어 워커 — 수신 스레드 하나 · 미디어 워커 N(전송 객체마다 하나 고정 — 발행 · 구독을 따로 센다). 링은 워커마다 생산자 하나(워커마다 · 수신 스레드) + 제어 하나. 업링크 몫이 고른 줄은 목적지 워커마다 묶어 넘긴다. 키프레임 요청 · SR 번역 · 예열 프레임처럼 남의 전송 객체 상태를 쓰는 일도 그 워커로 넘긴다. 주기 RTCP · probe · 자동 층은 워커마다 제 전송 객체만 tick 으로 돈다. 링이 차면 기다리지 않고 버리고 센다. 일이 없으면 잠듦 표시를 세우고 잔다 — 넣는 쪽은 그 표시가 있을 때만 깨운다. 수신 스레드 · 워커가 끝나면 프로세스를 내린다. 받은 시각(μs)을 항목에 실어 다운링크 송신 뒤 체류 시간을 워커마다 센다.
+//! 미디어 워커 — 수신 스레드 하나 · 미디어 워커 N(전송 객체마다 하나 고정 — 발행 · 구독을 따로 센다). 링은 워커마다 생산자 하나(워커마다 · 수신 스레드) + 제어 하나. 업링크 몫이 고른 줄은 목적지 워커마다 묶어 넘긴다. 키프레임 요청 · SR 번역 · 예열 프레임처럼 남의 전송 객체 상태를 쓰는 일도 그 워커로 넘긴다. 주기 RTCP · probe · 자동 층은 워커마다 제 전송 객체만 tick 으로 돈다. 링이 차거나 워커에 쌓인 패킷 수(묶음은 줄 수만큼)가 한도(`worker-queue-packets`)를 넘으면 기다리지 않고 버리고 센다. 일이 없으면 잠듦 표시를 세우고 잔다 — 넣는 쪽은 그 표시가 있을 때만 깨운다. 수신 스레드 · 워커가 끝나면 프로세스를 내린다. 받은 시각(μs)을 항목에 실어 다운링크 송신 뒤 체류 시간을 워커마다 센다.
 
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -60,7 +60,20 @@ struct Worker {
     pubs: AtomicUsize,
     subs: AtomicUsize,
     own: Mutex<Vec<Weak<Transport>>>,
+    queued: Queued,
     transit: Transit,
+}
+
+#[derive(Default)]
+#[repr(align(128))]
+struct Queued(AtomicUsize);
+
+fn packets(item: &Item) -> usize {
+    match item {
+        Item::Out(o) => o.dls.len(),
+        Item::Sr { dls, .. } => dls.len(),
+        Item::In { .. } | Item::Key { .. } | Item::Synth { .. } => 1,
+    }
 }
 
 #[derive(Default)]
@@ -97,6 +110,7 @@ pub fn transit_body() -> serde_json::Value {
 pub struct Workers {
     w: Vec<Worker>,
     tick: TickCfg,
+    limit: usize,
 }
 
 static WORKERS: OnceLock<Workers> = OnceLock::new();
@@ -163,7 +177,16 @@ fn push(idx: usize, item: Item) -> bool {
     let Some(ws) = workers() else { return false };
     let Some(w) = ws.w.get(idx) else { return false };
     let p = producer(ws.w.len());
+    let n = packets(&item);
+    if w.queued.0.fetch_add(n, Ordering::AcqRel) + n > ws.limit {
+        w.queued.0.fetch_sub(n, Ordering::AcqRel);
+        wake(w);
+        return false;
+    }
     let ok = w.rings[p].push(item).is_ok();
+    if !ok {
+        w.queued.0.fetch_sub(n, Ordering::AcqRel);
+    }
     wake(w);
     ok
 }
@@ -332,7 +355,9 @@ fn drain(w: &Worker) -> usize {
         for _ in 0..BATCH {
             match ring.pop() {
                 Some(it) => {
+                    let n = packets(&it);
                     handle(it);
+                    w.queued.0.fetch_sub(n, Ordering::AcqRel);
                     did += 1;
                 }
                 None => break,
@@ -423,7 +448,7 @@ fn fatal(name: &str, r: std::thread::Result<()>) -> ! {
     std::process::exit(EXIT_CODE);
 }
 
-pub fn start(n: usize, tick: TickCfg, rt: tokio::runtime::Handle) -> Result<(), String> {
+pub fn start(n: usize, tick: TickCfg, limit: usize, rt: tokio::runtime::Handle) -> Result<(), String> {
     let n = n.max(1);
     let mut w = Vec::with_capacity(n);
     for _ in 0..n {
@@ -433,9 +458,9 @@ pub fn start(n: usize, tick: TickCfg, rt: tokio::runtime::Handle) -> Result<(), 
         }
         rings.push(ArrayQueue::new(READER_RING));
         rings.push(ArrayQueue::new(CONTROL_RING));
-        w.push(Worker { rings, sleeping: AtomicBool::new(false), thread: OnceLock::new(), pubs: AtomicUsize::new(0), subs: AtomicUsize::new(0), own: Mutex::new(Vec::new()), transit: Transit::default() });
+        w.push(Worker { rings, sleeping: AtomicBool::new(false), thread: OnceLock::new(), pubs: AtomicUsize::new(0), subs: AtomicUsize::new(0), own: Mutex::new(Vec::new()), queued: Queued::default(), transit: Transit::default() });
     }
-    WORKERS.set(Workers { w, tick }).map_err(|_| "미디어 워커를 두 번 띄웠다".to_string())?;
+    WORKERS.set(Workers { w, tick, limit: limit.max(1) }).map_err(|_| "미디어 워커를 두 번 띄웠다".to_string())?;
     for i in 0..n {
         let rt = rt.clone();
         let name = format!("media-{i}");

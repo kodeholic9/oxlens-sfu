@@ -232,7 +232,7 @@ pub async fn run(cfg: SfuCfg, epoch: String) -> Result<(), String> {
     let sfu = Arc::new(Sfu { cfg, epoch, io: io.clone(), bus, state: Mutex::new(State { rooms: BTreeMap::new(), peers: BTreeMap::new(), arev: BTreeMap::new() }), floor_wake: Mutex::new(HashMap::new()), udp_addr });
     let rt = tokio::runtime::Handle::current();
     let tick = crate::fwd::work::TickCfg { max_bitrate_bps: u64::from(sfu.cfg.policy.media.max_bitrate_bps), auto_layer: sfu.cfg.policy.media.auto_layer };
-    crate::fwd::work::start(sfu.cfg.media_workers, tick, rt.clone())?;
+    crate::fwd::work::start(sfu.cfg.media_workers, tick, sfu.cfg.worker_queue_packets, rt.clone())?;
     let reader = crate::link::io::reader(&io, tcp).map_err(|e| format!("수신 스레드 준비: {e}"))?;
     crate::fwd::work::spawn_reader(reader, rt)?;
     tokio::spawn(on_dc(sfu.clone(), dc_rx));

@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.4 · 정:RULE-CFG-THREE-PLACES · 정:IMPL-CFG-SYSTEM-FILE · 정:CAND-CFG-SFUD-DEFAULT-PORTS · 정:CAND-CFG-SFUD-NODE-GRACE · 정:RULE-BUS-KEYSPACE · 정:CAND-BUS-NO-ZENOH-BOOT · 운영:RULE-BOOT-ARGS · model: claude-opus-5-5
+// spec: v1.4 · 정:RULE-CFG-THREE-PLACES · 정:IMPL-CFG-SYSTEM-FILE · 정:CAND-CFG-SFUD-DEFAULT-PORTS · 정:CAND-CFG-SFUD-NODE-GRACE · 정:RULE-BUS-KEYSPACE · 정:CAND-BUS-NO-ZENOH-BOOT · 정:RULE-FWD-MEDIA-WORKERS · 운영:RULE-BOOT-ARGS · model: claude-opus-5-5
 //! sfud 값의 자리 — 기동 인자(포트 · 거두기 유예 · 버스 좌표는 기본값이 없다 — 없으면 기동 실패) · 정책 파일. `public-ip` 는 ICE 후보이자 UDP 바인드 주소(`auto` = 기본 인터페이스 · 없으면 루프백). 배너 한 줄 = 해석된 최종값 전량.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
@@ -23,10 +23,12 @@ pub const ARGS: &[Spec] = &[
     opt("node-grace-secs"),
     opt("media-workers"),
     opt("control-threads"),
+    opt("worker-queue-packets"),
     flag("version"),
 ];
 
 pub const CONTROL_THREADS: usize = 2;
+pub const WORKER_QUEUE_PACKETS: usize = 6_000;
 
 #[derive(Debug, Clone)]
 pub struct SfuCfg {
@@ -44,6 +46,7 @@ pub struct SfuCfg {
     pub node_grace_secs: u64,
     pub media_workers: usize,
     pub control_threads: usize,
+    pub worker_queue_packets: usize,
     pub build: String,
     pub args: Args,
 }
@@ -85,6 +88,7 @@ impl SfuCfg {
         let node_grace_secs: u64 = args.parse_num("node-grace-secs")?.ok_or("--node-grace-secs 가 없다(기본값 없음)")?;
         let media_workers: usize = args.parse_num::<usize>("media-workers")?.unwrap_or_else(default_media_workers).max(1);
         let control_threads: usize = args.parse_num::<usize>("control-threads")?.unwrap_or(CONTROL_THREADS).max(1);
+        let worker_queue_packets: usize = args.parse_num::<usize>("worker-queue-packets")?.unwrap_or(WORKER_QUEUE_PACKETS).max(1);
         let build = common::build::identity(args.get("build"));
         Ok(SfuCfg {
             grpc_listen,
@@ -101,6 +105,7 @@ impl SfuCfg {
             node_grace_secs,
             media_workers,
             control_threads,
+            worker_queue_packets,
             build,
             args,
         })
@@ -117,6 +122,7 @@ impl SfuCfg {
         }
         b.put("media-workers", self.media_workers);
         b.put("control-threads", self.control_threads);
+        b.put("worker-queue-packets", self.worker_queue_packets);
         self.policy.banner(&mut b, Reader::Sfud);
         b
     }
