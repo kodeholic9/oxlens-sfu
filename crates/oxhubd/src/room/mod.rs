@@ -11,7 +11,8 @@ use oxsig::{Code, Failure};
 
 use crate::bus::Bus;
 
-pub const CREATE_VISIBLE_WAIT: Duration = Duration::from_secs(3);
+pub const CREATE_VISIBLE_WAIT: Duration = Duration::from_secs(1);
+pub const PERMANENT_TTL: u32 = u32::MAX;
 
 pub fn valid_room_id(r: &str) -> bool {
     !r.is_empty() && r.len() <= 255 && common::keyspace::valid_piece(r)
@@ -44,6 +45,12 @@ pub async fn create(bus: &Bus, policy: &Policy, mut body: serde_json::Value) -> 
         return Err(Code::InvalidPayload.failure().with_message("room_id"));
     }
     obj.insert("room_id".into(), serde_json::Value::String(room.clone()));
+    let permanent = |v: u32| if v == 0 { PERMANENT_TTL } else { v };
+    for (k, v) in [("unused_ttl_secs", policy.hub.room_unused_ttl_secs), ("departure_ttl_secs", policy.hub.room_departure_ttl_secs)] {
+        if obj.get(k).map(|x| x.is_null()).unwrap_or(true) {
+            obj.insert(k.into(), serde_json::json!(permanent(v)));
+        }
+    }
     if policy.quota.max_rooms > 0 {
         let n = bus.view.lock().map(|v| v.routing.len()).unwrap_or(0) as u32;
         if n >= policy.quota.max_rooms && bus.room_route(&room).is_none() {

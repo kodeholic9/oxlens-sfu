@@ -141,23 +141,29 @@ fn cors(hub: &Hub, headers: &HeaderMap, mut r: Response) -> Response {
     }
     h.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("authorization, content-type, x-oxlens-session"));
     h.insert(header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET, POST, OPTIONS"));
+    h.insert(header::ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("600"));
     r
 }
 
 enum Who {
     Bearer,
-    Session(Arc<ses::Session>),
+    Session(String),
 }
 
-fn who(hub: &Hub, headers: &HeaderMap) -> Result<Who, Failure> {
+async fn who(hub: &Hub, headers: &HeaderMap) -> Result<Who, Failure> {
+    let bearer = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer "));
     if let Some(sid) = headers.get("x-oxlens-session").and_then(|v| v.to_str().ok()) {
-        return hub.ses.session(sid).map(Who::Session).ok_or_else(|| Code::SessionNotFound.failure());
+        if let Some(s) = hub.ses.session(sid) {
+            return Ok(Who::Session(s.user_id.clone()));
+        }
+        if let Some((user, _node)) = hub.bus.find_sess(sid).await {
+            return Ok(Who::Session(user));
+        }
+        if bearer.is_none() {
+            return Err(Code::SessionNotFound.failure());
+        }
     }
-    let tok = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .ok_or_else(|| Code::TokenInvalid.failure())?;
+    let tok = bearer.ok_or_else(|| Code::TokenInvalid.failure())?;
     hub.ses.accounts.verify_user(tok).map(|_| Who::Bearer).map_err(|c| c.failure())
 }
 
@@ -165,7 +171,7 @@ async fn rooms(State(hub): St, method: Method, headers: HeaderMap, body: Bytes) 
     if method == Method::OPTIONS {
         return cors(&hub, &headers, StatusCode::NO_CONTENT.into_response());
     }
-    let r = match who(&hub, &headers) {
+    let r = match who(&hub, &headers).await {
         Err(f) => fail(f),
         Ok(_) if method == Method::GET => match crate::room::list(&hub.bus).await {
             Ok(l) => ok(serde_json::to_value(l).unwrap_or_default()),
@@ -200,11 +206,11 @@ async fn room(
         return cors(&hub, &headers, StatusCode::METHOD_NOT_ALLOWED.into_response());
     }
     let tracks = q.get("tracks").map(|v| v == "1").unwrap_or(false);
-    let r = match who(&hub, &headers) {
+    let r = match who(&hub, &headers).await {
         Err(f) => fail(f),
         Ok(w) => {
-            let (user, me) = match &w {
-                Who::Session(s) => (Some(s.user_id.clone()), s.in_room(&room)),
+            let (user, me) = match w {
+                Who::Session(u) => (Some(u), true),
                 Who::Bearer => (None, false),
             };
             match crate::room::get(&hub.bus, &room, user.as_deref(), me, tracks).await {
