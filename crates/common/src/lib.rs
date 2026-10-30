@@ -3,6 +3,7 @@
 //! hub · sfud 가 함께 쓰는 것 — 값의 자리 셋(정책 · 시스템 파일 · 인자) · 빌드 신원 · 로그 줄 · 버스 키.
 
 pub mod args;
+pub mod envelope;
 pub mod ident;
 pub mod keyspace;
 pub mod log;

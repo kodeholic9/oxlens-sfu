@@ -1,484 +1,391 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.4 · 정:RULE-OPS-SURFACE · 정:RULE-OPS-TOKEN · 정:IMPL-OPS-CUT · 정:IMPL-OPS-DESTROY-REAP · 정:RULE-OPS-DROPS · 운영:RULE-AUTH-THREE · 운영:RULE-READ-SFUS · 운영:RULE-READ-ROOMS · 운영:RULE-READ-USERS · 운영:RULE-READ-SNAPSHOT · 운영:RULE-READ-DROPS · 운영:RULE-READ-TRANSIT · 운영:RULE-READ-ROOM-DETAIL · 운영:RULE-READ-NODE-ROOMS · 운영:RULE-READ-BUS · 운영:RULE-READ-BUS-ALL · 운영:RULE-READ-USER-MEDIA · 운영:RULE-READ-USER-PROBE · 운영:RULE-CTL-SUPERVISOR · 운영:RULE-CTL-CUT · 운영:RULE-CTL-ROOM · 운영:RULE-CTL-LOG-LEVEL · 운영:RULE-RISK-CONFIRM · 운영:RULE-ERR-ADMIN-CODES · 운영:RULE-FMT-REPLY · 운영:RULE-FMT-NO-INVENT · model: claude-opus-5-5
-//! 운영 표면 `/admin/*` — 운영 토큰 또는 loopback(XFF 불신) · 읽기 · 되돌릴 수 있음 · 확인값 필수 셋 · 모르는 것은 지어내지 않는다.
+// spec: v1.6 · 운영:RULE-READ-SFUS · 운영:RULE-READ-ROOMS · 운영:RULE-READ-USERS · 운영:RULE-READ-SNAPSHOT · 운영:RULE-READ-DROPS · 운영:RULE-READ-TRANSIT · 운영:RULE-READ-ROOM-DETAIL · 운영:RULE-READ-NODE-ROOMS · 운영:RULE-READ-BUS · 운영:RULE-READ-BUS-ALL · 운영:RULE-READ-USER-MEDIA · 운영:RULE-READ-USER-PROBE · 운영:RULE-CTL-SUPERVISOR · 운영:RULE-CTL-CUT · 운영:RULE-CTL-ROOM · 운영:RULE-CTL-LOG-LEVEL · 운영:RULE-FMT-NO-INVENT · 정:IMPL-OPS-CUT · 정:IMPL-OPS-DESTROY-REAP · model: claude-opus-5-5
+//! `/admin` — 읽기(유닛 · 방 · 세션 · 버림 · 체류 · 버스) · 제어(supervisor · 절단 · 퇴장 · 폭파 · 수준). 정본은 sfud 를 경유해 가져온다 · 못 닿은 곳은 `error`.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::net::SocketAddr;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use axum::Router;
-use axum::body::Bytes;
-use axum::extract::{ConnectInfo, Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
-use common::bus::env::{Call, Reply};
-use oxsig::code::{Code, Failure};
-use oxsig::op::Op;
+use common::envelope::{CallKind, Envelope, Reply};
+use common::policy::LoggingLevel;
+use oxsig::{Code, Failure};
 use serde_json::{Value, json};
 
-use super::route::{self, Target};
-use super::sup::{Cmd, UnitState, ZENOH_UNIT};
-use super::{HubRef, now_ms};
-use common::system::{UnitKind, UnitRole};
+use super::Hub;
+use super::supervisor::{Role, UnitState};
+use crate::ses;
 
-fn admin_fail(code: Code, status: u16) -> Response {
-    (StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST), axum::Json(Failure::of(code))).into_response()
+pub type AdminResult = Result<Value, Failure>;
+
+fn admin_env(method: &str, path: &str, body: Value) -> Envelope {
+    let mut e = Envelope::new(CallKind::Admin);
+    e.method = Some(method.to_string());
+    e.path = Some(path.to_string());
+    e.body = body;
+    e
 }
 
-fn reply_resp(r: Reply) -> Response {
-    match r {
-        Reply::Ok { body } => axum::Json(body).into_response(),
-        Reply::Http { status, body } => (StatusCode::from_u16(status).unwrap_or(StatusCode::OK), axum::Json(body)).into_response(),
-        Reply::Fail { failure } => {
-            let s = match failure.code {
-                3002 | 3001 | 2008 => 404,
-                3009 => 409,
-                1003 | 1002 => 400,
-                c => Code(c).http_status(),
-            };
-            (StatusCode::from_u16(s).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), axum::Json(failure)).into_response()
-        }
+async fn sfu_admin(hub: &Hub, node: &str, method: &str, path: &str, body: Value) -> Result<Value, Failure> {
+    match hub.bus.call(node, &admin_env(method, path, body)).await {
+        Reply::Ok { body } => Ok(body),
+        Reply::Http { status, body } if status < 300 => Ok(body),
+        Reply::Http { body, .. } => Err(serde_json::from_value::<Failure>(body).unwrap_or_else(|_| Code::SfuError.failure())),
+        Reply::Fail { failure } => Err(failure),
     }
 }
 
-fn authorized(hub: &HubRef, peer: &SocketAddr, h: &HeaderMap) -> Result<(), Box<Response>> {
-    if super::http::loopback(peer) {
-        return Ok(());
+fn unit_row(hub: &Hub, u: &super::supervisor::UnitHandle) -> Value {
+    let st = u.state();
+    let mut o = json!({
+        "unit": u.id,
+        "unit_state": st.as_str(),
+        "live": st == UnitState::Running,
+        "node_live": hub.bus.view.lock().map(|v| v.node_live(&hub.node)).unwrap_or(false),
+    });
+    if let Some(e) = u.epoch() {
+        o["sfu_id"] = json!(e);
     }
-    let tok = h.get("authorization").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).map(str::trim);
-    let Some(t) = tok else { return Err(Box::new(admin_fail(Code::TOKEN_INVALID, 401))) };
-    crate::ses::token::verify_ops(t, &hub.cfg.system.hub.auth.api_keys).map(|_| ()).map_err(|c| Box::new(admin_fail(c, 401)))
+    if let Some(a) = &u.addr {
+        o["addr"] = json!(a);
+    }
+    o
 }
 
-macro_rules! guard {
-    ($hub:expr, $peer:expr, $h:expr) => {
-        if let Err(r) = authorized(&$hub, &$peer, &$h) {
-            return *r;
-        }
-    };
+pub fn sfus(hub: &Hub) -> Value {
+    let rows: Vec<Value> = hub.sup.sfu_units().iter().map(|u| unit_row(hub, u)).collect();
+    json!({ "sfus": rows, "supervising": !hub.sup.units.is_empty() })
 }
 
-pub fn router() -> Router<HubRef> {
-    Router::new()
-        .route("/admin/sfus", get(sfus))
-        .route("/admin/rooms", get(rooms))
-        .route("/admin/users", get(users))
-        .route("/admin/snapshot", get(snapshot))
-        .route("/admin/drops", get(drops))
-        .route("/admin/transit", get(transit))
-        .route("/admin/bus", get(bus))
-        .route("/admin/rooms/:room_id/snapshot", get(room_snapshot))
-        .route("/admin/sfus/:sfu_id/rooms", get(sfu_rooms))
-        .route("/admin/users/:user_id/media", get(user_media))
-        .route("/admin/users/:user_id/probe", get(user_probe))
-        .route("/admin/supervisor/status", get(sup_status))
-        .route("/admin/supervisor/load/:id", post(sup_load))
-        .route("/admin/supervisor/stop/:id", post(sup_stop))
-        .route("/admin/supervisor/kill/:id", post(sup_kill))
-        .route("/admin/supervisor/shutdown", post(sup_shutdown))
-        .route("/admin/users/:user_id/cut", post(user_cut))
-        .route("/admin/rooms/:room_id/reap/:user_id", post(room_reap))
-        .route("/admin/rooms/:room_id/destroy", post(room_destroy))
-        .route("/admin/log-level", post(log_level))
-}
-
-fn sfu_rows(hub: &HubRef) -> Vec<Value> {
-    let node_live = hub.node_live(hub.me());
-    hub.sup
-        .snapshot()
+pub fn rooms(hub: &Hub) -> Value {
+    let routing = hub.bus.view.lock().map(|v| v.routing.clone()).unwrap_or_default();
+    let sessions = hub.ses.sessions();
+    let rows: Vec<Value> = routing
         .iter()
-        .filter(|u| u.cfg.role == UnitRole::Sfu && u.cfg.kind != UnitKind::Inproc)
-        .map(|u| {
-            let mut o = json!({"unit": u.cfg.id, "live": u.state == UnitState::Running, "node_live": node_live, "unit_state": u.state.as_str()});
-            if let Some(a) = &u.cfg.addr {
-                o["addr"] = json!(a);
-            }
-            if u.state == UnitState::Running
-                && let Some(e) = &u.epoch
-            {
-                o["sfu_id"] = json!(e);
-            }
-            o
-        })
-        .collect()
-}
-
-async fn sfus(State(hub): State<HubRef>, ConnectInfo(p): ConnectInfo<SocketAddr>, h: HeaderMap) -> Response {
-    guard!(hub, p, h);
-    axum::Json(json!({"sfus": sfu_rows(&hub), "supervising": hub.sup.supervising()})).into_response()
-}
-
-async fn rooms(State(hub): State<HubRef>, ConnectInfo(p): ConnectInfo<SocketAddr>, h: HeaderMap) -> Response {
-    guard!(hub, p, h);
-    let entries = hub.rooms.lock().map(|m| m.entries()).unwrap_or_default();
-    let rows: Vec<Value> = entries
-        .into_iter()
-        .map(|(r, l)| {
-            let ids = hub.sessions.lock().map(|t| t.room_members(&r)).unwrap_or_default();
-            json!({"room_id": r, "node": l.node, "sfu_id": l.inst, "members": ids.len(), "member_ids": ids})
+        .map(|(r, loc)| {
+            let ids: Vec<String> = sessions.iter().filter(|s| s.in_room(r) && !s.claims.hidden).map(|s| s.user_id.clone()).collect();
+            json!({ "room_id": r, "node": loc.node, "sfu_id": loc.inst, "members": ids.len(), "member_ids": ids })
         })
         .collect();
-    let total = rows.len();
-    axum::Json(json!({"rooms": rows, "total": total})).into_response()
+    json!({ "total": rows.len(), "rooms": rows })
 }
 
-async fn users(State(hub): State<HubRef>, ConnectInfo(p): ConnectInfo<SocketAddr>, h: HeaderMap) -> Response {
-    guard!(hub, p, h);
-    let sessions: Vec<_> = hub.sessions.lock().map(|t| t.all().map(|s| s.data.clone()).collect()).unwrap_or_default();
+pub async fn users(hub: &Hub) -> Value {
     let mut rows = Vec::new();
-    for d in sessions {
+    for s in hub.ses.sessions() {
         let mut links = Vec::new();
-        for (sfu, srv) in &d.servers {
-            let call = Call::Admin { method: "GET".into(), path: format!("/admin/users/{}/links", d.user_id), query: BTreeMap::new(), body: None };
-            if let Reply::Ok { body } | Reply::Http { body, .. } = route::call(&hub, &Target { node: srv.node.clone(), inst: Some(sfu.clone()) }, &call).await
-                && let Some(a) = body.get("links").and_then(|v| v.as_array())
+        for (node, _) in s.epochs() {
+            if let Ok(v) = sfu_admin(hub, &node, "GET", &format!("/admin/users/{}/links", s.user_id), Value::Null).await
+                && let Some(a) = v.get("links").and_then(|x| x.as_array())
             {
                 links.extend(a.iter().cloned());
             }
         }
-        rows.push(json!({"session": d.fingerprint(), "user_id": d.user_id, "participant_type": d.participant_type, "hidden": d.hidden, "links": links}));
+        rows.push(json!({
+            "session": s.fp,
+            "user_id": s.user_id,
+            "participant_type": s.claims.participant_type,
+            "hidden": s.claims.hidden,
+            "links": links,
+        }));
     }
-    let total = rows.len();
-    axum::Json(json!({"users": rows, "total": total})).into_response()
+    json!({ "total": rows.len(), "users": rows })
 }
 
-async fn snapshot(State(hub): State<HubRef>, ConnectInfo(p): ConnectInfo<SocketAddr>, h: HeaderMap) -> Response {
-    guard!(hub, p, h);
-    let (ready, _) = hub.sup.ready();
-    let rooms = hub.rooms.lock().map(|m| m.count()).unwrap_or(0);
-    let users = hub.sessions.lock().map(|t| t.len()).unwrap_or(0);
-    axum::Json(json!({"hub_id": hub.me(), "ready": ready, "build": hub.cfg.build, "supervising": hub.sup.supervising(), "sfus": sfu_rows(&hub), "rooms": rooms, "users": users}))
-        .into_response()
+pub fn snapshot(hub: &Hub) -> Value {
+    let (ready, _) = hub.ready();
+    let rows: Vec<Value> = hub.sup.sfu_units().iter().map(|u| unit_row(hub, u)).collect();
+    let rooms = hub.bus.view.lock().map(|v| v.routing.len()).unwrap_or(0);
+    json!({
+        "hub_id": hub.node,
+        "ready": ready,
+        "build": hub.build,
+        "supervising": !hub.sup.units.is_empty(),
+        "sfus": rows,
+        "rooms": rooms,
+        "users": hub.ses.sessions().len(),
+    })
 }
 
-pub fn hub_drops(hub: &HubRef) -> Value {
-    let mut o = serde_json::Map::new();
-    o.insert("unit".into(), json!(hub.me()));
-    o.insert("notice_no_socket".into(), json!(hub.drops.notice_no_socket.load(Ordering::Relaxed)));
-    o.insert("bus_ev_drop".into(), json!(hub.drops.bus_ev_drop.load(Ordering::Relaxed)));
-    for (k, v) in common::log::sender::drops() {
-        o.insert(k.into(), json!(v));
-    }
-    if let Ok(c) = hub.drops.codes.lock() {
-        for (k, v) in c.iter() {
-            o.insert(format!("code_{k}"), json!(v));
+pub async fn drops(hub: &Hub) -> Value {
+    let c = &hub.sender.counters;
+    let mut mine = json!({
+        "unit": "hub",
+        "sfu_id": hub.inst,
+        "notice_no_socket": hub.ses.counters.notice_no_socket.load(Ordering::Relaxed),
+        "bus_ev_drop": hub.bus.ev_drop.load(Ordering::Relaxed),
+        "log_queue_full": c.queue_full.load(Ordering::Relaxed),
+        "log_spool_full": c.spool_full.load(Ordering::Relaxed),
+    });
+    if let Ok(codes) = hub.ses.counters.codes.lock() {
+        for (k, v) in codes.iter() {
+            mine[format!("code_{k}")] = json!(v);
         }
     }
-    Value::Object(o)
+    let mut units = vec![mine];
+    units.extend(per_sfu_unit(hub, "/admin/drops").await);
+    json!({ "units": units })
 }
 
-async fn drops(State(hub): State<HubRef>, ConnectInfo(p): ConnectInfo<SocketAddr>, h: HeaderMap) -> Response {
-    guard!(hub, p, h);
-    let mut units = vec![hub_drops(&hub)];
-    units.extend(sfu_units(&hub, "/admin/drops").await);
-    axum::Json(json!({"units": units})).into_response()
-}
-
-async fn transit(State(hub): State<HubRef>, ConnectInfo(p): ConnectInfo<SocketAddr>, h: HeaderMap) -> Response {
-    guard!(hub, p, h);
-    axum::Json(json!({"units": sfu_units(&hub, "/admin/transit").await})).into_response()
-}
-
-async fn sfu_units(hub: &HubRef, path: &str) -> Vec<Value> {
-    let mut units = Vec::new();
-    for u in hub.sup.snapshot().iter().filter(|u| u.cfg.role == UnitRole::Sfu && u.cfg.kind != UnitKind::Inproc && u.cfg.enabled) {
-        let call = Call::Admin { method: "GET".into(), path: path.into(), query: BTreeMap::new(), body: None };
-        let r = match &u.epoch {
-            Some(e) if u.state == UnitState::Running => route::local(hub, Some(e), &call).await,
-            _ => Reply::fail(Code::SFU_UNAVAILABLE),
-        };
-        let row = match r {
-            Reply::Ok { mut body } | Reply::Http { mut body, .. } => {
-                body["unit"] = json!(u.cfg.id);
-                if let Some(e) = &u.epoch {
-                    body["sfu_id"] = json!(e);
-                }
-                body
-            }
-            Reply::Fail { failure } => json!({"unit": u.cfg.id, "error": failure.code}),
-        };
-        units.push(row);
-    }
-    units
-}
-
-pub async fn bus_body(hub: &HubRef) -> Value {
-    let z = &hub.cfg.system.zenoh;
-    let peers = match hub.bus() {
-        Some(b) => b.peers().await.into_iter().map(|p| json!({"zid": p.zid, "whatami": p.whatami, "links": p.links})).collect::<Vec<_>>(),
-        None => Vec::new(),
-    };
-    let (nodes, seen, iso, last) = match hub.rooms.lock() {
-        Ok(m) => {
-            let nodes: Vec<Value> = m.nodes().into_iter().map(|(n, i)| if n == hub.me() { json!({"node": n, "inst": i, "self": true}) } else { json!({"node": n, "inst": i}) }).collect();
-            let seen: Vec<Value> = m.entries().into_iter().filter(|(_, l)| l.node != hub.me()).map(|(r, l)| json!({"room_id": r, "node": l.node, "inst": l.inst})).collect();
-            let iso = m.isolated().map(|(t, h)| json!({"since_ms": t, "held_rooms": h})).unwrap_or(Value::Null);
-            let last = m.last_event.as_ref().map(|e| json!({"at_ms": e.at_ms, "kind": if e.put { "put" } else { "delete" }, "key": e.key})).unwrap_or(Value::Null);
-            (nodes, seen, iso, last)
-        }
-        Err(_) => (Vec::new(), Vec::new(), Value::Null, Value::Null),
-    };
-    json!({"node": hub.me(), "inst": hub.epoch, "mode": z.mode, "namespace": z.namespace, "listen": z.listen, "connect": z.connect, "peers": peers, "nodes": nodes, "rooms_seen": seen, "isolated": iso, "last_event": last})
-}
-
-#[derive(serde::Deserialize, Default)]
-struct AllQ {
-    all: Option<u8>,
-}
-
-async fn bus(State(hub): State<HubRef>, ConnectInfo(p): ConnectInfo<SocketAddr>, h: HeaderMap, Query(q): Query<AllQ>) -> Response {
-    guard!(hub, p, h);
-    if q.all != Some(1) {
-        return axum::Json(bus_body(&hub).await).into_response();
-    }
-    let mut want: BTreeSet<String> = hub.cands.lock().map(|c| c.set().into_iter().collect()).unwrap_or_default();
-    want.insert(hub.me().to_string());
-    let mut got: BTreeMap<String, Value> = BTreeMap::new();
-    if let Some(b) = hub.bus() {
-        for (node, r) in b.get_all(&hub.ks.q_all("bus"), Vec::new(), common::bus::REQUEST_TIMEOUT_MS).await {
-            if let Ok(bytes) = r
-                && let Ok(v) = serde_json::from_slice::<Value>(&bytes)
-            {
-                got.insert(node, v);
-            }
-        }
-    }
-    let nodes: Vec<Value> = want
-        .iter()
-        .map(|n| match got.get(n) {
-            Some(v) => json!({"node": n, "bus": v}),
-            None => json!({"node": n, "error": Code::SFU_UNAVAILABLE.0}),
-        })
-        .collect();
-    axum::Json(json!({"asked": hub.me(), "nodes": nodes})).into_response()
-}
-
-async fn room_snapshot(State(hub): State<HubRef>, ConnectInfo(p): ConnectInfo<SocketAddr>, h: HeaderMap, Path(room): Path<String>) -> Response {
-    guard!(hub, p, h);
-    let Some(t) = route::room_target(&hub, &room) else { return admin_fail(Code::ROOM_NOT_FOUND, 404) };
-    let call = Call::Admin { method: "GET".into(), path: format!("/admin/rooms/{room}/snapshot"), query: BTreeMap::new(), body: None };
-    reply_resp(route::call(&hub, &t, &call).await)
-}
-
-async fn sfu_rooms(State(hub): State<HubRef>, ConnectInfo(p): ConnectInfo<SocketAddr>, h: HeaderMap, Path(sfu): Path<String>) -> Response {
-    guard!(hub, p, h);
-    let unit = hub.sup.snapshot().into_iter().find(|u| u.cfg.id == sfu || u.epoch.as_deref() == Some(sfu.as_str()));
-    let (unit_id, epoch) = match &unit {
-        Some(u) => (u.cfg.id.clone(), u.epoch.clone().unwrap_or_default()),
-        None => (sfu.clone(), sfu.clone()),
-    };
-    let Some(t) = route::sfu_target(&hub, &epoch) else { return admin_fail(Code::SFU_UNAVAILABLE, 503) };
-    let rows = match route::call(&hub, &t, &Call::RoomList).await {
-        Reply::Ok { body } => body.get("rooms").and_then(|v| v.as_array()).cloned().unwrap_or_default(),
-        r => return reply_resp(r),
-    };
-    let rooms: Vec<Value> = rows.iter().map(|r| json!({"room_id": r["room_id"], "members": r["user_count"]})).collect();
-    let total = rooms.len();
-    axum::Json(json!({"unit": unit_id, "sfu_id": epoch, "rooms": rooms, "total": total})).into_response()
-}
-
-async fn user_servers(hub: &HubRef, user: &str) -> Vec<(String, String)> {
-    let local = hub.sessions.lock().ok().and_then(|t| t.of_user(user).map(|s| s.data.servers.iter().map(|(k, v)| (k.clone(), v.node.clone())).collect::<Vec<_>>()));
-    if let Some(l) = local {
-        return l;
-    }
-    let Some(b) = hub.bus() else { return Vec::new() };
-    let keys = b.tokens(&hub.ks.sess_of_user(user), common::bus::SESS_GET_TIMEOUT_MS).await;
+async fn per_sfu_unit(hub: &Hub, path: &str) -> Vec<Value> {
     let mut out = Vec::new();
-    for t in keys.iter().filter_map(|k| hub.ks.parse_sess(k)) {
-        if let Ok(bytes) = b.get_one(&format!("{}?user={user}", hub.ks.q_node(&t.node, "servers")), Vec::new(), common::bus::REQUEST_TIMEOUT_MS).await
-            && let Ok(v) = serde_json::from_slice::<Vec<(String, String)>>(&bytes)
-        {
-            out.extend(v);
+    for u in hub.sup.sfu_units() {
+        if u.state() != UnitState::Running {
+            out.push(json!({ "unit": u.id, "error": Code::SfuUnavailable.num() }));
+            continue;
+        }
+        match sfu_admin(hub, &hub.node, "GET", path, Value::Null).await {
+            Ok(mut v) => {
+                if let Some(o) = v.as_object_mut() {
+                    o.insert("unit".into(), json!(u.id));
+                    if let Some(e) = u.epoch() {
+                        o.insert("sfu_id".into(), json!(e));
+                    }
+                }
+                out.push(v);
+            }
+            Err(f) => out.push(json!({ "unit": u.id, "error": f.code })),
         }
     }
     out
 }
 
-async fn user_media(State(hub): State<HubRef>, ConnectInfo(p): ConnectInfo<SocketAddr>, h: HeaderMap, Path(user): Path<String>) -> Response {
-    guard!(hub, p, h);
+pub async fn transit(hub: &Hub) -> Value {
+    json!({ "units": per_sfu_unit(hub, "/admin/transit").await })
+}
+
+pub async fn room_snapshot(hub: &Hub, room: &str) -> AdminResult {
+    let loc = hub.bus.room_route(room).ok_or_else(|| Code::RoomNotFound.failure())?;
+    sfu_admin(hub, &loc.node, "GET", &format!("/admin/rooms/{room}/snapshot"), Value::Null).await
+}
+
+pub async fn sfu_rooms(hub: &Hub, id: &str) -> AdminResult {
+    let u = hub
+        .sup
+        .sfu_units()
+        .into_iter()
+        .find(|u| u.id == id || u.epoch().as_deref() == Some(id))
+        .ok_or_else(|| Code::PeerNotFound.failure().with_message("no such unit"))?;
+    let epoch = u.epoch().ok_or_else(|| Code::SfuUnavailable.failure())?;
+    let v = sfu_admin(hub, &hub.node, "GET", "/admin/rooms", Value::Null).await?;
+    let rooms = v.get("rooms").cloned().unwrap_or(json!([]));
+    let total = rooms.as_array().map(|a| a.len()).unwrap_or(0);
+    Ok(json!({ "unit": u.id, "sfu_id": epoch, "rooms": rooms, "total": total }))
+}
+
+pub async fn bus_view(hub: &Hub) -> Value {
+    let peers: Vec<Value> = hub.bus.peers().await.into_iter().map(|(z, w)| json!({ "zid": z, "whatami": w, "links": [] })).collect();
+    let v = match hub.bus.view.lock() {
+        Ok(v) => v.clone(),
+        Err(_) => return json!({}),
+    };
+    let mut nodes: Vec<Value> = v
+        .nodes
+        .iter()
+        .filter(|(_, n)| n.live)
+        .map(|(k, n)| {
+            let mut o = json!({ "node": k, "inst": n.inst });
+            if k == &hub.node {
+                o["self"] = json!(true);
+            }
+            o
+        })
+        .collect();
+    if v.self_declared && !v.nodes.contains_key(&hub.node) {
+        nodes.push(json!({ "node": hub.node, "inst": hub.inst, "self": true }));
+    }
+    let rooms_seen: Vec<Value> = v
+        .routing
+        .iter()
+        .filter(|(_, l)| l.node != hub.node)
+        .map(|(r, l)| json!({ "room_id": r, "node": l.node, "inst": l.inst }))
+        .collect();
+    let isolated = v.isolated.map(|since| json!({ "since_ms": since, "held_rooms": v.held.iter().collect::<Vec<_>>() }));
+    let last = v.last_event.as_ref().map(|e| json!({ "at_ms": e.at_ms, "kind": e.kind, "key": e.key }));
+    json!({
+        "node": hub.node,
+        "inst": hub.inst,
+        "mode": hub.mode,
+        "namespace": hub.namespace,
+        "listen": hub.bus.cfg_listen,
+        "connect": hub.bus.cfg_connect,
+        "peers": peers,
+        "nodes": nodes,
+        "rooms_seen": rooms_seen,
+        "isolated": isolated,
+        "last_event": last,
+    })
+}
+
+pub async fn bus_all(hub: &Hub) -> Value {
+    let mut rows = vec![json!({ "node": hub.node, "bus": bus_view(hub).await })];
+    for (n, _) in hub.bus.live_nodes() {
+        if n == hub.node {
+            continue;
+        }
+        match hub.bus.query(&n, "bus", Vec::new()).await {
+            Ok(b) => match serde_json::from_slice::<Value>(&b) {
+                Ok(v) => rows.push(json!({ "node": n, "bus": v })),
+                Err(_) => rows.push(json!({ "node": n, "error": Code::SfuError.num() })),
+            },
+            Err(c) => rows.push(json!({ "node": n, "error": c.num() })),
+        }
+    }
+    json!({ "asked": hub.node, "nodes": rows })
+}
+
+pub async fn user_media(hub: &Hub, user: &str) -> AdminResult {
+    let s = hub.ses.session_of_user(user).ok_or_else(|| Code::SessionNotFound.failure())?;
     let mut links = Vec::new();
-    for (sfu, node) in user_servers(&hub, &user).await {
-        let call = Call::Admin { method: "GET".into(), path: format!("/admin/users/{user}/media"), query: BTreeMap::new(), body: None };
-        match route::call(&hub, &Target { node, inst: Some(sfu.clone()) }, &call).await {
-            Reply::Ok { body } | Reply::Http { body, .. } => links.push(body),
-            Reply::Fail { failure } => links.push(json!({"sfu_id": sfu, "error": failure.code})),
-        }
-    }
-    axum::Json(json!({"user_id": user, "now": common::time::wall_ms(), "links": links})).into_response()
-}
-
-pub async fn probe_local(hub: &HubRef, user: &str) -> Vec<Value> {
-    let target = hub.sessions.lock().ok().and_then(|t| t.of_user(user).map(|s| (s.data.sid.clone(), s.data.fingerprint(), s.sock)));
-    let Some((sid, fp, sock)) = target else { return Vec::new() };
-    let Some(sock) = sock else { return vec![json!({"session": fp, "timeout": true})] };
-    let (req_id, rx) = hub.probes.open(&sid);
-    hub.push_frame(sock, Op::Task.code(), &json!({"phase": "request", "req_id": req_id, "type": "probe", "params": {}}));
-    match tokio::time::timeout(std::time::Duration::from_millis(crate::aux::PROBE_TIMEOUT_MS), rx).await {
-        Ok(Ok(r)) => vec![json!({"session": fp, "result": r})],
-        _ => {
-            hub.probes.close(&sid, req_id);
-            vec![json!({"session": fp, "timeout": true})]
-        }
-    }
-}
-
-async fn user_probe(State(hub): State<HubRef>, ConnectInfo(p): ConnectInfo<SocketAddr>, h: HeaderMap, Path(user): Path<String>) -> Response {
-    guard!(hub, p, h);
-    let mut sessions = probe_local(&hub, &user).await;
-    if let Some(b) = hub.bus() {
-        let keys = b.tokens(&hub.ks.sess_of_user(&user), common::bus::SESS_GET_TIMEOUT_MS).await;
-        for t in keys.iter().filter_map(|k| hub.ks.parse_sess(k)).filter(|t| t.node != hub.me()) {
-            if let Ok(bytes) = b.get_one(&format!("{}?user={user}", hub.ks.q_node(&t.node, "probe")), Vec::new(), common::bus::REQUEST_TIMEOUT_MS).await
-                && let Ok(v) = serde_json::from_slice::<Vec<Value>>(&bytes)
-            {
-                sessions.extend(v);
+    for (node, epoch) in s.epochs() {
+        match sfu_admin(hub, &node, "GET", &format!("/admin/users/{user}/media"), Value::Null).await {
+            Ok(v) => {
+                if let Some(a) = v.get("links").and_then(|x| x.as_array()) {
+                    links.extend(a.iter().cloned());
+                }
             }
+            Err(f) => links.push(json!({ "sfu_id": epoch, "error": f.code })),
         }
     }
-    if sessions.is_empty() {
-        return admin_fail(Code::SESSION_NOT_FOUND, 404);
-    }
-    axum::Json(json!({"user_id": user, "sessions": sessions})).into_response()
+    Ok(json!({ "user_id": user, "now": common::now_ms(), "links": links }))
 }
 
-async fn sup_status(State(hub): State<HubRef>, ConnectInfo(p): ConnectInfo<SocketAddr>, h: HeaderMap) -> Response {
-    guard!(hub, p, h);
-    axum::Json(super::sup::status_json(&hub)).into_response()
-}
-
-fn transition(id: &str, r: Result<(UnitState, UnitState), Code>) -> Response {
-    match r {
-        Ok((from, to)) => axum::Json(json!({"id": id, "from": from.as_str(), "to": to.as_str()})).into_response(),
-        Err(Code::ROOM_NOT_FOUND) => admin_fail(Code::ROOM_NOT_FOUND, 404),
-        Err(c) => admin_fail(c, if c == Code::PRECONDITION_FAILED { 409 } else { c.http_status() }),
+pub async fn probe_local(hub: &Hub, user: &str) -> Vec<Value> {
+    let Some(s) = hub.ses.session_of_user(user) else { return Vec::new() };
+    let Some(c) = s.conn() else {
+        return vec![json!({ "session": s.fp, "timeout": true })];
+    };
+    match crate::aux::probe(&hub.ses.probes, &c).await {
+        Some(r) => vec![json!({ "session": s.fp, "result": r })],
+        None => vec![json!({ "session": s.fp, "timeout": true })],
     }
 }
 
-async fn sup_load(State(hub): State<HubRef>, ConnectInfo(p): ConnectInfo<SocketAddr>, h: HeaderMap, Path(id): Path<String>) -> Response {
-    guard!(hub, p, h);
-    transition(&id, hub.sup.command(&id, Cmd::Load).await)
-}
-
-async fn sup_stop(State(hub): State<HubRef>, ConnectInfo(p): ConnectInfo<SocketAddr>, h: HeaderMap, Path(id): Path<String>) -> Response {
-    guard!(hub, p, h);
-    transition(&id, hub.sup.command(&id, Cmd::Stop).await)
-}
-
-#[derive(serde::Deserialize, Default)]
-struct KillQ {
-    if_epoch: Option<String>,
-}
-
-async fn sup_kill(State(hub): State<HubRef>, ConnectInfo(p): ConnectInfo<SocketAddr>, h: HeaderMap, Path(id): Path<String>, Query(q): Query<KillQ>) -> Response {
-    guard!(hub, p, h);
-    let Some(e) = q.if_epoch else { return admin_fail(Code::MISSING_FIELD, 400) };
-    let actual = if id == ZENOH_UNIT { Some(hub.epoch.clone()) } else { hub.sup.snapshot().into_iter().find(|u| u.cfg.id == id).and_then(|u| u.epoch) };
-    if actual.as_deref() != Some(e.as_str()) {
-        return (StatusCode::CONFLICT, axum::Json(Failure::of(Code::PRECONDITION_FAILED).details(json!({"expected": e, "actual": actual})))).into_response();
+pub async fn probe(hub: &Arc<Hub>, user: &str) -> AdminResult {
+    let mut rows = probe_local(hub, user).await;
+    for (node, _) in hub.bus.sessions_of_user(user).await {
+        if node == hub.node {
+            continue;
+        }
+        if let Ok(b) = hub.bus.query(&node, "probe", user.as_bytes().to_vec()).await
+            && let Ok(v) = serde_json::from_slice::<Vec<Value>>(&b)
+        {
+            rows.extend(v);
+        }
     }
-    transition(&id, hub.sup.command(&id, |r| Cmd::Kill(e.clone(), r)).await)
-}
-
-#[derive(serde::Deserialize, Default)]
-struct ConfirmQ {
-    confirm: Option<String>,
-}
-
-async fn sup_shutdown(State(hub): State<HubRef>, ConnectInfo(p): ConnectInfo<SocketAddr>, h: HeaderMap, Query(q): Query<ConfirmQ>) -> Response {
-    guard!(hub, p, h);
-    let Some(c) = q.confirm else { return admin_fail(Code::MISSING_FIELD, 400) };
-    if c != hub.me() {
-        return (StatusCode::CONFLICT, axum::Json(Failure::of(Code::PRECONDITION_FAILED).details(json!({"expected": c, "actual": hub.me()})))).into_response();
+    if rows.is_empty() {
+        return Err(Code::SessionNotFound.failure());
     }
-    let h2 = hub.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        super::begin_shutdown(&h2, "admin shutdown").await;
-    });
-    axum::Json(json!({"accepted": true, "order": ["clients", "units", "hub"]})).into_response()
+    Ok(json!({ "user_id": user, "sessions": rows }))
 }
 
-pub async fn cut_local(hub: &HubRef, user: &str) -> Vec<Value> {
-    let sid = hub.sessions.lock().ok().and_then(|t| t.of_user(user).map(|s| s.data.sid.clone()));
-    let Some(sid) = sid else { return Vec::new() };
-    let fp = common::log::fingerprint(&sid);
-    hub.discard_session(&sid, Code::SESSION_REVOKED, super::GoneBy::Server).await;
-    vec![json!({"session": fp, "code": Code::SESSION_REVOKED.0})]
-}
-
-async fn user_cut(State(hub): State<HubRef>, ConnectInfo(p): ConnectInfo<SocketAddr>, h: HeaderMap, Path(user): Path<String>) -> Response {
-    guard!(hub, p, h);
-    let mut cut = cut_local(&hub, &user).await;
-    if let Some(b) = hub.bus() {
-        let keys = b.tokens(&hub.ks.sess_of_user(&user), common::bus::SESS_GET_TIMEOUT_MS).await;
-        for t in keys.iter().filter_map(|k| hub.ks.parse_sess(k)).filter(|t| t.node != hub.me()) {
-            if let Ok(bytes) = b.get_one(&format!("{}?user={user}", hub.ks.q_node(&t.node, "cut")), Vec::new(), common::bus::REQUEST_TIMEOUT_MS).await
-                && let Ok(v) = serde_json::from_slice::<Vec<Value>>(&bytes)
+pub fn sup_status(hub: &Hub) -> Value {
+    let units: Vec<Value> = hub
+        .sup
+        .units
+        .iter()
+        .map(|u| {
+            let (restarts, next) = u.rec.lock().map(|r| (r.restarts, r.next_retry_at)).unwrap_or((0, None));
+            let st = u.state();
+            let mut o = json!({ "id": u.id, "kind": u.kind.as_str(), "order": u.order.max(0), "state": st.as_str(), "restarts": restarts });
+            if st == UnitState::Down
+                && let Some(t) = next
             {
-                cut.extend(v);
+                o["next_retry_ms"] = json!(t.saturating_duration_since(std::time::Instant::now()).as_millis() as u64);
             }
+            if u.role == Role::Sfu
+                && let Some(e) = u.epoch()
+            {
+                o["epoch"] = json!(e);
+            }
+            o
+        })
+        .collect();
+    json!({ "units": units, "supervising": !hub.sup.units.is_empty() })
+}
+
+pub async fn sup_ctl(hub: &Hub, id: &str, which: &str, if_epoch: Option<&str>) -> AdminResult {
+    let u = hub.sup.unit(id).ok_or_else(|| Code::PeerNotFound.failure().with_message("no such unit"))?;
+    if which == "kill" && u.role == Role::Sfu {
+        let want = if_epoch.ok_or_else(|| Code::MissingField.failure().with_message("if_epoch"))?;
+        let have = u.epoch().unwrap_or_default();
+        if want != have {
+            return Err(Code::PreconditionFailed.failure().with_details(json!({ "expected": want, "actual": have })));
+        }
+    }
+    let (from, to) = hub.sup.request(id, which).await.map_err(|e| Code::PreconditionFailed.failure().with_message(e))?;
+    Ok(json!({ "id": id, "from": from.as_str(), "to": to.as_str() }))
+}
+
+pub fn shutdown(hub: &Hub, confirm: Option<&str>) -> AdminResult {
+    let c = confirm.ok_or_else(|| Code::MissingField.failure().with_message("confirm"))?;
+    if c != hub.node {
+        return Err(Code::PreconditionFailed.failure().with_details(json!({ "expected": c, "actual": hub.node })));
+    }
+    let _ = hub.shutdown.send("admin shutdown".into());
+    Ok(json!({ "accepted": true, "order": ["clients", "units", "hub"] }))
+}
+
+pub async fn cut(hub: &Arc<Hub>, user: &str) -> AdminResult {
+    let mut cut = ses::cut(&hub.ses, user).await;
+    for (node, _) in hub.bus.sessions_of_user(user).await {
+        if node == hub.node {
+            continue;
+        }
+        if let Ok(b) = hub.bus.query(&node, "cut", user.as_bytes().to_vec()).await
+            && let Ok(v) = serde_json::from_slice::<Vec<String>>(&b)
+        {
+            cut.extend(v);
         }
     }
     if cut.is_empty() {
-        return admin_fail(Code::SESSION_NOT_FOUND, 404);
+        return Err(Code::SessionNotFound.failure());
     }
-    let total = cut.len();
-    axum::Json(json!({"user_id": user, "cut": cut, "total": total})).into_response()
+    let rows: Vec<Value> = cut.iter().map(|s| json!({ "session": s, "code": Code::SessionRevoked.num() })).collect();
+    Ok(json!({ "user_id": user, "cut": rows, "total": rows.len() }))
 }
 
-async fn room_reap(State(hub): State<HubRef>, ConnectInfo(p): ConnectInfo<SocketAddr>, h: HeaderMap, Path((room, user)): Path<(String, String)>) -> Response {
-    guard!(hub, p, h);
-    let Some(t) = route::room_target(&hub, &room) else { return admin_fail(Code::ROOM_NOT_FOUND, 404) };
-    let call = Call::Admin { method: "POST".into(), path: format!("/admin/rooms/{room}/reap/{user}"), query: BTreeMap::new(), body: None };
-    reply_resp(route::call(&hub, &t, &call).await)
+pub async fn reap(hub: &Hub, room: &str, user: &str) -> AdminResult {
+    let loc = hub.bus.room_route(room).ok_or_else(|| Code::RoomNotFound.failure())?;
+    let mut e = admin_env("POST", &format!("/admin/rooms/{room}/reap/{user}"), Value::Null);
+    e.target_user = Some(user.to_string());
+    match hub.bus.call(&loc.node, &e).await {
+        Reply::Ok { body } => Ok(body),
+        Reply::Http { status, body } if status < 300 => Ok(body),
+        Reply::Http { body, .. } => Err(serde_json::from_value(body).unwrap_or_else(|_| Code::SfuError.failure())),
+        Reply::Fail { failure } => Err(failure),
+    }
 }
 
-#[derive(serde::Deserialize, Default)]
-struct VersionQ {
-    if_version: Option<String>,
+pub async fn destroy(hub: &Hub, room: &str, if_version: Option<&str>) -> AdminResult {
+    let iv = if_version.ok_or_else(|| Code::MissingField.failure().with_message("if_version"))?;
+    let loc = hub.bus.room_route(room).ok_or_else(|| Code::RoomNotFound.failure())?;
+    let v = sfu_admin(hub, &loc.node, "POST", &format!("/admin/rooms/{room}/destroy"), json!({ "if_version": iv })).await?;
+    let until = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    while hub.bus.room_route(room).is_some() && tokio::time::Instant::now() < until {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    Ok(v)
 }
 
-async fn room_destroy(State(hub): State<HubRef>, ConnectInfo(p): ConnectInfo<SocketAddr>, h: HeaderMap, Path(room): Path<String>, Query(q): Query<VersionQ>) -> Response {
-    guard!(hub, p, h);
-    let Some(t) = route::room_target(&hub, &room) else { return admin_fail(Code::ROOM_NOT_FOUND, 404) };
-    let Some(v) = q.if_version else { return admin_fail(Code::MISSING_FIELD, 400) };
-    let mut query = BTreeMap::new();
-    query.insert("if_version".to_string(), v);
-    let call = Call::Admin { method: "POST".into(), path: format!("/admin/rooms/{room}/destroy"), query, body: None };
-    let r = route::call(&hub, &t, &call).await;
-    if matches!(&r, Reply::Ok { .. }) || matches!(&r, Reply::Http { status, .. } if *status < 300) {
-        let until = super::now_ms() + common::bus::SETTLE_MS + super::http::CREATE_WAIT_MS;
-        while super::now_ms() < until && route::room_target(&hub, &room).is_some() {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+pub async fn log_level(hub: &Hub, body: &Value) -> AdminResult {
+    let lvl = body
+        .get("level")
+        .and_then(|v| v.as_str())
+        .and_then(LoggingLevel::parse)
+        .ok_or_else(|| Code::InvalidPayload.failure().with_message("level"))?;
+    let ttl = body.get("ttl_secs").and_then(|v| v.as_u64());
+    let from = hub.sender.level(common::now_ms());
+    let until = ttl.map(|t| common::now_ms() + t * 1000);
+    hub.sender.set_level(lvl, until);
+    let mut units = vec!["hub".to_string()];
+    for u in hub.sup.sfu_units() {
+        if u.state() != UnitState::Running {
+            continue;
+        }
+        let mut e = Envelope::new(CallKind::LogLevel);
+        e.body = json!({ "level": lvl.as_str(), "until": until });
+        if matches!(hub.bus.call_local(&e).await, Reply::Ok { .. }) {
+            units.push(u.id.clone());
         }
     }
-    reply_resp(r)
-}
-
-#[derive(serde::Deserialize)]
-struct LevelReq {
-    level: String,
-    #[serde(default)]
-    ttl_secs: Option<u64>,
-}
-
-async fn log_level(State(hub): State<HubRef>, ConnectInfo(p): ConnectInfo<SocketAddr>, h: HeaderMap, body: Bytes) -> Response {
-    guard!(hub, p, h);
-    let Ok(req) = serde_json::from_slice::<LevelReq>(&body) else { return admin_fail(Code::INVALID_PAYLOAD, 400) };
-    let Some(to) = common::policy::LoggingLevel::parse(&req.level) else { return admin_fail(Code::INVALID_PAYLOAD, 400) };
-    let from = common::log::level::current_at(now_ms());
-    let ttl = req.ttl_secs.unwrap_or(u64::MAX / 4_000);
-    common::log::level::set_override(to, ttl, now_ms());
-    let until = req.ttl_secs.map(|t| common::time::wall_ms() + t * 1000);
-    let mut units = Vec::new();
-    for (id, _, mut c) in hub.sup.clients_running().await {
-        let call = Call::LogLevel { level: req.level.clone(), ttl_secs: req.ttl_secs.unwrap_or(0) };
-        if c.call(common::grpc::CallReq { envelope: call.encode() }).await.is_ok() {
-            units.push(id);
-        }
-    }
-    common::ev!(spec = "OP-PATH-ADMIN-LOG-LEVEL", from = from.as_str(), to = to.as_str(), "로그 수준 일시 덮기");
-    axum::Json(json!({"from": from.as_str(), "to": to.as_str(), "until": until, "units": units})).into_response()
+    Ok(json!({ "from": from.as_str(), "to": lvl.as_str(), "until": until, "units": units }))
 }

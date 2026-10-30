@@ -1,0 +1,27 @@
+// author: kodeholic (powered by Claude)
+// spec: v1.6 · 정:RULE-BUS-SHAPE · model: claude-opus-5-5
+syntax = "proto3";
+package handle;
+
+service Handle {
+  rpc Hello(HelloReq) returns (HelloRes);
+  rpc Call(CallReq) returns (CallRes);
+}
+
+message HelloReq {
+  string node = 1;
+  string hub_inst = 2;
+}
+
+message HelloRes {
+  string epoch = 1;
+  string build = 2;
+}
+
+message CallReq {
+  bytes envelope = 1;
+}
+
+message CallRes {
+  bytes reply = 1;
+}
