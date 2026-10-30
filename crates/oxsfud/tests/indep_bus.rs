@@ -19,7 +19,6 @@ fn unusable_node_id_fails_sfud_boot() {
 }
 
 #[test]
-#[ignore = "server defect: S-sym-RULE-BUS-KEYSPACE-6 sfud boots with any --zenoh-namespace (\"\" · \"n/1\" · \"n*\" · \"n$\" · \"n?\" · \"n#\" all accepted) (정:RULE-BUS-KEYSPACE 금지 문자 — 설정값 {c} 가 다섯 문자를 품거나 비면 hub · sfud 둘 다 기동 실패)"]
 fn unusable_namespace_fails_sfud_boot() {
     let mut accepted = Vec::new();
     for bad in ["", "n/1", "n*", "n$", "n?", "n#"] {

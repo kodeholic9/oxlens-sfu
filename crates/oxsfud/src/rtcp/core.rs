@@ -20,8 +20,8 @@ pub struct RecvStats {
     received: u32,
     expected_prior: u32,
     received_prior: u32,
-    transit: Option<i64>,
-    jitter: u32,
+    transit: Option<u32>,
+    jitter: f64,
     started: bool,
     pub packets: u64,
     pub bytes: u64,
@@ -94,12 +94,11 @@ impl RecvStats {
         let valid = self.update_seq(seq);
         self.packets += 1;
         self.bytes += bytes as u64;
-        let arrival = (arrival_ms as i64) * self.clock as i64 / 1000;
-        let transit = arrival - ts as i64;
+        let arrival = ((arrival_ms as u128 * self.clock as u128 / 1000) & 0xffff_ffff) as u32;
+        let transit = arrival.wrapping_sub(ts);
         if let Some(prev) = self.transit {
-            let d = (transit - prev).unsigned_abs() as i64;
-            let j = self.jitter as i64;
-            self.jitter = (j + d - ((j + 8) >> 4)).max(0) as u32;
+            let d = (transit.wrapping_sub(prev) as i32).unsigned_abs() as f64;
+            self.jitter += (d - self.jitter) / 16.0;
         }
         self.transit = Some(transit);
         valid
@@ -123,7 +122,7 @@ impl RecvStats {
         } else {
             ((lost_interval << 8) / expected_interval as i64).min(255) as u8
         };
-        Report { fraction, lost, extended_max: ext, jitter: self.jitter >> 4 }
+        Report { fraction, lost, extended_max: ext, jitter: self.jitter as u32 }
     }
 }
 

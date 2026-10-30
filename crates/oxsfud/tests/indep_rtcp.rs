@@ -174,7 +174,6 @@ fn rr_random_streams_epoch_scale_arrival() {
 }
 
 #[test]
-#[ignore = "server defect: S-sym-IMPL-RTCP-TERMINATE-6 RR jitter differs by 1 from RFC 3550 A.8 float J += (|D|-J)/16 then floor (seed 0x3550_3550_a1a3_a8a8 round 2 step 175: 141 vs 140)"]
 fn rr_random_jitter_exact_a8_float() {
     rr_random(0x3550_3550_a1a3_a8a8, 0, true, false);
 }
@@ -268,7 +267,6 @@ fn rr_drifting_jitter_matches_a8() {
 }
 
 #[test]
-#[ignore = "server defect: S-sym-IMPL-RTCP-TERMINATE-6 RR jitter across an RTP timestamp wrap departs from RFC 3550 A.8 32-bit transit (90 kHz · 3000 ticks per 20 ms · start u32::MAX-60000: 1160 vs 1173)"]
 fn rr_drifting_jitter_across_ts_wrap_matches_a8() {
     drifting("wrap", u32::MAX - 20 * 3_000);
 }

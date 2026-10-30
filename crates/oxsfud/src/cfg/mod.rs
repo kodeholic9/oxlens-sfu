@@ -89,6 +89,9 @@ impl SfuCfg {
         };
         let bind_ip = if is_local(ip) { ip } else { IpAddr::V4(Ipv4Addr::UNSPECIFIED) };
         let namespace = args.get("zenoh-namespace").unwrap_or("oxlens").to_string();
+        if !common::keyspace::valid_piece(&namespace) {
+            return Err(format!("zenoh-namespace {namespace:?} 는 키 조각이 못 된다"));
+        }
         let connect = args.get("zenoh-connect").unwrap_or("tcp/127.0.0.1:7447").to_string();
         let log_dir = args.get("log-dir").map(PathBuf::from);
         let log_socket = args.get("log-socket").map(PathBuf::from);
