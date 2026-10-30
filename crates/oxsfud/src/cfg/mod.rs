@@ -126,7 +126,6 @@ impl SfuCfg {
 
     pub fn banner_fields(&self) -> Vec<(String, String)> {
         let mut v = self.args.banner_fields();
-        v.retain(|(k, _)| k != "build");
         for (k, x) in [
             ("public-ip", self.ip.to_string()),
             ("media-workers", self.workers.to_string()),
