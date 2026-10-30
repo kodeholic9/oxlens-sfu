@@ -5,10 +5,14 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[[bin]]
+name = "oxadmin"
+path = "src/main.rs"
+
 [dependencies]
-serde.workspace = true
-serde_json.workspace = true
-jsonwebtoken.workspace = true
+serde = { workspace = true }
+serde_json = { workspace = true }
+jsonwebtoken = { workspace = true }
 
 [lints]
 workspace = true
