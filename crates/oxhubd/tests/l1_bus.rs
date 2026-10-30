@@ -44,7 +44,7 @@ fn delete_batch_is_judged_after_settle() {
     v.on_token(TokenEv::RoomPut { room: "rb".into(), node: "b".into(), inst: "eb".into() }, 0);
     v.on_token(TokenEv::RoomDel { room: "rb".into(), node: "b".into(), inst: "eb".into() }, 100);
     v.on_token(TokenEv::NodeDel { node: "b".into(), inst: "hb".into() }, 150);
-    assert!(v.settle(900).dropped_rooms.is_empty(), "S-sym-RULE-BUS-EVENTS — 가라앉기 전에는 판정하지 않는다");
+    assert!(v.settle(900).dropped_rooms.is_empty(), "S-sym-RULE-BUS-EVENTS-7 — 가라앉기 전에는 판정하지 않는다");
     let s = v.settle(1_200);
-    assert!(s.isolated_now && s.dropped_rooms.is_empty(), "S-sym-RULE-BUS-PRESENCE — 본 적 있는 남의 토큰 일괄 소멸은 고립 · 방을 쥔다");
+    assert!(s.isolated_now && s.dropped_rooms.is_empty(), "S-sym-RULE-BUS-EVENTS-7 — 본 적 있는 남의 토큰 일괄 소멸은 고립 · 방을 쥔다");
 }

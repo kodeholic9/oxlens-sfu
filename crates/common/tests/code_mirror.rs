@@ -158,7 +158,7 @@ fn code_mirror() {
             }
         }
     }
-    assert!(breaks.is_empty(), "S-sym-RULE-DOC-CODE-MIRROR — 거울 깨짐 {}:\n{}", breaks.len(), breaks.join("\n"));
+    assert!(breaks.is_empty(), "S-sym-RULE-DOC-CODE-MIRROR-1 — 거울 깨짐 {}:\n{}", breaks.len(), breaks.join("\n"));
 }
 
 #[test]

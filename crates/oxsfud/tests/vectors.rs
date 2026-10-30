@@ -64,7 +64,7 @@ fn fwd_rewrite_vectors() {
     }
     for s in cases(&v, "serial") {
         let (a, b) = (s["a"].as_u64().unwrap_or(0) as u16, s["b"].as_u64().unwrap_or(0) as u16);
-        assert_eq!(serial_after(a, b), s["after"].as_bool().unwrap_or(false), "S-sym-IMPL-FWD-SOURCE-SWITCH-4 — serial {a} {b}");
+        assert_eq!(serial_after(a, b), s["after"].as_bool().unwrap_or(false), "S-sym-IMPL-FWD-SOURCE-SWITCH-1 — serial {a} {b}");
     }
     for p in cases(&v, "pt_byte1") {
         let out = pt_byte1(p["byte1"].as_u64().unwrap_or(0) as u8, p["pt"].as_u64().unwrap_or(0) as u8);
@@ -74,9 +74,9 @@ fn fwd_rewrite_vectors() {
         let mut rw = Rewriter::new(90000);
         rw.ts_off = s["ts_off"].as_u64().unwrap_or(0) as u32;
         let got = rw.translate_sr_ts(s["in"]["rtp_ts"].as_u64().unwrap_or(0) as u32);
-        assert_eq!(got as u64, s["out"]["rtp_ts"].as_u64().unwrap_or(0), "S-sym-IMPL-FWD-SOURCE-SWITCH-5 — SR ts 번역");
-        assert_eq!(s["out"]["ntp"], s["in"]["ntp"], "S-sym-IMPL-FWD-SOURCE-SWITCH-5 — NTP 원본");
-        assert_eq!(s["out"]["ssrc"], s["downlink_ssrc"], "S-sym-IMPL-FWD-SOURCE-SWITCH-5 — 다운링크 SSRC");
+        assert_eq!(got as u64, s["out"]["rtp_ts"].as_u64().unwrap_or(0), "S-sym-IMPL-RTCP-TERMINATE-1 — SR ts 번역");
+        assert_eq!(s["out"]["ntp"], s["in"]["ntp"], "S-sym-IMPL-RTCP-TERMINATE-1 — NTP 원본");
+        assert_eq!(s["out"]["ssrc"], s["downlink_ssrc"], "S-sym-IMPL-RTCP-TERMINATE-1 — 다운링크 SSRC");
     }
     for e in cases(&v, "ext") {
         let t = &e["table"];
@@ -93,7 +93,7 @@ fn fwd_rewrite_vectors() {
         build(&table, &inp, &mut out);
         let want = hex(e["hex"].as_str().unwrap_or(""));
         assert_eq!(out, want, "S-sym-IMPL-SUB-SUBSCRIBER-TABLE-1 — 확장 다시 짓기 {}", e["name"]);
-        assert_eq!(table.one_byte(), e["form"] == "one", "S-sym-IMPL-SUB-SUBSCRIBER-TABLE-4 — 꼴 {}", e["name"]);
+        assert_eq!(table.one_byte(), e["form"] == "one", "S-sym-IMPL-SUB-SUBSCRIBER-TABLE-1 — 꼴 {}", e["name"]);
     }
 }
 
@@ -162,8 +162,8 @@ fn sim_aimd_vectors() {
         for s in c["steps"].as_array().unwrap_or(&vec![]) {
             let usage = Usage::parse(s["usage"].as_str().unwrap_or("normal")).unwrap_or(Usage::Normal);
             let out = a.update(s["at_ms"].as_u64().unwrap_or(0), usage, s["acked_bps"].as_u64().unwrap_or(0));
-            assert_eq!(out, s["out_bps"].as_u64().unwrap_or(0), "S-sym-RULE-SIM-TICK — AIMD {name} @{}", s["at_ms"]);
-            assert_eq!(a.near(), s["out_near"].as_bool().unwrap_or(false), "S-sym-RULE-SIM-TICK — near {name} @{}", s["at_ms"]);
+            assert_eq!(out, s["out_bps"].as_u64().unwrap_or(0), "sim 벡터 AIMD {name} @{}", s["at_ms"]);
+            assert_eq!(a.near(), s["out_near"].as_bool().unwrap_or(false), "sim 벡터 AIMD near {name} @{}", s["at_ms"]);
         }
     }
 }
