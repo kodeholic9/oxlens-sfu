@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-LINK-TRANSPORT · 연:TRN.frame.DC · 연:RULE-FLR-TRANSPORT-DC · 정:RULE-GC-LEAVE-SEVEN · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-LINK-TRANSPORT · 연:TRN.frame.DC · 연:RULE-FLR-TRANSPORT-DC · 정:RULE-GC-LEAVE-SEVEN · 정:CAND-LINK-DTLS-VALUES · 정:RULE-DOC-FIXED-PARTS · model: claude-opus-5-5
 //! DTLS(항상 passive · sha-256) → SRTP 키(AES128-CM-HMAC-SHA1-80) → SCTP/DCEP(채널 `"unreliable"` 하나 · 레코드 하나 = SCTP 패킷 하나 · 재전송 한도 없음). 회수 신호에 태스크를 끝낸다.
 
 use std::net::SocketAddr;

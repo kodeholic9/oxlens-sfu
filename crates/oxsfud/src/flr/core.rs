@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 연:FLR.S.G · 연:FLR.S.P · 연:FLR.S.gate · 연:FLR.S.perm · 연:FLR.S.ws · 연:RULE-FLR-TIMERS · 정:IMPL-FLR-LOCK · 정:RULE-CONC-SIX · model: claude-opus-5-5
+// spec: v1.6 · 연:FLR.S.G · 연:FLR.S.P · 연:FLR.S.gate · 연:FLR.S.perm · 연:FLR.S.ws · 연:RULE-FLR-TIMERS · 정:IMPL-FLR-LOCK · 정:RULE-CONC-SIX · 정:CAND-FLR-MEMBER-JOIN-INIT · 연:RULE-FLR-SEQ · 연:RULE-FLR-SERVER-STATE-SEPARATE · 연:RULE-FLR-MSG-IDLE · 연:RULE-FLR-MSG-REVOKE · 연:RULE-FLR-MSG-RELEASE · 연:RULE-FLR-SERVER-POLICY · 연:DEV-FLR-PUBROOM · 연:DEV-FLR-QUEUE-MAX · 연:DEV-FLR-NO-MCPRIO · 연:DEV-FLR-PREEMPT-RELATIVE · 연:DEV-FLR-PUB-AWAY · 연:DEV-FLR-RECVONLY-TRIGGER · 연:DEV-FLR-DENY-2-6 · 연:DEV-FLR-REGRANT-FWD · 연:DEV-FLR-TAKEN-ACK · 연:DEV-FLR-ACK-DROP · 연:DEV-FLR-T21-SAME-SEQ · 연:DEV-FLR-GRANTED-SEQ · 연:DEV-FLR-ACK-SEQ · 연:DEV-FLR-ROOM-GONE · model: claude-opus-5-5
 //! 발언권 판정 로직 — 생성 서버 상태기(`protocol/out/floor/server/floor_server.ts`)의 이식 · 걸음마다 보낼 것 · 지난 경우 라벨 · 효과를 돌려준다(판정은 락 안 · 집행은 락 밖).
 
 use std::collections::{BTreeMap, BTreeSet};

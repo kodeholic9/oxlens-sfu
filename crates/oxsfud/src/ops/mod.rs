@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-DOC-OWNERSHIP · 정:RULE-OPS-DROPS · 정:RULE-OPS-OBSERVE · 정:RULE-CONC-HOT-PATH · 정:IMPL-ERR-ISSUERS · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-DOC-OWNERSHIP · 정:RULE-OPS-DROPS · 정:RULE-OPS-OBSERVE · 정:RULE-CONC-HOT-PATH · 정:IMPL-ERR-ISSUERS · 정:CAND-OPS-SERVER-TRANSITION-SPEC · 정:CAND-DOC-ORCHESTRATION-ASPECT · model: claude-opus-5-5
 //! 가로지르는 것 — 프로세스 상태 하나(Peer · 방 · 발행 · 배정표) · 버림 계수(닫힌 목록) · 코드별 계수 · 영역 사이 조율(입장 · 발행 · 구독 · 발언권 집행 · 운영).
 
 pub mod admin;
@@ -229,14 +229,14 @@ pub fn peer_state_changed(tr: &Arc<Transport>, to: PeerState, path_changed: bool
     tracing::info!(kind = "diag", user = %tr.user, "peer state {} after {dwell}ms (conn {})", to.as_str(), tr.id);
 }
 
-pub fn floor_blocked_rtp(room: &str, user: &str) {
-    let (room, user) = (room.to_string(), user.to_string());
-    spawn(async move { floor::on_rtp(&room, &user, false) });
+pub fn floor_blocked_rtp(room: &Arc<String>, tr: &Arc<Transport>) {
+    let (room, tr) = (room.clone(), tr.clone());
+    spawn(async move { floor::on_rtp(&room, &tr.user, false) });
 }
 
-pub fn floor_rtp(room: &str, user: &str, first: bool) {
-    let (room, user) = (room.to_string(), user.to_string());
-    spawn(async move { floor::on_rtp(&room, &user, first) });
+pub fn floor_rtp(room: &Arc<String>, tr: &Arc<Transport>, first: bool) {
+    let (room, tr) = (room.clone(), tr.clone());
+    spawn(async move { floor::on_rtp(&room, &tr.user, first) });
 }
 
 pub fn simulcast_first_rtp(stream: &Arc<PubStream>) {

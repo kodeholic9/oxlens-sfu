@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-BUS-FATE · 정:RULE-FWD-MEDIA-WORKERS · 정:RULE-OPS-SURFACE · 운영:RULE-BOOT-ARGS · 운영:RULE-BOOT-BANNER · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-BUS-FATE · 정:RULE-FWD-MEDIA-WORKERS · 정:RULE-OPS-SURFACE · 운영:RULE-BOOT-ARGS · 운영:RULE-BOOT-BANNER · 정:CAND-BUS-SELF-WATCH-VALUES · 정:CAND-BUS-NO-ZENOH-BOOT · model: claude-opus-5-5
 //! oxsfud — 기동(로그 → 배너 → 인증서 → 미디어 스레드 → 버스 → 주기 작업 → Handle) · 부모 생존 채널(stdin EOF 면 끝낸다) · 자가 감시(제어 런타임이 10s 멎으면 끝낸다).
 
 use std::sync::Arc;

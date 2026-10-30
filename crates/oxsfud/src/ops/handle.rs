@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-BUS-SHAPE · 정:RULE-BUS-REQUEST · 정:IMPL-ERR-ISSUERS · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-BUS-SHAPE · 정:RULE-BUS-REQUEST · 정:IMPL-ERR-ISSUERS · 정:CAND-BUS-HANDLE-SHAPE · model: claude-opus-5-5
 //! node 안 Handle — `Hello`(node · hub_inst → epoch · build) · `Call`(봉투 → 답). `user_id` 는 봉투에서만 · 실패는 코드별로 센다.
 
 use common::envelope::handle::handle_server::{Handle, HandleServer};

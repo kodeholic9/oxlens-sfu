@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 운영:RULE-BOOT-ARGS · model: claude-opus-5-5
+// spec: v1.6 · 운영:RULE-BOOT-ARGS · 정:CAND-OPS-BUILD-DIRTY-MARK · model: claude-opus-5-5
 //! 빌드 신원 `{SHA 12}{-dirty}.{빌드 시각 unix 초}` — 소스가 바뀌면 다시 셈한다.
 
 use std::process::Command;

@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-RTCP-TERMINATE · 정:RULE-CONC-SANS-IO · model: claude-opus-5-5
+// spec: v1.6 · 정:IMPL-RTCP-TERMINATE · 정:RULE-CONC-SANS-IO · 정:CAND-RTCP-TWCC-HISTORY · model: claude-opus-5-5
 //! RTCP 산수 — 수신 통계(RFC 3550 A.1 · A.3 · A.8) · TWCC 피드백 창(draft-holmer §3.1 · libwebrtc 창). 시각은 인자.
 
 use std::collections::BTreeMap;

@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-AFF-ONE-SET · 정:IMPL-AFF-PUB-ROOM · 정:IMPL-AFF-PUB-MOVE · 연:AFF.type.Affiliation · 연:RULE-AFF-PUB-SELECT-CODEC-RECHECK · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-AFF-ONE-SET · 정:IMPL-AFF-PUB-ROOM · 정:IMPL-AFF-PUB-MOVE · 연:AFF.type.Affiliation · 연:RULE-AFF-PUB-SELECT-CODEC-RECHECK · 정:RULE-AFF-SERVER-SCOPE · 연:RULE-AFF-ONE-PUB-ROOM · 연:RULE-AFF-PUB-IN-SUB · 연:RULE-AFF-TWO-AXES · 연:RULE-AFF-PARTIAL · model: claude-opus-5-5
 //! 소속 — 입장 방 집합(= 구독 집합) 하나와 `pub_room`(RCU 값 · 매 패킷 이 값으로 방을 정한다) · 발행 방을 옮길 때의 재검사 둘(코덱 · 권한 비트).
 
 use std::sync::Arc;

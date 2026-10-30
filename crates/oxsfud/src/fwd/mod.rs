@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-FWD-STEPS · 정:RULE-FWD-BRANCH-AUTHORITY · 정:IMPL-FWD-ROOM · 정:RULE-FWD-MEDIA-WORKERS · 정:IMPL-FWD-SOURCE-SWITCH · 정:RULE-CONC-HOT-PATH · 정:RULE-OPS-TRANSIT · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-FWD-STEPS · 정:RULE-FWD-BRANCH-AUTHORITY · 정:IMPL-FWD-ROOM · 정:RULE-FWD-MEDIA-WORKERS · 정:IMPL-FWD-SOURCE-SWITCH · 정:RULE-CONC-HOT-PATH · 정:RULE-OPS-TRANSIT · 정:RULE-FWD-SCOPE · 정:CAND-FWD-REWRITER-LOCK · model: claude-opus-5-5
 //! 전달 — `on_rtp`(복호한 평문 RTP 하나: 발언권 관문 · 줄 고르기 · 목적지 워커 묶음) · 다운링크 몫(재기록 · PT · 확장 · TWCC · SRTP · 송신 · 체류).
 
 pub mod core;
@@ -468,7 +468,7 @@ fn forward(w: &Arc<Worker>, tr: &Arc<Transport>, track: &Arc<crate::r#pub::PubTr
         if !fan.speaker_is(&tr.user) {
             crate::ops::drop_count("prefan_gate");
             if track.blocked_notify(at_us) {
-                crate::ops::floor_blocked_rtp(&room, &tr.user);
+                crate::ops::floor_blocked_rtp(&room, tr);
             }
             return;
         }
@@ -478,7 +478,7 @@ fn forward(w: &Arc<Worker>, tr: &Arc<Transport>, track: &Arc<crate::r#pub::PubTr
         let prev = fan.last_notify_us.load(Ordering::Relaxed);
         if first || at_us.saturating_sub(prev) >= BLOCKED_NOTIFY_US {
             fan.last_notify_us.store(at_us, Ordering::Relaxed);
-            crate::ops::floor_rtp(&room, &tr.user, first);
+            crate::ops::floor_rtp(&room, tr, first);
         }
         for r in fan.rows.load().iter() {
             if r.user != tr.user && r.open() {

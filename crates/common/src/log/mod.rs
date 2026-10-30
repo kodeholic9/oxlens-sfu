@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 운영:RULE-LOG-PRINCIPLE · 운영:RULE-LOG-SENDER · 운영:RULE-LOG-TRANSITION · 운영:LOG.log.LINE · model: claude-opus-5-5
+// spec: v1.6 · 운영:RULE-LOG-PRINCIPLE · 운영:RULE-LOG-SENDER · 운영:RULE-LOG-TRANSITION · 운영:LOG.log.LINE · 정:CAND-OPS-LOG-ENV · model: claude-opus-5-5
 //! 로그 — 줄 꼴 · 보내는 쪽 · Layer · 배너 · 전이 줄 · 세션 지문.
 
 pub mod banner;

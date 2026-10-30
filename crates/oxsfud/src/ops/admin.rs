@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-OPS-SURFACE · 정:IMPL-OPS-DESTROY-REAP · 정:RULE-OPS-DROPS · 정:RULE-OPS-TRANSIT · 정:RULE-FLR-SNAPSHOT · 운영:RULE-CTL-LOG-LEVEL · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-OPS-SURFACE · 정:IMPL-OPS-DESTROY-REAP · 정:RULE-OPS-DROPS · 정:RULE-OPS-TRANSIT · 정:RULE-FLR-SNAPSHOT · 운영:RULE-CTL-LOG-LEVEL · 정:IMPL-AFF-FORCED · 연:RULE-AFF-NO-FORCED-IN-RES · 연:RULE-ROOM-ROOM-EVENT-PARTIAL · model: claude-opus-5-5
 //! 운영 경로(sfud 몫) — 연결 · 배정표 · 버림 · 체류 · 방 상세 · 방 목록 · `reap` · `destroy`(확인값 = 그 방 `version`) · 로그 수준 일시 덮기.
 
 use std::sync::Arc;

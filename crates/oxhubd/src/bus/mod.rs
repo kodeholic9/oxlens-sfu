@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · 정:RULE-BUS-PRESENCE · 정:RULE-BUS-EVENTS · 정:RULE-BUS-REQUEST · 정:IMPL-BUS-FAULTS · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · 정:RULE-BUS-PRESENCE · 정:RULE-BUS-EVENTS · 정:RULE-BUS-REQUEST · 정:IMPL-BUS-FAULTS · 정:RULE-BUS-PUBLIC · 정:CAND-BUS-REQUEST-TIMEOUT · model: claude-opus-5-5
 //! hub 의 버스 — zenoh router(임베드) · 토큰 선언 · 방 → node 맵 · 관심 구독 · node 안 Handle · node 사이 요청.
 
 pub mod placement;

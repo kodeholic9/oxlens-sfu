@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 운영:RULE-TOOL-ONE · 운영:RULE-TOOL-CONTRACT · 운영:RULE-RISK-CONFIRM · 운영:RULE-CTL-SUPERVISOR · 운영:RULE-CTL-CUT · 운영:RULE-CTL-ROOM · 운영:RULE-CTL-LOG-LEVEL · 운영:RULE-READ-BUS-ALL · 운영:RULE-READ-USER-MEDIA · model: claude-opus-5-5
+// spec: v1.6 · 운영:RULE-TOOL-ONE · 운영:RULE-TOOL-CONTRACT · 운영:RULE-RISK-CONFIRM · 운영:RULE-CTL-SUPERVISOR · 운영:RULE-CTL-CUT · 운영:RULE-CTL-ROOM · 운영:RULE-CTL-LOG-LEVEL · 운영:RULE-READ-BUS-ALL · 운영:RULE-READ-USER-MEDIA · 정:CAND-OPS-ADMIN-OUTPUT · model: claude-opus-5-5
 //! oxadmin — 운영 도구 하나 · 사람이 읽는 표가 기본(`--json` 은 raw) · 붙은 hub 를 매번 stderr 첫 줄에 · 되돌릴 수 없는 것은 도구가 먼저 읽은 판 값을 되싣는다 · `user` 는 두 번 읽어 Δ.
 
 mod http;

@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-CFG-THREE-PLACES · 정:IMPL-CFG-SYSTEM-FILE · 운영:RULE-BOOT-ARGS · 정:RULE-BUS-KEYSPACE · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-CFG-THREE-PLACES · 정:IMPL-CFG-SYSTEM-FILE · 운영:RULE-BOOT-ARGS · 정:RULE-BUS-KEYSPACE · 정:CAND-CFG-SFUD-NODE-GRACE · model: claude-opus-5-5
 //! hub 의 값 — 인자(strict) · 시스템 파일 · 정책 파일을 한 번 읽어 최종값으로 · 배너 칸은 출처 이름 그대로.
 
 use std::path::PathBuf;

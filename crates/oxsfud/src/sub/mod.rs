@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-SUB-PIPELINE · 정:IMPL-SUB-TABLE · 정:IMPL-SUB-SUBSCRIBER-TABLE · 정:IMPL-SUB-READY-GATE · 정:RULE-SUB-STATE · 연:SUB.type.MlineTable · 연:RULE-SUB-FILL · 연:RULE-ROOM-BUDGET-SPLIT · model: claude-opus-5-5
+// spec: v1.6 · 정:IMPL-SUB-PIPELINE · 정:IMPL-SUB-TABLE · 정:IMPL-SUB-SUBSCRIBER-TABLE · 정:IMPL-SUB-READY-GATE · 정:RULE-SUB-STATE · 연:SUB.type.MlineTable · 연:RULE-SUB-FILL · 연:RULE-ROOM-BUDGET-SPLIT · 정:RULE-SUB-SERVER-SCOPE · 정:CAND-SUB-ROW-CLASS · 정:CAND-SUB-PAUSED-FREES-ROW · 정:CAND-SUB-REASSIGN-TICK · 연:RULE-SUB-TABLE-ONE-SOURCE · model: claude-opus-5-5
 //! 구독 — 연결마다 배정표 하나(줄 = 구독 m-line · 다운링크 SSRC 는 줄 수명 동안 고정 · `since` ≤ ack 만 송신) · 구독자 표(튜플 → PT 짝 · 확장 번호) · 빈 줄은 같은 부류 · kind · 튜플의 가장 작은 mid 부터 · 상한이면 순위로 재배정 · READY 게이트.
 
 pub mod ext;

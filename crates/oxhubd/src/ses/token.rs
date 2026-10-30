@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-SES-TOKEN-ISSUE · 정:RULE-OPS-TOKEN · 연:SES.http.TOKEN · 연:RULE-SES-TOKEN-ACCOUNT-ALLOW · 연:RULE-SES-TOKEN-CLAIMS · model: claude-opus-5-5
+// spec: v1.6 · 정:IMPL-SES-TOKEN-ISSUE · 정:RULE-OPS-TOKEN · 연:SES.http.TOKEN · 연:RULE-SES-TOKEN-ACCOUNT-ALLOW · 연:RULE-SES-TOKEN-CLAIMS · 정:CAND-SES-TOKEN-CLAIM-NAMES · 연:RULE-SES-TOKEN-AXES-SEPARATE · 연:RULE-SES-TOKEN-NO-FLOOR-POLICY · 연:RULE-SES-TOKEN-BY-BACKEND · model: claude-opus-5-5
 //! 토큰 — 발급(계정 비밀로 HS256 · 계정 허용 검사 · `metadata` 상한) · A 평면 검증(계정 비밀 전부 + `jwt_secret`) · 운영 토큰 검증(`iss` 계정 · `ops`).
 
 use common::envelope::Claims;

@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-SES-DATA · 정:IMPL-SES-BIND · 정:IMPL-SES-HANDOVER · 정:IMPL-SES-RESUME · 정:IMPL-SES-ADMISSION · 정:RULE-BUS-REQUEST · 정:RULE-BUS-EVENTS · 연:SES.S.bind_new · 연:SES.S.bind_resume · 연:SES.S.resume_ok · 연:SES.S.leave · 연:SES.S.drop · 연:SES.S.TWindow · model: claude-opus-5-5
+// spec: v1.6 · 정:IMPL-SES-DATA · 정:IMPL-SES-BIND · 정:IMPL-SES-HANDOVER · 정:IMPL-SES-RESUME · 정:IMPL-SES-ADMISSION · 정:RULE-BUS-REQUEST · 정:RULE-BUS-EVENTS · 연:SES.S.bind_new · 연:SES.S.bind_resume · 연:SES.S.resume_ok · 연:SES.S.leave · 연:SES.S.drop · 연:SES.S.TWindow · 정:RULE-SES-GATEWAY-SCOPE · 정:CAND-AFF-SPLIT-ROUTE · 정:CAND-SES-SUBROOMS-RECONCILE · 연:RULE-ERR-4009-SUPPRESS · 연:RULE-SES-SOCKET-CLOSE-NORMAL · 연:RULE-SES-SERVER-POLICY · model: claude-opus-5-5
 //! 게이트웨이의 세션 — 세션 자료 · 인증 두 갈래 · 축출 · 넘겨받기 · RESUME 모으기 · op 라우팅 · 세션 폐기 한 길 · 통지 배달.
 
 pub mod conn;

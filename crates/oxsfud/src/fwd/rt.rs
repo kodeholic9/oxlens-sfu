@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-FWD-MEDIA-WORKERS · 정:RULE-OPS-TRANSIT · 정:RULE-LINK-TRANSPORT · 정:RULE-LINK-PAIR-LIVENESS · 정:RULE-OPS-DROPS · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-FWD-MEDIA-WORKERS · 정:RULE-OPS-TRANSIT · 정:RULE-LINK-TRANSPORT · 정:RULE-LINK-PAIR-LIVENESS · 정:RULE-OPS-DROPS · 정:CAND-LINK-UDP-BUFFER · model: claude-opus-5-5
 //! 수신 스레드 1 · 미디어 워커 N — 주소 색인은 수신 스레드 단독 · STUN 은 수신 스레드가 곧바로 · 워커 큐는 패킷 수 한도 · 잠듦 표시가 있을 때만 깨운다 · 워커가 끝나면 프로세스를 내린다.
 
 use std::collections::HashMap;

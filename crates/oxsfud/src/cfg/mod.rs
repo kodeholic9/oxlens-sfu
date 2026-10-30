@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-CFG-THREE-PLACES · 정:RULE-CFG-INDEX · 정:RULE-FWD-MEDIA-WORKERS · 정:RULE-LINK-TRANSPORT · 운영:RULE-BOOT-ARGS · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-CFG-THREE-PLACES · 정:RULE-CFG-INDEX · 정:RULE-FWD-MEDIA-WORKERS · 정:RULE-LINK-TRANSPORT · 운영:RULE-BOOT-ARGS · 정:CAND-CFG-SFUD-DEFAULT-PORTS · 정:CAND-CFG-SFUD-NODE-GRACE · 정:CAND-BUS-NO-ZENOH-BOOT · 정:CAND-LINK-UDP-BUFFER · model: claude-opus-5-5
 //! sfud 의 값 — 인자(strict · 인자 > 코드 기본값) · 정책 파일 · `public-ip`(ICE 후보이자 바인드 주소 · 없으면 루프백 · `auto` = 기본 인터페이스) · 워커 수 기본 = 코어 − 2(macOS 는 최대 2).
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};

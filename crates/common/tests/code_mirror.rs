@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-DOC-CODE-MIRROR · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-DOC-CODE-MIRROR · 정:CAND-DOC-GUARD-PLACE · model: claude-opus-5-5
 //! 구조 가드 — 코드 배치가 규격 영역의 거울인가: 영역 없는 최상위 모듈 · 디렉터리 없는 영역 · 개념 영역의 `may_use` 밖 `crate::` 호출을 센다.
 
 use std::collections::{BTreeMap, BTreeSet};

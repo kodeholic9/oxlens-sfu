@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 연:RULE-TRN-ENDPOINTS · 연:RULE-TRN-HTTP-AUTH-TWO · 연:RULE-TRN-CORS · 연:DEV-TRN-WS-ORIGIN · 연:RULE-TRN-SESSION-HEADER-SCOPE · 정:IMPL-ERR-ISSUERS · 정:RULE-OPS-SURFACE · 정:RULE-OPS-TOKEN · 운영:BOOT.http.HEALTH_READY · model: claude-opus-5-5
+// spec: v1.6 · 연:RULE-TRN-ENDPOINTS · 연:RULE-TRN-HTTP-AUTH-TWO · 연:RULE-TRN-CORS · 연:DEV-TRN-WS-ORIGIN · 연:RULE-TRN-SESSION-HEADER-SCOPE · 정:IMPL-ERR-ISSUERS · 정:RULE-OPS-SURFACE · 정:RULE-OPS-TOKEN · 운영:BOOT.http.HEALTH_READY · 정:CAND-ERR-HTTP-MAP · 정:CAND-ROOM-CORS-MAX-AGE · model: claude-opus-5-5
 //! HTTP 표면 — `{base}/ws` · `{base}/auth/token` · `{base}/rooms` 셋(CORS) · `/healthz` · `/admin`(운영 토큰 또는 loopback) · HTTP 상태 번호는 일반 사상 하나.
 
 use std::net::SocketAddr;

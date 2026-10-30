@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-SIM-TICK · 정:RULE-SIM-MODES · 정:IMPL-SIM-SWITCH · 정:IMPL-PUB-RID-SPATIAL · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-SIM-TICK · 정:RULE-SIM-MODES · 정:IMPL-SIM-SWITCH · 정:IMPL-PUB-RID-SPATIAL · 정:CAND-SIM-PROBE-SHAPE · model: claude-opus-5-5
 //! 시뮬캐스트 · 자동 층 — 전환 기계(pending 10s · Pause 드롭 · target 키프레임 = 확정 · current 릴레이 · in-band demote) · 수동 상한과 자동 판단의 `min` · v1(RR 손실 · NACK · 드롭) · v2(TWCC 송신측 GCC + RTX 패딩 프로브).
 
 pub mod core;

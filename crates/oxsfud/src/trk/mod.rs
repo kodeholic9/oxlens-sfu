@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-TRK-FROM-PUB · 정:IMPL-TRK-CODEC-REGISTRY · 연:RULE-TRK-PUB-TO-TRACK · 연:RULE-TRK-SLOT-LIFE · 연:RULE-ROOM-MEDIA-CODECS · 연:TRK.type.TrackEntry · model: claude-opus-5-5
+// spec: v1.6 · 정:IMPL-TRK-FROM-PUB · 정:IMPL-TRK-CODEC-REGISTRY · 연:RULE-TRK-PUB-TO-TRACK · 연:RULE-TRK-SLOT-LIFE · 연:RULE-ROOM-MEDIA-CODECS · 연:TRK.type.TrackEntry · 정:CAND-PUB-H264-PROFILE · 정:CAND-PUB-CODEC-REGISTRY-PLACE · 연:RULE-TRK-FIELDS-BY-TYPE · 연:RULE-TRK-FOUR-PATHS · model: claude-opus-5-5
 //! 트랙 — 코덱 등록부(VP8 · H264 · 키프레임 판정기가 있는 것만) · 슬롯 트랙 둘(방과 수명) · 발행에서 파생하는 개인 트랙 목록(`muted` 포함).
 
 use oxsig::msg::{Kind, MediaCodecs, TrackEntry, TrackEntryType};

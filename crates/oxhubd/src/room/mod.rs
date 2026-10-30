@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-BUS-PLACEMENT · 정:RULE-BUS-REQUEST · 정:IMPL-ROOM-LIFE · 연:ROOM.http.CREATE_ROOM · 연:ROOM.http.GET_ROOM · 연:ROOM.http.LIST_ROOMS · 연:RULE-ROOM-CREATE-FORM · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-BUS-PLACEMENT · 정:RULE-BUS-REQUEST · 정:IMPL-ROOM-LIFE · 연:ROOM.http.CREATE_ROOM · 연:ROOM.http.GET_ROOM · 연:ROOM.http.LIST_ROOMS · 연:RULE-ROOM-CREATE-FORM · 정:CAND-ROOM-CREATE-WAITS-TOKEN · 정:CAND-ROOM-TTL-PERMANENT-MARK · model: claude-opus-5-5
 //! hub 의 방 HTTP — 생성은 배치(HRW) 뒤 그 node 로 · 맵에 보일 때까지 응답을 미룬다 · 상세는 방 → node 맵으로 · 목록은 전 node 병합.
 
 use std::time::Duration;

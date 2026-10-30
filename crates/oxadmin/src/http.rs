@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 운영:RULE-TOOL-CONTRACT · 운영:RULE-AUTH-THREE · 운영:RULE-FMT-REPLY · model: claude-opus-5-5
+// spec: v1.6 · 운영:RULE-TOOL-CONTRACT · 운영:RULE-AUTH-THREE · 운영:RULE-FMT-REPLY · 정:CAND-OPS-TOOL-HUB-FORM · model: claude-opus-5-5
 //! hub 하나에 붙는 HTTP/1.1 — `host:port` · URL 둘 다 받는다(스킴이 없으면 `http://`) · 원격이면 그 자리에서 운영 토큰을 서명한다.
 
 use std::io::{Read, Write};

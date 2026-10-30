@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-SES-READ-AND-PROCESS · 정:IMPL-SES-SOCKET-LIFE · 연:RULE-TRN-CLOSE · 연:RULE-TRN-FLOW-CONTROL · 연:RULE-TRN-WINDOW-PER-DIRECTION · 연:RULE-TRN-LANES · 연:RULE-SES-BIND-PROC · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-SES-READ-AND-PROCESS · 정:IMPL-SES-SOCKET-LIFE · 연:RULE-TRN-CLOSE · 연:RULE-TRN-FLOW-CONTROL · 연:RULE-TRN-WINDOW-PER-DIRECTION · 연:RULE-TRN-LANES · 연:RULE-SES-BIND-PROC · 연:RULE-SES-HEARTBEAT · 연:RULE-SES-LEAVE-CARRIES-REASON · 정:CAND-SES-PREBIND-2001 · model: claude-opus-5-5
 //! WS 연결 하나 — 읽기와 처리를 가른다 · `HEARTBEAT` 는 읽는 즉시 · 방 요청은 연결 순서대로 · 서버 통지는 4단 큐 + ACK 창 · 끊을 때는 `LEAVE` 먼저.
 
 use std::collections::{HashMap, VecDeque};

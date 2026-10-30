@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-PUB-TWO-LAYERS · 정:RULE-PUB-STATE · 정:IMPL-PUB-ADD · 정:IMPL-PUB-ACCEPT · 정:IMPL-PUB-REMOVE · 정:IMPL-PUB-TRACK-SET · 정:RULE-RTCP-NACK-UP · 정:RULE-FWD-INGRESS-STATS · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-PUB-TWO-LAYERS · 정:RULE-PUB-STATE · 정:IMPL-PUB-ADD · 정:IMPL-PUB-ACCEPT · 정:IMPL-PUB-REMOVE · 정:IMPL-PUB-TRACK-SET · 정:RULE-RTCP-NACK-UP · 정:RULE-FWD-INGRESS-STATS · 정:RULE-PUB-SERVER-SCOPE · 정:CAND-PUB-RID-EXTRA · 정:CAND-PUB-INGRESS-STATS-OWNER · model: claude-opus-5-5
 //! 발행 — 논리 `PublisherStream`(track_id · 메타 · 구독 줄 목록) · 물리 `PublisherTrack`(업링크 SSRC · 캐시 1024 · NACK 결손 · PLI 스로틀 · 수신 통계) · 시뮬캐스트는 첫 RTP 에 rid 로 붙인다.
 
 use std::collections::{BTreeMap, HashMap};

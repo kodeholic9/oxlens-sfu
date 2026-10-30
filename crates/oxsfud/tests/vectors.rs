@@ -194,9 +194,20 @@ fn flr_media_bind_vectors() {
         assert_eq!(inorder.bound, bound(&c["bound"]), "S-sym-IMPL-FLR-MEDIA-BIND-3 — 판정 차례 결과 {name}");
         let orders = c["orders"].as_array().map(|a| a.to_vec()).unwrap_or_default();
         assert!(!orders.is_empty(), "S-sym-IMPL-FLR-MEDIA-BIND-4 — 집행 차례 판이 비었다 {name}");
+        let mut differs = 0u64;
         for o in orders {
             let mut s = Slot::default();
             let idx: Vec<usize> = o["order"].as_array().map(|a| a.iter().filter_map(|x| x.as_u64()).map(|x| x as usize).collect()).unwrap_or_default();
+            let mut blind: Option<(String, u64)> = None;
+            for i in &idx {
+                blind = match &decided[*i] {
+                    Effect::Bind { user, g } => Some((user.clone(), *g)),
+                    Effect::Release { .. } => None,
+                };
+            }
+            if blind != bound(&c["bound"]) {
+                differs += 1;
+            }
             let mut applied = vec![false; decided.len()];
             for i in &idx {
                 applied[*i] = s.apply(&decided[*i]);
@@ -206,5 +217,7 @@ fn flr_media_bind_vectors() {
             assert_eq!(got, want, "S-sym-IMPL-FLR-MEDIA-BIND-4 — 적용 여부 {name} {idx:?}");
             assert_eq!(s.bound, bound(&o["bound"]), "S-sym-IMPL-FLR-MEDIA-BIND-5 — 끝 슬롯 {name} {idx:?}");
         }
+        let want = c["targetless_differs"].as_u64().unwrap_or_else(|| panic!("targetless_differs 없음 {name}"));
+        assert_eq!(differs, want, "S-sym-IMPL-FLR-MEDIA-BIND-4 — 번호를 안 보는 집행이 판정 차례와 갈리는 차례 수 {name}");
     }
 }

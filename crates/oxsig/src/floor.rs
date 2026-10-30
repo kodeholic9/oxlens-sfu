@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 연:RULE-FLR-HEADER · 연:RULE-FLR-MSG-TYPES · 연:RULE-FLR-TLV · 연:RULE-FLR-TIMERS · 연:FLR.wire · model: claude-opus-5-5
+// spec: v1.6 · 연:RULE-FLR-HEADER · 연:RULE-FLR-MSG-TYPES · 연:RULE-FLR-TLV · 연:RULE-FLR-TIMERS · 연:FLR.wire · 연:RULE-FLR-MSG-GRANTED · 연:RULE-FLR-MSG-TAKEN · 연:RULE-FLR-MSG-ACK · 연:RULE-FLR-MSG-QUEUE · 연:RULE-FLR-MSG-REQUEST · 연:RULE-FLR-MSG-DENY · 연:RULE-FLR-TLV-MATRIX · 연:RULE-FLR-ACK-BIT · 연:RULE-FLR-RTCP-HEADER-DROPPED · 연:RULE-FLR-T9-VALUE · 연:DEV-FLR-TLV-EXT · 연:DEV-FLR-DENY-101 · 연:DEV-FLR-DENY-102 · 연:DEV-FLR-DENY-255 · 연:DEV-FLR-T7-VALUE · 연:DEV-FLR-T9 · 연:DEV-FLR-CAUSE-U8 · 연:DEV-FLR-ACK-NOSRC · 연:DEV-FLR-CLIENT-RETX · 연:RULE-ERR-FLOOR-OUTSIDE · 연:RULE-ERR-NOT-MIXED · model: claude-opus-5-5
 //! 발언권 메시지(MBCP) 부호화 — 머리(V · R · A · Type) · TLV 개수 · TLV. 원문 번호 · 사유 · 타이머 값.
 
 pub const REQUEST: u8 = 0;

@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-LINK-PEER-STATE · 정:RULE-LINK-PAIR-LIVENESS · 정:RULE-LINK-TRANSPORT · 정:IMPL-LINK-ICE-RESTART · 정:RULE-DOC-OWNERSHIP · model: claude-opus-5-5
+// spec: v1.6 · 정:IMPL-LINK-PEER-STATE · 정:RULE-LINK-PAIR-LIVENESS · 정:RULE-LINK-TRANSPORT · 정:IMPL-LINK-ICE-RESTART · 정:RULE-DOC-OWNERSHIP · 정:RULE-LINK-SERVER-SCOPE · 정:RULE-CONC-STATE-VOCAB · model: claude-opus-5-5
 //! 연결 — Peer(사람 × 미디어 서버) · 전송 객체(연결마다 하나 · 자격 · 경로 · 쌍별 생존 · PeerState · SRTP 문맥) · 신원은 전송 객체(ufrag · 주소는 조회 키).
 
 pub mod creds;

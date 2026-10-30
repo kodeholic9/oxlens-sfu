@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 연:ERR.type.Failure · 연:RULE-ERR-FAILURE-FORM · 연:RULE-ERR-UNKNOWN-BY-LEAD · 연:DEV-ERR-LEAVE-PERMANENT-NULL · 연:SES.op.LEAVE · model: claude-opus-5-5
+// spec: v1.6 · 연:ERR.type.Failure · 연:RULE-ERR-FAILURE-FORM · 연:RULE-ERR-UNKNOWN-BY-LEAD · 연:DEV-ERR-LEAVE-PERMANENT-NULL · 연:SES.op.LEAVE · 연:RULE-ERR-NO-RETRY-AFTER · 연:RULE-ERR-ONE-NUMBER-ONE-MEANING · model: claude-opus-5-5
 //! 오류 번호 공간 하나 — 실패 응답(`flags=10`)과 `LEAVE` 사유가 같은 번호를 쓴다.
 
 use serde::{Deserialize, Serialize};

@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-SUB-SUBSCRIBER-TABLE · 정:REJ-SUB-EXT-SWAP · 정:RULE-CONC-SANS-IO · model: claude-opus-5-5
+// spec: v1.6 · 정:IMPL-SUB-SUBSCRIBER-TABLE · 정:REJ-SUB-EXT-SWAP · 정:RULE-CONC-SANS-IO · 정:CAND-SUB-MID-EXT-ALWAYS · model: claude-opus-5-5
 //! egress 헤더 확장 다시 짓기 — 들어온 영역은 버리고 구독자 표의 번호로 mid · 음량 · abs-send-time · transport-cc 만. 꼴은 표로 정한다(ID 전부 1~14 면 one-byte).
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

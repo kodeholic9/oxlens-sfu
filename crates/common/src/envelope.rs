@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-BUS-SHAPE · 정:RULE-BUS-REQUEST · 정:RULE-BUS-EVENTS · 정:IMPL-BUS-HOME-LOST · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-BUS-SHAPE · 정:RULE-BUS-REQUEST · 정:RULE-BUS-EVENTS · 정:IMPL-BUS-HOME-LOST · 정:CAND-BUS-HANDLE-SHAPE · 정:CAND-BUS-NOTICE-ENVELOPE · model: claude-opus-5-5
 //! node 안 Handle 과 node 사이 `q/node/{node}/call` 이 함께 나르는 봉투 · 답 · 통지 봉투(JSON).
 
 use oxsig::Failure;

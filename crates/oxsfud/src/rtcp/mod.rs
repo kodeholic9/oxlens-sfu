@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-RTCP-TERMINATE · 정:RULE-RTCP-NACK-UP · 정:RULE-RTCP-NACK-DOWN · 정:RULE-OPS-DROPS · model: claude-opus-5-5
+// spec: v1.6 · 정:IMPL-RTCP-TERMINATE · 정:RULE-RTCP-NACK-UP · 정:RULE-RTCP-NACK-DOWN · 정:RULE-OPS-DROPS · 정:CAND-RTCP-SENDER-SSRC · 정:CAND-RTCP-REMB-ESTIMATE · 정:CAND-RTCP-RR-PER-STREAM · 정:CAND-RTCP-NACK-BUDGET-UNIT · 정:CAND-RTCP-RTX-GATE-WINDOW · model: claude-opus-5-5
 //! RTCP 종단 — 서버가 짓는 것(Ingress RR 1000ms · TWCC 100ms · REMB 1000ms · NACK 상향 · PLI 스로틀) · 구독자 것 소비(RR · NACK → RTX · PLI · TWCC) · 발행자 SR 번역 · `1pc` 분해. sender SSRC 1.
 
 pub mod core;

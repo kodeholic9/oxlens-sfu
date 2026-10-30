@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 연:SES.op · 연:ROOM.op · 연:PUB.op · 연:SUB.op · 연:TRK.op · 연:LINK.op · 연:AFF.op · 연:AUX.op · 연:LINK.type.ServerConfig · 연:SUB.type.MlineTable · 연:TRK.type.TrackEntry · 연:ROOM.type.MemberInfo · 연:ROOM.http.CREATE_ROOM · 연:SES.http.TOKEN · model: claude-opus-5-5
+// spec: v1.6 · 연:SES.op · 연:ROOM.op · 연:PUB.op · 연:SUB.op · 연:TRK.op · 연:LINK.op · 연:AFF.op · 연:AUX.op · 연:LINK.type.ServerConfig · 연:SUB.type.MlineTable · 연:TRK.type.TrackEntry · 연:ROOM.type.MemberInfo · 연:ROOM.http.CREATE_ROOM · 연:SES.http.TOKEN · 연:RULE-ROOM-MEMBERINFO-SHAPE · 연:RULE-ROOM-LEAVE-FORM · 연:RULE-ROOM-PARTICIPANT-EVENT-FORM · 연:RULE-ROOM-ROOM-EVENT-NO-VERSION · 연:RULE-AFF-RES-NO-VERSION · 연:RULE-PUB-SET-RES · 연:RULE-PUB-PUBLISH-RES · 연:RULE-TRK-ELEMENT-HAS-ROOM-ID · 연:RULE-TRK-TRACK-STATE-TYPES · 연:RULE-TRK-TRACK-STATE-NO-STALLED · 연:RULE-SUB-LAYER-BY-TRACK-ID · 연:RULE-SUB-ROW-ONE-MLINE · 연:RULE-SUB-ASSIGN-TIER · model: claude-opus-5-5
 //! WS · HTTP body 의 형 — 칸 이름 · 필수 · 갈래는 연동규격서 구조 절 그대로.
 
 use serde::{Deserialize, Serialize};

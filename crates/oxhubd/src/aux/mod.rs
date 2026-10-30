@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-AUX-TASK · 연:AUX.op.TASK · 운영:RULE-READ-USER-PROBE · model: claude-opus-5-5
+// spec: v1.6 · 정:IMPL-AUX-TASK · 연:AUX.op.TASK · 운영:RULE-READ-USER-PROBE · 정:CAND-AUX-TASK-CLIENT-REQUEST · 연:RULE-AUX-TASK-PROC · 연:RULE-AUX-TASK-TYPES · 연:RULE-AUX-PROBE-PARAMS · 연:RULE-AUX-SERVER-POLICY · model: claude-opus-5-5
 //! `TASK` — 서버가 발제(`req_id` 단조증가) · 클라 `report` 를 새 프레임으로 받는다 · 클라가 보낸 `request` 는 빈 성공 · probe 시한 3s.
 
 use std::collections::HashMap;

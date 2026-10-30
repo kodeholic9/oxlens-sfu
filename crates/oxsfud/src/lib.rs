@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-DOC-PLANES · 정:RULE-DOC-OWNERSHIP · 정:RULE-DOC-CODE-MIRROR · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-DOC-PLANES · 정:RULE-DOC-OWNERSHIP · 정:RULE-DOC-CODE-MIRROR · 정:RULE-DOC-SERVER-CONTRACT · model: claude-opus-5-5
 //! 미디어 서버(sfud) — Peer · 방 · 발행 · 구독 · 발언권 · 전달 · RTCP 종단 · 자동 층.
 
 pub mod aff;
