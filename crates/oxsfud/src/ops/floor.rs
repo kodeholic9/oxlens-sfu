@@ -154,8 +154,9 @@ fn rearm(fl: &Floor, ck: &mut Clock, now: u64) {
 }
 
 fn execute(room: &Arc<Room>, p: &Plan) {
+    let reason = if p.step.labels.contains(&"FLR.S.gate.not_in_room") { Some("not_in_room") } else { None };
     for o in &p.step.out {
-        if let Some(m) = to_mbcp(&o.m, &room.id) {
+        if let Some(m) = to_mbcp(&o.m, &room.id, reason) {
             send(&o.to, &m);
         }
     }
@@ -173,12 +174,12 @@ fn execute(room: &Arc<Room>, p: &Plan) {
     }
 }
 
-pub fn to_mbcp(m: &Msg, room: &str) -> Option<mbcp::Msg> {
+pub fn to_mbcp(m: &Msg, room: &str, reason: Option<&str>) -> Option<mbcp::Msg> {
     Some(match m.t {
         Mt::Granted => mbcp::granted(m.n as u8, m.d as u16, m.q as u16, room),
         Mt::Taken => mbcp::taken(m.a.as_deref().unwrap_or(""), m.q as u16, room),
         Mt::Idle => mbcp::idle(m.q as u16, room, m.a.as_deref()),
-        Mt::Deny => mbcp::deny_msg(m.n as u8, room, None),
+        Mt::Deny => mbcp::deny_msg(m.n as u8, room, reason),
         Mt::Revoke => mbcp::revoke_msg(m.n as u8, room, None),
         Mt::Qinfo => mbcp::queue_info(m.n.min(255) as u8, m.d as u8, room),
         Mt::Ack => mbcp::ack(m.n as u8, room, Some(m.q as u16)),

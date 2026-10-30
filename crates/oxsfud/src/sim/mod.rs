@@ -140,7 +140,6 @@ pub struct ConnSim {
     pub acked: VecDeque<(u64, usize)>,
     pub group: Option<(i64, i64, i64, i64)>,
     pub probe: Option<Probe>,
-    pub measured: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -169,7 +168,6 @@ impl Default for ConnSim {
             acked: VecDeque::new(),
             group: None,
             probe: None,
-            measured: None,
         }
     }
 }
@@ -215,7 +213,7 @@ pub fn tick(tr: &Arc<Transport>, now: u64) {
     let n_rows = rows.len() as f64;
     let demand_h = n_rows * H_BPS as f64 * HEADROOM;
     let demand_now = n_rows * if s.level == 1 { H_BPS } else { L_BPS } as f64 * HEADROOM;
-    let est = s.measured.unwrap_or(s.aimd.bps()) as f64;
+    let est = s.aimd.bps() as f64;
     let in_grace = now.saturating_sub(s.last_promote) < GRACE_MS;
     let short = v2 && !in_grace && s.level == 1 && est < demand_now;
     let bad = short || loss >= DEMOTE_LOSS || nack_rate > DEMOTE_NACK_PER_S || drops > 0;
@@ -232,7 +230,6 @@ pub fn tick(tr: &Arc<Transport>, now: u64) {
         s.level = 0;
         s.bad = 0;
         s.last_demote = now;
-        s.measured = None;
         changed = Some(0u8);
     } else if s.level == 0 && !bad && loss <= CLEAN_LOSS && now.saturating_sub(s.last_demote) >= s.backoff {
         let usage_ok = s.trend.usage != Some(Usage::Overuse);
@@ -253,7 +250,7 @@ pub fn tick(tr: &Arc<Transport>, now: u64) {
         };
         s.probe = None;
         match measured {
-            Some(x) if x as f64 >= demand_h => s.measured = Some(x),
+            Some(x) if x as f64 >= demand_h => s.aimd.set_estimate(x, now),
             _ => s.last_demote = now,
         }
     }

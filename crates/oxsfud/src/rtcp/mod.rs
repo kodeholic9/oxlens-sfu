@@ -33,7 +33,7 @@ pub const PLI_BURST_MS: [u64; 3] = [0, 500, 1_500];
 pub struct Sr {
     pub ntp: u64,
     pub rtp: u32,
-    pub at_ms: u64,
+    pub at_us: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -490,7 +490,7 @@ fn uplink(w: &Worker, tr: &Arc<Transport>, ups: &[Arc<PubTrack>], now: u64, now_
                 _ => continue,
             };
             let (lsr, dlsr) = match srs.get(&t.ssrc) {
-                Some(s) => (((s.ntp >> 16) & 0xffff_ffff) as u32, ((now.saturating_sub(s.at_ms)) * 65_536 / 1000) as u32),
+                Some(s) => (((s.ntp >> 16) & 0xffff_ffff) as u32, (mono_us().saturating_sub(s.at_us) * 65_536 / 1_000_000) as u32),
                 None => (0, 0),
             };
             send_rtcp(w, tr, &build_rr(t.ssrc, &r, lsr, dlsr));
@@ -579,7 +579,7 @@ fn on_sr(tr: &Arc<Transport>, body: &[u8]) {
         return;
     };
     let (Some(hi), Some(lo), Some(rtp)) = (be32(body, 4), be32(body, 8), be32(body, 12)) else { return };
-    let sr = Sr { ntp: ((hi as u64) << 32) | lo as u64, rtp, at_ms: common::now_ms() };
+    let sr = Sr { ntp: ((hi as u64) << 32) | lo as u64, rtp, at_us: mono_us() };
     if let Ok(mut g) = tr.rtc.sr.lock() {
         g.insert(ssrc, sr);
     }
