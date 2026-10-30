@@ -1,17 +1,11 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.4 · 연:RULE-TRN-TWO-FRAMES · 연:RULE-TRN-ONE-REPLY · 연:RULE-TRN-CLOSE · 연:RULE-TRN-UNKNOWN-JSON-FIELD · 연:REJ-TRN-MISREADINGS · model: claude-opus-5-5
-//! WS 프레임 — 8B 머리(ver · flags · op · pid) + JSON 몸통. 두 갈래(요청 · 통지 / 응답)만 있다.
+// spec: v1.6 · 연:TRN.frame.WS · 연:RULE-TRN-TWO-FRAMES · 연:RULE-TRN-CLOSE · 연:RULE-TRN-UNKNOWN-JSON-FIELD · model: claude-opus-5-5
+//! WS 프레임 — 8바이트 머리(ver · flags · op · pid) + JSON body. 빈 body 는 0바이트이고 `{}` 와 같게 받는다.
 
-use serde::Serialize;
-use serde::de::DeserializeOwned;
-
-use crate::code::Failure;
-
-pub const VERSION: u8 = 1;
+pub const VER: u8 = 1;
 pub const HEADER_LEN: usize = 8;
-pub const MAX_FRAME: usize = 1_048_576;
-
-const KIND_MASK: u8 = 0b0000_0011;
+pub const MAX_FRAME_BYTES: usize = 1_048_576;
+pub const KIND_MASK: u8 = 0b11;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameKind {
@@ -31,42 +25,13 @@ impl FrameKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FrameError {
-    TooLarge,
-    Short,
-    BadVersion,
-    ReservedKind,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Frame {
+pub struct Header {
     pub flags: u8,
     pub op: u16,
     pub pid: u32,
-    pub body: Vec<u8>,
 }
 
-impl Frame {
-    pub fn new(kind: FrameKind, op: u16, pid: u32, body: Vec<u8>) -> Frame {
-        Frame { flags: kind.bits(), op, pid, body }
-    }
-
-    pub fn request<T: Serialize>(op: u16, pid: u32, body: &T) -> Frame {
-        Frame::new(FrameKind::Request, op, pid, to_body(body))
-    }
-
-    pub fn ok<T: Serialize>(&self, body: &T) -> Frame {
-        Frame { flags: (self.flags & !KIND_MASK) | FrameKind::Ok.bits(), op: self.op, pid: self.pid, body: to_body(body) }
-    }
-
-    pub fn ack(&self) -> Frame {
-        Frame { flags: (self.flags & !KIND_MASK) | FrameKind::Ok.bits(), op: self.op, pid: self.pid, body: Vec::new() }
-    }
-
-    pub fn fail(&self, failure: &Failure) -> Frame {
-        Frame { flags: (self.flags & !KIND_MASK) | FrameKind::Fail.bits(), op: self.op, pid: self.pid, body: to_body(failure) }
-    }
-
+impl Header {
     pub fn kind(&self) -> FrameKind {
         match self.flags & KIND_MASK {
             0b00 => FrameKind::Request,
@@ -78,104 +43,118 @@ impl Frame {
     pub fn reserved(&self) -> u8 {
         self.flags & !KIND_MASK
     }
+}
 
-    pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(HEADER_LEN + self.body.len());
-        out.push(VERSION);
-        out.push(self.flags);
-        out.extend_from_slice(&self.op.to_be_bytes());
-        out.extend_from_slice(&self.pid.to_be_bytes());
-        out.extend_from_slice(&self.body);
-        out
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Frame<'a> {
+    pub header: Header,
+    pub body: &'a [u8],
+}
 
-    pub fn decode(bytes: &[u8]) -> Result<Frame, FrameError> {
-        if bytes.len() > MAX_FRAME {
-            return Err(FrameError::TooLarge);
-        }
-        if bytes.len() < HEADER_LEN {
-            return Err(FrameError::Short);
-        }
-        if bytes[0] != VERSION {
-            return Err(FrameError::BadVersion);
-        }
-        let flags = bytes[1];
-        if flags & KIND_MASK == KIND_MASK {
-            return Err(FrameError::ReservedKind);
-        }
-        let op = u16::from_be_bytes([bytes[2], bytes[3]]);
-        let pid = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
-        Ok(Frame { flags, op, pid, body: bytes[HEADER_LEN..].to_vec() })
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameError {
+    TooShort,
+    TooLarge,
+    BadVersion,
+    ReservedKind,
+}
 
-    pub fn parse<T: DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
-        parse_body(&self.body)
-    }
-
-    pub fn json(&self) -> Result<serde_json::Value, serde_json::Error> {
-        parse_body(&self.body)
+impl std::fmt::Display for FrameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            FrameError::TooShort => "frame shorter than 8 bytes",
+            FrameError::TooLarge => "frame larger than 1048576 bytes",
+            FrameError::BadVersion => "frame ver is not 1",
+            FrameError::ReservedKind => "flags kind bits 11",
+        };
+        f.write_str(s)
     }
 }
 
-pub fn parse_body<T: DeserializeOwned>(body: &[u8]) -> Result<T, serde_json::Error> {
-    if body.is_empty() { serde_json::from_slice(b"{}") } else { serde_json::from_slice(body) }
-}
+impl std::error::Error for FrameError {}
 
-pub fn to_body<T: Serialize>(body: &T) -> Vec<u8> {
-    match serde_json::to_vec(body) {
-        Ok(v) if v == b"{}" => Vec::new(),
-        Ok(v) => v,
-        Err(_) => Vec::new(),
+pub fn decode(buf: &[u8]) -> Result<Frame<'_>, FrameError> {
+    if buf.len() > MAX_FRAME_BYTES {
+        return Err(FrameError::TooLarge);
     }
+    if buf.len() < HEADER_LEN {
+        return Err(FrameError::TooShort);
+    }
+    if buf[0] != VER {
+        return Err(FrameError::BadVersion);
+    }
+    let flags = buf[1];
+    if flags & KIND_MASK == KIND_MASK {
+        return Err(FrameError::ReservedKind);
+    }
+    let op = u16::from_be_bytes([buf[2], buf[3]]);
+    let pid = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
+    Ok(Frame { header: Header { flags, op, pid }, body: &buf[HEADER_LEN..] })
 }
 
-pub fn next_pid(pid: u32) -> u32 {
-    pid.wrapping_add(1)
+pub fn encode(kind: FrameKind, op: u16, pid: u32, body: &[u8]) -> Vec<u8> {
+    encode_flags(kind.bits(), op, pid, body)
+}
+
+pub fn encode_flags(flags: u8, op: u16, pid: u32, body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(HEADER_LEN + body.len());
+    out.push(VER);
+    out.push(flags);
+    out.extend_from_slice(&op.to_be_bytes());
+    out.extend_from_slice(&pid.to_be_bytes());
+    out.extend_from_slice(body);
+    out
+}
+
+pub fn reply_flags(req: &Header, kind: FrameKind) -> u8 {
+    req.reserved() | kind.bits()
+}
+
+pub fn body_value(body: &[u8]) -> Result<serde_json::Value, serde_json::Error> {
+    if body.is_empty() {
+        return Ok(serde_json::Value::Object(serde_json::Map::new()));
+    }
+    serde_json::from_slice(body)
+}
+
+pub fn parse_body<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, serde_json::Error> {
+    if body.is_empty() {
+        return serde_json::from_slice(b"{}");
+    }
+    serde_json::from_slice(body)
+}
+
+pub fn empty_body() -> Vec<u8> {
+    Vec::new()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code::Code;
 
     #[test]
-    fn round_trip_keeps_reserved_bits() {
-        let f = Frame { flags: 0b1010_0000, op: 0x0201, pid: 7, body: b"{\"room_id\":\"r\"}".to_vec() };
-        let g = Frame::decode(&f.encode()).expect("decode");
-        assert_eq!(g, f);
-        assert_eq!(g.kind(), FrameKind::Request);
-        assert_eq!(g.ok(&serde_json::json!({})).reserved(), 0b1010_0000);
+    fn roundtrip_and_reserved_bits_kept() {
+        let b = encode_flags(0b1000_0001, 0x0101, 7, b"{}");
+        let f = decode(&b).unwrap();
+        assert_eq!(f.header.kind(), FrameKind::Ok);
+        assert_eq!(f.header.reserved(), 0b1000_0000);
+        assert_eq!(f.header.op, 0x0101);
+        assert_eq!(f.header.pid, 7);
+        assert_eq!(f.body, b"{}");
+        assert_eq!(reply_flags(&f.header, FrameKind::Fail), 0b1000_0010);
     }
 
     #[test]
-    fn empty_body_is_zero_bytes_and_braces_read_the_same() {
-        let f = Frame::request(0x0103, 1, &serde_json::json!({}));
-        assert_eq!(f.encode().len(), HEADER_LEN);
-        let a: serde_json::Value = parse_body(b"").expect("empty");
-        let b: serde_json::Value = parse_body(b"{}").expect("braces");
-        assert_eq!(a, b);
+    fn rejects() {
+        assert_eq!(decode(&[1, 0, 0]), Err(FrameError::TooShort));
+        assert_eq!(decode(&[2, 0, 0, 1, 0, 0, 0, 1]), Err(FrameError::BadVersion));
+        assert_eq!(decode(&[1, 3, 0, 1, 0, 0, 0, 1]), Err(FrameError::ReservedKind));
+        let big = vec![1u8; MAX_FRAME_BYTES + 1];
+        assert_eq!(decode(&big), Err(FrameError::TooLarge));
     }
 
     #[test]
-    fn broken_frames_are_refused() {
-        assert_eq!(Frame::decode(&[1, 0, 0]), Err(FrameError::Short));
-        assert_eq!(Frame::decode(&[2, 0, 0, 1, 0, 0, 0, 1]), Err(FrameError::BadVersion));
-        assert_eq!(Frame::decode(&[1, 3, 0, 1, 0, 0, 0, 1]), Err(FrameError::ReservedKind));
-        assert_eq!(Frame::decode(&vec![1u8; MAX_FRAME + 1]), Err(FrameError::TooLarge));
-    }
-
-    #[test]
-    fn failure_reply_mirrors_op_and_pid() {
-        let req = Frame::request(0x0201, 42, &serde_json::json!({"room_id": "r"}));
-        let f = req.fail(&Failure::of(Code::ROOM_NOT_FOUND));
-        assert_eq!((f.op, f.pid, f.kind()), (0x0201, 42, FrameKind::Fail));
-        let v = f.json().expect("json");
-        assert_eq!(v["code"], 3001);
-        assert_eq!(v["permanent"], false);
-    }
-
-    #[test]
-    fn pid_wraps_to_zero() {
-        assert_eq!(next_pid(u32::MAX), 0);
+    fn empty_body_is_object() {
+        assert_eq!(body_value(b"").unwrap(), serde_json::json!({}));
     }
 }

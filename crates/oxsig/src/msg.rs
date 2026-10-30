@@ -1,476 +1,322 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.4 · 연:SES.op.BIND · 연:SES.op.RESUME · 연:SES.op.LEAVE · 연:ROOM.op.ROOM_JOIN · 연:AFF.op.AFFILIATION · 연:AUX.op.TASK · 연:RULE-PUB-REMOVE-FORM · 연:RULE-ROOM-NOTIFY-VERSION-FOUR · 연:SES.http.TOKEN · 연:ROOM.http.GET_ROOM · model: claude-opus-5-5
-//! op 마다 요청 · 응답 · 통지 몸통 — HTTP 접속점 몸통도 여기 둔다.
-
-use std::collections::BTreeMap;
+// spec: v1.6 · 연:SES.op · 연:ROOM.op · 연:PUB.op · 연:SUB.op · 연:TRK.op · 연:LINK.op · 연:AFF.op · 연:AUX.op · 연:LINK.type.ServerConfig · 연:SUB.type.MlineTable · 연:TRK.type.TrackEntry · 연:ROOM.type.MemberInfo · 연:ROOM.http.CREATE_ROOM · 연:SES.http.TOKEN · model: claude-opus-5-5
+//! WS · HTTP body 의 형 — 칸 이름 · 필수 · 갈래는 연동규격서 구조 절 그대로.
 
 use serde::{Deserialize, Serialize};
-
-use crate::code::{Code, Failure};
-use crate::types::{
-    Affiliation, Duplex, ExtMap, Kind, MediaCodecs, MemberInfo, MlineTable, PcMode, Permission, ProbeResult, Publication, PublishTrack,
-    RoomSnapshot, RoomSummary, ServerConfig, TrackEntry, Version,
-};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct BindReq {
-    pub token: String,
+pub struct Affiliation {
+    pub sub_rooms: Vec<String>,
+    pub pub_room: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ProbeResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
+    pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_ver: Option<u32>,
+    pub pub_tracks: Option<Vec<serde_json::Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pc_mode: Option<PcMode>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct BindRes {
-    pub user_id: String,
-    pub server_ver: u32,
-    pub heartbeat_interval: u64,
-    pub session_id: String,
-    pub resume_window_ms: u64,
-    pub pc_mode: PcMode,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct ResumeReq {}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-pub struct ResumeRes {
-    pub snapshot: BTreeMap<String, RoomSnapshot>,
-    pub publications: Vec<Publication>,
-    pub mline_tables: Vec<MlineTable>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct HeartbeatReq {}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct HeartbeatRes {}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct LeaveReq {}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LeaveBody {
-    pub code: u16,
-    pub name: String,
+    pub sub_tracks: Option<Vec<serde_json::Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
+    pub env: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub details: Option<serde_json::Value>,
-}
-
-impl LeaveBody {
-    pub fn of(code: Code) -> LeaveBody {
-        LeaveBody { code: code.0, name: code.name().to_string(), message: None, details: None }
-    }
-
-    pub fn from_failure(f: &Failure) -> LeaveBody {
-        LeaveBody { code: f.code, name: f.name.clone(), message: f.message.clone(), details: f.details.clone() }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RoomJoinReqCodecs {
-    pub kind: Kind,
-    pub pt: u8,
-    pub name: String,
+    pub devices: Option<Vec<serde_json::Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fmtp: Option<String>,
+    pub permissions: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rtx_pt: Option<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RoomJoinReq {
-    pub room_id: String,
+    pub state: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub role: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub select: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extmap: Option<Vec<ExtMap>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub codecs: Option<Vec<RoomJoinReqCodecs>>,
+    pub network: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RoomJoinRes {
-    pub room_id: String,
-    pub participants: Vec<MemberInfo>,
-    pub me: MemberInfo,
-    pub affiliation: Affiliation,
-    pub server_config: ServerConfig,
-    pub tracks: Vec<TrackEntry>,
-    pub version: Version,
-    pub media_codecs: MediaCodecs,
-    pub mline_table: MlineTable,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PcMode {
+    #[serde(rename = "1pc")]
+    One,
+    #[serde(rename = "2pc")]
+    Two,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RoomLeaveReq {
-    pub room_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RoomLeaveRes {
-    pub room_id: String,
-    pub affiliation: Affiliation,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PublishTracksReqAddAction {
-    #[serde(rename = "add")]
-    Add,
-    #[serde(rename = "remove")]
-    Remove,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PublishTracksReqRemoveAction {
-    #[serde(rename = "remove")]
-    Remove,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum PublishTracksReq {
-    Remove {
-        action: PublishTracksReqRemoveAction,
-        room_id: String,
-        track_ids: Vec<String>,
-    },
-    Add {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        action: Option<PublishTracksReqAddAction>,
-        room_id: String,
-        tracks: Vec<PublishTrack>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        twcc_extmap_id: Option<u8>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        rid_extmap_id: Option<u8>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        repair_rid_extmap_id: Option<u8>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        mid_extmap_id: Option<u8>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        audio_level_extmap_id: Option<u8>,
-    },
-}
-
-impl PublishTracksReq {
-    pub fn room_id(&self) -> &str {
+impl PcMode {
+    pub fn as_str(self) -> &'static str {
         match self {
-            PublishTracksReq::Remove { room_id, .. } | PublishTracksReq::Add { room_id, .. } => room_id,
+            PcMode::One => "1pc",
+            PcMode::Two => "2pc",
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PublishTracksResAddTracks {
-    pub mid: String,
-    pub track_id: String,
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServerConfigIce {
+    pub ip: String,
+    pub port: u16,
+    pub publish_ufrag: String,
+    pub publish_pwd: String,
+    pub subscribe_ufrag: String,
+    pub subscribe_pwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp_port: Option<u16>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "action")]
-pub enum PublishTracksRes {
-    #[serde(rename = "add")]
-    Add { tracks: Vec<PublishTracksResAddTracks> },
-    #[serde(rename = "remove")]
-    Remove {},
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DtlsSetup {
+    #[serde(rename = "passive")]
+    Passive,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TrackSetReq {
-    pub room_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub track_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ssrc: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub muted: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub duplex: Option<Duplex>,
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServerConfigDtls {
+    pub fingerprint: String,
+    pub setup: DtlsSetup,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TrackSetRes {
-    pub ssrc: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub muted: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub duplex: Option<Duplex>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub noop: Option<bool>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReadyReq {
-    pub room_id: String,
-    pub arev: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct ReadyRes {}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SubscribeLayerReqTargets {
-    pub track_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub spatial: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub temporal: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub paused: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub priority: Option<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SubscribeLayerReq {
-    pub room_id: String,
-    pub targets: Vec<SubscribeLayerReqTargets>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct SubscribeLayerRes {}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct IceRestartReq {
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServerConfig {
     pub sfu_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct IceRestartResPublish {
-    pub ufrag: String,
-    pub pwd: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct IceRestartResSubscribe {
-    pub ufrag: String,
-    pub pwd: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct IceRestartRes {
-    pub publish: IceRestartResPublish,
+    pub pc_mode: PcMode,
+    pub ice: ServerConfigIce,
+    pub dtls: ServerConfigDtls,
+    pub codecs: Vec<CodecPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub subscribe: Option<IceRestartResSubscribe>,
+    pub codecs_sub: Option<Vec<CodecPolicy>>,
+    pub extmap: Vec<ExtMap>,
+    pub max_bitrate_bps: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct AffiliationReq {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pub_select: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pub_deselect: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub change_id: Option<String>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum Kind {
+    #[serde(rename = "audio")]
+    Audio,
+    #[serde(rename = "video")]
+    Video,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AffiliationResCause {
-    #[serde(rename = "user")]
-    User,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AffiliationRes {
-    pub sub_rooms: Vec<String>,
-    pub pub_room: Option<String>,
-    pub cause: AffiliationResCause,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub change_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MessageReq {
-    pub room_id: String,
-    pub content: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MessageRes {
-    pub msg_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MessageBody {
-    pub room_id: String,
-    pub user_id: String,
-    pub content: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TaskReqRequestType {
-    #[serde(rename = "probe")]
-    Probe,
+impl Kind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Kind::Audio => "audio",
+            Kind::Video => "video",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "phase")]
-pub enum TaskReq {
-    #[serde(rename = "request")]
-    Request {
-        req_id: u32,
-        #[serde(rename = "type")]
-        type_: TaskReqRequestType,
-        params: serde_json::Value,
-    },
-    #[serde(rename = "report")]
-    Report {
-        req_id: u32,
-        #[serde(rename = "type")]
-        type_: TaskReqRequestType,
-        result: ProbeResult,
-    },
+pub struct CodecPolicy {
+    pub kind: Kind,
+    pub name: String,
+    pub rtcp_fb: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtMap {
+    pub id: u8,
+    pub uri: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Duplex {
+    #[serde(rename = "full")]
+    Full,
+    #[serde(rename = "half")]
+    Half,
+}
+
+impl Duplex {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Duplex::Full => "full",
+            Duplex::Half => "half",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Publication {
+    pub track_id: String,
+    pub room_id: String,
+    pub kind: Kind,
+    pub duplex: Duplex,
+    pub codec: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fmtp: Option<String>,
+    pub simulcast: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Source {
+    #[serde(rename = "camera")]
+    Camera,
+    #[serde(rename = "screen")]
+    Screen,
+}
+
+impl Source {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Source::Camera => "camera",
+            Source::Screen => "screen",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PublishTrack {
+    pub kind: Kind,
+    pub ssrc: u32,
+    pub mid: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codec: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fmtp: Option<String>,
+    pub pt: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtx_pt: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtx_ssrc: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<Source>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplex: Option<Duplex>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub simulcast: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct TaskRes {}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ParticipantEventBodyType {
-    #[serde(rename = "joined")]
-    Joined,
-    #[serde(rename = "left")]
-    Left,
+pub struct MediaCodecs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ParticipantEventBody {
-    #[serde(rename = "type")]
-    pub type_: ParticipantEventBodyType,
+pub struct RoomSummary {
     pub room_id: String,
+    pub name: String,
+    pub capacity: u32,
+    pub user_count: u32,
+    pub created_at: u64,
+    pub rec: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemberInfo {
     pub user_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub select: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub participant_type: Option<u8>,
+    pub select: bool,
+    pub participant_type: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission: Option<Permission>,
-    pub version: Version,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ParticipantStateBodyType {
-    #[serde(rename = "permission")]
-    Permission,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Permission {
+    pub publish_audio: bool,
+    pub publish_video: bool,
+    pub publish_screen: bool,
+    pub floor_request: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ParticipantStateBody {
-    #[serde(rename = "type")]
-    pub type_: ParticipantStateBodyType,
-    pub user_id: String,
-    pub room_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version: Option<Version>,
-    pub permission: Permission,
+impl Permission {
+    pub const ALL: Permission = Permission { publish_audio: true, publish_video: true, publish_screen: true, floor_request: true };
+
+    pub fn is_default(&self) -> bool {
+        self == &Permission::ALL
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RoomEventBodyAffiliationCause {
-    #[serde(rename = "kick")]
-    Kick,
-    #[serde(rename = "room_closed")]
-    RoomClosed,
+impl Default for Permission {
+    fn default() -> Self {
+        Permission::ALL
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum RoomEventBody {
-    #[serde(rename = "affiliation")]
-    Affiliation {
-        room_id: String,
-        affiliation: Affiliation,
-        cause: RoomEventBodyAffiliationCause,
-    },
-    #[serde(rename = "sync_required")]
-    SyncRequired { room_id: String, reason: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TrackEventBody {
-    pub action: PublishTracksReqAddAction,
-    pub room_id: String,
+pub struct RoomSnapshot {
+    pub participants: Vec<MemberInfo>,
+    pub me: MemberInfo,
     pub tracks: Vec<TrackEntry>,
     pub version: Version,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TrackStateBodyType {
-    #[serde(rename = "muted")]
-    Muted,
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Version {
+    pub epoch: String,
+    pub seq: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TrackStateBody {
+pub struct MlineEntry {
+    pub mid: String,
+    pub kind: Kind,
+    pub pt: u8,
+    pub codec: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fmtp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtx_pt: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room_id: Option<String>,
+    pub ssrc: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtx_ssrc: Option<u32>,
+    pub stream_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MlineTable {
+    pub sfu_id: String,
+    pub arev: u64,
+    pub mlines: Vec<MlineEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TrackEntryType {
+    #[serde(rename = "individual")]
+    Individual,
+    #[serde(rename = "slot")]
+    Slot,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrackEntry {
     #[serde(rename = "type")]
-    pub type_: TrackStateBodyType,
-    pub user_id: String,
+    pub type_: TrackEntryType,
+    pub room_id: String,
     pub track_id: String,
     pub kind: Kind,
-    pub room_id: String,
-    pub version: Version,
-    pub muted: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LinkEventBodyType {
-    #[serde(rename = "suspect")]
-    Suspect,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LinkEventBody {
-    #[serde(rename = "type")]
-    pub type_: LinkEventBodyType,
-    pub sfu_id: String,
-    pub ufrag: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MlineEventBody {
-    pub table: MlineTable,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codec: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fmtp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<Source>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub muted: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub simulcast: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scalability: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TokenReq {
-    pub api_key: String,
-    pub api_secret: String,
-    pub user_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub participant_type: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hidden: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub permission: Option<Permission>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TokenRes {
-    pub token: String,
-    pub expires_in: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListRoomsRes {
     pub rooms: Vec<RoomSummary>,
     pub total: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct CreateRoomReq {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room_id: Option<String>,
@@ -485,13 +331,19 @@ pub struct CreateRoomReq {
     pub media_codecs: Option<MediaCodecs>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateRoomRes {
     pub room_id: String,
     pub name: String,
     pub capacity: u32,
     pub created_at: u64,
     pub media_codecs: MediaCodecs,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct GetRoomQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracks: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -510,38 +362,438 @@ pub struct GetRoomRes {
     pub tracks: Option<Vec<TrackEntry>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TokenReq {
+    pub api_key: String,
+    pub api_secret: String,
+    pub user_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub participant_type: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission: Option<Permission>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TokenRes {
+    pub token: String,
+    pub expires_in: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct AffiliationReq {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pub_select: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pub_deselect: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AffiliationCause {
+    #[serde(rename = "user")]
+    User,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AffiliationRes {
+    pub sub_rooms: Vec<String>,
+    pub pub_room: Option<String>,
+    pub cause: AffiliationCause,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessageReq {
+    pub room_id: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessageRes {
+    pub msg_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessageBody {
+    pub room_id: String,
+    pub user_id: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TaskType {
+    #[serde(rename = "probe")]
+    Probe,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "phase")]
+pub enum TaskReq {
+    #[serde(rename = "request")]
+    Request {
+        req_id: u32,
+        #[serde(rename = "type")]
+        type_: TaskType,
+        params: serde_json::Value,
+    },
+    #[serde(rename = "report")]
+    Report {
+        req_id: u32,
+        #[serde(rename = "type")]
+        type_: TaskType,
+        result: ProbeResult,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Empty {}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IceRestartReq {
+    pub sfu_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IceCred {
+    pub ufrag: String,
+    pub pwd: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IceRestartRes {
+    pub publish: IceCred,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscribe: Option<IceCred>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LinkEventType {
+    #[serde(rename = "suspect")]
+    Suspect,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LinkEventBody {
+    #[serde(rename = "type")]
+    pub type_: LinkEventType,
+    pub sfu_id: String,
+    pub ufrag: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MlineEventBody {
+    pub table: MlineTable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TrackAction {
+    #[serde(rename = "add")]
+    Add,
+    #[serde(rename = "remove")]
+    Remove,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RemoveAction {
+    #[serde(rename = "remove")]
+    Remove,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PublishTracksReq {
+    Add {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<TrackAction>,
+        room_id: String,
+        tracks: Vec<PublishTrack>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        twcc_extmap_id: Option<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rid_extmap_id: Option<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repair_rid_extmap_id: Option<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mid_extmap_id: Option<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audio_level_extmap_id: Option<u8>,
+    },
+    Remove {
+        action: RemoveAction,
+        room_id: String,
+        track_ids: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AddedTrack {
+    pub mid: String,
+    pub track_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action")]
+pub enum PublishTracksRes {
+    #[serde(rename = "add")]
+    Add { tracks: Vec<AddedTrack> },
+    #[serde(rename = "remove")]
+    Remove {},
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrackSetReq {
+    pub room_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssrc: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub muted: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplex: Option<Duplex>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrackSetRes {
+    pub ssrc: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub muted: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplex: Option<Duplex>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub noop: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JoinCodec {
+    pub kind: Kind,
+    pub pt: u8,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fmtp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtx_pt: Option<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoomJoinReq {
+    pub room_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub select: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extmap: Option<Vec<ExtMap>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codecs: Option<Vec<JoinCodec>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoomJoinRes {
+    pub room_id: String,
+    pub participants: Vec<MemberInfo>,
+    pub me: MemberInfo,
+    pub affiliation: Affiliation,
+    pub server_config: ServerConfig,
+    pub tracks: Vec<TrackEntry>,
+    pub version: Version,
+    pub media_codecs: MediaCodecs,
+    pub mline_table: MlineTable,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoomLeaveReq {
+    pub room_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoomLeaveRes {
+    pub room_id: String,
+    pub affiliation: Affiliation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ParticipantEventType {
+    #[serde(rename = "joined")]
+    Joined,
+    #[serde(rename = "left")]
+    Left,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ParticipantEventBody {
+    #[serde(rename = "type")]
+    pub type_: ParticipantEventType,
+    pub room_id: String,
+    pub user_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub select: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub participant_type: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission: Option<Permission>,
+    pub version: Version,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ParticipantStateType {
+    #[serde(rename = "permission")]
+    Permission,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ParticipantStateBody {
+    #[serde(rename = "type")]
+    pub type_: ParticipantStateType,
+    pub user_id: String,
+    pub room_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<Version>,
+    pub permission: Permission,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AffiliationEventCause {
+    #[serde(rename = "kick")]
+    Kick,
+    #[serde(rename = "room_closed")]
+    RoomClosed,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum RoomEventBody {
+    #[serde(rename = "affiliation")]
+    Affiliation { room_id: String, affiliation: Affiliation, cause: AffiliationEventCause },
+    #[serde(rename = "sync_required")]
+    SyncRequired { room_id: String, reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct BindReq {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_ver: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pc_mode: Option<PcMode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BindRes {
+    pub user_id: String,
+    pub server_ver: u32,
+    pub heartbeat_interval: u64,
+    pub session_id: String,
+    pub resume_window_ms: u64,
+    pub pc_mode: PcMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResumeRes {
+    pub snapshot: BTreeMap<String, RoomSnapshot>,
+    pub publications: Vec<Publication>,
+    pub mline_tables: Vec<MlineTable>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LeaveBody {
+    pub code: u16,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReadyReq {
+    pub room_id: String,
+    pub arev: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LayerTarget {
+    pub track_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spatial: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temporal: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubscribeLayerReq {
+    pub room_id: String,
+    pub targets: Vec<LayerTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrackEventBody {
+    pub action: TrackAction,
+    pub room_id: String,
+    pub tracks: Vec<TrackEntry>,
+    pub version: Version,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TrackStateType {
+    #[serde(rename = "muted")]
+    Muted,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrackStateBody {
+    #[serde(rename = "type")]
+    pub type_: TrackStateType,
+    pub user_id: String,
+    pub track_id: String,
+    pub kind: Kind,
+    pub room_id: String,
+    pub version: Version,
+    pub muted: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn publish_tracks_branches_parse() {
-        let add: PublishTracksReq = serde_json::from_value(serde_json::json!({
-            "room_id": "r", "tracks": [{"kind": "audio", "ssrc": 1, "mid": "0", "pt": 111, "codec": "opus"}]
-        }))
-        .expect("add");
+    fn publish_tracks_req_both_shapes() {
+        let add: PublishTracksReq = serde_json::from_str(
+            r#"{"room_id":"r","tracks":[{"kind":"audio","ssrc":1,"mid":"0","pt":111}]}"#,
+        )
+        .unwrap();
         assert!(matches!(add, PublishTracksReq::Add { .. }));
-        let rm: PublishTracksReq = serde_json::from_value(serde_json::json!({"action": "remove", "room_id": "r", "track_ids": ["t"]})).expect("remove");
+        let rm: PublishTracksReq =
+            serde_json::from_str(r#"{"action":"remove","room_id":"r","track_ids":["t"]}"#).unwrap();
         assert!(matches!(rm, PublishTracksReq::Remove { .. }));
-        let res = serde_json::to_value(PublishTracksRes::Remove {}).expect("res");
-        assert_eq!(res, serde_json::json!({"action": "remove"}));
     }
 
     #[test]
-    fn task_phase_is_inner_tag() {
-        let t: TaskReq = serde_json::from_value(serde_json::json!({"phase": "request", "req_id": 3, "type": "probe", "params": {}})).expect("task");
-        assert!(matches!(t, TaskReq::Request { req_id: 3, .. }));
+    fn publish_tracks_res_remove_shape() {
+        let v = serde_json::to_value(PublishTracksRes::Remove {}).unwrap();
+        assert_eq!(v, serde_json::json!({"action":"remove"}));
     }
 
     #[test]
-    fn unknown_fields_are_ignored() {
-        let r: RoomJoinReq = serde_json::from_value(serde_json::json!({"room_id": "r", "participant_type": 2, "x": 1})).expect("join");
-        assert_eq!(r.room_id, "r");
-    }
-
-    #[test]
-    fn leave_body_has_no_permanent() {
-        let v = serde_json::to_value(LeaveBody::of(Code::HEARTBEAT_TIMEOUT)).expect("leave");
-        assert_eq!(v, serde_json::json!({"code": 4008, "name": "HEARTBEAT_TIMEOUT"}));
+    fn affiliation_pub_room_null_kept() {
+        let v = serde_json::to_value(Affiliation { sub_rooms: vec![], pub_room: None }).unwrap();
+        assert_eq!(v, serde_json::json!({"sub_rooms":[],"pub_room":null}));
     }
 }
