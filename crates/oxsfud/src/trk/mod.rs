@@ -144,16 +144,16 @@ pub fn slot_entries(room: &str, codecs: &MediaCodecs) -> Vec<TrackEntry> {
         .into_iter()
         .map(|k| {
             let codec = match k {
-                Kind::Audio => codecs.audio.clone().unwrap_or_else(|| DEFAULT_AUDIO.into()),
-                Kind::Video => room_video(codecs).to_string(),
+                Kind::Audio => None,
+                Kind::Video => Some(room_video(codecs).to_string()),
             };
             TrackEntry {
                 type_: TrackEntryType::Slot,
                 room_id: room.to_string(),
                 track_id: slot_track_id(room, k),
                 kind: k,
-                fmtp: row_fmtp(&codec),
-                codec: Some(codec),
+                fmtp: codec.as_deref().and_then(row_fmtp),
+                codec,
                 user_id: None,
                 source: None,
                 active: None,
@@ -171,7 +171,7 @@ pub fn entry(s: &PubStream) -> TrackEntry {
         room_id: s.room.load().as_str().to_string(),
         track_id: s.track_id.clone(),
         kind: s.kind,
-        codec: Some(s.codec_name()),
+        codec: if s.kind == Kind::Video { Some(s.codec_name()) } else { None },
         fmtp: s.fmtp.clone(),
         user_id: Some(s.user.clone()),
         source: s.source,

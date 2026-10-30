@@ -79,10 +79,10 @@ impl View {
     pub fn on_token(&mut self, ev: TokenEv, now: u64) {
         self.last_token_at = now;
         let (kind, key) = match &ev {
-            TokenEv::NodePut { node, inst } => ("node_put", format!("{node}/{inst}")),
-            TokenEv::NodeDel { node, inst } => ("node_del", format!("{node}/{inst}")),
-            TokenEv::RoomPut { room, node, inst } => ("room_put", format!("{room}/{node}/{inst}")),
-            TokenEv::RoomDel { room, node, inst } => ("room_del", format!("{room}/{node}/{inst}")),
+            TokenEv::NodePut { node, inst } => ("put", format!("node/{node}/{inst}")),
+            TokenEv::NodeDel { node, inst } => ("delete", format!("node/{node}/{inst}")),
+            TokenEv::RoomPut { room, node, inst } => ("put", format!("room/{room}/{node}/{inst}")),
+            TokenEv::RoomDel { room, node, inst } => ("delete", format!("room/{room}/{node}/{inst}")),
         };
         self.last_event = Some(LastEvent { at_ms: now, kind, key });
         match ev {
