@@ -35,6 +35,8 @@ drops!(
     send_fail,
     ingress_queue_full,
     egress_queue_full,
+    transport_gone,
+    oversize,
     rtp_unknown_path,
     srtp_not_ready,
     srtp_fail,
@@ -98,6 +100,6 @@ mod tests {
         let rows = d.rows();
         assert!(rows.iter().any(|(k, v)| k == "prefan_gate" && *v == 1));
         assert!(rows.iter().any(|(k, v)| k == "code_3001" && *v == 1));
-        assert_eq!(rows.len(), 29);
+        assert_eq!(rows.len(), 31);
     }
 }

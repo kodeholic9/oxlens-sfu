@@ -92,7 +92,7 @@ impl Io {
     }
 
     pub fn register(&self, t: &Arc<Transport>) {
-        t.worker.store(crate::fwd::work::assign(t.role.subscribes()), Ordering::Relaxed);
+        crate::fwd::work::adopt(t);
         let ufrags = t.ledger.lock().map(|l| l.ufrags()).unwrap_or_default();
         if let Ok(mut m) = self.ufrags.write() {
             for u in ufrags {
@@ -141,7 +141,7 @@ impl Io {
         if let Ok(mut a) = self.all.write()
             && a.remove(&t.id).is_some()
         {
-            crate::fwd::work::release(t.worker.load(Ordering::Relaxed), t.role.subscribes());
+            crate::fwd::work::forsake(t);
         }
     }
 

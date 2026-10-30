@@ -152,7 +152,7 @@ fn synth_round(hot: &RoomHot, skip: Option<&str>, key: u64, seq: u16, ts: u32, n
         if skip.is_some_and(|u| *dl.user == *u) || !dl.sendable.load(Ordering::Acquire) {
             continue;
         }
-        crate::fwd::egress::synthetic(&dl, key, seq, ts, &PRIME, now);
+        crate::fwd::work::synthetic(&dl, key, seq, ts, &PRIME, now);
     }
 }
 

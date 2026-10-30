@@ -236,7 +236,7 @@ pub fn keyframe_burst(s: &Arc<crate::r#pub::Stream>, delays_ms: &[u64]) {
                 tokio::time::sleep(std::time::Duration::from_millis(d)).await;
             }
             for u in s.uplinks.load().iter().filter(|u| !u.rtx) {
-                request_keyframe(u, common::time::mono_ms(), true);
+                crate::fwd::work::keyframe(u, common::time::mono_ms(), true);
             }
         });
     }

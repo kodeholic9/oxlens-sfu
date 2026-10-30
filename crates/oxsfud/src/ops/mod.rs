@@ -188,35 +188,10 @@ fn stat_lines(sfu: &Sfu) {
 fn spawn_timers(sfu: &Arc<Sfu>) {
     let s = sfu.clone();
     tokio::spawn(async move {
-        let mut iv = tokio::time::interval(Duration::from_millis(crate::rtcp::NACK_POLL_MS));
-        let mut n: u64 = 0;
-        let max = u64::from(s.cfg.policy.media.max_bitrate_bps);
-        loop {
-            iv.tick().await;
-            n += 1;
-            let now = now_ms();
-            for t in s.io.transports() {
-                crate::rtcp::send_nacks(&t, now);
-                if n.is_multiple_of(crate::rtcp::TWCC_MS / crate::rtcp::NACK_POLL_MS) {
-                    crate::rtcp::send_twcc(&t);
-                }
-                if n.is_multiple_of(crate::rtcp::RR_MS / crate::rtcp::NACK_POLL_MS) {
-                    crate::rtcp::send_rr_remb(&t, common::time::mono_us(), max);
-                }
-                crate::sim::probe_chunk(&t, now);
-            }
-        }
-    });
-    let s = sfu.clone();
-    tokio::spawn(async move {
         let mut iv = tokio::time::interval(Duration::from_millis(crate::sim::core::TICK_MS));
         loop {
             iv.tick().await;
-            let now = now_ms();
-            liveness(&s, now);
-            for t in s.io.transports() {
-                crate::sim::tick(&t, now, s.cfg.policy.media.auto_layer);
-            }
+            liveness(&s, now_ms());
         }
     });
     let s = sfu.clone();
@@ -256,7 +231,8 @@ pub async fn run(cfg: SfuCfg, epoch: String) -> Result<(), String> {
     let grpc: SocketAddr = cfg.grpc_listen.parse().map_err(|e| format!("--grpc-listen {}: {e}", cfg.grpc_listen))?;
     let sfu = Arc::new(Sfu { cfg, epoch, io: io.clone(), bus, state: Mutex::new(State { rooms: BTreeMap::new(), peers: BTreeMap::new(), arev: BTreeMap::new() }), floor_wake: Mutex::new(HashMap::new()), udp_addr });
     let rt = tokio::runtime::Handle::current();
-    crate::fwd::work::start(sfu.cfg.media_workers, rt.clone())?;
+    let tick = crate::fwd::work::TickCfg { max_bitrate_bps: u64::from(sfu.cfg.policy.media.max_bitrate_bps), auto_layer: sfu.cfg.policy.media.auto_layer };
+    crate::fwd::work::start(sfu.cfg.media_workers, tick, rt.clone())?;
     crate::fwd::work::spawn_reader(io.clone(), rt)?;
     if let Some(l) = tcp {
         tokio::spawn(crate::link::io::tcp_serve(io.clone(), l));

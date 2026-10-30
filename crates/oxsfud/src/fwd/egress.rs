@@ -40,7 +40,7 @@ pub fn forward(dl: &Arc<Downlink>, r: &Rtp<'_>, up: &Arc<Uplink>, keyframe: bool
         if switching && dl.kind == oxsig::types::Kind::Video && !keyframe {
             bump(&DROPS.await_keyframe);
             drop(rw);
-            crate::rtcp::request_keyframe(up, now_ms, false);
+            super::work::keyframe(up, now_ms, false);
             return;
         }
         let cov = covers(dl.clock, r.payload());
@@ -117,7 +117,7 @@ pub fn forward_pli(dl: &Arc<Downlink>, now_ms: u64, infra: bool) {
     let src = dl.rewrite.lock().ok().and_then(|r| r.src.clone()).and_then(|w| w.upgrade());
     match src {
         Some(up) => {
-            crate::rtcp::request_keyframe(&up, now_ms, infra);
+            super::work::keyframe(&up, now_ms, infra);
         }
         None => bump(&DROPS.rtcp_unresolved),
     }
@@ -129,7 +129,7 @@ pub fn target_layer_pli(dl: &Arc<Downlink>, now_ms: u64) {
     let target = dl.want_layer.load(Ordering::Acquire).min(dl.auto_layer.load(Ordering::Acquire));
     dl.switch_at_ms.store(now_ms, Ordering::Release);
     if let Some(u) = stream.uplink_of_layer(Some(target)) {
-        crate::rtcp::request_keyframe(&u, now_ms, true);
+        super::work::keyframe(&u, now_ms, true);
     }
 }
 
@@ -139,15 +139,17 @@ pub fn relay_sr(up: &Arc<Uplink>, ntp: u64, rtp_ts: u32) {
     if let Some(room) = stream.aff.pub_room.load_full() {
         targets.extend(room.slot(stream.kind).live());
     }
-    for dl in targets {
-        let same = dl.rewrite.lock().ok().and_then(|r| r.src.as_ref().and_then(|w| w.upgrade()).map(|u| Arc::ptr_eq(&u, up)).map(|x| (x, r.rw.ts_off())));
-        let Some((true, ts_off)) = same else { continue };
-        let Some(t) = dl.transport.upgrade() else { continue };
-        let out = super::core::translate_sr(super::core::SrIn { ssrc: up.ssrc, ntp, rtp_ts }, dl.ssrc, ts_off);
-        let pkts = dl.egress_pkts.load(Ordering::Relaxed) as u32;
-        let bytes = dl.egress_bytes.load(Ordering::Relaxed) as u32;
-        t.send_rtcp(&crate::rtcp::pkt::sr(out.ssrc, out.ntp, out.rtp_ts, pkts, bytes));
-    }
+    super::work::relay_sr(up, targets, ntp, rtp_ts);
+}
+
+pub fn sr_to(dl: &Arc<Downlink>, up: &Arc<Uplink>, ntp: u64, rtp_ts: u32) {
+    let same = dl.rewrite.lock().ok().and_then(|r| r.src.as_ref().and_then(|w| w.upgrade()).map(|u| Arc::ptr_eq(&u, up)).map(|x| (x, r.rw.ts_off())));
+    let Some((true, ts_off)) = same else { return };
+    let Some(t) = dl.transport.upgrade() else { return };
+    let out = super::core::translate_sr(super::core::SrIn { ssrc: up.ssrc, ntp, rtp_ts }, dl.ssrc, ts_off);
+    let pkts = dl.egress_pkts.load(Ordering::Relaxed) as u32;
+    let bytes = dl.egress_bytes.load(Ordering::Relaxed) as u32;
+    t.send_rtcp(&crate::rtcp::pkt::sr(out.ssrc, out.ntp, out.rtp_ts, pkts, bytes));
 }
 
 pub fn send_probe(t: &Arc<Transport>, dl: &Arc<Downlink>) -> Option<u16> {
