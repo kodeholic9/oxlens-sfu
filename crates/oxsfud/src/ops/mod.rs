@@ -33,7 +33,6 @@ pub const DROP_NAMES: &[&str] = &[
     "send_fail",
     "ingress_queue_full",
     "egress_queue_full",
-    "pool_empty",
     "transport_gone",
     "oversize",
     "rtp_unknown_path",
