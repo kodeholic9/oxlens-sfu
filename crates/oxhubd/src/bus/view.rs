@@ -49,11 +49,13 @@ pub struct View {
     last_token_at: u64,
     pub last_event: Option<LastEvent>,
     pub duplicates: u64,
+    pub recovered: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Settled {
     pub dropped_rooms: Vec<String>,
+    pub released: Vec<String>,
     pub isolated_now: bool,
 }
 
@@ -73,6 +75,7 @@ impl View {
             last_token_at: 0,
             last_event: None,
             duplicates: 0,
+            recovered: false,
         }
     }
 
@@ -92,6 +95,7 @@ impl View {
                     self.seen_other = true;
                     if self.isolated.is_some() {
                         self.isolated = None;
+                        self.recovered = true;
                     }
                 }
                 self.nodes.insert(node, NodeSeen { inst, live: true, gone_at: None });
@@ -120,6 +124,7 @@ impl View {
         let mut out = Settled::default();
         if self.pending.is_empty() && self.isolated.is_none() && !self.held.is_empty() {
             out.dropped_rooms = self.release_held();
+            out.released = out.dropped_rooms.clone();
             return out;
         }
         if !self.settle_due(now) {
@@ -159,7 +164,9 @@ impl View {
             }
         }
         if self.isolated.is_none() {
-            out.dropped_rooms.extend(self.release_held());
+            let r = self.release_held();
+            out.released.extend(r.iter().cloned());
+            out.dropped_rooms.extend(r);
         }
         out
     }

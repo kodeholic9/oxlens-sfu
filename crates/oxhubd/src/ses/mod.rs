@@ -461,8 +461,12 @@ pub fn shutdown_all(ctx: &Arc<Ctx>) -> usize {
     n
 }
 
-fn room_of(body: &serde_json::Value) -> Option<String> {
-    body.get("room_id").and_then(|v| v.as_str()).map(|s| s.to_string())
+fn room_of(body: &serde_json::Value) -> Result<String, Failure> {
+    match body.get("room_id") {
+        None | Some(serde_json::Value::Null) => Err(Code::MissingField.failure().with_message("room_id")),
+        Some(serde_json::Value::String(s)) => Ok(s.clone()),
+        Some(_) => Err(Code::InvalidPayload.failure().with_message("room_id")),
+    }
 }
 
 pub fn valid_room_id(r: &str) -> bool {
@@ -571,7 +575,7 @@ async fn route(ctx: &Arc<Ctx>, s: &Arc<Session>, op: Op, body: serde_json::Value
             Ok(v)
         }
         Op::RoomJoin => {
-            let room = room_of(&body).ok_or_else(|| Code::MissingField.failure().with_message("room_id"))?;
+            let room = room_of(&body)?;
             if !valid_room_id(&room) {
                 return Err(Code::InvalidPayload.failure().with_message("room_id"));
             }
@@ -596,7 +600,7 @@ async fn route(ctx: &Arc<Ctx>, s: &Arc<Session>, op: Op, body: serde_json::Value
             r
         }
         Op::RoomLeave => {
-            let room = room_of(&body).ok_or_else(|| Code::MissingField.failure().with_message("room_id"))?;
+            let room = room_of(&body)?;
             let loc = ctx.bus.room_route(&room).ok_or_else(|| Code::RoomNotFound.failure())?;
             let v = call_node(ctx, s, &loc.node, op, body).await?;
             if let Ok(l) = serde_json::from_value::<RoomLeaveRes>(v.clone()) {
@@ -605,7 +609,7 @@ async fn route(ctx: &Arc<Ctx>, s: &Arc<Session>, op: Op, body: serde_json::Value
             Ok(v)
         }
         Op::PublishTracks | Op::Ready | Op::SubscribeLayer | Op::TrackSet | Op::Message => {
-            let room = room_of(&body).ok_or_else(|| Code::MissingField.failure().with_message("room_id"))?;
+            let room = room_of(&body)?;
             if !valid_room_id(&room) {
                 return Err(Code::InvalidPayload.failure().with_message("room_id"));
             }

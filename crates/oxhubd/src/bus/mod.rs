@@ -155,11 +155,24 @@ impl Bus {
             loop {
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 let Some(b) = me.upgrade() else { break };
-                let dropped = match b.view.lock() {
-                    Ok(mut v) => v.settle(common::now_ms()).dropped_rooms,
-                    Err(_) => Vec::new(),
+                let (s, recovered, live) = match b.view.lock() {
+                    Ok(mut v) => {
+                        let s = v.settle(common::now_ms());
+                        let rec = std::mem::replace(&mut v.recovered, false);
+                        let live: Vec<String> = v.nodes.iter().filter(|(_, n)| n.live).map(|(k, n)| format!("{k}/{}", n.inst)).collect();
+                        (s, rec, live.join(","))
+                    }
+                    Err(_) => (view::Settled::default(), false, String::new()),
                 };
-                for r in dropped {
+                if s.isolated_now {
+                    tracing::info!(kind = "diag", "bus isolated — other node tokens all gone (live view {live})");
+                }
+                if recovered {
+                    tracing::info!(kind = "diag", "bus isolation over — other node token back (live view {live})");
+                }
+                for r in s.dropped_rooms {
+                    let why = if s.released.contains(&r) { "held room released — owner node not live" } else { "room token delete settled" };
+                    tracing::info!(kind = "diag", room = %r, "drop candidate: {why} (live view {live})");
                     if let Some((node, inst)) = b.room_token(&r).await {
                         if let Ok(mut v) = b.view.lock() {
                             v.on_token(TokenEv::RoomPut { room: r.clone(), node, inst }, common::now_ms());
