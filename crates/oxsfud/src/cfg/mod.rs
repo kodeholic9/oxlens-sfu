@@ -51,8 +51,11 @@ pub struct SfuCfg {
     pub args: Args,
 }
 
+pub const MACOS_MEDIA_WORKERS: usize = 2;
+
 pub fn default_media_workers() -> usize {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).saturating_sub(2).max(1)
+    let by_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).saturating_sub(2).max(1);
+    if cfg!(target_os = "macos") { by_cores.min(MACOS_MEDIA_WORKERS) } else { by_cores }
 }
 
 fn default_interface() -> Option<IpAddr> {
