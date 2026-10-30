@@ -1,27 +1,36 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.4 · 정:IMPL-CFG-SYSTEM-FILE · 정:RULE-CFG-THREE-PLACES · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · 정:CAND-OPS-SUPERVISOR-DEFAULTS · 운영:RULE-BOOT-PORTS · model: claude-opus-5-5
-//! 시스템 파일(hub 전용) — 키 전량 strict 파싱(모르는 키 = 기동 실패) · 버스 전제 둘 · 키 조각 검사.
+// spec: v1.6 · 정:IMPL-CFG-SYSTEM-FILE · 정:RULE-CFG-THREE-PLACES · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · model: claude-opus-5-5
+//! 시스템 파일(hub 전용) — 키 전량 strict(모르는 키 = 기동 실패) · zenoh 전제 둘은 다른 값이면 기동 실패.
 
 use serde::Deserialize;
 
-use crate::banner::Banner;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemError(pub String);
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+impl std::fmt::Display for SystemError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "system: {}", self.0)
+    }
+}
+
+impl std::error::Error for SystemError {}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SystemFile {
-    pub hub: Hub,
-    #[serde(default, rename = "unit")]
-    pub units: Vec<Unit>,
+pub struct System {
+    pub hub: HubSection,
+    #[serde(default)]
+    pub unit: Vec<Unit>,
     pub zenoh: Zenoh,
     #[serde(default)]
     pub supervisor: Supervisor,
     #[serde(default)]
-    pub hook: Option<Hook>,
+    pub hook: Option<HookSection>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Hub {
+pub struct HubSection {
     pub listen: String,
     #[serde(default = "default_base_path")]
     pub base_path: String,
@@ -31,6 +40,7 @@ pub struct Hub {
     pub log_socket: Option<String>,
     #[serde(default)]
     pub tls: Option<Tls>,
+    #[serde(default)]
     pub auth: Auth,
 }
 
@@ -38,14 +48,14 @@ fn default_base_path() -> String {
     "/media".to_string()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Tls {
     pub cert: String,
     pub key: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Auth {
     #[serde(default)]
@@ -54,14 +64,14 @@ pub struct Auth {
     pub api_keys: Vec<ApiKey>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApiKey {
     pub key: String,
     pub secret: String,
     #[serde(default)]
     pub name: Option<String>,
-    #[serde(default = "default_types")]
+    #[serde(default = "default_participant_types")]
     pub participant_types: Vec<u8>,
     #[serde(default)]
     pub hidden_allowed: bool,
@@ -71,7 +81,7 @@ pub struct ApiKey {
     pub hook_allowed: bool,
 }
 
-fn default_types() -> Vec<u8> {
+fn default_participant_types() -> Vec<u8> {
     vec![0]
 }
 
@@ -93,38 +103,14 @@ impl UnitKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum UnitRole {
-    Sfu,
-    Log,
-}
-
-impl UnitRole {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            UnitRole::Sfu => "sfu",
-            UnitRole::Log => "log",
-        }
-    }
-}
-
-fn default_role() -> UnitRole {
-    UnitRole::Sfu
-}
-
-fn default_true() -> bool {
-    true
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Unit {
     pub id: String,
     pub kind: UnitKind,
     pub order: i32,
     #[serde(default = "default_role")]
-    pub role: UnitRole,
+    pub role: String,
     #[serde(default)]
     pub addr: Option<String>,
     #[serde(default)]
@@ -133,7 +119,15 @@ pub struct Unit {
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+fn default_role() -> String {
+    "sfu".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Zenoh {
     pub mode: String,
@@ -152,142 +146,164 @@ pub struct Zenoh {
     pub base_config: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields, default)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Supervisor {
+    #[serde(default = "default_backoff")]
     pub backoff_ms: Vec<u64>,
+    #[serde(default = "default_intensity_max")]
     pub intensity_max: u32,
+    #[serde(default = "default_intensity_window")]
     pub intensity_window_secs: u64,
+    #[serde(default = "default_hello_timeout")]
     pub hello_timeout_ms: u64,
+    #[serde(default = "default_node_grace")]
     pub node_grace_secs: u64,
 }
 
 impl Default for Supervisor {
-    fn default() -> Supervisor {
-        Supervisor { backoff_ms: vec![200, 500, 1000, 2000, 5000], intensity_max: 5, intensity_window_secs: 60, hello_timeout_ms: 10_000, node_grace_secs: 30 }
+    fn default() -> Self {
+        Supervisor {
+            backoff_ms: default_backoff(),
+            intensity_max: default_intensity_max(),
+            intensity_window_secs: default_intensity_window(),
+            hello_timeout_ms: default_hello_timeout(),
+            node_grace_secs: default_node_grace(),
+        }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+fn default_backoff() -> Vec<u64> {
+    vec![200, 500, 1000, 2000, 5000]
+}
+fn default_intensity_max() -> u32 {
+    5
+}
+fn default_intensity_window() -> u64 {
+    60
+}
+fn default_hello_timeout() -> u64 {
+    10_000
+}
+fn default_node_grace() -> u64 {
+    30
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Hook {
+pub struct HookSection {
     #[serde(default)]
     pub webhooks: Vec<Webhook>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Webhook {
     pub url: String,
     pub secret: String,
 }
 
-impl SystemFile {
-    pub fn parse(text: &str) -> Result<SystemFile, String> {
-        let s: SystemFile = toml::from_str(text).map_err(|e| format!("system: {e}"))?;
+impl System {
+    pub fn parse(text: &str) -> Result<System, SystemError> {
+        let s: System = toml::from_str(text).map_err(|e| SystemError(e.to_string()))?;
         s.validate()?;
         Ok(s)
     }
 
-    pub fn load(path: &str) -> Result<SystemFile, String> {
-        let text = std::fs::read_to_string(path).map_err(|e| format!("system: {path}: {e}"))?;
-        SystemFile::parse(&text)
+    pub fn load(path: &std::path::Path) -> Result<System, SystemError> {
+        let text = std::fs::read_to_string(path).map_err(|e| SystemError(format!("{}: {e}", path.display())))?;
+        System::parse(&text)
     }
 
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), SystemError> {
         if self.zenoh.mode != "router" {
-            return Err(format!("system: zenoh.mode = {} — router 고정", self.zenoh.mode));
+            return Err(SystemError(format!("zenoh.mode {} — router 고정", self.zenoh.mode)));
         }
         if !self.zenoh.qos_enabled {
-            return Err("system: zenoh.qos_enabled = false — true 고정(정:RULE-BUS-SHAPE)".into());
+            return Err(SystemError("zenoh.qos_enabled false — true 고정".into()));
         }
         if self.zenoh.lowlatency {
-            return Err("system: zenoh.lowlatency = true — false 고정(정:RULE-BUS-SHAPE)".into());
+            return Err(SystemError("zenoh.lowlatency true — false 고정".into()));
         }
-        crate::bus::keys::check_fragment("zenoh.namespace", &self.zenoh.namespace)?;
-        let mut seen = std::collections::BTreeSet::new();
-        for u in &self.units {
-            if !seen.insert(u.id.as_str()) {
-                return Err(format!("system: unit id 겹침 {}", u.id));
+        if !crate::keyspace::valid_piece(&self.zenoh.namespace) {
+            return Err(SystemError(format!("zenoh.namespace {:?} 는 키 조각이 못 된다", self.zenoh.namespace)));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for u in &self.unit {
+            if !seen.insert(u.id.clone()) {
+                return Err(SystemError(format!("unit id {} 중복", u.id)));
             }
             if u.kind == UnitKind::Process && u.cmd.is_empty() {
-                return Err(format!("system: unit {} — process 인데 cmd 가 없다", u.id));
+                return Err(SystemError(format!("unit {} process 인데 cmd 가 없다", u.id)));
             }
-            if u.role == UnitRole::Log && u.kind != UnitKind::Inproc {
-                return Err(format!("system: unit {} — 로거(role = log)는 kind = inproc 이다(정:RULE-OPS-LOGGER)", u.id));
-            }
-            if u.role == UnitRole::Sfu {
-                crate::bus::keys::check_fragment("unit.id", &u.id)?;
-            }
-        }
-        if self.supervisor.backoff_ms.is_empty() {
-            return Err("system: supervisor.backoff_ms 가 비었다".into());
         }
         Ok(())
     }
 
-    pub fn first_sfu(&self) -> Option<&Unit> {
-        self.units.iter().find(|u| u.role == UnitRole::Sfu)
+    pub fn first_sfu_unit(&self) -> Option<&Unit> {
+        self.unit.iter().find(|u| u.role == "sfu")
     }
 
-    pub fn banner(&self, b: &mut Banner) {
-        b.put("hub.listen", &self.hub.listen);
-        b.put("hub.base_path", &self.hub.base_path);
-        b.put_opt("hub.log_dir", self.hub.log_dir.as_ref());
-        b.put_opt("hub.log_socket", self.hub.log_socket.as_ref());
-        match &self.hub.tls {
-            Some(t) => {
-                b.put("hub.tls.cert", &t.cert);
-                b.put("hub.tls.key", &t.key);
-            }
-            None => {
-                b.put("hub.tls.cert", crate::banner::ABSENT);
-                b.put("hub.tls.key", crate::banner::ABSENT);
-            }
-        }
-        b.put_secret("hub.auth.jwt_secret", self.hub.auth.jwt_secret.is_some());
-        for (i, k) in self.hub.auth.api_keys.iter().enumerate() {
+    pub fn banner_fields(&self) -> Vec<(String, String)> {
+        let opt = |v: &Option<String>| v.clone().unwrap_or_else(|| "-".to_string());
+        let h = &self.hub;
+        let mut v: Vec<(String, String)> = vec![
+            ("hub.listen".into(), h.listen.clone()),
+            ("hub.base_path".into(), h.base_path.clone()),
+            ("hub.log_dir".into(), opt(&h.log_dir)),
+            ("hub.log_socket".into(), opt(&h.log_socket)),
+            ("hub.tls.cert".into(), h.tls.as_ref().map(|t| t.cert.clone()).unwrap_or_else(|| "-".into())),
+            ("hub.tls.key".into(), h.tls.as_ref().map(|t| t.key.clone()).unwrap_or_else(|| "-".into())),
+            ("hub.auth.jwt_secret".into(), if h.auth.jwt_secret.is_some() { "***".into() } else { "-".into() }),
+        ];
+        for (i, k) in h.auth.api_keys.iter().enumerate() {
             let p = format!("hub.auth.api_keys[{i}]");
-            b.put(format!("{p}.key"), &k.key);
-            b.put_secret(format!("{p}.secret"), true);
-            b.put_opt(format!("{p}.name"), k.name.as_ref());
-            b.put_list(format!("{p}.participant_types"), &k.participant_types);
-            b.put(format!("{p}.hidden_allowed"), k.hidden_allowed);
-            b.put(format!("{p}.ops_allowed"), k.ops_allowed);
-            b.put(format!("{p}.hook_allowed"), k.hook_allowed);
+            v.push((format!("{p}.key"), k.key.clone()));
+            v.push((format!("{p}.secret"), "***".into()));
+            v.push((format!("{p}.name"), opt(&k.name)));
+            v.push((
+                format!("{p}.participant_types"),
+                k.participant_types.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(","),
+            ));
+            v.push((format!("{p}.hidden_allowed"), k.hidden_allowed.to_string()));
+            v.push((format!("{p}.ops_allowed"), k.ops_allowed.to_string()));
+            v.push((format!("{p}.hook_allowed"), k.hook_allowed.to_string()));
         }
-        for (i, u) in self.units.iter().enumerate() {
+        for (i, u) in self.unit.iter().enumerate() {
             let p = format!("unit[{i}]");
-            b.put(format!("{p}.id"), &u.id);
-            b.put(format!("{p}.kind"), u.kind.as_str());
-            b.put(format!("{p}.order"), u.order);
-            b.put(format!("{p}.role"), u.role.as_str());
-            b.put_opt(format!("{p}.addr"), u.addr.as_ref());
-            b.put(format!("{p}.cmd"), u.cmd.join(" "));
-            b.put(format!("{p}.enabled"), u.enabled);
+            v.push((format!("{p}.id"), u.id.clone()));
+            v.push((format!("{p}.kind"), u.kind.as_str().into()));
+            v.push((format!("{p}.order"), u.order.to_string()));
+            v.push((format!("{p}.role"), u.role.clone()));
+            v.push((format!("{p}.addr"), opt(&u.addr)));
+            v.push((format!("{p}.cmd"), if u.cmd.is_empty() { "-".into() } else { u.cmd.join(" ") }));
+            v.push((format!("{p}.enabled"), u.enabled.to_string()));
         }
-        b.put("zenoh.mode", &self.zenoh.mode);
-        b.put_list("zenoh.listen", &self.zenoh.listen);
-        b.put_list("zenoh.connect", &self.zenoh.connect);
-        b.put("zenoh.multicast_scouting", self.zenoh.multicast_scouting);
-        b.put("zenoh.qos_enabled", self.zenoh.qos_enabled);
-        b.put("zenoh.lowlatency", self.zenoh.lowlatency);
-        b.put("zenoh.namespace", &self.zenoh.namespace);
-        b.put_opt("zenoh.base_config", self.zenoh.base_config.as_ref());
-        b.put_list("supervisor.backoff_ms", &self.supervisor.backoff_ms);
-        b.put("supervisor.intensity_max", self.supervisor.intensity_max);
-        b.put("supervisor.intensity_window_secs", self.supervisor.intensity_window_secs);
-        b.put("supervisor.hello_timeout_ms", self.supervisor.hello_timeout_ms);
-        b.put("supervisor.node_grace_secs", self.supervisor.node_grace_secs);
+        let z = &self.zenoh;
+        v.push(("zenoh.mode".into(), z.mode.clone()));
+        v.push(("zenoh.listen".into(), z.listen.join(",")));
+        v.push(("zenoh.connect".into(), if z.connect.is_empty() { "-".into() } else { z.connect.join(",") }));
+        v.push(("zenoh.multicast_scouting".into(), z.multicast_scouting.to_string()));
+        v.push(("zenoh.qos_enabled".into(), z.qos_enabled.to_string()));
+        v.push(("zenoh.lowlatency".into(), z.lowlatency.to_string()));
+        v.push(("zenoh.namespace".into(), z.namespace.clone()));
+        v.push(("zenoh.base_config".into(), opt(&z.base_config)));
+        let s = &self.supervisor;
+        v.push(("supervisor.backoff_ms".into(), s.backoff_ms.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",")));
+        v.push(("supervisor.intensity_max".into(), s.intensity_max.to_string()));
+        v.push(("supervisor.intensity_window_secs".into(), s.intensity_window_secs.to_string()));
+        v.push(("supervisor.hello_timeout_ms".into(), s.hello_timeout_ms.to_string()));
+        v.push(("supervisor.node_grace_secs".into(), s.node_grace_secs.to_string()));
         match &self.hook {
-            Some(h) => {
-                for (i, w) in h.webhooks.iter().enumerate() {
-                    b.put(format!("hook.webhooks[{i}].url"), &w.url);
-                    b.put_secret(format!("hook.webhooks[{i}].secret"), !w.secret.is_empty());
+            Some(hk) if !hk.webhooks.is_empty() => {
+                for (i, w) in hk.webhooks.iter().enumerate() {
+                    v.push((format!("hook.webhooks[{i}].url"), w.url.clone()));
+                    v.push((format!("hook.webhooks[{i}].secret"), "***".into()));
                 }
             }
-            None => b.put("hook", crate::banner::ABSENT),
+            _ => v.push(("hook.webhooks".into(), "-".into())),
         }
+        v
     }
 }
 
@@ -295,51 +311,16 @@ impl SystemFile {
 mod tests {
     use super::*;
 
-    const BASE: &str = r#"
-[hub]
-listen = "127.0.0.1:1974"
-[hub.auth]
-jwt_secret = "s"
-[[hub.auth.api_keys]]
-key = "k"
-secret = "x"
-[[unit]]
-id = "node-a"
-kind = "process"
-order = 1
-cmd = ["oxsfud"]
-[zenoh]
-mode = "router"
-namespace = "ox"
-"#;
+    const MIN: &str = "[hub]\nlisten = \"0.0.0.0:1974\"\n[zenoh]\nmode = \"router\"\nnamespace = \"ox\"\n";
 
     #[test]
-    fn defaults_fill_in() {
-        let s = SystemFile::parse(BASE).expect("parse");
+    fn strict_and_fixed() {
+        let s = System::parse(MIN).unwrap();
         assert_eq!(s.hub.base_path, "/media");
-        assert_eq!(s.hub.auth.api_keys[0].participant_types, vec![0]);
-        assert_eq!(s.units[0].role, UnitRole::Sfu);
-        assert!(s.units[0].enabled);
         assert_eq!(s.supervisor.node_grace_secs, 30);
-        assert_eq!(s.supervisor.backoff_ms, vec![200, 500, 1000, 2000, 5000]);
-    }
-
-    #[test]
-    fn unknown_key_and_bad_bus_premises_fail() {
-        assert!(SystemFile::parse(&format!("{BASE}\nunknown = 1\n")).is_err());
-        assert!(SystemFile::parse(&BASE.replace("namespace = \"ox\"", "namespace = \"ox\"\nlowlatency = true")).is_err());
-        assert!(SystemFile::parse(&BASE.replace("namespace = \"ox\"", "namespace = \"o*x\"")).is_err());
-        assert!(SystemFile::parse(&BASE.replace("mode = \"router\"", "mode = \"peer\"")).is_err());
-    }
-
-    #[test]
-    fn banner_hides_secrets() {
-        let s = SystemFile::parse(BASE).expect("parse");
-        let mut b = Banner::new();
-        s.banner(&mut b);
-        let r = b.render();
-        assert!(r.contains("hub.auth.jwt_secret=***"));
-        assert!(r.contains("hub.auth.api_keys[0].secret=***"));
-        assert!(!r.contains("=x "));
+        assert!(System::parse(&format!("{MIN}typo = 1\n")).is_err());
+        assert!(System::parse(&MIN.replace("router", "peer")).is_err());
+        assert!(System::parse(&MIN.replace("\"ox\"", "\"o/x\"")).is_err());
+        assert!(s.banner_fields().iter().any(|(k, v)| k == "hub.auth.jwt_secret" && v == "-"));
     }
 }

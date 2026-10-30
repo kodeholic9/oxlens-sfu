@@ -1,122 +1,121 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.4 · 운영:RULE-LOG-PRINCIPLE · 운영:RULE-LOG-SENDER · 운영:RULE-LOG-SPEC · 운영:RULE-LOG-TRANSITION · 정:RULE-OPS-LOGGER · 정:RULE-OPS-SUPERVISOR · model: claude-opus-5-5
-//! 로그 — 한 곳에 모은다 · 보내는 쪽은 기다리지 않는다 · 규격에 이름이 있으면 `ev`. `ev!` · `stat!` 은 수준과 상관없이 늘 나간다.
+// spec: v1.6 · 운영:RULE-LOG-PRINCIPLE · 운영:RULE-LOG-SENDER · 운영:RULE-LOG-TRANSITION · 운영:LOG.log.LINE · model: claude-opus-5-5
+//! 로그 — 줄 꼴 · 보내는 쪽 · Layer · 배너 · 전이 줄 · 세션 지문.
 
+pub mod banner;
 pub mod layer;
-pub mod level;
 pub mod line;
 pub mod sender;
 
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
-use tracing_subscriber::layer::SubscriberExt;
+pub use line::{Kind, Line};
+pub use sender::{Counters, Sender, SenderConfig, Sink};
 
-use crate::policy::{Logging, LoggingLevel};
+use crate::policy::{LoggingLevel, Policy};
 
-pub use line::fingerprint;
+static GLOBAL: OnceLock<Arc<Sender>> = OnceLock::new();
 
-pub const SPEC_UNIT_STATE: &str = "SV-STATE-UNIT-STATE";
-pub const SPEC_PEER_STATE: &str = "SV-STATE-PEER-STATE";
-pub const SPEC_PUBLISH_STATE: &str = "SV-STATE-PUBLISH-STATE";
-pub const SPEC_SUBSCRIBE_STATE: &str = "SV-STATE-SUBSCRIBE-STATE";
-
-static HEAD: OnceLock<line::Head> = OnceLock::new();
-static LINE_MAX: OnceLock<usize> = OnceLock::new();
-static TX: OnceLock<sender::Tx> = OnceLock::new();
-
-#[macro_export]
-macro_rules! ev {
-    ($($t:tt)*) => { ::tracing::info!(target: "ox::ev", $($t)*) };
-}
-
-#[macro_export]
-macro_rules! stat {
-    ($($t:tt)*) => { ::tracing::info!(target: "ox::stat", $($t)*) };
-}
-
-#[derive(Debug)]
-pub struct Init {
+pub struct Setup {
     pub node: String,
-    pub proc_: &'static str,
+    pub proc_name: &'static str,
     pub epoch: Option<String>,
-    pub logging: Logging,
-    pub sink: sender::Sink,
+    pub sink: Sink,
+    pub log_dir: Option<PathBuf>,
 }
 
-pub fn sink_for(proc_: &str, node: &str, log_dir: Option<&str>, log_socket: Option<&str>, logging: &Logging) -> sender::Sink {
-    match log_socket {
-        None => sender::Sink::Stdout,
-        Some(sock) => {
-            let dir = log_dir.map(PathBuf::from).or_else(|| PathBuf::from(sock).parent().map(PathBuf::from)).unwrap_or_else(std::env::temp_dir);
-            sender::Sink::Socket { path: PathBuf::from(sock), spool: dir.join(format!("{node}.{proc_}.spool.log")), spool_max: logging.spool_max_bytes }
-        }
-    }
+pub fn level_from_env(policy: &Policy) -> LoggingLevel {
+    std::env::var("OX_LOG_LEVEL").ok().and_then(|v| LoggingLevel::parse(v.trim())).unwrap_or(policy.logging.level)
 }
 
-pub fn hub_sink(node: &str, log_dir: Option<&str>, log_socket: Option<&str>, logging: &Logging) -> (sender::Sink, Option<std::sync::Arc<sender::Gate>>) {
-    match log_socket {
-        None => (sender::Sink::Stdout, None),
-        Some(sock) => {
-            let dir = log_dir.map(PathBuf::from).or_else(|| PathBuf::from(sock).parent().map(PathBuf::from)).unwrap_or_else(std::env::temp_dir);
-            let gate = sender::Gate::new();
-            (sender::Sink::Hub { gate: gate.clone(), spool: dir.join(format!("{node}.hub.spool.log")), spool_max: logging.spool_max_bytes }, Some(gate))
-        }
-    }
-}
-
-pub fn init(i: Init) -> LoggingLevel {
-    let lvl = level::boot(i.logging.level);
-    let head = line::Head { node: i.node, proc_: i.proc_.to_string(), epoch: i.epoch };
-    let _ = HEAD.set(head.clone());
-    let _ = LINE_MAX.set(i.logging.line_max_bytes as usize);
-    let tx = sender::start(i.sink, i.logging.queue_max_lines as usize);
-    let _ = TX.set(tx.clone());
-    let layer = layer::OxLayer { head, tx, line_max: i.logging.line_max_bytes as usize };
-    let sub = tracing_subscriber::registry().with(layer);
+pub fn init(setup: Setup, policy: &Policy) -> Arc<Sender> {
+    let sender = Sender::start(SenderConfig {
+        node: setup.node,
+        proc_name: setup.proc_name,
+        epoch: setup.epoch,
+        sink: setup.sink,
+        log_dir: setup.log_dir,
+        line_max: policy.logging.line_max_bytes as usize,
+        queue_max: policy.logging.queue_max_lines as usize,
+        spool_max: policy.logging.spool_max_bytes,
+        level: level_from_env(policy),
+    });
+    let _ = GLOBAL.set(sender.clone());
+    use tracing_subscriber::layer::SubscriberExt;
+    let sub = tracing_subscriber::registry().with(layer::OxLayer { sender: sender.clone() });
     let _ = tracing::subscriber::set_global_default(sub);
-    lvl
+    sender
 }
 
-pub fn recovery_line(spooled: u64, dropped: u64) -> String {
-    let head = HEAD.get().cloned().unwrap_or_default();
-    let fields = vec![("spooled".to_string(), spooled.to_string()), ("dropped".to_string(), dropped.to_string())];
-    let ts = crate::time::iso_now();
-    line::render(&head, &line::Record { ts: &ts, mono: crate::time::mono_us(), kind: line::Kind::Stat, fields: &fields, msg: None }, LINE_MAX.get().copied().unwrap_or(1024))
+pub fn global() -> Option<&'static Arc<Sender>> {
+    GLOBAL.get()
 }
 
-pub fn render_local(kind: line::Kind, fields: &[(String, String)], msg: Option<&str>) -> String {
-    let head = HEAD.get().cloned().unwrap_or_default();
-    let ts = crate::time::iso_now();
-    line::render(&head, &line::Record { ts: &ts, mono: crate::time::mono_us(), kind, fields, msg }, LINE_MAX.get().copied().unwrap_or(1024))
-}
-
-pub fn unit_transition(unit: &str, from: &str, to: &str, cause: &str) {
-    crate::ev!(spec = SPEC_UNIT_STATE, unit = unit, area = "OPS", key = unit, from = from, to = to, cause = cause);
-}
-
-pub fn banner_lines(head: &line::Head, ts: &str, mono: u64, build: &str, epoch: &str, banner: &crate::banner::Banner, line_max: usize) -> Result<Vec<String>, String> {
-    let line_of = |part: usize, parts: usize, msg: &str| {
-        let mut fields = vec![("spec".to_string(), SPEC_UNIT_STATE.to_string())];
-        if part == 1 {
-            fields.push(("epoch".to_string(), epoch.to_string()));
-            fields.push(("build".to_string(), build.to_string()));
-        }
-        fields.push(("part".to_string(), part.to_string()));
-        fields.push(("parts".to_string(), parts.to_string()));
-        line::render(head, &line::Record { ts, mono, kind: line::Kind::Ev, fields: &fields, msg: Some(msg) }, usize::MAX)
-    };
-    banner.split(line_max, &line_of).map_err(|key| format!("기동 배너 칸 `{key}` 하나가 줄 상한 logging.line_max_bytes={line_max} 을 홀로 넘는다(운영:RULE-BOOT-ARGS — 기동 실패)"))
-}
-
-pub fn boot_lines(build: &str, epoch: &str, banner: &crate::banner::Banner) -> Result<(), String> {
-    let head = HEAD.get().cloned().unwrap_or_default();
-    let ts = crate::time::iso_now();
-    let lines = banner_lines(&head, &ts, crate::time::mono_us(), build, epoch, banner, LINE_MAX.get().copied().unwrap_or(1024))?;
-    if let Some(tx) = TX.get() {
-        for l in lines {
-            tx.send(l);
-        }
+pub fn emit(line: Line) {
+    if let Some(s) = GLOBAL.get() {
+        s.emit(line);
     }
-    Ok(())
+}
+
+pub fn fingerprint(session_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let d = Sha256::digest(session_id.as_bytes());
+    d.iter().take(4).map(|b| format!("{b:02x}")).collect()
+}
+
+pub struct Transition<'a> {
+    pub area: &'a str,
+    pub key: &'a str,
+    pub spec: Option<&'a str>,
+    pub from: &'a str,
+    pub to: Option<&'a str>,
+    pub cause: &'a str,
+    pub inputs: &'a [(&'a str, String)],
+}
+
+impl Transition<'_> {
+    pub fn line(&self) -> Line {
+        let mut l = Line::new(Kind::Ev);
+        l.spec = self.spec.map(|s| s.to_string());
+        l = l.rec("area", self.area).rec("key", self.key).rec("from", self.from);
+        if let Some(t) = self.to {
+            l = l.rec("to", t);
+        }
+        l = l.rec("cause", self.cause);
+        if self.spec.is_none() {
+            l = l.rec("impossible", 1);
+        }
+        for (k, v) in self.inputs {
+            l = l.rec(&format!("in.{k}"), v);
+        }
+        l
+    }
+}
+
+pub fn bool_fields_state(fields: &[(&str, bool)]) -> String {
+    let on: Vec<&str> = fields.iter().filter(|(_, b)| *b).map(|(n, _)| *n).collect();
+    if on.is_empty() { "-".to_string() } else { on.join("+") }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fingerprint_is_8_hex() {
+        let f = fingerprint("abc");
+        assert_eq!(f.len(), 8);
+        assert_eq!(f, "ba7816bf");
+    }
+
+    #[test]
+    fn transition_impossible_has_no_spec_to() {
+        let t = Transition { area: "FLR", key: "r1", spec: None, from: "IDLE", to: None, cause: "RELEASE", inputs: &[] };
+        let s = t.line().render(&line::Head { node: "n".into(), proc_name: "sfu" }, "T", 0, 1024);
+        assert!(s.contains("impossible=1"));
+        assert!(!s.contains("spec="));
+        assert!(!s.contains(" to="));
+        assert_eq!(bool_fields_state(&[("bound", true), ("resumed", false), ("live", true)]), "bound+live");
+    }
 }

@@ -1,271 +1,328 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.4 · 운영:RULE-LOG-SENDER · 운영:RULE-LOG-LOGGER · 정:RULE-OPS-LOGGER · 정:RULE-OPS-DROPS · model: claude-opus-5-5
-//! 보내는 쪽 — 유한 채널 → 전담 스레드 하나 → DGRAM 소켓(비차단 · sfud) 또는 hub 안 로거 유닛의 채널(hub 줄 — 소켓을 안 거친다 · 유닛이 `Running` 이 아니면 spool) · 실패 즉시 spool · 소켓 미설정이면 stdout · 회복 첫 줄 `kind=stat spooled=N dropped=M`.
+// spec: v1.6 · 운영:RULE-LOG-SENDER · 운영:RULE-LOG-LOGGER · 정:RULE-OPS-LOGGER · 운영:RULE-LOG-LEVEL · model: claude-opus-5-5
+//! 보내는 쪽 — 유한 채널(차면 드롭 + 계수) · 전담 스레드 하나 · 소켓 / hub 안 로거 채널 / stdout · 실패 즉시 spool · 회복 첫 줄.
 
 use std::io::Write;
 use std::os::unix::net::UnixDatagram;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
-pub static QUEUE_FULL: AtomicU64 = AtomicU64::new(0);
-pub static SPOOL_FULL: AtomicU64 = AtomicU64::new(0);
-pub static SPOOLED: AtomicU64 = AtomicU64::new(0);
-pub static SEND_EAGAIN: AtomicU64 = AtomicU64::new(0);
-pub static SEND_EMSGSIZE: AtomicU64 = AtomicU64::new(0);
-pub static SEND_ABSENT: AtomicU64 = AtomicU64::new(0);
-
-#[derive(Debug)]
-pub enum Sink {
-    Stdout,
-    Socket { path: PathBuf, spool: PathBuf, spool_max: u64 },
-    Channel(SyncSender<String>),
-    Hub { gate: Arc<Gate>, spool: PathBuf, spool_max: u64 },
-}
+use super::line::{Head, Kind, Line};
+use crate::policy::LoggingLevel;
 
 #[derive(Debug, Default)]
-pub struct Gate {
-    tx: Mutex<Option<SyncSender<String>>>,
+pub struct Counters {
+    pub queue_full: AtomicU64,
+    pub spool_full: AtomicU64,
+    pub sent: AtomicU64,
+    pub spooled: AtomicU64,
+    pub eagain: AtomicU64,
+    pub emsgsize: AtomicU64,
+    pub absent: AtomicU64,
 }
 
-impl Gate {
-    pub fn new() -> Arc<Gate> {
-        Arc::new(Gate::default())
+#[derive(Debug, Clone)]
+pub enum Sink {
+    Stdout,
+    Socket(PathBuf),
+    Inproc,
+}
+
+pub struct Sender {
+    tx: SyncSender<String>,
+    pub head: Head,
+    pub epoch: Option<String>,
+    pub line_max: usize,
+    pub counters: Arc<Counters>,
+    started: Instant,
+    level: AtomicU8,
+    base_level: AtomicU8,
+    level_until_ms: AtomicU64,
+    inproc: Arc<Mutex<Option<SyncSender<String>>>>,
+    inproc_running: Arc<AtomicBool>,
+}
+
+pub struct SenderConfig {
+    pub node: String,
+    pub proc_name: &'static str,
+    pub epoch: Option<String>,
+    pub sink: Sink,
+    pub log_dir: Option<PathBuf>,
+    pub line_max: usize,
+    pub queue_max: usize,
+    pub spool_max: u64,
+    pub level: LoggingLevel,
+}
+
+impl Sender {
+    pub fn start(cfg: SenderConfig) -> Arc<Sender> {
+        let (tx, rx) = sync_channel::<String>(cfg.queue_max.max(1));
+        let counters = Arc::new(Counters::default());
+        let inproc: Arc<Mutex<Option<SyncSender<String>>>> = Arc::new(Mutex::new(None));
+        let inproc_running = Arc::new(AtomicBool::new(false));
+        let s = Arc::new(Sender {
+            tx,
+            head: Head { node: cfg.node.clone(), proc_name: cfg.proc_name },
+            epoch: cfg.epoch.clone(),
+            line_max: cfg.line_max,
+            counters: counters.clone(),
+            started: Instant::now(),
+            level: AtomicU8::new(cfg.level.rank()),
+            base_level: AtomicU8::new(cfg.level.rank()),
+            level_until_ms: AtomicU64::new(0),
+            inproc: inproc.clone(),
+            inproc_running: inproc_running.clone(),
+        });
+        let spool_path = cfg
+            .log_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(format!("{}.{}.spool.log", cfg.node, cfg.proc_name));
+        let worker = Worker {
+            rx,
+            sink: cfg.sink,
+            counters,
+            spool_path,
+            spool: None,
+            spool_bytes: 0,
+            spool_max: cfg.spool_max,
+            failing: false,
+            outage_spooled: 0,
+            outage_dropped: 0,
+            inproc,
+            inproc_running,
+            head: s.head.clone(),
+            epoch: cfg.epoch,
+            started: s.started,
+            line_max: cfg.line_max,
+            sock: None,
+        };
+        let _ = std::thread::Builder::new().name("log-sender".into()).spawn(move || worker.run());
+        s
     }
 
-    pub fn open(&self, tx: SyncSender<String>) {
-        if let Ok(mut g) = self.tx.lock() {
-            g.replace(tx);
+    pub fn mono_us(&self) -> u64 {
+        self.started.elapsed().as_micros() as u64
+    }
+
+    pub fn emit(&self, mut line: Line) {
+        if let Some(e) = &self.epoch {
+            line.set_key_if_absent("epoch", e);
+        }
+        let s = line.render(&self.head, &super::line::ts_now(), self.mono_us(), self.line_max);
+        self.push(s);
+    }
+
+    pub fn push(&self, s: String) {
+        match self.tx.try_send(s) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                self.counters.queue_full.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
-    pub fn close(&self) {
-        if let Ok(mut g) = self.tx.lock() {
+    pub fn attach_inproc(&self, tx: SyncSender<String>) {
+        if let Ok(mut g) = self.inproc.lock() {
+            g.replace(tx);
+        }
+        self.inproc_running.store(true, Ordering::Release);
+    }
+
+    pub fn detach_inproc(&self) {
+        self.inproc_running.store(false, Ordering::Release);
+        if let Ok(mut g) = self.inproc.lock() {
             g.take();
         }
     }
 
-    fn current(&self) -> Option<SyncSender<String>> {
-        self.tx.lock().ok().and_then(|g| g.clone())
+    pub fn level(&self, now_ms: u64) -> LoggingLevel {
+        let until = self.level_until_ms.load(Ordering::Acquire);
+        if until != 0 && now_ms >= until {
+            self.level_until_ms.store(0, Ordering::Release);
+            self.level.store(self.base_level.load(Ordering::Acquire), Ordering::Release);
+        }
+        rank_level(self.level.load(Ordering::Acquire))
+    }
+
+    pub fn set_level(&self, level: LoggingLevel, until_ms: Option<u64>) {
+        self.level.store(level.rank(), Ordering::Release);
+        self.level_until_ms.store(until_ms.unwrap_or(0), Ordering::Release);
+        if until_ms.is_none() {
+            self.base_level.store(level.rank(), Ordering::Release);
+        }
+    }
+
+    pub fn level_override(&self) -> Option<(LoggingLevel, u64)> {
+        let until = self.level_until_ms.load(Ordering::Acquire);
+        if until == 0 {
+            return None;
+        }
+        Some((rank_level(self.level.load(Ordering::Acquire)), until))
+    }
+
+    pub fn base_level(&self) -> LoggingLevel {
+        rank_level(self.base_level.load(Ordering::Acquire))
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Tx(SyncSender<String>);
-
-impl Tx {
-    pub fn send(&self, line: String) {
-        match self.0.try_send(line) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => {
-                QUEUE_FULL.fetch_add(1, Ordering::Relaxed);
-            }
-            Err(TrySendError::Disconnected(_)) => {}
-        }
+fn rank_level(r: u8) -> LoggingLevel {
+    match r {
+        0 => LoggingLevel::Trace,
+        1 => LoggingLevel::Debug,
+        2 => LoggingLevel::Info,
+        3 => LoggingLevel::Warn,
+        _ => LoggingLevel::Error,
     }
 }
 
-pub fn drops() -> Vec<(&'static str, u64)> {
-    vec![("log_queue_full", QUEUE_FULL.load(Ordering::Relaxed)), ("log_spool_full", SPOOL_FULL.load(Ordering::Relaxed))]
+struct Worker {
+    rx: Receiver<String>,
+    sink: Sink,
+    counters: Arc<Counters>,
+    spool_path: PathBuf,
+    spool: Option<std::fs::File>,
+    spool_bytes: u64,
+    spool_max: u64,
+    failing: bool,
+    outage_spooled: u64,
+    outage_dropped: u64,
+    inproc: Arc<Mutex<Option<SyncSender<String>>>>,
+    inproc_running: Arc<AtomicBool>,
+    head: Head,
+    epoch: Option<String>,
+    started: Instant,
+    line_max: usize,
+    sock: Option<UnixDatagram>,
 }
 
-pub fn start(sink: Sink, queue_max: usize) -> Tx {
-    let (tx, rx) = std::sync::mpsc::sync_channel::<String>(queue_max.max(1));
-    let _ = std::thread::Builder::new().name("ox-log-tx".into()).spawn(move || run(sink, rx));
-    Tx(tx)
-}
-
-struct Spool {
-    path: PathBuf,
-    max: u64,
-    file: Option<std::fs::File>,
-    size: u64,
-    spooled: u64,
-    dropped: u64,
-}
-
-impl Spool {
-    fn write(&mut self, line: &str) {
-        if self.file.is_none() {
-            if let Some(dir) = self.path.parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            match std::fs::OpenOptions::new().create(true).append(true).open(&self.path) {
-                Ok(f) => {
-                    self.size = f.metadata().map(|m| m.len()).unwrap_or(0);
-                    self.file = Some(f);
-                }
-                Err(_) => {
-                    self.drop_one();
-                    return;
-                }
-            }
+impl Worker {
+    fn run(mut self) {
+        while let Ok(line) = self.rx.recv() {
+            self.deliver(line);
         }
-        let need = line.len() as u64 + 1;
-        if self.size + need > self.max {
-            self.drop_one();
+    }
+
+    fn deliver(&mut self, line: String) {
+        if matches!(self.sink, Sink::Stdout) {
+            let mut out = std::io::stdout().lock();
+            let _ = writeln!(out, "{line}");
+            self.counters.sent.fetch_add(1, Ordering::Relaxed);
             return;
         }
-        let ok = self.file.as_mut().is_some_and(|f| f.write_all(line.as_bytes()).and_then(|_| f.write_all(b"\n")).is_ok());
-        if ok {
-            self.size += need;
-            self.spooled += 1;
-            SPOOLED.fetch_add(1, Ordering::Relaxed);
-        } else {
-            self.drop_one();
+        if self.failing && self.try_send(&self.recovery_line()) {
+            self.failing = false;
+            self.outage_spooled = 0;
+            self.outage_dropped = 0;
         }
+        if !self.failing && self.try_send(&line) {
+            self.counters.sent.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        self.failing = true;
+        self.spool_write(&line);
     }
 
-    fn drop_one(&mut self) {
-        self.dropped += 1;
-        SPOOL_FULL.fetch_add(1, Ordering::Relaxed);
+    fn recovery_line(&self) -> String {
+        let mut l = Line::new(Kind::Stat).rec("spooled", self.outage_spooled).rec("dropped", self.outage_dropped);
+        if let Some(e) = &self.epoch {
+            l.set_key_if_absent("epoch", e);
+        }
+        l.render(&self.head, &super::line::ts_now(), self.started.elapsed().as_micros() as u64, self.line_max)
     }
-}
 
-fn send_dgram(sock: &UnixDatagram, path: &PathBuf, line: &str) -> bool {
-    match sock.send_to(line.as_bytes(), path) {
-        Ok(_) => true,
-        Err(e) => {
-            match e.raw_os_error() {
-                Some(code) if code == libc_emsgsize() => {
-                    SEND_EMSGSIZE.fetch_add(1, Ordering::Relaxed);
+    fn try_send(&mut self, line: &str) -> bool {
+        match &self.sink {
+            Sink::Stdout => true,
+            Sink::Inproc => {
+                if !self.inproc_running.load(Ordering::Acquire) {
+                    self.counters.absent.fetch_add(1, Ordering::Relaxed);
+                    return false;
                 }
-                _ if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    SEND_EAGAIN.fetch_add(1, Ordering::Relaxed);
-                }
-                _ => {
-                    SEND_ABSENT.fetch_add(1, Ordering::Relaxed);
+                let g = match self.inproc.lock() {
+                    Ok(g) => g,
+                    Err(_) => return false,
+                };
+                match g.as_ref() {
+                    Some(tx) => match tx.try_send(line.to_string()) {
+                        Ok(()) => true,
+                        Err(TrySendError::Full(_)) => {
+                            self.counters.eagain.fetch_add(1, Ordering::Relaxed);
+                            false
+                        }
+                        Err(TrySendError::Disconnected(_)) => {
+                            self.counters.absent.fetch_add(1, Ordering::Relaxed);
+                            false
+                        }
+                    },
+                    None => {
+                        self.counters.absent.fetch_add(1, Ordering::Relaxed);
+                        false
+                    }
                 }
             }
-            false
-        }
-    }
-}
-
-fn libc_emsgsize() -> i32 {
-    if cfg!(target_os = "linux") { 90 } else { 40 }
-}
-
-fn run(sink: Sink, rx: Receiver<String>) {
-    match sink {
-        Sink::Stdout => {
-            let out = std::io::stdout();
-            for line in rx {
-                let mut o = out.lock();
-                let _ = o.write_all(line.as_bytes());
-                let _ = o.write_all(b"\n");
-                let _ = o.flush();
+            Sink::Socket(path) => {
+                let path = path.clone();
+                if self.sock.is_none() {
+                    match UnixDatagram::unbound() {
+                        Ok(s) => {
+                            let _ = s.set_nonblocking(true);
+                            self.sock = Some(s);
+                        }
+                        Err(_) => return false,
+                    }
+                }
+                let Some(sock) = &self.sock else { return false };
+                match sock.send_to(line.as_bytes(), &path) {
+                    Ok(_) => true,
+                    Err(e) => {
+                        let c = match e.raw_os_error() {
+                            Some(35) | Some(11) | Some(55) => &self.counters.eagain,
+                            Some(40) | Some(90) => &self.counters.emsgsize,
+                            _ => &self.counters.absent,
+                        };
+                        c.fetch_add(1, Ordering::Relaxed);
+                        false
+                    }
+                }
             }
         }
-        Sink::Channel(next) => {
-            for line in rx {
-                if next.send(line).is_err() {
+    }
+
+    fn spool_write(&mut self, line: &str) {
+        let n = line.len() as u64 + 1;
+        if self.spool_bytes + n > self.spool_max {
+            self.counters.spool_full.fetch_add(1, Ordering::Relaxed);
+            self.outage_dropped += 1;
+            return;
+        }
+        if self.spool.is_none() {
+            match std::fs::OpenOptions::new().create(true).append(true).open(&self.spool_path) {
+                Ok(f) => {
+                    self.spool_bytes = f.metadata().map(|m| m.len()).unwrap_or(0);
+                    self.spool = Some(f);
+                }
+                Err(_) => {
+                    self.counters.spool_full.fetch_add(1, Ordering::Relaxed);
+                    self.outage_dropped += 1;
                     return;
                 }
             }
         }
-        Sink::Hub { gate, spool, spool_max } => {
-            let mut sp = Spool { path: spool, max: spool_max, file: None, size: 0, spooled: 0, dropped: 0 };
-            let mut failing = false;
-            for line in rx {
-                let next = gate.current();
-                let sent = next.as_ref().is_some_and(|n| n.send(line.clone()).is_ok());
-                if sent {
-                    if failing {
-                        failing = false;
-                        if let Some(n) = next {
-                            let _ = n.send(super::recovery_line(sp.spooled, sp.dropped));
-                        }
-                        sp.spooled = 0;
-                        sp.dropped = 0;
-                    }
-                } else {
-                    failing = true;
-                    sp.write(&line);
-                }
-            }
+        let ok = match self.spool.as_mut() {
+            Some(f) => writeln!(f, "{line}").is_ok(),
+            None => false,
+        };
+        if ok {
+            self.spool_bytes += n;
+            self.counters.spooled.fetch_add(1, Ordering::Relaxed);
+            self.outage_spooled += 1;
+        } else {
+            self.counters.spool_full.fetch_add(1, Ordering::Relaxed);
+            self.outage_dropped += 1;
         }
-        Sink::Socket { path, spool, spool_max } => {
-            let sock = UnixDatagram::unbound().ok();
-            if let Some(s) = &sock {
-                let _ = s.set_nonblocking(true);
-            }
-            let mut sp = Spool { path: spool, max: spool_max, file: None, size: 0, spooled: 0, dropped: 0 };
-            let mut failing = false;
-            for line in rx {
-                let sent = sock.as_ref().is_some_and(|s| send_dgram(s, &path, &line));
-                if sent {
-                    if failing {
-                        failing = false;
-                        let rec = super::recovery_line(sp.spooled, sp.dropped);
-                        if let Some(s) = sock.as_ref() {
-                            let _ = send_dgram(s, &path, &rec);
-                        }
-                        sp.spooled = 0;
-                        sp.dropped = 0;
-                    }
-                } else {
-                    failing = true;
-                    sp.write(&line);
-                }
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn missing_logger_goes_to_spool_immediately() {
-        let dir = std::env::temp_dir().join(format!("oxspool-{}", std::process::id()));
-        let spool = dir.join("n.hub.spool.log");
-        let tx = start(Sink::Socket { path: dir.join("absent.sock"), spool: spool.clone(), spool_max: 1 << 20 }, 16);
-        tx.send("ts=T kind=diag msg=x".into());
-        drop(tx);
-        for _ in 0..50 {
-            if std::fs::read_to_string(&spool).map(|s| s.contains("msg=x")).unwrap_or(false) {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        assert!(std::fs::read_to_string(&spool).expect("spool").contains("msg=x"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn hub_lines_go_to_logger_channel_not_socket_and_spool_when_unit_not_running() {
-        let dir = std::env::temp_dir().join(format!("oxhubgate-{}", std::process::id()));
-        let spool = dir.join("n.hub.spool.log");
-        let gate = Gate::new();
-        let tx = start(Sink::Hub { gate: gate.clone(), spool: spool.clone(), spool_max: 1 << 20 }, 16);
-        tx.send("ts=T kind=diag msg=before".into());
-        for _ in 0..50 {
-            if std::fs::read_to_string(&spool).map(|s| s.contains("msg=before")).unwrap_or(false) {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        assert!(std::fs::read_to_string(&spool).expect("spool").contains("msg=before"), "O-sym-RULE-LOG-LOGGER-3 로거 유닛이 Running 이 아니면 hub 줄은 spool");
-        let (ltx, lrx) = std::sync::mpsc::sync_channel::<String>(16);
-        gate.open(ltx);
-        tx.send("ts=T kind=diag msg=after".into());
-        let got: Vec<String> = (0..2).filter_map(|_| lrx.recv_timeout(std::time::Duration::from_secs(2)).ok()).collect();
-        assert!(got.iter().any(|l| l.contains("spooled=1")), "O-sym-RULE-LOG-LOGGER-3 회복 첫 줄 — {got:?}");
-        assert!(got.iter().any(|l| l.ends_with("msg=after")), "O-sym-RULE-LOG-LOGGER-3 hub 줄은 소켓을 안 거치고 로거 채널로 — {got:?}");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn full_queue_counts_and_does_not_wait() {
-        let (next, _keep) = std::sync::mpsc::sync_channel::<String>(0);
-        let tx = start(Sink::Channel(next), 1);
-        let before = QUEUE_FULL.load(Ordering::Relaxed);
-        for i in 0..50 {
-            tx.send(format!("l{i}"));
-        }
-        assert!(QUEUE_FULL.load(Ordering::Relaxed) > before);
     }
 }

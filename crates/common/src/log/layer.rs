@@ -1,147 +1,137 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.4 · 운영:RULE-LOG-SENDER · 운영:RULE-LOG-CONTEXT · 운영:RULE-LOG-LEVEL · 운영:RULE-LOG-KEYS · 정:RULE-OPS-LOGGER · 정:CAND-OPS-FOREIGN-LOG · model: claude-opus-5-5
-//! `tracing` Layer 하나 — span 칸(session · room · user · epoch)을 줄에 붙이고 줄을 지어 보내는 쪽 채널에 넣는다. 남의 크레이트는 `warn` 이상 · zenoh 는 `info` 까지 · hub 안 zenoh 유닛이 낸 줄은 상관 키 `unit=zenoh`.
+// spec: v1.6 · 운영:RULE-LOG-SENDER · 운영:RULE-LOG-CONTEXT · 운영:RULE-LOG-LEVEL · 정:RULE-OPS-LOGGER · model: claude-opus-5-5
+//! `tracing` Layer 하나 — 사건 칸 + span 문맥(`session` · `room` · `user` · `epoch`)으로 줄을 짓는다 · 수준은 `diag` 만 거른다 · 남의 크레이트는 `warn` 이상(zenoh 는 `info`).
 
-use std::fmt::Write as _;
+use std::sync::Arc;
 
 use tracing::field::{Field, Visit};
-use tracing::subscriber::Interest;
-use tracing::{Event, Level, Metadata, Subscriber};
+use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
 
-use super::line::{Head, Kind, Record, render};
-use super::sender::Tx;
+use super::line::{Kind, Line, key_index};
+use super::sender::Sender;
+use crate::policy::LoggingLevel;
 
-pub const EV_TARGET: &str = "ox::ev";
-pub const STAT_TARGET: &str = "ox::stat";
-const OURS: &[&str] = &["ox::", "oxhubd", "oxsfud", "oxadmin", "common", "oxsig"];
-pub const HUB_ZENOH_UNIT: &str = "zenoh";
-
-pub fn ours(target: &str) -> bool {
-    OURS.iter().any(|p| target.starts_with(p))
+pub struct OxLayer {
+    pub sender: Arc<Sender>,
 }
 
-fn foreign_allows(m: &Metadata<'_>) -> bool {
-    let cap = if m.target().starts_with("zenoh") { &Level::INFO } else { &Level::WARN };
-    m.level() <= cap
+#[derive(Default, Clone)]
+struct SpanKeys(Vec<(String, String)>);
+
+struct Collect {
+    line: Line,
+    kind_set: bool,
 }
 
-#[derive(Default)]
-struct Fields(Vec<(String, String)>, Option<String>);
-
-impl Visit for Fields {
-    fn record_debug(&mut self, f: &Field, v: &dyn std::fmt::Debug) {
-        let mut s = String::new();
-        let _ = write!(s, "{v:?}");
-        self.put(f, s);
-    }
-
-    fn record_str(&mut self, f: &Field, v: &str) {
-        self.put(f, v.to_string());
-    }
-
-    fn record_i64(&mut self, f: &Field, v: i64) {
-        self.put(f, v.to_string());
-    }
-
-    fn record_u64(&mut self, f: &Field, v: u64) {
-        self.put(f, v.to_string());
-    }
-
-    fn record_bool(&mut self, f: &Field, v: bool) {
-        self.put(f, if v { "1".to_string() } else { "0".to_string() });
-    }
-
-    fn record_f64(&mut self, f: &Field, v: f64) {
-        self.put(f, v.to_string());
-    }
-}
-
-impl Fields {
-    fn put(&mut self, f: &Field, v: String) {
-        if f.name() == "message" {
-            self.1 = Some(v);
-        } else {
-            self.0.push((f.name().to_string(), v));
+impl Collect {
+    fn put(&mut self, name: &str, v: String) {
+        match name {
+            "message" => self.line.msg = Some(v),
+            "kind" => {
+                if let Some(k) = Kind::parse(&v) {
+                    self.line.kind = k;
+                    self.kind_set = true;
+                }
+            }
+            "spec" => self.line.spec = Some(v),
+            "rec" => self.line.raw = Some(v),
+            n if key_index(n).is_some() => {
+                let i = key_index(n).unwrap_or(0);
+                self.line.keys[i] = Some(v);
+            }
+            n => self.line.recs.push((n.to_string(), v)),
         }
     }
 }
 
-struct SpanFields(Vec<(String, String)>);
+impl Visit for Collect {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        self.put(field.name(), format!("{value:?}"));
+    }
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.put(field.name(), value.to_string());
+    }
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        self.put(field.name(), value.to_string());
+    }
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.put(field.name(), value.to_string());
+    }
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        self.put(field.name(), value.to_string());
+    }
+}
 
-pub struct OxLayer {
-    pub head: Head,
-    pub tx: Tx,
-    pub line_max: usize,
+struct SpanVisit<'a>(&'a mut Vec<(String, String)>);
+
+impl Visit for SpanVisit<'_> {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        self.0.push((field.name().to_string(), format!("{value:?}")));
+    }
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.0.push((field.name().to_string(), value.to_string()));
+    }
+}
+
+fn own_target(t: &str) -> bool {
+    t.starts_with("oxhubd") || t.starts_with("oxsfud") || t.starts_with("common") || t.starts_with("oxsig") || t.starts_with("oxadmin") || t == "ox"
+}
+
+fn level_rank(l: &Level) -> u8 {
+    match *l {
+        Level::TRACE => 0,
+        Level::DEBUG => 1,
+        Level::INFO => 2,
+        Level::WARN => 3,
+        Level::ERROR => 4,
+    }
 }
 
 impl<S> tracing_subscriber::Layer<S> for OxLayer
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
-    fn register_callsite(&self, m: &'static Metadata<'static>) -> Interest {
-        if ours(m.target()) {
-            Interest::sometimes()
-        } else if foreign_allows(m) {
-            Interest::always()
-        } else {
-            Interest::never()
-        }
-    }
-
-    fn enabled(&self, m: &Metadata<'_>, _ctx: Context<'_, S>) -> bool {
-        if !ours(m.target()) {
-            return foreign_allows(m);
-        }
-        if m.is_span() || m.target() == EV_TARGET || m.target() == STAT_TARGET {
-            return true;
-        }
-        super::level::allows(m.level(), crate::time::mono_ms())
-    }
-
     fn on_new_span(&self, attrs: &tracing::span::Attributes<'_>, id: &tracing::span::Id, ctx: Context<'_, S>) {
-        let mut f = Fields::default();
-        attrs.record(&mut f);
+        let mut v = Vec::new();
+        attrs.record(&mut SpanVisit(&mut v));
         if let Some(span) = ctx.span(id) {
-            span.extensions_mut().insert(SpanFields(f.0));
-        }
-    }
-
-    fn on_record(&self, id: &tracing::span::Id, values: &tracing::span::Record<'_>, ctx: Context<'_, S>) {
-        let mut f = Fields::default();
-        values.record(&mut f);
-        if let Some(span) = ctx.span(id) {
-            let mut ext = span.extensions_mut();
-            if let Some(sf) = ext.get_mut::<SpanFields>() {
-                sf.0.extend(f.0);
-            }
+            span.extensions_mut().insert(SpanKeys(v));
         }
     }
 
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
-        let m = event.metadata();
-        let kind = match m.target() {
-            EV_TARGET => Kind::Ev,
-            STAT_TARGET => Kind::Stat,
-            _ => Kind::Diag,
-        };
-        let mut fields: Vec<(String, String)> = Vec::new();
+        let meta = event.metadata();
+        let target = meta.target();
+        let rank = level_rank(meta.level());
+        if !own_target(target) {
+            let floor = if target.starts_with("zenoh") { 2 } else { 3 };
+            if rank < floor {
+                return;
+            }
+        }
+        let mut c = Collect { line: Line::new(Kind::Diag), kind_set: false };
+        event.record(&mut c);
+        if !c.kind_set || c.line.kind == Kind::Diag {
+            c.line.kind = Kind::Diag;
+            let cur = self.sender.level(crate::now_ms());
+            if rank < cur.rank() && !(cur == LoggingLevel::Trace) {
+                return;
+            }
+            if !own_target(target) {
+                c.line.recs.insert(0, ("target".to_string(), target.to_string()));
+            }
+        }
         if let Some(scope) = ctx.event_scope(event) {
             for span in scope.from_root() {
-                if let Some(sf) = span.extensions().get::<SpanFields>() {
-                    fields.extend(sf.0.iter().cloned());
+                if let Some(k) = span.extensions().get::<SpanKeys>() {
+                    for (n, v) in &k.0 {
+                        c.line.set_key_if_absent(n, v);
+                    }
                 }
             }
         }
-        let mut f = Fields::default();
-        event.record(&mut f);
-        fields.extend(f.0);
-        if self.head.proc_ == "hub" && m.target().starts_with("zenoh") && !fields.iter().any(|(k, _)| k == "unit") {
-            fields.push(("unit".to_string(), HUB_ZENOH_UNIT.to_string()));
-        }
-        let ts = crate::time::iso_now();
-        let line = render(&self.head, &Record { ts: &ts, mono: crate::time::mono_us(), kind, fields: &fields, msg: f.1.as_deref() }, self.line_max);
-        self.tx.send(line);
+        self.sender.emit(c.line);
     }
 }
