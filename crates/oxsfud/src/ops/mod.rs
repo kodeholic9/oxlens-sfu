@@ -219,7 +219,7 @@ pub async fn run(cfg: SfuCfg, epoch: String) -> Result<(), String> {
     let udp_addr = SocketAddr::new(cfg.bind_ip, cfg.udp_port);
     let udp = crate::link::io::bind_udp(udp_addr, cfg.media_workers).map_err(|e| format!("UDP {udp_addr}: {e}"))?;
     let tcp = match cfg.tcp_port {
-        Some(p) => Some(tokio::net::TcpListener::bind(SocketAddr::new(cfg.bind_ip, p)).await.map_err(|e| format!("TCP {p}: {e}"))?),
+        Some(p) => Some(std::net::TcpListener::bind(SocketAddr::new(cfg.bind_ip, p)).map_err(|e| format!("TCP {p}: {e}"))?),
         None => None,
     };
     let (dc_tx, dc_rx) = mpsc::unbounded_channel();
@@ -233,11 +233,8 @@ pub async fn run(cfg: SfuCfg, epoch: String) -> Result<(), String> {
     let rt = tokio::runtime::Handle::current();
     let tick = crate::fwd::work::TickCfg { max_bitrate_bps: u64::from(sfu.cfg.policy.media.max_bitrate_bps), auto_layer: sfu.cfg.policy.media.auto_layer };
     crate::fwd::work::start(sfu.cfg.media_workers, tick, rt.clone())?;
-    crate::fwd::work::spawn_reader(io.clone(), rt)?;
-    if let Some(l) = tcp {
-        tokio::spawn(crate::link::io::tcp_serve(io.clone(), l));
-        tokio::spawn(crate::link::io::tcp_keepalive(io.clone()));
-    }
+    let reader = crate::link::io::reader(&io, tcp).map_err(|e| format!("수신 스레드 준비: {e}"))?;
+    crate::fwd::work::spawn_reader(reader, rt)?;
     tokio::spawn(on_dc(sfu.clone(), dc_rx));
     tokio::spawn(on_link(sfu.clone(), link_rx));
     tokio::spawn(on_signal(sfu.clone(), sig_rx));

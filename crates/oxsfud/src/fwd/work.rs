@@ -313,7 +313,15 @@ fn own(w: &Worker) -> Vec<Arc<Transport>> {
 fn tick(w: &Worker, cfg: TickCfg, n: u64, now: u64, sim: bool) {
     let twcc = n.is_multiple_of(crate::rtcp::TWCC_MS / crate::rtcp::NACK_POLL_MS);
     let rr = n.is_multiple_of(crate::rtcp::RR_MS / crate::rtcp::NACK_POLL_MS);
+    let keepalive = n.is_multiple_of(crate::link::tcp::KEEPALIVE_MS / crate::rtcp::NACK_POLL_MS);
     for t in own(w) {
+        if keepalive
+            && let Some(io) = t.io.upgrade()
+        {
+            for c in t.pairs.lock().map(|p| p.tcp_conns()).unwrap_or_default() {
+                io.keepalive(c);
+            }
+        }
         crate::rtcp::send_nacks(&t, now);
         if twcc {
             crate::rtcp::send_twcc(&t);
@@ -407,14 +415,14 @@ pub fn start(n: usize, tick: TickCfg, rt: tokio::runtime::Handle) -> Result<(), 
     Ok(())
 }
 
-pub fn spawn_reader(io: Arc<crate::link::Io>, rt: tokio::runtime::Handle) -> Result<(), String> {
+pub fn spawn_reader(reader: crate::link::io::Reader, rt: tokio::runtime::Handle) -> Result<(), String> {
     let n = count();
     std::thread::Builder::new()
         .name("media-rx".into())
         .spawn(move || {
             ME.with(|m| m.set(n));
             let _g = rt.enter();
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| super::rx::udp_loop(&io)));
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || reader.run()));
             fatal("media-rx", r);
         })
         .map(|_| ())

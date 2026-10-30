@@ -1989,6 +1989,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1788edb87fdc09c7e26304471e2f5be8cdefb1b6930d6e3985fc02ff53bf86ee"
 dependencies = [
  "libc",
+ "log",
  "wasi",
  "windows-sys 0.61.2",
 ]
@@ -2246,6 +2247,7 @@ dependencies = [
  "dtls",
  "getrandom 0.3.4",
  "hmac",
+ "mio",
  "nix 0.26.4",
  "oxsig",
  "rcgen 0.13.2",

@@ -23,6 +23,7 @@ futures-util = "0.3"
 dashmap = "6"
 arc-swap = "1"
 crossbeam-queue = "0.3"
+mio = { version = "1", features = ["os-poll", "net"] }
 socket2 = { version = "0.6", features = ["all"] }
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
