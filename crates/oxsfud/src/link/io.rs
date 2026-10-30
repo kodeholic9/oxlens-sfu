@@ -7,8 +7,10 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 
+use std::net::UdpSocket;
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, UdpSocket};
+use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
 use super::ice::{self, Via};
@@ -50,6 +52,7 @@ pub enum LinkSignal {
 
 pub struct Io {
     pub udp: Arc<UdpSocket>,
+    senders: Vec<UdpSocket>,
     pub local: SocketAddr,
     pub tcp_port: Option<u16>,
     tcp: RwLock<HashMap<u64, mpsc::UnboundedSender<Vec<u8>>>>,
@@ -64,11 +67,12 @@ pub struct Io {
 }
 
 impl Io {
-    pub fn new(udp: Arc<UdpSocket>, tcp_port: Option<u16>, cert: dtls::crypto::Certificate, dc_events: mpsc::UnboundedSender<DcEvent>, signals: mpsc::UnboundedSender<LinkSignal>) -> Io {
-        let local = udp.local_addr().unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)));
+    pub fn new(udp: Udp, tcp_port: Option<u16>, cert: dtls::crypto::Certificate, dc_events: mpsc::UnboundedSender<DcEvent>, signals: mpsc::UnboundedSender<LinkSignal>) -> Io {
+        let local = udp.main.local_addr().unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)));
         let fingerprint = cert.certificate.first().map(|c| super::cert::fingerprint(c.as_ref())).unwrap_or_default();
         Io {
-            udp,
+            udp: Arc::new(udp.main),
+            senders: udp.senders,
             local,
             tcp_port,
             tcp: RwLock::new(HashMap::new()),
@@ -88,6 +92,7 @@ impl Io {
     }
 
     pub fn register(&self, t: &Arc<Transport>) {
+        t.worker.store(crate::fwd::work::assign(t.role.subscribes()), Ordering::Relaxed);
         let ufrags = t.ledger.lock().map(|l| l.ufrags()).unwrap_or_default();
         if let Ok(mut m) = self.ufrags.write() {
             for u in ufrags {
@@ -133,8 +138,10 @@ impl Io {
                 m.remove(&c);
             }
         }
-        if let Ok(mut a) = self.all.write() {
-            a.remove(&t.id);
+        if let Ok(mut a) = self.all.write()
+            && a.remove(&t.id).is_some()
+        {
+            crate::fwd::work::release(t.worker.load(Ordering::Relaxed), t.role.subscribes());
         }
     }
 
@@ -149,12 +156,9 @@ impl Io {
     pub fn send_via(&self, via: Via, bytes: &[u8]) -> bool {
         match via {
             Via::Udp(a) => {
-                for _ in 0..3 {
-                    match self.udp.try_send_to(bytes, a) {
-                        Ok(_) => return true,
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::yield_now(),
-                        Err(_) => break,
-                    }
+                let sock = crate::fwd::work::current().and_then(|i| self.senders.get(i)).unwrap_or(&self.udp);
+                if sock.send_to(bytes, a).is_ok() {
+                    return true;
                 }
                 Transport::note_send_fail();
                 false
@@ -292,13 +296,33 @@ impl Io {
     }
 }
 
-pub fn bind_udp(addr: SocketAddr) -> std::io::Result<UdpSocket> {
-    let std_sock = std::net::UdpSocket::bind(addr)?;
-    std_sock.set_nonblocking(true)?;
-    let fd = std::os::fd::AsRawFd::as_raw_fd(&std_sock);
-    let _ = nix::sys::socket::setsockopt(fd, nix::sys::socket::sockopt::RcvBuf, &SOCKET_BUFFER);
-    let _ = nix::sys::socket::setsockopt(fd, nix::sys::socket::sockopt::SndBuf, &SOCKET_BUFFER);
-    UdpSocket::from_std(std_sock)
+pub struct Udp {
+    pub main: UdpSocket,
+    pub senders: Vec<UdpSocket>,
+}
+
+fn udp_socket(addr: SocketAddr, reuse_port: bool) -> std::io::Result<UdpSocket> {
+    let s = socket2::Socket::new(socket2::Domain::for_address(addr), socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
+    if reuse_port {
+        s.set_reuse_port(true)?;
+    }
+    let _ = s.set_recv_buffer_size(SOCKET_BUFFER);
+    let _ = s.set_send_buffer_size(SOCKET_BUFFER);
+    s.bind(&addr.into())?;
+    Ok(s.into())
+}
+
+pub fn bind_udp(addr: SocketAddr, senders: usize) -> std::io::Result<Udp> {
+    if !cfg!(target_os = "macos") || senders == 0 {
+        return Ok(Udp { main: udp_socket(addr, false)?, senders: Vec::new() });
+    }
+    let first = udp_socket(addr, true)?;
+    let bound = first.local_addr()?;
+    let mut out = vec![first];
+    for _ in 1..senders {
+        out.push(udp_socket(bound, true)?);
+    }
+    Ok(Udp { main: udp_socket(bound, true)?, senders: out })
 }
 
 pub async fn tcp_serve(io: Arc<Io>, listener: TcpListener) {
@@ -345,7 +369,7 @@ pub async fn tcp_serve(io: Arc<Io>, listener: TcpListener) {
                     }
                     let via = Via::Tcp(conn, addr);
                     if let Some((t, class)) = io2.on_datagram(&f, via, common::time::mono_ms()) {
-                        crate::fwd::rx::dispatch(&t, class, &f);
+                        crate::fwd::work::submit_in(&t, class, f.to_vec());
                     }
                 }
             }

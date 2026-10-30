@@ -21,8 +21,12 @@ pub const ARGS: &[Spec] = &[
     opt("log-dir"),
     opt("log-socket"),
     opt("node-grace-secs"),
+    opt("media-workers"),
+    opt("control-threads"),
     flag("version"),
 ];
+
+pub const CONTROL_THREADS: usize = 2;
 
 #[derive(Debug, Clone)]
 pub struct SfuCfg {
@@ -38,8 +42,14 @@ pub struct SfuCfg {
     pub log_dir: Option<String>,
     pub log_socket: Option<String>,
     pub node_grace_secs: u64,
+    pub media_workers: usize,
+    pub control_threads: usize,
     pub build: String,
     pub args: Args,
+}
+
+pub fn default_media_workers() -> usize {
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).saturating_sub(2).max(1)
 }
 
 fn default_interface() -> Option<IpAddr> {
@@ -73,6 +83,8 @@ impl SfuCfg {
         common::bus::keys::check_fragment("--zenoh-namespace", &namespace)?;
         let zenoh_connect = args.require("zenoh-connect")?.to_string();
         let node_grace_secs: u64 = args.parse_num("node-grace-secs")?.ok_or("--node-grace-secs 가 없다(기본값 없음)")?;
+        let media_workers: usize = args.parse_num::<usize>("media-workers")?.unwrap_or_else(default_media_workers).max(1);
+        let control_threads: usize = args.parse_num::<usize>("control-threads")?.unwrap_or(CONTROL_THREADS).max(1);
         let build = common::build::identity(args.get("build"));
         Ok(SfuCfg {
             grpc_listen,
@@ -87,6 +99,8 @@ impl SfuCfg {
             log_dir: args.get("log-dir").map(str::to_string),
             log_socket: args.get("log-socket").map(str::to_string),
             node_grace_secs,
+            media_workers,
+            control_threads,
             build,
             args,
         })
@@ -101,6 +115,8 @@ impl SfuCfg {
         for name in ["id", "build", "zenoh-namespace", "zenoh-connect", "log-dir", "log-socket", "node-grace-secs"] {
             b.put_opt(name, self.args.get(name));
         }
+        b.put("media-workers", self.media_workers);
+        b.put("control-threads", self.control_threads);
         self.policy.banner(&mut b, Reader::Sfud);
         b
     }

@@ -7,10 +7,12 @@ pub mod egress;
 pub mod hot;
 pub mod rtp;
 pub mod rx;
+pub mod work;
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use bytes::Bytes;
 use oxsig::types::{Duplex, Kind};
 
 use self::hot::{FloorIn, LAYER_NONE};
@@ -21,7 +23,7 @@ use crate::r#pub::{Stream, Uplink};
 pub const FLOOR_NOTIFY_MS: u64 = 500;
 pub const VOICE_LEVEL: u8 = 50;
 
-pub fn on_rtp(t: &Arc<Transport>, plain: &[u8], now_ms: u64) {
+pub fn on_rtp(t: &Arc<Transport>, plain: &Bytes, now_ms: u64) {
     let Some(r) = rtp::parse(plain) else {
         bump(&DROPS.rtp_malformed);
         return;
@@ -47,6 +49,7 @@ pub fn on_rtp(t: &Arc<Transport>, plain: &[u8], now_ms: u64) {
     if up.rtx {
         let Some(base) = stream.uplink_of_layer(up.layer) else { return };
         let Some(orig) = rtp::rtx_unwrap(&r, base.ssrc, stream.pt) else { return };
+        let orig = Bytes::from(orig);
         let Some(r2) = rtp::parse(&orig) else { return };
         media(t, &base, &stream, &r2, &orig, now_ms, true);
         return;
@@ -54,7 +57,7 @@ pub fn on_rtp(t: &Arc<Transport>, plain: &[u8], now_ms: u64) {
     media(t, &up, &stream, &r, plain, now_ms, false);
 }
 
-fn media(t: &Arc<Transport>, up: &Arc<Uplink>, stream: &Arc<Stream>, r: &rtp::Rtp<'_>, plain: &[u8], now_ms: u64, recovered: bool) {
+fn media(t: &Arc<Transport>, up: &Arc<Uplink>, stream: &Arc<Stream>, r: &rtp::Rtp<'_>, plain: &Bytes, now_ms: u64, recovered: bool) {
     if let Ok(mut ing) = up.ingress.lock() {
         if !recovered {
             ing.stats.update(r.seq, r.ts, now_ms);
@@ -105,6 +108,7 @@ fn media(t: &Arc<Transport>, up: &Arc<Uplink>, stream: &Arc<Stream>, r: &rtp::Rt
             slot.speaker_last_ms.store(now_ms, Ordering::Release);
             let _ = slot.speaker_first_ms.compare_exchange(0, now_ms.max(1), Ordering::AcqRel, Ordering::Acquire);
             slot.priming.store(false, Ordering::Release);
+            let mut fan = work::Fanout::new(r, plain, up, keyframe, level, now_ms);
             for w in slot.downlinks.load().iter() {
                 let Some(dl) = w.upgrade() else { continue };
                 if dl.user == stream.user {
@@ -114,10 +118,12 @@ fn media(t: &Arc<Transport>, up: &Arc<Uplink>, stream: &Arc<Stream>, r: &rtp::Rt
                     bump(&DROPS.row_gate);
                     continue;
                 }
-                egress::forward(&dl, r, up, keyframe, level, now_ms);
+                fan.add(&dl);
             }
+            fan.flush();
         }
         Duplex::Full => {
+            let mut fan = work::Fanout::new(r, plain, up, keyframe, level, now_ms);
             for w in stream.subs.load().iter() {
                 let Some(dl) = w.upgrade() else { continue };
                 let carry = dl.carry.load();
@@ -136,8 +142,9 @@ fn media(t: &Arc<Transport>, up: &Arc<Uplink>, stream: &Arc<Stream>, r: &rtp::Rt
                 if stream.simulcast && !layer_ok(&dl, up, keyframe, now_ms) {
                     continue;
                 }
-                egress::forward(&dl, r, up, keyframe, level, now_ms);
+                fan.add(&dl);
             }
+            fan.flush();
         }
     }
 }

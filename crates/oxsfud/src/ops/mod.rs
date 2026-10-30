@@ -242,7 +242,7 @@ fn spawn_timers(sfu: &Arc<Sfu>) {
 pub async fn run(cfg: SfuCfg, epoch: String) -> Result<(), String> {
     let cert = crate::link::cert::generate()?;
     let udp_addr = SocketAddr::new(cfg.bind_ip, cfg.udp_port);
-    let udp = crate::link::io::bind_udp(udp_addr).map_err(|e| format!("UDP {udp_addr}: {e}"))?;
+    let udp = crate::link::io::bind_udp(udp_addr, cfg.media_workers).map_err(|e| format!("UDP {udp_addr}: {e}"))?;
     let tcp = match cfg.tcp_port {
         Some(p) => Some(tokio::net::TcpListener::bind(SocketAddr::new(cfg.bind_ip, p)).await.map_err(|e| format!("TCP {p}: {e}"))?),
         None => None,
@@ -251,11 +251,13 @@ pub async fn run(cfg: SfuCfg, epoch: String) -> Result<(), String> {
     let (link_tx, link_rx) = mpsc::unbounded_channel();
     let (sig_tx, sig_rx) = mpsc::unbounded_channel();
     let _ = SIG.set(sig_tx);
-    let io = Arc::new(Io::new(Arc::new(udp), cfg.tcp_port, cert, dc_tx, link_tx));
+    let io = Arc::new(Io::new(udp, cfg.tcp_port, cert, dc_tx, link_tx));
     let bus = Bus::open(&cfg.zenoh_connect, &cfg.namespace, &cfg.node_id, &epoch).await?;
     let grpc: SocketAddr = cfg.grpc_listen.parse().map_err(|e| format!("--grpc-listen {}: {e}", cfg.grpc_listen))?;
     let sfu = Arc::new(Sfu { cfg, epoch, io: io.clone(), bus, state: Mutex::new(State { rooms: BTreeMap::new(), peers: BTreeMap::new(), arev: BTreeMap::new() }), floor_wake: Mutex::new(HashMap::new()), udp_addr });
-    tokio::spawn(crate::fwd::rx::udp_loop(io.clone()));
+    let rt = tokio::runtime::Handle::current();
+    crate::fwd::work::start(sfu.cfg.media_workers, rt.clone())?;
+    crate::fwd::work::spawn_reader(io.clone(), rt)?;
     if let Some(l) = tcp {
         tokio::spawn(crate::link::io::tcp_serve(io.clone(), l));
         tokio::spawn(crate::link::io::tcp_keepalive(io.clone()));

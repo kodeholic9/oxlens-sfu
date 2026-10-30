@@ -25,7 +25,7 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+    let rt = match tokio::runtime::Builder::new_multi_thread().worker_threads(cfg.control_threads).enable_all().build() {
         Ok(r) => r,
         Err(e) => {
             eprintln!("oxsfud: runtime: {e}");

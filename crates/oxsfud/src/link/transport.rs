@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use arc_swap::ArcSwap;
@@ -92,6 +92,7 @@ pub struct Transport {
     pub pending_sim: ArcSwap<Vec<Arc<crate::r#pub::Stream>>>,
     pub nack_budget: Arc<crate::rtcp::Budget>,
     pub sim: Mutex<crate::sim::State>,
+    pub worker: AtomicUsize,
 }
 
 impl Transport {
@@ -126,6 +127,7 @@ impl Transport {
             pending_sim: ArcSwap::from_pointee(Vec::new()),
             nack_budget: budget,
             sim: Mutex::new(crate::sim::State::new(now_ms)),
+            worker: AtomicUsize::new(0),
         }
     }
 
