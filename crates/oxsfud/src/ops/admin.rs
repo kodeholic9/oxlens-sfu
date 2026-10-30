@@ -63,10 +63,7 @@ fn rooms() -> Result<Value, Failure> {
         .rooms
         .all()
         .iter()
-        .map(|r| {
-            let ids = r.users();
-            json!({ "room_id": r.id, "node": s.node, "sfu_id": s.epoch, "members": ids.len(), "member_ids": ids })
-        })
+        .map(|r| json!({ "room_id": r.id, "members": r.registered() }))
         .collect();
     v.sort_by(|a, b| a["room_id"].as_str().cmp(&b["room_id"].as_str()));
     Ok(json!({ "rooms": v }))
@@ -75,10 +72,7 @@ fn rooms() -> Result<Value, Failure> {
 fn room_snapshot(rid: &str) -> Result<Value, Failure> {
     let s = sfu()?;
     let room = s.rooms.get(rid).ok_or_else(|| Code::RoomNotFound.failure())?;
-    let slot = |k: Kind| {
-        let f = room.slot(k);
-        json!({ "speaker": f.speaker.load_full().map(|x| x.as_str().to_string()), "rows": f.rows.load().len() })
-    };
+    let slot = |k: Kind| json!(room.slot(k).speaker.load_full().map(|x| x.as_str().to_string()));
     Ok(json!({ "room": {
         "room_id": room.id,
         "name": room.name,

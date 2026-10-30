@@ -144,7 +144,7 @@ fn run(c: &Ctx, o: &Opts) -> Result<(), String> {
             let v = c.get(&format!("/admin/sfus/{}/rooms", enc(id)))?;
             if !c.raw(&v) {
                 kv(&v, &["unit", "sfu_id", "total"]);
-                table(arr(&v, "rooms"), &["room_id", "members", "member_ids"]);
+                table(arr(&v, "rooms"), &["room_id", "members"]);
             }
         }
         "rooms" => {
