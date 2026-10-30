@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.4 · 정:RULE-OPS-SURFACE · 정:IMPL-OPS-DESTROY-REAP · 정:RULE-OPS-DROPS · 정:RULE-FLR-SNAPSHOT · 정:IMPL-AFF-FORCED · 정:CAND-BUS-HANDLE-SHAPE · 운영:RULE-READ-USERS · 운영:RULE-READ-DROPS · 운영:RULE-READ-ROOM-DETAIL · 운영:RULE-READ-USER-MEDIA · 운영:RULE-CTL-ROOM · 운영:RULE-FMT-NO-INVENT · model: claude-opus-5-5
-//! C 평면의 sfud 몫 — 게이트웨이가 `Call::Admin` 봉투로 넘긴 것: 연결(`links`) · 버림 계수 · 방 상세(정본) · 미디어 연결(배정표 · 재기록기) · 한 사람 퇴장(`reap`) · 즉시 폭파(`destroy` — 확인값 = `version`).
+// spec: v1.4 · 정:RULE-OPS-SURFACE · 정:IMPL-OPS-DESTROY-REAP · 정:RULE-OPS-DROPS · 정:RULE-FLR-SNAPSHOT · 정:IMPL-AFF-FORCED · 정:CAND-BUS-HANDLE-SHAPE · 운영:RULE-READ-USERS · 운영:RULE-READ-DROPS · 운영:RULE-READ-TRANSIT · 운영:RULE-READ-ROOM-DETAIL · 운영:RULE-READ-USER-MEDIA · 운영:RULE-CTL-ROOM · 운영:RULE-FMT-NO-INVENT · 정:RULE-OPS-TRANSIT · model: claude-opus-5-5
+//! C 평면의 sfud 몫 — 게이트웨이가 `Call::Admin` 봉투로 넘긴 것: 연결(`links`) · 버림 계수 · 체류 시간 · 방 상세(정본) · 미디어 연결(배정표 · 재기록기) · 한 사람 퇴장(`reap`) · 즉시 폭파(`destroy` — 확인값 = `version`).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -33,6 +33,7 @@ pub fn handle(sfu: &Arc<Sfu>, method: &str, path: &str, query: &BTreeMap<String,
             b["bus_ev_drop"] = json!(sfu.bus.dropped.load(Ordering::Relaxed) + super::drops::DROPS.bus_ev_drop.load(Ordering::Relaxed));
             Reply::Ok { body: b }
         }
+        ("GET", ["admin", "transit"]) => Reply::Ok { body: crate::fwd::work::transit_body() },
         ("GET", ["admin", "rooms", r, "snapshot"]) => snapshot(sfu, r),
         ("GET", ["admin", "users", u, "media"]) => media(sfu, u),
         ("POST", ["admin", "rooms", r, "reap", u]) => reap(sfu, r, u, exec),

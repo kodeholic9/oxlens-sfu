@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.4 · 정:RULE-OPS-SURFACE · 정:RULE-OPS-TOKEN · 정:IMPL-OPS-CUT · 정:IMPL-OPS-DESTROY-REAP · 정:RULE-OPS-DROPS · 운영:RULE-AUTH-THREE · 운영:RULE-READ-SFUS · 운영:RULE-READ-ROOMS · 운영:RULE-READ-USERS · 운영:RULE-READ-SNAPSHOT · 운영:RULE-READ-DROPS · 운영:RULE-READ-ROOM-DETAIL · 운영:RULE-READ-NODE-ROOMS · 운영:RULE-READ-BUS · 운영:RULE-READ-BUS-ALL · 운영:RULE-READ-USER-MEDIA · 운영:RULE-READ-USER-PROBE · 운영:RULE-CTL-SUPERVISOR · 운영:RULE-CTL-CUT · 운영:RULE-CTL-ROOM · 운영:RULE-CTL-LOG-LEVEL · 운영:RULE-RISK-CONFIRM · 운영:RULE-ERR-ADMIN-CODES · 운영:RULE-FMT-REPLY · 운영:RULE-FMT-NO-INVENT · model: claude-opus-5-5
+// spec: v1.4 · 정:RULE-OPS-SURFACE · 정:RULE-OPS-TOKEN · 정:IMPL-OPS-CUT · 정:IMPL-OPS-DESTROY-REAP · 정:RULE-OPS-DROPS · 운영:RULE-AUTH-THREE · 운영:RULE-READ-SFUS · 운영:RULE-READ-ROOMS · 운영:RULE-READ-USERS · 운영:RULE-READ-SNAPSHOT · 운영:RULE-READ-DROPS · 운영:RULE-READ-TRANSIT · 운영:RULE-READ-ROOM-DETAIL · 운영:RULE-READ-NODE-ROOMS · 운영:RULE-READ-BUS · 운영:RULE-READ-BUS-ALL · 운영:RULE-READ-USER-MEDIA · 운영:RULE-READ-USER-PROBE · 운영:RULE-CTL-SUPERVISOR · 운영:RULE-CTL-CUT · 운영:RULE-CTL-ROOM · 운영:RULE-CTL-LOG-LEVEL · 운영:RULE-RISK-CONFIRM · 운영:RULE-ERR-ADMIN-CODES · 운영:RULE-FMT-REPLY · 운영:RULE-FMT-NO-INVENT · model: claude-opus-5-5
 //! 운영 표면 `/admin/*` — 운영 토큰 또는 loopback(XFF 불신) · 읽기 · 되돌릴 수 있음 · 확인값 필수 셋 · 모르는 것은 지어내지 않는다.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -66,6 +66,7 @@ pub fn router() -> Router<HubRef> {
         .route("/admin/users", get(users))
         .route("/admin/snapshot", get(snapshot))
         .route("/admin/drops", get(drops))
+        .route("/admin/transit", get(transit))
         .route("/admin/bus", get(bus))
         .route("/admin/rooms/:room_id/snapshot", get(room_snapshot))
         .route("/admin/sfus/:sfu_id/rooms", get(sfu_rooms))
@@ -170,10 +171,21 @@ pub fn hub_drops(hub: &HubRef) -> Value {
 async fn drops(State(hub): State<HubRef>, ConnectInfo(p): ConnectInfo<SocketAddr>, h: HeaderMap) -> Response {
     guard!(hub, p, h);
     let mut units = vec![hub_drops(&hub)];
+    units.extend(sfu_units(&hub, "/admin/drops").await);
+    axum::Json(json!({"units": units})).into_response()
+}
+
+async fn transit(State(hub): State<HubRef>, ConnectInfo(p): ConnectInfo<SocketAddr>, h: HeaderMap) -> Response {
+    guard!(hub, p, h);
+    axum::Json(json!({"units": sfu_units(&hub, "/admin/transit").await})).into_response()
+}
+
+async fn sfu_units(hub: &HubRef, path: &str) -> Vec<Value> {
+    let mut units = Vec::new();
     for u in hub.sup.snapshot().iter().filter(|u| u.cfg.role == UnitRole::Sfu && u.cfg.kind != UnitKind::Inproc && u.cfg.enabled) {
-        let call = Call::Admin { method: "GET".into(), path: "/admin/drops".into(), query: BTreeMap::new(), body: None };
+        let call = Call::Admin { method: "GET".into(), path: path.into(), query: BTreeMap::new(), body: None };
         let r = match &u.epoch {
-            Some(e) if u.state == UnitState::Running => route::local(&hub, Some(e), &call).await,
+            Some(e) if u.state == UnitState::Running => route::local(hub, Some(e), &call).await,
             _ => Reply::fail(Code::SFU_UNAVAILABLE),
         };
         let row = match r {
@@ -188,7 +200,7 @@ async fn drops(State(hub): State<HubRef>, ConnectInfo(p): ConnectInfo<SocketAddr
         };
         units.push(row);
     }
-    axum::Json(json!({"units": units})).into_response()
+    units
 }
 
 pub async fn bus_body(hub: &HubRef) -> Value {

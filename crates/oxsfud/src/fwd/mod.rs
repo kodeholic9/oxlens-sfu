@@ -23,7 +23,7 @@ use crate::r#pub::{Stream, Uplink};
 pub const FLOOR_NOTIFY_MS: u64 = 500;
 pub const VOICE_LEVEL: u8 = 50;
 
-pub fn on_rtp(t: &Arc<Transport>, plain: &Bytes, now_ms: u64) {
+pub fn on_rtp(t: &Arc<Transport>, plain: &Bytes, now_ms: u64, at_us: u64) {
     let Some(r) = rtp::parse(plain) else {
         bump(&DROPS.rtp_malformed);
         return;
@@ -51,13 +51,14 @@ pub fn on_rtp(t: &Arc<Transport>, plain: &Bytes, now_ms: u64) {
         let Some(orig) = rtp::rtx_unwrap(&r, base.ssrc, stream.pt) else { return };
         let orig = Bytes::from(orig);
         let Some(r2) = rtp::parse(&orig) else { return };
-        media(t, &base, &stream, &r2, &orig, now_ms, true);
+        media(t, &base, &stream, &r2, &orig, now_ms, at_us, true);
         return;
     }
-    media(t, &up, &stream, &r, plain, now_ms, false);
+    media(t, &up, &stream, &r, plain, now_ms, at_us, false);
 }
 
-fn media(t: &Arc<Transport>, up: &Arc<Uplink>, stream: &Arc<Stream>, r: &rtp::Rtp<'_>, plain: &Bytes, now_ms: u64, recovered: bool) {
+#[allow(clippy::too_many_arguments)]
+fn media(t: &Arc<Transport>, up: &Arc<Uplink>, stream: &Arc<Stream>, r: &rtp::Rtp<'_>, plain: &Bytes, now_ms: u64, at_us: u64, recovered: bool) {
     if let Ok(mut ing) = up.ingress.lock() {
         if !recovered {
             ing.stats.update(r.seq, r.ts, now_ms);
@@ -108,7 +109,7 @@ fn media(t: &Arc<Transport>, up: &Arc<Uplink>, stream: &Arc<Stream>, r: &rtp::Rt
             slot.speaker_last_ms.store(now_ms, Ordering::Release);
             let _ = slot.speaker_first_ms.compare_exchange(0, now_ms.max(1), Ordering::AcqRel, Ordering::Acquire);
             slot.priming.store(false, Ordering::Release);
-            let mut fan = work::Fanout::new(r, plain, up, keyframe, level, now_ms);
+            let mut fan = work::Fanout::new(r, plain, up, keyframe, level, now_ms, at_us);
             for w in slot.downlinks.load().iter() {
                 let Some(dl) = w.upgrade() else { continue };
                 if dl.user == stream.user {
@@ -123,7 +124,7 @@ fn media(t: &Arc<Transport>, up: &Arc<Uplink>, stream: &Arc<Stream>, r: &rtp::Rt
             fan.flush();
         }
         Duplex::Full => {
-            let mut fan = work::Fanout::new(r, plain, up, keyframe, level, now_ms);
+            let mut fan = work::Fanout::new(r, plain, up, keyframe, level, now_ms, at_us);
             for w in stream.subs.load().iter() {
                 let Some(dl) = w.upgrade() else { continue };
                 let carry = dl.carry.load();

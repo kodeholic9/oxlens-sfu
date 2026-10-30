@@ -1,9 +1,9 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.4 · 정:RULE-FWD-MEDIA-WORKERS · 정:RULE-CONC-PERF-AXES · 정:RULE-OPS-DROPS · 정:IMPL-RTCP-TERMINATE · 정:IMPL-FLR-MEDIA-BIND · model: claude-opus-5-5
-//! 미디어 워커 — 수신 스레드 하나 · 미디어 워커 N(전송 객체마다 하나 고정 — 발행 · 구독을 따로 센다). 링은 워커마다 생산자 하나(워커마다 · 수신 스레드) + 제어 하나. 업링크 몫이 고른 줄은 목적지 워커마다 묶어 넘긴다. 키프레임 요청 · SR 번역 · 예열 프레임처럼 남의 전송 객체 상태를 쓰는 일도 그 워커로 넘긴다. 주기 RTCP · probe · 자동 층은 워커마다 제 전송 객체만 tick 으로 돈다. 링이 차면 기다리지 않고 버리고 센다. 일이 없으면 잠듦 표시를 세우고 잔다 — 넣는 쪽은 그 표시가 있을 때만 깨운다. 수신 스레드 · 워커가 끝나면 프로세스를 내린다.
+// spec: v1.4 · 정:RULE-FWD-MEDIA-WORKERS · 정:RULE-CONC-PERF-AXES · 정:RULE-OPS-DROPS · 정:IMPL-RTCP-TERMINATE · 정:IMPL-FLR-MEDIA-BIND · 정:RULE-OPS-TRANSIT · model: claude-opus-5-5
+//! 미디어 워커 — 수신 스레드 하나 · 미디어 워커 N(전송 객체마다 하나 고정 — 발행 · 구독을 따로 센다). 링은 워커마다 생산자 하나(워커마다 · 수신 스레드) + 제어 하나. 업링크 몫이 고른 줄은 목적지 워커마다 묶어 넘긴다. 키프레임 요청 · SR 번역 · 예열 프레임처럼 남의 전송 객체 상태를 쓰는 일도 그 워커로 넘긴다. 주기 RTCP · probe · 자동 층은 워커마다 제 전송 객체만 tick 으로 돈다. 링이 차면 기다리지 않고 버리고 센다. 일이 없으면 잠듦 표시를 세우고 잔다 — 넣는 쪽은 그 표시가 있을 때만 깨운다. 수신 스레드 · 워커가 끝나면 프로세스를 내린다. 받은 시각(μs)을 항목에 실어 다운링크 송신 뒤 체류 시간을 워커마다 센다.
 
 use std::cell::Cell;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread::Thread;
 use std::time::Duration;
@@ -26,6 +26,8 @@ const BATCH: usize = 64;
 const SPIN: u32 = 256;
 const PARK_MS: u64 = 50;
 pub const EXIT_CODE: i32 = 70;
+pub const TRANSIT_LE_US: [u64; 7] = [1_000, 5_000, 10_000, 50_000, 100_000, 500_000, 1_000_000];
+pub const TRANSIT_NAMES: [&str; 8] = ["le_1ms", "le_5ms", "le_10ms", "le_50ms", "le_100ms", "le_500ms", "le_1000ms", "gt_1000ms"];
 
 pub struct Out {
     pub dls: Vec<Arc<Downlink>>,
@@ -34,10 +36,11 @@ pub struct Out {
     pub keyframe: bool,
     pub level: Option<u8>,
     pub now_ms: u64,
+    pub at_us: u64,
 }
 
 pub enum Item {
-    In { t: Arc<Transport>, class: Class, data: Vec<u8> },
+    In { t: Arc<Transport>, class: Class, data: Vec<u8>, at_us: u64 },
     Out(Box<Out>),
     Key { up: Arc<Uplink>, now_ms: u64, infra: bool },
     Synth { dl: Arc<Downlink>, key: u64, seq: u16, ts: u32, payload: &'static [u8], now_ms: u64 },
@@ -57,6 +60,38 @@ struct Worker {
     pubs: AtomicUsize,
     subs: AtomicUsize,
     own: Mutex<Vec<Weak<Transport>>>,
+    transit: Transit,
+}
+
+#[derive(Default)]
+#[repr(align(128))]
+struct Transit {
+    buckets: [AtomicU64; 8],
+    sum_us: AtomicU64,
+}
+
+fn transit(at_us: u64) {
+    let Some(w) = current().and_then(|i| workers().and_then(|ws| ws.w.get(i))) else { return };
+    let us = common::time::mono_us().saturating_sub(at_us);
+    let b = TRANSIT_LE_US.iter().position(|&le| us <= le).unwrap_or(TRANSIT_LE_US.len());
+    w.transit.buckets[b].fetch_add(1, Ordering::Relaxed);
+    w.transit.sum_us.fetch_add(us, Ordering::Relaxed);
+}
+
+pub fn transit_body() -> serde_json::Value {
+    let mut o = serde_json::Map::new();
+    let (mut count, mut sum) = (0u64, 0u64);
+    for (b, name) in TRANSIT_NAMES.iter().enumerate() {
+        let v: u64 = workers().map(|ws| ws.w.iter().map(|w| w.transit.buckets[b].load(Ordering::Relaxed)).sum()).unwrap_or(0);
+        count += v;
+        o.insert((*name).to_string(), serde_json::json!(v));
+    }
+    if let Some(ws) = workers() {
+        sum = ws.w.iter().map(|w| w.transit.sum_us.load(Ordering::Relaxed)).sum();
+    }
+    o.insert("count".into(), serde_json::json!(count));
+    o.insert("sum_us".into(), serde_json::json!(sum));
+    serde_json::Value::Object(o)
 }
 
 pub struct Workers {
@@ -137,17 +172,17 @@ fn owner(t: &Transport) -> usize {
     t.worker.load(Ordering::Relaxed)
 }
 
-pub fn submit_in(t: &Arc<Transport>, class: Class, data: Vec<u8>) {
+pub fn submit_in(t: &Arc<Transport>, class: Class, data: Vec<u8>, at_us: u64) {
     if data.len() > SLOT_BYTES {
         bump(&DROPS.oversize);
         return;
     }
     let idx = owner(t);
     if workers().is_none() {
-        super::rx::dispatch(t, class, &data);
+        super::rx::dispatch(t, class, &data, at_us);
         return;
     }
-    if !push(idx, Item::In { t: t.clone(), class, data }) {
+    if !push(idx, Item::In { t: t.clone(), class, data, at_us }) {
         bump(&DROPS.ingress_queue_full);
     }
 }
@@ -208,12 +243,13 @@ pub struct Fanout<'a> {
     keyframe: bool,
     level: Option<u8>,
     now_ms: u64,
+    at_us: u64,
     per: Vec<Vec<Arc<Downlink>>>,
 }
 
 impl<'a> Fanout<'a> {
-    pub fn new(r: &'a super::rtp::Rtp<'a>, buf: &'a Bytes, up: &'a Arc<Uplink>, keyframe: bool, level: Option<u8>, now_ms: u64) -> Fanout<'a> {
-        Fanout { r, buf, up, keyframe, level, now_ms, per: Vec::new() }
+    pub fn new(r: &'a super::rtp::Rtp<'a>, buf: &'a Bytes, up: &'a Arc<Uplink>, keyframe: bool, level: Option<u8>, now_ms: u64, at_us: u64) -> Fanout<'a> {
+        Fanout { r, buf, up, keyframe, level, now_ms, at_us, per: Vec::new() }
     }
 
     pub fn add(&mut self, dl: &Arc<Downlink>) {
@@ -223,7 +259,9 @@ impl<'a> Fanout<'a> {
         };
         let idx = owner(&t);
         if here(idx) {
-            super::egress::forward(dl, self.r, self.up, self.keyframe, self.level, self.now_ms);
+            if super::egress::forward(dl, self.r, self.up, self.keyframe, self.level, self.now_ms) {
+                transit(self.at_us);
+            }
             return;
         }
         if self.per.is_empty() {
@@ -238,7 +276,7 @@ impl<'a> Fanout<'a> {
                 continue;
             }
             let lost = dls.len() as u64;
-            let out = Out { dls, up: self.up.clone(), buf: self.buf.clone(), keyframe: self.keyframe, level: self.level, now_ms: self.now_ms };
+            let out = Out { dls, up: self.up.clone(), buf: self.buf.clone(), keyframe: self.keyframe, level: self.level, now_ms: self.now_ms, at_us: self.at_us };
             if !push(idx, Item::Out(Box::new(out))) {
                 DROPS.egress_queue_full.fetch_add(lost, Ordering::Relaxed);
             }
@@ -256,17 +294,19 @@ fn alive(dl: &Downlink) -> bool {
 
 fn handle(item: Item) {
     match item {
-        Item::In { t, class, data } => {
+        Item::In { t, class, data, at_us } => {
             if t.closed.load(Ordering::Acquire) {
                 bump(&DROPS.transport_gone);
                 return;
             }
-            super::rx::dispatch(&t, class, &data);
+            super::rx::dispatch(&t, class, &data, at_us);
         }
         Item::Out(o) => {
             if let Some(r) = super::rtp::parse(&o.buf) {
                 for dl in o.dls.iter().filter(|d| alive(d)) {
-                    super::egress::forward(dl, &r, &o.up, o.keyframe, o.level, o.now_ms);
+                    if super::egress::forward(dl, &r, &o.up, o.keyframe, o.level, o.now_ms) {
+                        transit(o.at_us);
+                    }
                 }
             }
         }
@@ -393,7 +433,7 @@ pub fn start(n: usize, tick: TickCfg, rt: tokio::runtime::Handle) -> Result<(), 
         }
         rings.push(ArrayQueue::new(READER_RING));
         rings.push(ArrayQueue::new(CONTROL_RING));
-        w.push(Worker { rings, sleeping: AtomicBool::new(false), thread: OnceLock::new(), pubs: AtomicUsize::new(0), subs: AtomicUsize::new(0), own: Mutex::new(Vec::new()) });
+        w.push(Worker { rings, sleeping: AtomicBool::new(false), thread: OnceLock::new(), pubs: AtomicUsize::new(0), subs: AtomicUsize::new(0), own: Mutex::new(Vec::new()), transit: Transit::default() });
     }
     WORKERS.set(Workers { w, tick }).map_err(|_| "미디어 워커를 두 번 띄웠다".to_string())?;
     for i in 0..n {

@@ -7,12 +7,12 @@ use std::sync::Arc;
 use crate::link::Transport;
 use crate::link::io::Class;
 
-pub fn dispatch(t: &Arc<Transport>, class: Class, data: &[u8]) {
+pub fn dispatch(t: &Arc<Transport>, class: Class, data: &[u8], at_us: u64) {
     let now = common::time::mono_ms();
     match class {
         Class::Rtp => {
             if let Some(p) = t.unprotect_rtp(data) {
-                super::on_rtp(t, &p, now);
+                super::on_rtp(t, &p, now, at_us);
             }
         }
         Class::Rtcp => {

@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.4 · 정:RULE-LINK-TRANSPORT · 정:RULE-LINK-PAIR-LIVENESS · 정:IMPL-LINK-PEER-STATE · 정:IMPL-LINK-ICE-RESTART · 정:RULE-OPS-DROPS · 정:CAND-LINK-UDP-BUFFER · 정:RULE-FWD-MEDIA-WORKERS · model: claude-opus-5-5
-//! 전송 등록부와 소켓 — UDP 포트 하나 · ICE-TCP passive(RFC 4571) · demux(첫 바이트) · STUN 검증 차례(조회 → MI 검증 → 생존 → 지명 → 응답) · DTLS 넘김. 수신 스레드가 UDP · TCP 리슨 · TCP 연결을 함께 기다리고(`mio`) 주소 색인(ufrag · 경로 주소)을 혼자 쥔다 — 제어 쪽 등록 · 회수 · ufrag 교체는 명령 채널로 넘긴다. TCP 송신은 연결마다 송신 버퍼(64KB)를 두고 막히면 수신 스레드가 쓰기 가능 사건에서 마저 비운다.
+// spec: v1.4 · 정:RULE-LINK-TRANSPORT · 정:RULE-LINK-PAIR-LIVENESS · 정:IMPL-LINK-PEER-STATE · 정:IMPL-LINK-ICE-RESTART · 정:RULE-OPS-DROPS · 정:CAND-LINK-UDP-BUFFER · 정:RULE-FWD-MEDIA-WORKERS · 정:RULE-OPS-TRANSIT · model: claude-opus-5-5
+//! 전송 등록부와 소켓 — UDP 포트 하나 · ICE-TCP passive(RFC 4571) · demux(첫 바이트) · STUN 검증 차례(조회 → MI 검증 → 생존 → 지명 → 응답) · DTLS 넘김. 데이터그램마다 받은 시각(μs)을 워커로 넘긴다(체류 시간의 시작). 수신 스레드가 UDP · TCP 리슨 · TCP 연결을 함께 기다리고(`mio`) 주소 색인(ufrag · 경로 주소)을 혼자 쥔다 — 제어 쪽 등록 · 회수 · ufrag 교체는 명령 채널로 넘긴다. TCP 송신은 연결마다 송신 버퍼(64KB)를 두고 막히면 수신 스레드가 쓰기 가능 사건에서 마저 비운다.
 
 use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
@@ -279,7 +279,8 @@ impl Rx {
         self.by_via.get(via).and_then(Weak::upgrade)
     }
 
-    fn on_datagram(&mut self, data: &[u8], via: Via, now_ms: u64) {
+    fn on_datagram(&mut self, data: &[u8], via: Via, at_us: u64) {
+        let now_ms = at_us / 1_000;
         match classify(data) {
             Class::Stun => self.on_stun(data, via, now_ms),
             Class::Dtls => match self.lookup(&via) {
@@ -287,7 +288,7 @@ impl Rx {
                 None => bump(&DROPS.rtp_unknown_path),
             },
             c @ (Class::Rtp | Class::Rtcp) => match self.lookup(&via) {
-                Some(t) => crate::fwd::work::submit_in(&t, c, data.to_vec()),
+                Some(t) => crate::fwd::work::submit_in(&t, c, data.to_vec(), at_us),
                 None => bump(&DROPS.rtp_unknown_path),
             },
             Class::Unknown => bump(&DROPS.demux_unknown),
@@ -362,7 +363,7 @@ impl Rx {
         }
     }
 
-    fn read_conn(&mut self, conn: u64, buf: &mut [u8], now_ms: u64) {
+    fn read_conn(&mut self, conn: u64, buf: &mut [u8]) {
         let mut frames = Vec::new();
         let mut closed = false;
         let addr = {
@@ -384,6 +385,7 @@ impl Rx {
             }
             c.addr
         };
+        let at_us = common::time::mono_us();
         for f in frames {
             if f.is_empty() {
                 continue;
@@ -392,7 +394,7 @@ impl Rx {
                 bump(&DROPS.oversize);
                 continue;
             }
-            self.on_datagram(&f, Via::Tcp(conn, addr), now_ms);
+            self.on_datagram(&f, Via::Tcp(conn, addr), at_us);
         }
         if closed {
             self.tcp_closed(conn);
@@ -476,7 +478,7 @@ impl Reader {
                 match ev.token() {
                     T_UDP => loop {
                         match self.udp.recv_from(&mut buf) {
-                            Ok((n, from)) => rx.on_datagram(&buf[..n], Via::Udp(from), common::time::mono_ms()),
+                            Ok((n, from)) => rx.on_datagram(&buf[..n], Via::Udp(from), common::time::mono_us()),
                             Err(e) if e.kind() == ErrorKind::WouldBlock => break,
                             Err(_) => break,
                         }
@@ -489,7 +491,7 @@ impl Reader {
                             self.io.flush(conn);
                         }
                         if ev.is_readable() || ev.is_read_closed() || ev.is_error() {
-                            rx.read_conn(conn, &mut buf, now);
+                            rx.read_conn(conn, &mut buf);
                         }
                     }
                 }

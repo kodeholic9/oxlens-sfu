@@ -31,17 +31,17 @@ fn send(dl: &Downlink, t: &Transport, pkt: &[u8], twcc: Option<u16>) -> bool {
     ok
 }
 
-pub fn forward(dl: &Arc<Downlink>, r: &Rtp<'_>, up: &Arc<Uplink>, keyframe: bool, audio_level: Option<u8>, now_ms: u64) {
-    let Some(t) = dl.transport.upgrade() else { return };
+pub fn forward(dl: &Arc<Downlink>, r: &Rtp<'_>, up: &Arc<Uplink>, keyframe: bool, audio_level: Option<u8>, now_ms: u64) -> bool {
+    let Some(t) = dl.transport.upgrade() else { return false };
     let key = u64::from(up.ssrc);
     let (seq, ts) = {
-        let Ok(mut rw) = dl.rewrite.lock() else { return };
+        let Ok(mut rw) = dl.rewrite.lock() else { return false };
         let switching = rw.rw.source() != Some(key);
         if switching && dl.kind == oxsig::types::Kind::Video && !keyframe {
             bump(&DROPS.await_keyframe);
             drop(rw);
             super::work::keyframe(up, now_ms, false);
-            return;
+            return false;
         }
         let cov = covers(dl.clock, r.payload());
         let m = rw.rw.map(key, r.seq, r.ts, now_ms, dl.clock, cov);
@@ -54,7 +54,7 @@ pub fn forward(dl: &Arc<Downlink>, r: &Rtp<'_>, up: &Arc<Uplink>, keyframe: bool
     };
     let (block, twcc) = ext_for(dl, &t, audio_level);
     let pkt = rtp::rebuild(r, dl.ssrc, seq, ts, dl.pt.load(Ordering::Relaxed), &block);
-    send(dl, &t, &pkt, twcc);
+    send(dl, &t, &pkt, twcc)
 }
 
 pub fn synthetic(dl: &Arc<Downlink>, key: u64, seq: u16, ts: u32, payload: &[u8], now_ms: u64) {
