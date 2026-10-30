@@ -490,7 +490,7 @@ fn uplink(w: &Worker, tr: &Arc<Transport>, ups: &[Arc<PubTrack>], now: u64, now_
                 _ => continue,
             };
             let (lsr, dlsr) = match srs.get(&t.ssrc) {
-                Some(s) => (((s.ntp >> 16) & 0xffff_ffff) as u32, (mono_us().saturating_sub(s.at_us) * 65_536 / 1_000_000) as u32),
+                Some(s) => (((s.ntp >> 16) & 0xffff_ffff) as u32, ((mono_us().saturating_sub(s.at_us) * 65_536 / 1_000_000) as u32).max(1)),
                 None => (0, 0),
             };
             send_rtcp(w, tr, &build_rr(t.ssrc, &r, lsr, dlsr));
