@@ -229,6 +229,20 @@ impl Bus {
         None
     }
 
+    pub async fn session_users(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Ok(replies) = self.session.liveliness().get(self.keys.sess_all()).timeout(SESS_GET_TIMEOUT).await {
+            while let Ok(r) = replies.recv_async().await {
+                if let Ok(s) = r.result()
+                    && let Some(Parsed::Sess { user, .. }) = self.keys.parse(s.key_expr().as_str())
+                {
+                    out.push(user);
+                }
+            }
+        }
+        out
+    }
+
     pub async fn sessions_of_user(&self, user: &str) -> Vec<(String, String)> {
         let sel = format!("ox/{}/int/sess/{user}/**", self.keys.ns);
         let mut out = Vec::new();
@@ -403,13 +417,21 @@ impl Bus {
         self.view.lock().map(|v| v.live_nodes()).unwrap_or_default()
     }
 
-    pub async fn peers(&self) -> Vec<(String, String)> {
+    pub async fn peers(&self) -> Vec<(String, String, Vec<String>)> {
+        let mut links: HashMap<String, Vec<String>> = HashMap::new();
+        for l in self.session.info().links().await {
+            links.entry(l.zid().to_string()).or_default().push(format!("{} -> {}", l.src(), l.dst()));
+        }
         let mut out = Vec::new();
         for z in self.session.info().routers_zid().await {
-            out.push((z.to_string(), "router".to_string()));
+            let k = z.to_string();
+            let l = links.get(&k).cloned().unwrap_or_default();
+            out.push((k, "router".to_string(), l));
         }
         for z in self.session.info().peers_zid().await {
-            out.push((z.to_string(), "peer".to_string()));
+            let k = z.to_string();
+            let l = links.get(&k).cloned().unwrap_or_default();
+            out.push((k, "peer".to_string(), l));
         }
         out
     }

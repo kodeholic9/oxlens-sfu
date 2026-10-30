@@ -242,7 +242,9 @@ pub async fn bind(ctx: &Arc<Ctx>, conn: &Conn, op: u16, pid: u32, flags: u8, bod
         }
     };
     if ctx.policy.quota.max_sessions > 0 {
-        let n = ctx.by_sid.lock().map(|g| g.len()).unwrap_or(0) as u32;
+        let local = ctx.by_sid.lock().map(|g| g.len()).unwrap_or(0) as u32;
+        let deploy = ctx.bus.session_users().await.into_iter().filter(|u| u != &id.user_id).count() as u32;
+        let n = local.max(deploy);
         ctx.full.store(n >= ctx.policy.quota.max_sessions, Ordering::Relaxed);
         if ctx.full_flag() {
             fail_bind(ctx, conn, op, pid, flags, Code::QuotaExceeded.failure(), Some("SES.S.bind_4003"));

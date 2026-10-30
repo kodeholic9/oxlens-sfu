@@ -172,7 +172,7 @@ pub async fn sfu_rooms(hub: &Hub, id: &str) -> AdminResult {
 }
 
 pub async fn bus_view(hub: &Hub) -> Value {
-    let peers: Vec<Value> = hub.bus.peers().await.into_iter().map(|(z, w)| json!({ "zid": z, "whatami": w, "links": [] })).collect();
+    let peers: Vec<Value> = hub.bus.peers().await.into_iter().map(|(z, w, l)| json!({ "zid": z, "whatami": w, "links": l })).collect();
     let v = match hub.bus.view.lock() {
         Ok(v) => v.clone(),
         Err(_) => return json!({}),

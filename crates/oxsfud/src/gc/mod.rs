@@ -42,6 +42,7 @@ pub fn leave(peer: &Arc<Peer>, room_id: &str, why: Why, keep_roster: bool) -> bo
     crate::ops::floor::run(&room, |f, _| f.ws_leave(&user));
     if crate::aff::pub_room(peer).as_deref() == Some(room_id) {
         crate::aff::set_pub_room(peer, None);
+        crate::ops::media::aff_line(&user, "AFF.S.left", Some(room_id), None, why.as_str());
     }
     let hidden = if keep_roster {
         room.member(&user).map(|m| m.hidden).unwrap_or(false)

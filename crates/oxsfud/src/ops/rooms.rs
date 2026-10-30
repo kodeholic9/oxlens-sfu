@@ -173,7 +173,7 @@ pub fn join(c: &Ctx, body: &Value) -> Result<Value, Failure> {
         return Err(Code::MidLimit.failure());
     }
     let claims = c.claims.clone().unwrap_or_default();
-    let select = req.select.unwrap_or(false);
+    let select = req.select.unwrap_or(true);
     let member = Member {
         user: c.user.clone(),
         role: Some(req.role.unwrap_or(255)),
@@ -189,13 +189,25 @@ pub fn join(c: &Ctx, body: &Value) -> Result<Value, Failure> {
     let u = c.user.clone();
     let fr = me.permission.floor_request;
     super::floor::run(&room, |f, _| f.ws_join(&u, half, fr));
+    let old_pub = crate::aff::pub_room(&peer);
     if select {
-        if let Err(f) = super::media::move_pub(&peer, Some(&room), claims.permission) {
-            tracing::info!(kind = "diag", user = %c.user, room = %room.id, "implicit pub_select refused ({})", f.name);
+        match super::media::move_pub(&peer, Some(&room), claims.permission) {
+            Ok(()) => {
+                let label = if old_pub.is_some() && old_pub.as_deref() != Some(room.id.as_str()) { "AFF.S.join_select_moved" } else { "AFF.S.join_select" };
+                super::media::aff_line(&c.user, label, old_pub.as_deref(), Some(&room.id), "ROOM_JOIN");
+            }
+            Err(f) => {
+                let label = if f.code == Code::NotAuthorized.num() { "AFF.S.reject_perm" } else { "AFF.S.reject" };
+                super::media::aff_line(&c.user, label, old_pub.as_deref(), old_pub.as_deref(), "ROOM_JOIN");
+                tracing::info!(kind = "diag", user = %c.user, room = %room.id, "implicit pub_select refused ({})", f.name);
+            }
         }
-    } else if crate::aff::pub_room(&peer).as_deref() == Some(room.id.as_str()) {
-        let u = c.user.clone();
-        super::floor::run(&room, |f, _| f.ws_pub_select(&u));
+    } else {
+        super::media::aff_line(&c.user, "AFF.S.join_listen", old_pub.as_deref(), old_pub.as_deref(), "ROOM_JOIN");
+        if old_pub.as_deref() == Some(room.id.as_str()) {
+            let u = c.user.clone();
+            super::floor::run(&room, |f, _| f.ws_pub_select(&u));
+        }
     }
     peer.ever_sent_join.store(true, Ordering::Release);
     let res = RoomJoinRes {

@@ -6,7 +6,7 @@ use oxsfud::cfg::SfuCfg;
 
 fn args(id: &str, ns: &str) -> Vec<String> {
     let policy = format!("{}/../../policy.toml", env!("CARGO_MANIFEST_DIR"));
-    ["--id", id, "--policy", &policy, "--zenoh-namespace", ns, "--grpc-listen", "127.0.0.1:0", "--udp-port", "0"].iter().map(|s| s.to_string()).collect()
+    ["--id", id, "--policy", &policy, "--zenoh-namespace", ns, "--grpc-listen", "127.0.0.1:0", "--udp-port", "0", "--zenoh-connect", "tcp/127.0.0.1:7447", "--node-grace-secs", "10"].iter().map(|s| s.to_string()).collect()
 }
 
 #[test]

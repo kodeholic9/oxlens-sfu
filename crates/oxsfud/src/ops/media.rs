@@ -178,18 +178,32 @@ fn perm_of(c: &Ctx, room: &Room) -> Permission {
     room.permission_for(&c.user, c.claims.as_ref().and_then(|x| x.permission))
 }
 
+fn item<T: serde::de::DeserializeOwned>(v: &Value, k: &str) -> Option<T> {
+    v.get(k).and_then(|x| serde_json::from_value(x.clone()).ok())
+}
+
 pub fn publish(c: &Ctx, body: &Value) -> Result<Value, Failure> {
-    let req: PublishTracksReq = parse(body)?;
-    match req {
-        PublishTracksReq::Remove { room_id, track_ids, .. } => unpublish(c, &room_id, &track_ids),
-        PublishTracksReq::Add { room_id, tracks, twcc_extmap_id, rid_extmap_id, repair_rid_extmap_id, mid_extmap_id, audio_level_extmap_id, .. } => {
+    if body.get("action").and_then(|v| v.as_str()) == Some("remove") {
+        return match parse::<PublishTracksReq>(body)? {
+            PublishTracksReq::Remove { room_id, track_ids, .. } => unpublish(c, &room_id, &track_ids),
+            PublishTracksReq::Add { .. } => Err(Code::InvalidPayload.failure()),
+        };
+    }
+    let room_id: String = item(body, "room_id").ok_or_else(|| Code::MissingField.failure().with_message("room_id"))?;
+    let items: Vec<Value> = item(body, "tracks").ok_or_else(|| Code::MissingField.failure().with_message("tracks"))?;
+    let ext = |k: &str| -> Option<u8> { item(body, k) };
+    let (twcc_extmap_id, rid_extmap_id, repair_rid_extmap_id, mid_extmap_id, audio_level_extmap_id) =
+        (ext("twcc_extmap_id"), ext("rid_extmap_id"), ext("repair_rid_extmap_id"), ext("mid_extmap_id"), ext("audio_level_extmap_id"));
+    {
+        {
             let s = sfu()?;
             let (peer, room) = joined(c, &room_id)?;
             let perm = perm_of(c, &room);
-            let denied: Vec<&str> = tracks
+            let denied: Vec<&str> = items
                 .iter()
-                .filter(|t| !crate::aff::bit_allows(&perm, t.kind, t.source))
-                .map(|t| crate::aff::bit_name(t.kind, t.source))
+                .filter_map(|v| item::<Kind>(v, "kind").map(|k| (k, item::<Source>(v, "source"))))
+                .filter(|(k, src)| !crate::aff::bit_allows(&perm, *k, *src))
+                .map(|(k, src)| crate::aff::bit_name(k, src))
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect();
@@ -197,20 +211,28 @@ pub fn publish(c: &Ctx, body: &Value) -> Result<Value, Failure> {
                 return Err(Code::NotAuthorized.failure().with_details(json!({ "denied": denied })));
             }
             let pub_room = crate::aff::pub_room(&peer);
-            if tracks.iter().any(|t| t.duplex.unwrap_or(Duplex::Full) == Duplex::Full) && pub_room.as_deref() != Some(room_id.as_str()) {
+            if items.iter().any(|v| item::<Duplex>(v, "duplex").unwrap_or(Duplex::Full) == Duplex::Full) && pub_room.as_deref() != Some(room_id.as_str()) {
                 return Err(Code::NotPubRoom.failure());
             }
             let ctx = s.pubs.ctx(&c.user);
-            if tracks.len() > PER_REQUEST || ctx.active() + tracks.len() > PER_PERSON {
+            if items.len() > PER_REQUEST || ctx.active() + items.len() > PER_PERSON {
                 return Err(Code::TrackLimit.failure().with_details(json!({ "per_request": PER_REQUEST, "per_person": PER_PERSON })));
             }
-            for t in &tracks {
-                if t.mid.is_empty() || t.ssrc == 0 {
-                    return Err(Code::MissingField.failure().with_message("mid/ssrc"));
+            let mut tracks: Vec<PublishTrack> = Vec::with_capacity(items.len());
+            for v in &items {
+                for k in ["kind", "ssrc", "mid", "pt"] {
+                    if v.get(k).map(|x| x.is_null()).unwrap_or(true) {
+                        return Err(Code::MissingField.failure().with_message(k));
+                    }
+                }
+                let t: PublishTrack = serde_json::from_value(v.clone()).map_err(|e| Code::InvalidPayload.failure().with_message(e.to_string()))?;
+                if t.mid.is_empty() {
+                    return Err(Code::MissingField.failure().with_message("mid"));
                 }
                 if t.simulcast.unwrap_or(false) && rid_extmap_id.is_none() {
                     return Err(Code::MissingField.failure().with_message("rid_extmap_id"));
                 }
+                tracks.push(t);
             }
             if peer.pc_mode == PcMode::One
                 && let Some(t) = s.table(&peer)
@@ -590,21 +612,35 @@ pub fn affiliation(c: &Ctx, body: &Value) -> Result<Value, Failure> {
     let s = sfu()?;
     let peer = s.peer(&c.user).ok_or_else(|| Code::NotInRoom.failure())?;
     let token = c.claims.as_ref().and_then(|x| x.permission);
+    let old = crate::aff::pub_room(&peer);
     if let Some(sel) = req.pub_select.as_deref() {
         if let Some(room) = s.rooms.get(sel) {
             if !peer.in_room(sel) {
                 return Err(Code::NotInRoom.failure());
             }
-            move_pub(&peer, Some(&room), token)?;
+            if old.as_deref() == Some(sel) {
+                aff_line(&c.user, "AFF.S.same", old.as_deref(), old.as_deref(), "AFFILIATION");
+            } else if let Err(f) = move_pub(&peer, Some(&room), token) {
+                let label = if f.code == Code::NotAuthorized.num() { "AFF.S.reject_perm" } else { "AFF.S.reject" };
+                aff_line(&c.user, label, old.as_deref(), old.as_deref(), "AFFILIATION");
+                return Err(f);
+            } else {
+                aff_line(&c.user, "AFF.S.select", old.as_deref(), Some(sel), "AFFILIATION");
+            }
         }
     } else if let Some(de) = req.pub_deselect.as_deref()
-        && crate::aff::pub_room(&peer).as_deref() == Some(de)
+        && old.as_deref() == Some(de)
     {
         release_floor_if_speaker(&c.user, de);
         move_pub(&peer, None, token)?;
+        aff_line(&c.user, "AFF.S.away", old.as_deref(), None, "AFFILIATION");
     }
     let a = crate::aff::affiliation(&peer);
     ok(&AffiliationRes { sub_rooms: a.sub_rooms, pub_room: a.pub_room, cause: AffiliationCause::User, change_id: req.change_id })
+}
+
+pub fn aff_line(user: &str, label: &str, from: Option<&str>, to: Option<&str>, cause: &str) {
+    super::transition("AFF", user, label, from.unwrap_or("-"), to.unwrap_or("-"), cause, &[("user", user)]);
 }
 
 pub fn message(c: &Ctx, body: &Value) -> Result<Value, Failure> {

@@ -340,21 +340,29 @@ fn user(c: &Ctx, u: &str, interval_ms: u64) -> Result<(), String> {
                 let pw = prev.map(|p| &p["rewrite"]);
                 let seq_now = rw["last_seq"].as_u64();
                 let seq_before = pw.and_then(|p| p["last_seq"].as_u64());
-                let flow = match (seq_before, seq_now, pw.and_then(|p| p["last_at"].as_u64()), rw["last_at"].as_u64()) {
+                let at_now = rw["last_at"].as_u64();
+                let at_before = pw.and_then(|p| p["last_at"].as_u64());
+                let delta = |a: Option<u64>, b: Option<u64>| match (a, b) {
+                    (Some(x), Some(y)) => json!(y as i64 - x as i64),
+                    _ => Value::Null,
+                };
+                let flow = match (seq_before, seq_now, at_before, at_now) {
                     (Some(x), Some(y), Some(t0), Some(t1)) if x != y || t0 != t1 => "흐름",
                     (Some(_), Some(_), _, _) => "멎음",
                     _ => "-",
                 };
-                let seq = match (seq_before, seq_now) {
-                    (Some(x), Some(y)) => format!("{x}→{y}"),
-                    (None, Some(y)) => format!("-→{y}"),
-                    _ => "-".into(),
+                let src = match &rw["src"] {
+                    Value::Object(_) => format!("{}/{}", cell(&rw["src"]["user_id"]), cell(&rw["src"]["track_id"])),
+                    x => cell(x),
                 };
-                let src = if rw["src"].is_null() { "-".to_string() } else { format!("{}/{}", cell(&rw["src"]["user_id"]), cell(&rw["src"]["track_id"])) };
-                json!({ "mid": mid, "kind": m["entry"]["kind"], "track_id": m["entry"]["track_id"], "room_id": m["entry"]["room_id"], "ssrc": m["entry"]["ssrc"], "src": src, "last_seq": seq, "switches": rw["switches"], "flow": flow })
+                json!({
+                    "sfu_id": lb["sfu_id"], "mid": mid, "kind": m["entry"]["kind"], "track_id": m["entry"]["track_id"], "room_id": m["entry"]["room_id"],
+                    "src": src, "switches": rw["switches"], "flow": flow,
+                    "last_seq": seq_now, "Δseq": delta(seq_before, seq_now), "last_at": at_now, "Δat": delta(at_before, at_now),
+                })
             })
             .collect();
-        table(&rows, &["mid", "kind", "track_id", "room_id", "ssrc", "src", "last_seq", "switches", "flow"]);
+        table(&rows, &["sfu_id", "mid", "kind", "track_id", "room_id", "src", "switches", "flow", "last_seq", "Δseq", "last_at", "Δat"]);
     }
     Ok(())
 }

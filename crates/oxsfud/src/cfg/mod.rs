@@ -27,7 +27,6 @@ pub const ARGS: &[&str] = &[
 ];
 
 pub const DEFAULT_CONTROL_THREADS: usize = 2;
-pub const DEFAULT_GRACE_SECS: u64 = 10;
 
 pub struct SfuCfg {
     pub args: Args,
@@ -79,8 +78,8 @@ impl SfuCfg {
         }
         let policy_path = args.get("policy").unwrap_or("policy.toml").to_string();
         let policy = Policy::load(std::path::Path::new(&policy_path)).map_err(|x| x.to_string())?;
-        let grpc: SocketAddr = args.get("grpc-listen").unwrap_or("127.0.0.1:50061").parse().map_err(|x| format!("--grpc-listen: {x}"))?;
-        let udp_port = args.parse_num::<u16>("udp-port").map_err(e)?.unwrap_or(20_000);
+        let grpc: SocketAddr = args.require("grpc-listen").map_err(e)?.parse().map_err(|x| format!("--grpc-listen: {x}"))?;
+        let udp_port = args.parse_num::<u16>("udp-port").map_err(e)?.ok_or("--udp-port is required")?;
         let tcp_port = args.parse_num::<u16>("tcp-port").map_err(e)?;
         let ip = match args.get("public-ip") {
             None => IpAddr::V4(Ipv4Addr::LOCALHOST),
@@ -92,10 +91,10 @@ impl SfuCfg {
         if !common::keyspace::valid_piece(&namespace) {
             return Err(format!("zenoh-namespace {namespace:?} 는 키 조각이 못 된다"));
         }
-        let connect = args.get("zenoh-connect").unwrap_or("tcp/127.0.0.1:7447").to_string();
+        let connect = args.require("zenoh-connect").map_err(e)?.to_string();
         let log_dir = args.get("log-dir").map(PathBuf::from);
         let log_socket = args.get("log-socket").map(PathBuf::from);
-        let grace_secs = args.parse_num::<u64>("node-grace-secs").map_err(e)?.unwrap_or(DEFAULT_GRACE_SECS);
+        let grace_secs = args.parse_num::<u64>("node-grace-secs").map_err(e)?.ok_or("--node-grace-secs is required")?;
         let workers = args.parse_num::<usize>("media-workers").map_err(e)?.unwrap_or_else(default_workers).max(1);
         let control_threads = args.parse_num::<usize>("control-threads").map_err(e)?.unwrap_or(DEFAULT_CONTROL_THREADS).max(1);
         let queue_packets = args.parse_num::<usize>("worker-queue-packets").map_err(e)?.unwrap_or(crate::fwd::rt::DEFAULT_QUEUE_PACKETS).max(1);
@@ -127,6 +126,7 @@ impl SfuCfg {
 
     pub fn banner_fields(&self) -> Vec<(String, String)> {
         let mut v = self.args.banner_fields();
+        v.retain(|(k, _)| k != "build");
         for (k, x) in [
             ("public-ip", self.ip.to_string()),
             ("media-workers", self.workers.to_string()),

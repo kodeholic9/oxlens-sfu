@@ -52,6 +52,7 @@ impl HubCfg {
 
     pub fn banner_fields(&self) -> Vec<(String, String)> {
         let mut v = self.args.banner_fields();
+        v.retain(|(k, _)| k != "build");
         v.extend(self.system.banner_fields());
         v.extend(self.policy.banner_fields_hub());
         v
