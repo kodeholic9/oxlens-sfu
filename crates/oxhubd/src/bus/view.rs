@@ -123,6 +123,9 @@ impl View {
     pub fn settle(&mut self, now: u64) -> Settled {
         let mut out = Settled::default();
         if self.pending.is_empty() && self.isolated.is_none() && !self.held.is_empty() {
+            if now < self.last_token_at + SETTLE_MS {
+                return out;
+            }
             out.dropped_rooms = self.release_held();
             out.released = out.dropped_rooms.clone();
             return out;
@@ -281,6 +284,43 @@ mod tests {
         assert!(v.held.contains("rb"));
         assert!(v.candidates(2_000).contains(&"b".to_string()));
         assert!(!v.candidates(40_000).contains(&"b".to_string()));
+    }
+
+    #[test]
+    fn held_rooms_wait_for_settle_after_recovery() {
+        let mut v = View::new("c", "ci", 30_000);
+        v.on_token(np("a"), 0);
+        v.on_token(np("b"), 0);
+        v.on_token(rp("rb", "b"), 0);
+        v.on_token(rd("rb", "b"), 10);
+        v.on_token(nd("a"), 20);
+        v.on_token(nd("b"), 25);
+        assert!(v.settle(2_000).isolated_now);
+        assert!(v.held.contains("rb"));
+        v.on_token(np("a"), 5_000);
+        assert!(v.settle(5_200).dropped_rooms.is_empty());
+        assert!(v.held.contains("rb"));
+        v.on_token(np("b"), 5_400);
+        v.on_token(rp("rb", "b"), 5_400);
+        assert!(v.settle(7_000).dropped_rooms.is_empty());
+        assert!(v.held.is_empty());
+        assert!(v.room_node("rb").is_some());
+    }
+
+    #[test]
+    fn held_room_of_absent_owner_drops_after_settle() {
+        let mut v = View::new("c", "ci", 30_000);
+        v.on_token(np("a"), 0);
+        v.on_token(np("b"), 0);
+        v.on_token(rp("rb", "b"), 0);
+        v.on_token(rd("rb", "b"), 10);
+        v.on_token(nd("a"), 20);
+        v.on_token(nd("b"), 25);
+        assert!(v.settle(2_000).isolated_now);
+        v.on_token(np("a"), 5_000);
+        assert!(v.settle(5_500).dropped_rooms.is_empty());
+        assert_eq!(v.settle(6_100).dropped_rooms, vec!["rb".to_string()]);
+        assert!(v.room_node("rb").is_none());
     }
 
     #[test]
