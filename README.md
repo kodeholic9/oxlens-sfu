@@ -29,7 +29,7 @@
 | Video PTT (video floor) | ⏸ shelved — the browser send pacer cannot be controlled from here |
 | Outbound hooks (webhooks / events to a third-party server) | ⏳ specified, not implemented |
 | Single-authority multi-node placement | 🧪 design and model checking in progress |
-| Throughput / latency / memory benchmarks | ⏳ not measured yet |
+| Capacity measurement — connection ceiling · broadcast fan-out · capacity regression gate (`oxcap`, in a private test repository) | ✅ |
 
 ## Architecture
 
@@ -118,7 +118,7 @@ Each **regeneration round** asks a fresh AI agent to build this server from the 
 - Two blind code reviewers, one reading spec → code and one reading code → spec.
 - A ratcheted scoreboard. A round cannot close if any column got worse than the previous round.
 
-Defects go back into the spec or the measurement, never into a hand patch. The next round shows whether the fix held.
+Up to round 7 (`v1.5`), defects went back into the spec or the measurement, never into a hand patch, and the next round showed whether the fix held. After `v1.5` the rounds are paused and ledger rows are fixed by hand. Each fix leaves a recurrence test that fails on the build before the fix and passes after it. A single area is regenerated when it needs to be; the whole server is regenerated only when the model improves substantially.
 
 | Round | First scenario run | Review findings (high · medium · low) | Server spec labels cited by code | Spec units cited by test assets |
 |---|---|---|---|---|
@@ -131,7 +131,7 @@ In round 6, blind independent tests caught 50 of 52 planted symptoms (96 %). Tes
 
 ## Status and limits
 
-- `v1.4` is the first public release. It is a working server, verified as described above, and has not been load-tested.
+- `v1.4` is the first public release. From `v1.5` (round 7) a capacity regression gate on fixed shapes (broadcast to 1,000 and 1,500 listeners, a 128-person meeting) is part of the completion criteria. Load on impaired networks (loss, delay) has not been measured yet.
 - Some things are specified but not yet followed by the code. They are tracked as numbered rows in the server spec's implementation ledger, and each one names the code location and the test that will close it.
 - The web SDK is younger than the server and has not yet gone through regeneration rounds.
 
