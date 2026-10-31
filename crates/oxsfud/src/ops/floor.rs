@@ -430,6 +430,15 @@ fn bind_media(room: &Arc<Room>, user: &str, from_idle: bool) {
 }
 
 fn release_media(room: &Arc<Room>, prev: Option<&str>) {
+    if let Some(p) = prev {
+        for st in slot_video(room, p).0 {
+            for t in st.physical() {
+                if let Ok(mut g) = t.pli.lock() {
+                    g.pending = false;
+                }
+            }
+        }
+    }
     for k in [Kind::Audio, Kind::Video] {
         let fan = room.slot(k);
         fan.speaker.store(None);

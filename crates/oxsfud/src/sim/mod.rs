@@ -29,6 +29,7 @@ pub const COLLAPSE_MS: u64 = 5_000;
 pub const GRACE_MS: u64 = 10_000;
 pub const LOSS_FRESH_MS: u64 = 6_000;
 pub const PENDING_MS: u64 = 10_000;
+pub const PENDING_PLI_RETRY_MS: u64 = 250;
 pub const INBAND_MS: u64 = 1_000;
 pub const PROBE_RUN_MS: u64 = 2_500;
 pub const PROBE_JUDGE_MS: u64 = 4_000;
@@ -95,6 +96,12 @@ pub fn pass(row: &DownRow, t: &Arc<PubTrack>, keyframe: bool, now: u64) -> bool 
         if l == tgt && keyframe {
             row.layer.store(tgt, Ordering::Release);
             return true;
+        }
+        if tgt != LAYER_PAUSE && now.saturating_sub(row.pending_pli_at.load(Ordering::Relaxed)) >= PENDING_PLI_RETRY_MS {
+            row.pending_pli_at.store(now, Ordering::Relaxed);
+            if let Some(ts) = sibling(t, tgt) {
+                crate::rtcp::request_pli(&ts, true);
+            }
         }
         if l == cur {
             return true;
