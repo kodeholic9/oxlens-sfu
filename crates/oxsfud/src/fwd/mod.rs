@@ -430,6 +430,20 @@ pub fn on_rtp(w: &Arc<Worker>, tr: &Arc<Transport>, plain: Bytes, at_us: u64) {
     forward(w, tr, &track, &rtp, plain.clone(), at_us);
 }
 
+pub fn on_pub_room(stream: &crate::r#pub::PubStream, pub_room: &str) -> bool {
+    stream.room.load().as_str() == pub_room
+}
+
+pub fn row_gate(stream: &crate::r#pub::PubStream, r: &DownRow) -> Option<&'static str> {
+    if !r.open() {
+        return Some("row_gate");
+    }
+    if stream.kind == Kind::Video && r.gate.load().as_ref().map(|g| !g.load(Ordering::Acquire)).unwrap_or(true) {
+        return Some("ready_gate");
+    }
+    None
+}
+
 fn forward(w: &Arc<Worker>, tr: &Arc<Transport>, track: &Arc<crate::r#pub::PubTrack>, rtp: &Rtp<'_>, plain: Bytes, at_us: u64) {
     let now_ms = common::now_ms();
     let ids = tr.ext_ids.load();
@@ -486,24 +500,17 @@ fn forward(w: &Arc<Worker>, tr: &Arc<Transport>, track: &Arc<crate::r#pub::PubTr
             }
         }
     } else {
-        if stream.room.load().as_str() != room.as_str() {
+        if !on_pub_room(stream, room.as_str()) {
             crate::ops::drop_count("no_pub_room");
             return;
         }
         for r in stream.rows.load().iter() {
-            if !r.open() {
-                crate::ops::drop_count("row_gate");
+            if let Some(why) = row_gate(stream, r) {
+                crate::ops::drop_count(why);
                 continue;
             }
-            if stream.kind == Kind::Video {
-                let gated = r.gate.load().as_ref().map(|g| !g.load(Ordering::Acquire)).unwrap_or(true);
-                if gated {
-                    crate::ops::drop_count("ready_gate");
-                    continue;
-                }
-                if stream.simulcast && !crate::sim::pass(r, track, keyframe, now_ms) {
-                    continue;
-                }
+            if stream.kind == Kind::Video && stream.simulcast && !crate::sim::pass(r, track, keyframe, now_ms) {
+                continue;
             }
             targets.push(r.clone());
         }

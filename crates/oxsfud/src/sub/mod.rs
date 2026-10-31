@@ -382,6 +382,16 @@ impl Table {
         out.push(Change { down: r.down.clone(), class: r.class, old, new: Some((c.track_id.clone(), c.room.clone())) });
     }
 
+    fn rehome(s: &mut State, i: usize, c: &Cand, now: u64, out: &mut Vec<Change>) {
+        let gate = if c.kind == Kind::Video { Some(Self::gate(s, &c.room, now)) } else { None };
+        let r = &mut s.rows[i];
+        let old = r.track.replace((c.track_id.clone(), c.room.clone()));
+        r.down.room.store(Some(Arc::new(c.room.clone())));
+        r.down.src.store(Some(Arc::new((c.track_id.clone(), c.room.clone()))));
+        r.down.gate.store(gate);
+        out.push(Change { down: r.down.clone(), class: r.class, old, new: Some((c.track_id.clone(), c.room.clone())) });
+    }
+
     fn unload(s: &mut State, i: usize, rev: u64, out: &mut Vec<Change>) {
         let r = &mut s.rows[i];
         let Some(old) = r.track.take() else { return };
@@ -438,6 +448,19 @@ impl Table {
             return out;
         }
         for kind in [Kind::Audio, Kind::Video] {
+            for i in 0..s.rows.len() {
+                let r = &s.rows[i];
+                if r.class != Class::Full || r.kind != kind {
+                    continue;
+                }
+                let Some((tid, room)) = r.track.clone() else { continue };
+                if cands.iter().any(|c| c.class == Class::Full && c.track_id == tid && c.room == room) {
+                    continue;
+                }
+                if let Some(c) = cands.iter().find(|c| c.class == Class::Full && c.kind == kind && c.track_id == tid && !c.paused) {
+                    Self::rehome(&mut s, i, c, now, &mut ch);
+                }
+            }
             let cap = if kind == Kind::Audio { FULL_AUDIO } else { FULL_VIDEO };
             let mut desired: Vec<&Cand> = cands.iter().filter(|c| c.class == Class::Full && c.kind == kind && !c.paused).collect();
             let loaded_at: HashMap<(String, String), u64> = s

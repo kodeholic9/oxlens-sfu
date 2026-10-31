@@ -69,11 +69,14 @@ pub fn leave(peer: &Arc<Peer>, room_id: &str, why: Why, keep_roster: bool) -> bo
             let here = st.room.load().as_str() == room_id;
             let full_here = here && st.duplex() == Duplex::Full;
             let resting_here = here && st.listed.load(Ordering::Acquire);
-            if full_here || resting_here || last {
+            if full_here || last {
                 if st.listed.swap(false, Ordering::AcqRel) && here {
                     removed.push(crate::trk::entry(&st));
                 }
                 crate::ops::media::drop_stream(peer, &st);
+            } else if resting_here {
+                removed.push(crate::trk::entry(&st));
+                st.room.store(std::sync::Arc::new(String::new()));
             }
         }
     }

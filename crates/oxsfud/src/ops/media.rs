@@ -389,29 +389,32 @@ pub fn drop_stream(peer: &Peer, st: &Arc<PubStream>) {
 
 fn unpublish(c: &Ctx, room_id: &str, ids: &[String]) -> Result<Value, Failure> {
     let s = sfu()?;
-    let (peer, room) = joined(c, room_id)?;
+    let (peer, _) = joined(c, room_id)?;
     let ctx = s.pubs.get(&c.user).ok_or_else(|| Code::TrackNotFound.failure())?;
     let mut list = Vec::new();
     for id in ids {
         list.push(ctx.find(id).ok_or_else(|| Code::TrackNotFound.failure().with_details(json!({ "track_id": id })))?);
     }
-    let mut removed = Vec::new();
+    let mut removed: std::collections::BTreeMap<String, Vec<TrackEntry>> = std::collections::BTreeMap::new();
     for st in &list {
         if st.is_half() {
             release_floor_if_speaker(&c.user, &st.room.load());
         }
         let listed = st.listed.swap(false, Ordering::AcqRel);
         drop_stream(&peer, st);
-        if listed {
-            removed.push(crate::trk::entry(st));
+        let at = st.room.load().as_str().to_string();
+        if listed && !at.is_empty() {
+            removed.entry(at).or_default().push(crate::trk::entry(st));
         }
     }
     if !has_half(&c.user) {
         reg_half(&peer, false);
     }
-    if !removed.is_empty() {
-        track_event(&room, TrackAction::Remove, removed);
-        resync_room(room_id);
+    for (at, es) in removed {
+        if let Some(r) = s.rooms.get(&at) {
+            track_event(&r, TrackAction::Remove, es);
+            resync_room(&at);
+        }
     }
     ok(&PublishTracksRes::Remove {})
 }
@@ -585,28 +588,31 @@ pub fn move_pub(peer: &Peer, to: Option<&Arc<Room>>, token: Option<Permission>) 
     let mut moved_from = Vec::new();
     let mut moved_to = Vec::new();
     for st in &streams {
-        if let Some(r) = to {
-            st.room.store(Arc::new(r.id.clone()));
-        }
-        if st.listed.load(Ordering::Acquire) && to.is_some() {
+        let listed = st.listed.load(Ordering::Acquire);
+        let was = st.room.load().as_str().to_string();
+        if listed && !was.is_empty() {
             moved_from.push(crate::trk::entry(st));
+        }
+        st.room.store(Arc::new(to.map(|r| r.id.clone()).unwrap_or_default()));
+        if listed && to.is_some() {
             moved_to.push(crate::trk::entry(st));
         }
+    }
+    if let Some(old) = cur.as_deref()
+        && !moved_from.is_empty()
+        && let Some(or) = s.rooms.get(old)
+    {
+        for e in moved_from.iter_mut() {
+            e.room_id = old.to_string();
+        }
+        track_event(&or, TrackAction::Remove, moved_from);
+        resync_room(old);
     }
     if let Some(r) = to {
         let u = peer.user.clone();
         super::floor::run(r, |f, _| f.ws_pub_select(&u));
-        if let Some(old) = cur.as_deref()
-            && !moved_from.is_empty()
-        {
-            if let Some(or) = s.rooms.get(old) {
-                for e in moved_from.iter_mut() {
-                    e.room_id = old.to_string();
-                }
-                track_event(&or, TrackAction::Remove, moved_from);
-            }
+        if !moved_to.is_empty() {
             track_event(r, TrackAction::Add, moved_to);
-            resync_room(old);
             resync_room(&r.id);
         }
     }

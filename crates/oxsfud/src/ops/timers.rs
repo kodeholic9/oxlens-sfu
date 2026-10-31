@@ -192,10 +192,11 @@ fn eligible_from(room: &Room, tid: &str, row: &crate::fwd::DownRow, user: &str, 
     if st.is_half() {
         return None;
     }
+    let pub_room = s.peer(&st.user).and_then(|p| crate::aff::pub_room(&p))?;
+    if !crate::fwd::on_pub_room(&st, &pub_room) || crate::fwd::row_gate(&st, row).is_some() {
+        return None;
+    }
     if row.kind == Kind::Video {
-        if row.gate.load().as_ref().map(|g| !g.load(Ordering::Acquire)).unwrap_or(true) {
-            return None;
-        }
         if st.simulcast && row.layer.load(Ordering::Acquire) == LAYER_PAUSE && row.target.load(Ordering::Acquire) == LAYER_PAUSE {
             return None;
         }
