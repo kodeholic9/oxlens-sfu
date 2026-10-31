@@ -382,10 +382,12 @@ impl Table {
         out.push(Change { down: r.down.clone(), class: r.class, old, new: Some((c.track_id.clone(), c.room.clone())) });
     }
 
-    fn rehome(s: &mut State, i: usize, c: &Cand, now: u64, out: &mut Vec<Change>) {
+    fn rehome(s: &mut State, i: usize, c: &Cand, rev: u64, now: u64, out: &mut Vec<Change>) {
         let gate = if c.kind == Kind::Video { Some(Self::gate(s, &c.room, now)) } else { None };
         let r = &mut s.rows[i];
         let old = r.track.replace((c.track_id.clone(), c.room.clone()));
+        r.since = rev;
+        r.down.since.store(rev, Ordering::Release);
         r.down.room.store(Some(Arc::new(c.room.clone())));
         r.down.src.store(Some(Arc::new((c.track_id.clone(), c.room.clone()))));
         r.down.gate.store(gate);
@@ -488,7 +490,7 @@ impl Table {
                     continue;
                 }
                 if let Some(c) = cands.iter().find(|c| c.class == Class::Full && c.kind == kind && c.track_id == tid && !c.paused) {
-                    Self::rehome(&mut s, i, c, now, &mut ch);
+                    Self::rehome(&mut s, i, c, rev, now, &mut ch);
                 }
             }
             let cap = if kind == Kind::Audio { FULL_AUDIO } else { FULL_VIDEO };
@@ -724,6 +726,108 @@ mod tests {
         let after = t.snapshot("e");
         assert_eq!((after.arev, after.mlines.len()), (before.arev, before.mlines.len()), "정:IMPL-ROOM-JOIN ⑤ no row made · arev unchanged");
         assert!(!t.sync(&a, 3).changed, "정:IMPL-ROOM-JOIN ⑤ rollback resync changes nothing");
+    }
+
+    fn vid(id: &str, codec: &str, rank: i64) -> Cand {
+        Cand { codec: codec.into(), ..cand(id, "r", Kind::Video, Class::Full, rank) }
+    }
+
+    fn loaded(t: &Table) -> Vec<String> {
+        t.snapshot("e").mlines.iter().filter_map(|m| m.track_id.clone()).collect()
+    }
+
+    #[test]
+    fn rehome_waits_for_ack() {
+        let tr = Transport::new(1, "u", Role::Both, 0);
+        let t = Table::new(tr, PcMode::Two, 40);
+        t.sync(&[cand("a", "r1", Kind::Audio, Class::Full, 0)], 1);
+        t.ready("r1", t.snapshot("e").arev, 2);
+        let row = t.rows()[0].clone();
+        assert!(row.open(), "정:IMPL-SUB-TABLE loaded and acked row sends");
+        let o = t.sync(&[cand("a", "r2", Kind::Audio, Class::Full, 0)], 3);
+        assert!(o.changed);
+        assert_eq!(t.rows()[0].mid, row.mid, "정:IMPL-AFF-PUB-MOVE same row after the move");
+        assert!(!row.open(), "정:IMPL-SUB-TABLE since = the arev that moved the row · not sent before ack");
+        t.ready("r2", t.snapshot("e").arev, 4);
+        assert!(row.open(), "정:IMPL-SUB-TABLE sends again once the new arev is acked");
+    }
+
+    #[test]
+    fn ready_gate_opens_at_timeout() {
+        let tr = Transport::new(1, "u", Role::Both, 0);
+        let t = Table::new(tr, PcMode::Two, 40);
+        t.sync(&[vid("v", "H264", 0)], 1_000);
+        let g = t.rows()[0].gate.load_full().expect("video row has a gate");
+        assert!(!g.load(Ordering::Acquire));
+        assert!(t.gate_timeouts(1_000 + T_GATE_MS - 1).is_empty(), "정:IMPL-SUB-READY-GATE not before T-gate");
+        assert_eq!(t.gate_timeouts(1_000 + T_GATE_MS), vec!["r".to_string()], "정:IMPL-SUB-READY-GATE released at T-gate");
+        assert!(g.load(Ordering::Acquire), "정:IMPL-SUB-READY-GATE gate open without READY");
+        assert!(t.gate_timeouts(1_000 + 2 * T_GATE_MS).is_empty(), "정:IMPL-SUB-READY-GATE observed once");
+    }
+
+    #[test]
+    fn other_tuple_takes_the_oldest_empty_row() {
+        let tr = Transport::new(1, "u", Role::Both, 0);
+        let t = Table::new(tr, PcMode::Two, 40);
+        let h: Vec<Cand> = (0..FULL_VIDEO).map(|i| vid(&format!("h{i}"), "H264", 0)).collect();
+        for i in 0..h.len() {
+            t.sync(&h[..=i], 10 + i as u64);
+        }
+        assert_eq!(loaded(&t).len(), FULL_VIDEO);
+        t.sync(&[], 100);
+        let o = t.sync(&[vid("p", "VP8", 0)], 200);
+        assert!(o.changed);
+        let snap = t.snapshot("e");
+        let row = snap.mlines.iter().find(|m| m.track_id.as_deref() == Some("p")).expect("정:IMPL-SUB-TABLE VP8 gets a row by retuning");
+        assert_eq!(row.codec, "VP8");
+        assert_eq!(row.mid, snap.mlines.iter().filter(|m| m.kind == Kind::Video).map(|m| m.mid.clone()).min_by_key(|m| m.parse::<u32>().unwrap_or(0)).unwrap(), "정:IMPL-SUB-TABLE the longest-empty row is retuned");
+    }
+
+    #[test]
+    fn victim_tie_is_least_recently_loaded() {
+        let tr = Transport::new(1, "u", Role::Both, 0);
+        let t = Table::new(tr, PcMode::Two, 40);
+        let mut c: Vec<Cand> = Vec::new();
+        for i in 0..FULL_VIDEO {
+            c.push(vid(&format!("v{i}"), "H264", 0));
+            t.sync(&c, 10 + i as u64);
+        }
+        c.push(vid("hot", "H264", 5));
+        t.sync(&c, 100);
+        let l = loaded(&t);
+        assert!(l.contains(&"hot".to_string()));
+        assert!(!l.contains(&"v0".to_string()), "정:IMPL-SUB-TABLE tie victim = least recently loaded (v0) · loaded {l:?}");
+    }
+
+    fn full_then_waiters(waiters: &[(&str, i64, u64)]) -> (Table, Vec<Cand>) {
+        let tr = Transport::new(1, "u", Role::Both, 0);
+        let t = Arc::try_unwrap(Table::new(tr, PcMode::Two, 40)).ok().expect("one owner");
+        let mut c: Vec<Cand> = (0..FULL_VIDEO).map(|i| vid(&format!("v{i}"), "H264", 1)).collect();
+        t.sync(&c, 1);
+        for (id, rank, at) in waiters {
+            c.push(vid(id, "H264", *rank));
+            t.sync(&c, *at);
+        }
+        (t, c)
+    }
+
+    #[test]
+    fn refill_tie_is_longest_wait() {
+        let (t, mut c) = full_then_waiters(&[("late", 0, 20), ("early", 0, 10)]);
+        assert!(!loaded(&t).contains(&"early".to_string()) && !loaded(&t).contains(&"late".to_string()));
+        c.retain(|x| x.track_id != "v0");
+        t.sync(&c, 30);
+        let l = loaded(&t);
+        assert!(l.contains(&"early".to_string()) && !l.contains(&"late".to_string()), "정:IMPL-SUB-TABLE tie at refill = longest wait · {l:?}");
+    }
+
+    #[test]
+    fn refill_rank_beats_wait() {
+        let (t, mut c) = full_then_waiters(&[("old", 0, 10), ("hi", 1, 20)]);
+        c.retain(|x| x.track_id != "v0");
+        t.sync(&c, 30);
+        let l = loaded(&t);
+        assert!(l.contains(&"hi".to_string()) && !l.contains(&"old".to_string()), "정:IMPL-SUB-TABLE refill order = rank first · {l:?}");
     }
 
     #[test]

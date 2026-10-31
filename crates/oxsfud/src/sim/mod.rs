@@ -184,6 +184,11 @@ fn sim_rows(tr: &Transport) -> Vec<(Arc<DownRow>, Arc<PubTrack>)> {
         .collect()
 }
 
+pub fn nack_per_s(prev: &mut HashMap<usize, u64>, key: usize, total: u64) -> f64 {
+    let p = prev.insert(key, total).unwrap_or(total);
+    total.saturating_sub(p) as f64 * 1000.0 / super::rtcp::SIM_MS as f64
+}
+
 pub fn tick(tr: &Arc<Transport>, now: u64) {
     let m = mode();
     if m == Mode::Off {
@@ -203,9 +208,7 @@ pub fn tick(tr: &Arc<Transport>, now: u64) {
         if now.saturating_sub(r.rr_at.load(Ordering::Relaxed)) <= LOSS_FRESH_MS {
             loss = loss.max(r.rr_loss.load(Ordering::Relaxed) as f64 / 256.0);
         }
-        let n = r.nacks.load(Ordering::Relaxed);
-        let p = s.prev_nacks.insert(key, n).unwrap_or(n);
-        nack_rate += n.saturating_sub(p) as f64 * 1000.0 / super::rtcp::SIM_MS as f64;
+        nack_rate += nack_per_s(&mut s.prev_nacks, key, r.nacks.load(Ordering::Relaxed));
         let d = r.drops.load(Ordering::Relaxed);
         let pd = s.prev_drops.insert(key, d).unwrap_or(d);
         drops += d.saturating_sub(pd);
@@ -377,5 +380,15 @@ mod tests {
     fn names() {
         assert_eq!(layer_name(0), "l");
         assert_eq!(layer_name(LAYER_PAUSE), "pause");
+    }
+
+    #[test]
+    fn nack_rate_is_a_per_tick_window() {
+        let mut prev = HashMap::new();
+        assert_eq!(nack_per_s(&mut prev, 1, 0), 0.0);
+        let burst = nack_per_s(&mut prev, 1, 40);
+        assert!(burst > DEMOTE_NACK_PER_S, "정:RULE-SIM-TICK a burst counts in its tick · {burst}");
+        assert_eq!(nack_per_s(&mut prev, 1, 40), 0.0, "정:RULE-SIM-TICK quiet tick after a burst is zero — the window decays");
+        assert_eq!(nack_per_s(&mut prev, 2, 500), 0.0, "정:RULE-SIM-TICK a newly seen row starts its window, not its history");
     }
 }
