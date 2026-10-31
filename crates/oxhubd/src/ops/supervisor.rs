@@ -264,9 +264,7 @@ impl Supervisor {
         let mut c = tokio::process::Command::new(prog);
         c.args(args);
         c.args(["--id", &self.cfg.node]);
-        if let Some(b) = &self.cfg.build_label {
-            c.args(["--build", b]);
-        }
+        c.args(["--build", self.cfg.build_label.as_deref().unwrap_or("")]);
         c.args(&self.cfg.extra_args);
         c.stdin(std::process::Stdio::piped());
         c.kill_on_drop(true);

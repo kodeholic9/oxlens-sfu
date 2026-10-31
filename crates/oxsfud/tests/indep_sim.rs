@@ -7,10 +7,11 @@ use oxsfud::sim::{COLLAPSE_MS, GRACE_MS};
 use std::path::PathBuf;
 
 fn vectors_dir() -> PathBuf {
-    match std::env::var("OXLENS_SPEC_VECTORS") {
+    let spec = match std::env::var("OXLENS_SPEC") {
         Ok(p) => PathBuf::from(p),
-        Err(_) => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../context/spec/server/out/vectors"),
-    }
+        Err(_) => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../context/spec"),
+    };
+    spec.join("server/out/vectors")
 }
 
 fn load(name: &str) -> serde_json::Value {

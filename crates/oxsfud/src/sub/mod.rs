@@ -404,6 +404,29 @@ impl Table {
         out.push(Change { down: r.down.clone(), class: r.class, old: Some(old), new: None });
     }
 
+    fn fresh_slot_rows(s: &State, cands: &[Cand], want_slot: &BTreeSet<(String, Kind)>) -> usize {
+        let unwanted = |r: &Row| r.class == Class::Slot && r.track.as_ref().map(|t| !want_slot.contains(&(t.1.clone(), r.kind))).unwrap_or(false);
+        let mut claimed: BTreeSet<usize> = BTreeSet::new();
+        let mut fresh = 0;
+        for c in cands.iter().filter(|c| c.class == Class::Slot) {
+            if s.rows.iter().any(|r| r.class == Class::Slot && r.kind == c.kind && r.track.as_ref().map(|t| t.1 == c.room).unwrap_or(false)) {
+                continue;
+            }
+            let t = tuple_of(c.kind, &c.codec);
+            let free = (0..s.rows.len()).find(|&i| {
+                let r = &s.rows[i];
+                !claimed.contains(&i) && r.class == Class::Slot && r.kind == c.kind && r.tuple == t && (r.track.is_none() || unwanted(r))
+            });
+            match free {
+                Some(i) => {
+                    claimed.insert(i);
+                }
+                None => fresh += 1,
+            }
+        }
+        fresh
+    }
+
     pub fn sync(&self, cands: &[Cand], now: u64) -> SyncOut {
         let mut out = SyncOut::default();
         let Ok(mut s) = self.st.lock() else { return out };
@@ -412,6 +435,13 @@ impl Table {
         let rows_before = s.rows.len();
         let mut tuned = false;
         let want_slot: BTreeSet<(String, Kind)> = cands.iter().filter(|c| c.class == Class::Slot).map(|c| (c.room.clone(), c.kind)).collect();
+        let fresh = Self::fresh_slot_rows(&s, cands, &want_slot);
+        let slot_rows = s.rows.iter().filter(|r| r.class == Class::Slot).count();
+        if fresh > 0 && (slot_rows + fresh > self.slot_budget || s.rows.len() + fresh > self.limit()) {
+            out.mid_limit = true;
+            out.budget = Some(if slot_rows + fresh > self.slot_budget { (self.slot_budget, slot_rows) } else { (self.limit(), s.rows.len()) });
+            return out;
+        }
         for i in 0..s.rows.len() {
             let r = &s.rows[i];
             if r.class == Class::Slot && r.track.as_ref().map(|t| !want_slot.contains(&(t.1.clone(), r.kind))).unwrap_or(false) {
@@ -676,6 +706,24 @@ mod tests {
         ];
         assert!(t.sync(&more, 2).mid_limit);
         assert_eq!(t.snapshot("e").mlines[0].mid, "32");
+    }
+
+    #[test]
+    fn slot_budget_is_all_or_nothing() {
+        let tr = Transport::new(1, "u", Role::Both, 0);
+        let t = Table::new(tr, PcMode::Two, 3);
+        let a = vec![cand("ptt-a-audio", "a", Kind::Audio, Class::Slot, 0), cand("ptt-a-video", "a", Kind::Video, Class::Slot, 0)];
+        assert!(!t.sync(&a, 1).mid_limit);
+        let before = t.snapshot("e");
+        let mut ab = a.clone();
+        ab.push(cand("ptt-b-audio", "b", Kind::Audio, Class::Slot, 0));
+        ab.push(cand("ptt-b-video", "b", Kind::Video, Class::Slot, 0));
+        let o = t.sync(&ab, 2);
+        assert!(o.mid_limit && o.changes.is_empty(), "정:IMPL-ROOM-JOIN ⑤ budget short loads nothing");
+        assert_eq!(o.budget, Some((3, 2)));
+        let after = t.snapshot("e");
+        assert_eq!((after.arev, after.mlines.len()), (before.arev, before.mlines.len()), "정:IMPL-ROOM-JOIN ⑤ no row made · arev unchanged");
+        assert!(!t.sync(&a, 3).changed, "정:IMPL-ROOM-JOIN ⑤ rollback resync changes nothing");
     }
 
     #[test]

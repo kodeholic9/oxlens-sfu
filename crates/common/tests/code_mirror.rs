@@ -162,6 +162,23 @@ fn code_mirror() {
 }
 
 #[test]
+fn spec_location_is_one_variable() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let other = concat!("OXLENS_", "SPEC_");
+    let mut files = Vec::new();
+    for c in ["common", "oxsig", "oxhubd", "oxsfud", "oxadmin"] {
+        rs_files(&root.join(c).join("tests"), &mut files);
+    }
+    let bad: Vec<String> = files
+        .iter()
+        .filter(|f| std::fs::read_to_string(f).map(|t| t.contains(other)).unwrap_or(false))
+        .map(|f| f.display().to_string())
+        .collect();
+    assert!(!files.is_empty(), "S-sym-RULE-DOC-CODE-MIRROR-1 — 시험 파일을 못 찾았다(안 쟀다)");
+    assert!(bad.is_empty(), "S-sym-RULE-DOC-CODE-MIRROR-1 — 규격 위치는 OXLENS_SPEC 하나다 · 다른 변수를 읽는 시험 {}:\n{}", bad.len(), bad.join("\n"));
+}
+
+#[test]
 fn crate_refs_reads_groups_and_raw() {
     let r = crate_refs("use crate::{room::X, r#pub::{A, B}};\nlet x = crate::flr::y();");
     assert_eq!(r, ["flr", "pub", "room"].iter().map(|s| s.to_string()).collect());

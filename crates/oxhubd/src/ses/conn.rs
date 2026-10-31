@@ -16,7 +16,6 @@ use tokio::sync::mpsc;
 use super::{Ctx, Session};
 
 pub const T_BIND: Duration = Duration::from_secs(10);
-pub const T_IDLE: Duration = Duration::from_secs(30);
 pub const T_ACK: Duration = Duration::from_secs(30);
 pub const QUEUE_MAX: usize = 1_000;
 
@@ -167,7 +166,7 @@ pub async fn serve(ws: WebSocket, ctx: Arc<Ctx>) {
 
     let mut session: Option<Arc<Session>> = None;
     loop {
-        let limit = if session.is_none() { T_BIND } else { T_IDLE };
+        let limit = if session.is_none() { T_BIND } else { Duration::from_millis(ctx.policy.hub.heartbeat_timeout_ms as u64) };
         let msg = match tokio::time::timeout(limit, stream.next()).await {
             Err(_) => {
                 conn.leave(Code::HeartbeatTimeout);

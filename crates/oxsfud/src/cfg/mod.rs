@@ -98,7 +98,7 @@ impl SfuCfg {
         let workers = args.parse_num::<usize>("media-workers").map_err(e)?.unwrap_or_else(default_workers).max(1);
         let control_threads = args.parse_num::<usize>("control-threads").map_err(e)?.unwrap_or(DEFAULT_CONTROL_THREADS).max(1);
         let queue_packets = args.parse_num::<usize>("worker-queue-packets").map_err(e)?.unwrap_or(crate::fwd::rt::DEFAULT_QUEUE_PACKETS).max(1);
-        let build_label = args.get("build").map(|s| s.to_string());
+        let build_label = args.get("build").filter(|s| !s.is_empty()).map(|s| s.to_string());
         Ok(SfuCfg {
             args,
             policy,
