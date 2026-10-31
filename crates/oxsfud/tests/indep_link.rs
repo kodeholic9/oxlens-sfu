@@ -244,6 +244,19 @@ fn expired_udp_pair_is_not_used() {
 }
 
 #[test]
+fn control_sends_obey_pair_expiry() {
+    let tr: Arc<Transport> = Transport::new(3, "u3", Role::Both, 0);
+    let key = PathKey::Udp("198.51.100.8:40000".parse().expect("addr"));
+    let never_tcp = |_: u64| false;
+    tr.touch_pair(key, 1_000);
+    assert_eq!(tr.control_path(2_000, never_tcp), Some(key), "S-sym-RULE-LINK-PAIR-LIVENESS-1 DTLS before nomination uses the fresh pair");
+    assert_eq!(tr.control_path(31_001, never_tcp), None, "S-sym-RULE-LINK-PAIR-LIVENESS-1 DTLS before nomination does not use an expired pair");
+    tr.path.store(Some(Arc::new(key)));
+    assert_eq!(tr.control_path(30_999, never_tcp), Some(key), "S-sym-RULE-LINK-PAIR-LIVENESS-1 DTLS · DC use the live path");
+    assert_eq!(tr.control_path(31_001, never_tcp), None, "S-sym-RULE-LINK-PAIR-LIVENESS-1 DTLS · DC are not sent on an expired path");
+}
+
+#[test]
 fn tcp_pair_lives_while_connected() {
     let tr: Arc<Transport> = Transport::new(2, "u2", Role::Both, 0);
     let key = PathKey::Tcp(77);

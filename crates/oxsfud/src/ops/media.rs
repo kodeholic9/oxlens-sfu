@@ -65,7 +65,7 @@ pub fn cands_for(p: &Peer) -> Vec<Cand> {
             }
             let (prio, paused) = table.as_ref().map(|t| t.pref(&st.track_id)).unwrap_or((0, false));
             let rank = if st.kind == Kind::Video { prio as i64 } else { voice_rank(&st) };
-            out.push(Cand { track_id: st.track_id.clone(), room: rid.clone(), kind: st.kind, class: Class::Full, codec: st.codec_name(), rank, paused });
+            out.push(Cand { track_id: st.track_id.clone(), room: rid.clone(), kind: st.kind, class: Class::Full, codec: st.codec_name().to_string(), rank, paused });
         }
     }
     out

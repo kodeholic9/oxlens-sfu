@@ -116,10 +116,10 @@ impl PubStream {
         self.duplex.store(if d == Duplex::Half { 1 } else { 0 }, Ordering::Release);
     }
 
-    pub fn codec_name(&self) -> String {
+    pub fn codec_name(&self) -> &str {
         match self.kind {
-            Kind::Audio => "opus".into(),
-            Kind::Video => self.codec.clone().unwrap_or_default(),
+            Kind::Audio => "opus",
+            Kind::Video => self.codec.as_deref().unwrap_or(""),
         }
     }
 

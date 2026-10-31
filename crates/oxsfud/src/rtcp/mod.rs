@@ -485,9 +485,9 @@ fn uplink(w: &Worker, tr: &Arc<Transport>, ups: &[Arc<PubTrack>], now: u64, now_
     if due(&tr.rtc.next_rr, now, RR_MS) {
         let srs = tr.rtc.sr.lock().map(|g| g.clone()).unwrap_or_default();
         for t in ups {
-            let r = match t.recv.lock() {
-                Ok(mut s) if s.packets > 0 => s.report(),
-                _ => continue,
+            let r = match t.recv.lock().ok().and_then(|mut s| s.report()) {
+                Some(r) => r,
+                None => continue,
             };
             let (lsr, dlsr) = match srs.get(&t.ssrc) {
                 Some(s) => (((s.ntp >> 16) & 0xffff_ffff) as u32, ((mono_us().saturating_sub(s.at_us) * 65_536 / 1_000_000) as u32).max(1)),

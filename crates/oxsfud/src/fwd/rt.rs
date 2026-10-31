@@ -68,10 +68,20 @@ impl Transit {
     }
 }
 
+#[repr(align(128))]
+pub struct Line(pub AtomicUsize);
+
+impl std::ops::Deref for Line {
+    type Target = AtomicUsize;
+    fn deref(&self) -> &AtomicUsize {
+        &self.0
+    }
+}
+
 pub struct Worker {
     pub id: usize,
     pub inbox: Vec<Arc<ArrayQueue<Item>>>,
-    pub queued: AtomicUsize,
+    pub queued: Line,
     pub sleeping: AtomicBool,
     pub thread: OnceLock<std::thread::Thread>,
     pub sock: Arc<UdpSocket>,
@@ -97,7 +107,8 @@ impl Worker {
             self.queued.fetch_sub(n, Ordering::AcqRel);
             return false;
         }
-        if self.sleeping.load(Ordering::Acquire)
+        std::sync::atomic::fence(Ordering::SeqCst);
+        if self.sleeping.load(Ordering::SeqCst)
             && let Some(t) = self.thread.get()
         {
             t.unpark();
@@ -213,7 +224,7 @@ impl Media {
 
 pub fn control_send(tr: &Transport, data: &[u8]) {
     let Some(m) = media() else { return };
-    let path = tr.path.load_full().map(|p| *p).or_else(|| tr.pairs.lock().ok().and_then(|p| p.last().map(|x| x.key)));
+    let path = tr.control_path(common::now_ms(), |id| m.tcp_open(id));
     if let Some(p) = path
         && !m.send_on(&m.recv_sock, p, data)
     {
@@ -260,7 +271,7 @@ pub fn start(c: StartCfg) -> Result<Arc<Media>, String> {
             Arc::new(Worker {
                 id: i,
                 inbox: (0..n + 2).map(|k| Arc::new(ArrayQueue::new(if k == 0 { RECV_RING } else if k == n + 1 { CTL_RING } else { WORKER_RING }))).collect(),
-                queued: AtomicUsize::new(0),
+                queued: Line(AtomicUsize::new(0)),
                 sleeping: AtomicBool::new(false),
                 thread: OnceLock::new(),
                 sock: if per_worker_sock { wsocks[i].clone() } else { recv.clone() },

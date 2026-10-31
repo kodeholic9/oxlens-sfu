@@ -246,7 +246,6 @@ fn stat() {
         .rec("drops", drops)
         .rec("transit_count", count)
         .rec("transit_sum_us", sum)
-        .rec("dc_dropped", crate::aux::DC_DROPPED.load(Ordering::Relaxed))
         .msg("sfud");
     common::log::emit(l);
 }

@@ -183,7 +183,7 @@ pub fn entry(s: &PubStream) -> TrackEntry {
         room_id: s.room.load().as_str().to_string(),
         track_id: s.track_id.clone(),
         kind: s.kind,
-        codec: if s.kind == Kind::Video { Some(s.codec_name()) } else { None },
+        codec: if s.kind == Kind::Video { Some(s.codec_name().to_string()) } else { None },
         fmtp: s.fmtp.clone(),
         user_id: Some(s.user.clone()),
         source: s.source,

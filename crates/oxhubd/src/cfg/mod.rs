@@ -22,7 +22,7 @@ pub struct HubCfg {
 }
 
 pub fn compiled_build() -> &'static str {
-    env!("OX_BUILD")
+    common::ident::COMPILED
 }
 
 impl HubCfg {

@@ -314,12 +314,13 @@ pub fn worker_loop(w: &Arc<Worker>) {
             std::hint::spin_loop();
             continue;
         }
-        w.sleeping.store(true, Ordering::Release);
+        w.sleeping.store(true, Ordering::SeqCst);
+        std::sync::atomic::fence(Ordering::SeqCst);
         let empty = w.inbox.iter().all(|r| r.is_empty());
         if empty {
             std::thread::park_timeout(std::time::Duration::from_millis(5));
         }
-        w.sleeping.store(false, Ordering::Release);
+        w.sleeping.store(false, Ordering::SeqCst);
         idle = 0;
     }
 }
@@ -450,7 +451,7 @@ fn forward(w: &Arc<Worker>, tr: &Arc<Transport>, track: &Arc<crate::r#pub::PubTr
     let stream = &track.stream;
     let audio_level = if stream.kind == Kind::Audio { ext_get(rtp.ext, ids.audio_level).and_then(|v| v.first().copied()) } else { None };
     let payload = &plain[rtp.hlen..];
-    let keyframe = stream.kind == Kind::Video && crate::trk::is_keyframe(&stream.codec_name(), payload);
+    let keyframe = stream.kind == Kind::Video && crate::trk::is_keyframe(stream.codec_name(), payload);
     let pkt = Pkt {
         data: plain.clone(),
         hlen: rtp.hlen,
@@ -495,9 +496,14 @@ fn forward(w: &Arc<Worker>, tr: &Arc<Transport>, track: &Arc<crate::r#pub::PubTr
             crate::ops::floor_rtp(&room, tr, first);
         }
         for r in fan.rows.load().iter() {
-            if r.user != tr.user && r.open() {
-                targets.push(r.clone());
+            if r.user == tr.user {
+                continue;
             }
+            if !r.open() {
+                crate::ops::drop_count("row_gate");
+                continue;
+            }
+            targets.push(r.clone());
         }
     } else {
         if !on_pub_room(stream, room.as_str()) {

@@ -276,7 +276,7 @@ pub fn resume(env: &Envelope) -> Result<Value, Failure> {
             room_id: st.room.load().as_str().to_string(),
             kind: st.kind,
             duplex: st.duplex(),
-            codec: Some(st.codec_name()),
+            codec: Some(st.codec_name().to_string()),
             fmtp: st.fmtp.clone(),
             simulcast: st.simulcast,
         })

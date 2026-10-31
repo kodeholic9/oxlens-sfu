@@ -103,7 +103,10 @@ impl ORr {
         self.transit = Some(transit);
         v
     }
-    fn report(&mut self) -> Report {
+    fn report(&mut self) -> Option<Report> {
+        if !self.started || self.probation > 0 {
+            return None;
+        }
         let extended_max = self.cycles + self.max_seq as u32;
         let expected = extended_max as i64 - self.base_seq as i64 + 1;
         let lost = (expected - self.received as i64).clamp(-0x80_0000, 0x7f_ffff) as i32;
@@ -113,7 +116,7 @@ impl ORr {
         self.received_prior = self.received;
         let lost_interval = expected_interval - received_interval;
         let fraction = if expected_interval == 0 || lost_interval <= 0 { 0 } else { ((lost_interval << 8) / expected_interval).min(255) as u8 };
-        Report { fraction, lost, extended_max, jitter: self.jitter as u32 }
+        Some(Report { fraction, lost, extended_max, jitter: self.jitter as u32 })
     }
 }
 
@@ -143,12 +146,12 @@ fn rr_oracle_and_product_match_vectors() {
         let mut p = RecvStats::new(clock);
         for e in case["events"].as_array().expect("events") {
             if let Some(r) = e.get("report") {
-                let want = Report {
+                let want = (!r.is_null()).then(|| Report {
                     fraction: r["fraction"].as_u64().expect("fraction") as u8,
                     lost: r["lost"].as_i64().expect("lost") as i32,
                     extended_max: r["extended_max"].as_u64().expect("ext") as u32,
                     jitter: r["jitter"].as_u64().expect("jitter") as u32,
-                };
+                });
                 assert_eq!(o.report(), want, "S-sym-IMPL-RTCP-TERMINATE-6 oracle report vs vector · {name}");
                 assert_eq!(p.report(), want, "S-sym-IMPL-RTCP-TERMINATE-6 product report vs vector · {name}");
             } else {
@@ -184,9 +187,15 @@ fn rr_random_reports_during_probation() {
     rr_random(0x3550_3550_a1a3_a8a8, 0, false, true);
 }
 
-fn same_report(p: Report, o: Report, exact_jitter: bool) -> bool {
-    let j = if exact_jitter { p.jitter == o.jitter } else { p.jitter.abs_diff(o.jitter) <= 1 };
-    p.fraction == o.fraction && p.lost == o.lost && p.extended_max == o.extended_max && j
+fn same_report(p: Option<Report>, o: Option<Report>, exact_jitter: bool) -> bool {
+    match (p, o) {
+        (None, None) => true,
+        (Some(p), Some(o)) => {
+            let j = if exact_jitter { p.jitter == o.jitter } else { p.jitter.abs_diff(o.jitter) <= 1 };
+            p.fraction == o.fraction && p.lost == o.lost && p.extended_max == o.extended_max && j
+        }
+        _ => false,
+    }
 }
 
 fn rr_random(seed: u64, at_base: u64, exact_jitter: bool, during_probation: bool) {
@@ -239,8 +248,8 @@ fn rr_jitter_survives_rtp_timestamp_wrap() {
             ts = ts.wrapping_add(step);
             at += 20;
         }
-        let r = p.report();
-        assert_eq!(r, o.report(), "S-sym-IMPL-RTCP-TERMINATE-6 RR across RTP timestamp wrap equals RFC 3550 A.8 (32-bit transit) · clock {clock}");
+        let r = p.report().expect("S-sym-IMPL-RTCP-TERMINATE-6 report after probation");
+        assert_eq!(Some(r), o.report(), "S-sym-IMPL-RTCP-TERMINATE-6 RR across RTP timestamp wrap equals RFC 3550 A.8 (32-bit transit) · clock {clock}");
         assert!(r.jitter < 16, "S-sym-IMPL-RTCP-TERMINATE-6 steady stream keeps jitter near 0 across ts wrap · clock {clock} · jitter {}", r.jitter);
     }
 }
@@ -279,13 +288,13 @@ fn rr_loss_is_what_was_not_received() {
         p.update(s, s as u32 * 960, at, 50);
         at += 20;
     }
-    let r = p.report();
+    let r = p.report().expect("S-sym-IMPL-RTCP-TERMINATE-6 report after probation");
     assert_eq!((r.lost, r.extended_max, r.fraction), (0, 9, 0), "S-sym-IMPL-RTCP-TERMINATE-6 clean stream reports no loss");
     for s in (10u16..30).filter(|s| s % 4 != 0) {
         p.update(s, s as u32 * 960, at, 50);
         at += 20;
     }
-    let r = p.report();
+    let r = p.report().expect("S-sym-IMPL-RTCP-TERMINATE-6 report after probation");
     assert_eq!(r.extended_max, 29, "S-sym-IMPL-RTCP-TERMINATE-6 highest seq is the highest received");
     assert_eq!(r.lost, 5, "S-sym-IMPL-RTCP-TERMINATE-6 cumulative loss counts the 5 missing seqs 12 16 20 24 28");
     assert_eq!(r.fraction, (5 * 256 / 20) as u8, "S-sym-IMPL-RTCP-TERMINATE-6 fraction over the interval 10..=29");

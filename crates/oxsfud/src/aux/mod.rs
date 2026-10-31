@@ -11,7 +11,6 @@ use crate::link::{Peer, Transport};
 pub const DC_BUFFER: usize = 64;
 
 static PENDING: OnceLock<Mutex<HashMap<String, VecDeque<Vec<u8>>>>> = OnceLock::new();
-pub static DC_DROPPED: AtomicU64 = AtomicU64::new(0);
 pub static DC_SEND_FAIL: AtomicU64 = AtomicU64::new(0);
 
 fn pending() -> &'static Mutex<HashMap<String, VecDeque<Vec<u8>>>> {
@@ -35,7 +34,7 @@ pub fn dc_send(p: &Peer, frame: Vec<u8>) {
                 q.push_back(frame);
                 while q.len() > DC_BUFFER {
                     q.pop_front();
-                    DC_DROPPED.fetch_add(1, Ordering::Relaxed);
+                    crate::ops::drop_count("dc_backlog_full");
                 }
             }
         }

@@ -192,6 +192,19 @@ impl Transport {
         let p = self.path.load_full()?;
         if self.path_alive(now, tcp_open) { Some(*p) } else { None }
     }
+
+    pub fn control_path(&self, now: u64, tcp_open: impl Fn(u64) -> bool) -> Option<PathKey> {
+        if self.path.load().is_some() {
+            return self.send_ok(now, tcp_open);
+        }
+        let p = self.pairs.lock().ok()?;
+        let last = p.last()?;
+        let alive = match last.key {
+            PathKey::Udp(_) => now.saturating_sub(last.last_ms) <= UDP_PAIR_EXPIRE_MS,
+            PathKey::Tcp(id) => tcp_open(id),
+        };
+        alive.then_some(last.key)
+    }
 }
 
 pub struct Peer {

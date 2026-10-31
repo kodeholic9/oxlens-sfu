@@ -105,7 +105,11 @@ fn rtcp_vectors() {
         let mut st = RecvStats::new(c["clock"].as_u64().unwrap_or(48000) as u32);
         for e in c["events"].as_array().unwrap_or(&vec![]) {
             if let Some(r) = e.get("report") {
-                let got = st.report();
+                if r.is_null() {
+                    assert!(st.report().is_none(), "S-sym-RULE-CONC-SANS-IO-1 — RR 출처 인정 전 블록 없음 {name}");
+                    continue;
+                }
+                let got = st.report().unwrap_or_else(|| panic!("S-sym-RULE-CONC-SANS-IO-1 — RR 블록이 있어야 한다 {name}"));
                 assert_eq!(got.fraction as u64, r["fraction"].as_u64().unwrap_or(0), "S-sym-RULE-CONC-SANS-IO-1 — RR fraction {name}");
                 assert_eq!(got.lost as i64, r["lost"].as_i64().unwrap_or(0), "S-sym-RULE-CONC-SANS-IO-1 — RR lost {name}");
                 assert_eq!(got.extended_max as u64, r["extended_max"].as_u64().unwrap_or(0), "S-sym-RULE-CONC-SANS-IO-1 — RR ext {name}");

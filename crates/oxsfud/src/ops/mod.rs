@@ -56,6 +56,7 @@ pub const DROP_NAMES: &[&str] = &[
     "dc_bad_frame",
     "dc_unknown_svc",
     "dc_no_room",
+    "dc_backlog_full",
     "bus_ev_drop",
 ];
 

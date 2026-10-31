@@ -308,17 +308,27 @@ fn fire_due(room: &Arc<Room>, rf: &Arc<RoomFloor>) {
     };
     for (name, user) in due {
         let u = user.clone().unwrap_or_default();
-        run(room, |f, _| match name {
-            "T1" => f.t1(),
-            "T2" => f.t2(),
-            "T3" => f.t3(),
-            "T7" => f.t7(),
-            "T20" => f.t20(),
-            "T8" => f.t8(&u),
-            "T21" => f.t21(&u),
-            "T9" => f.t9(&u),
-            _ => Step::default(),
+        run(room, |f, _| {
+            let armed = if user.is_some() { f.armed_participant(&u) } else { f.armed_server() };
+            if !armed.contains(&name) {
+                return Step::default();
+            }
+            fire(f, name, &u)
         });
+    }
+}
+
+fn fire(f: &mut Floor, name: &str, u: &str) -> Step {
+    match name {
+        "T1" => f.t1(),
+        "T2" => f.t2(),
+        "T3" => f.t3(),
+        "T7" => f.t7(),
+        "T20" => f.t20(),
+        "T8" => f.t8(u),
+        "T21" => f.t21(u),
+        "T9" => f.t9(u),
+        _ => Step::default(),
     }
 }
 
@@ -355,10 +365,35 @@ fn room_audio_opus(room: &Room) -> bool {
     room.media_codecs.audio.as_deref().map(|a| a.eq_ignore_ascii_case("opus")).unwrap_or(true)
 }
 
+fn slot_video(room: &Room, user: &str) -> (Vec<Arc<crate::r#pub::PubStream>>, bool) {
+    let Some(ctx) = super::sfu().and_then(|s| s.pubs.get(user)) else { return (Vec::new(), true) };
+    let vs: Vec<_> = ctx.streams().into_iter().filter(|st| st.kind == Kind::Video && st.is_half() && st.room.load().as_str() == room.id).collect();
+    let ok = vs.iter().all(|st| crate::trk::matches_room(Kind::Video, st.codec.as_deref(), st.fmtp.as_deref(), &room.media_codecs));
+    (vs, ok)
+}
+
+fn pli_while_bound(fan: &Arc<SlotFan>, t: &Arc<crate::r#pub::PubTrack>) {
+    let ep = fan.episode.load(Ordering::Acquire);
+    for d in crate::rtcp::PLI_BURST_MS {
+        let (fan, t) = (fan.clone(), t.clone());
+        super::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(d)).await;
+            if fan.episode.load(Ordering::Acquire) == ep {
+                crate::rtcp::request_pli(&t, true);
+            }
+        });
+    }
+}
+
 fn bind_media(room: &Arc<Room>, user: &str, from_idle: bool) {
+    let (videos, video_ok) = slot_video(room, user);
+    if !video_ok {
+        tracing::warn!(kind = "diag", room = %room.id, user = %user, "slot video codec differs from room — video not bound");
+    }
     for k in [Kind::Audio, Kind::Video] {
         let fan = room.slot(k);
-        fan.speaker.store(Some(Arc::new(user.to_string())));
+        let bind = k == Kind::Audio || video_ok;
+        fan.speaker.store(bind.then(|| Arc::new(user.to_string())));
         fan.episode.fetch_add(1, Ordering::AcqRel);
         fan.first_rtp_us.store(0, Ordering::Release);
         fan.last_notify_us.store(0, Ordering::Release);
@@ -384,18 +419,11 @@ fn bind_media(room: &Arc<Room>, user: &str, from_idle: bool) {
             audio.priming.store(0, Ordering::Release);
         });
     }
-    if let Some(s) = super::sfu()
-        && let Some(ctx) = s.pubs.get(user)
-    {
-        for st in ctx.streams() {
-            if st.kind == Kind::Video && st.is_half() && st.room.load().as_str() == room.id {
-                if !crate::trk::matches_room(Kind::Video, st.codec.as_deref(), st.fmtp.as_deref(), &room.media_codecs) {
-                    tracing::warn!(kind = "diag", room = %room.id, user = %user, "slot video codec differs from room — not bound");
-                    continue;
-                }
-                for t in st.physical() {
-                    crate::rtcp::pli_burst(&t);
-                }
+    if video_ok {
+        let fan = room.slot(Kind::Video);
+        for st in &videos {
+            for t in st.physical() {
+                pli_while_bound(fan, &t);
             }
         }
     }

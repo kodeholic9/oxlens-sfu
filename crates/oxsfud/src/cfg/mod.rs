@@ -49,7 +49,7 @@ pub struct SfuCfg {
 }
 
 pub fn compiled_build() -> &'static str {
-    env!("OX_BUILD")
+    common::ident::COMPILED
 }
 
 fn default_iface() -> Option<IpAddr> {

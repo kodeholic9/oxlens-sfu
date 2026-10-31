@@ -108,7 +108,10 @@ impl RecvStats {
         self.cycles + self.max_seq as u32
     }
 
-    pub fn report(&mut self) -> Report {
+    pub fn report(&mut self) -> Option<Report> {
+        if !self.started || self.probation > 0 {
+            return None;
+        }
         let ext = self.extended_max();
         let expected = ext.wrapping_sub(self.base_seq).wrapping_add(1);
         let lost = (expected as i64 - self.received as i64).clamp(-0x80_0000, 0x7f_ffff) as i32;
@@ -122,7 +125,7 @@ impl RecvStats {
         } else {
             ((lost_interval << 8) / expected_interval as i64).min(255) as u8
         };
-        Report { fraction, lost, extended_max: ext, jitter: self.jitter as u32 }
+        Some(Report { fraction, lost, extended_max: ext, jitter: self.jitter as u32 })
     }
 }
 
