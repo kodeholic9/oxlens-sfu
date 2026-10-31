@@ -130,6 +130,8 @@ impl Mesh {
         let accepts = listeners.into_iter().map(|li| tokio::spawn(accept_loop(li, ev_tx.clone())).abort_handle()).collect();
         let core = Core::new(cfg.node.clone(), cfg.router, cfg.lease, adv, seeds, Wiring { cmd_tx: cmd_tx.clone(), ev_tx, sess_tx, accepts });
         tokio::spawn(core.run(cmd_rx, ev_rx, sess_rx));
+        let listen: Vec<String> = bound.iter().map(|a| a.to_string()).collect();
+        tracing::info!(kind = "diag", node = %cfg.node, router = cfg.router, listen = %listen.join(","), connect = %cfg.connect.join(","), lease_ms = cfg.lease.as_millis() as u64, "mesh open");
         Ok(Mesh { cmd: cmd_tx, node: cfg.node, bound })
     }
 

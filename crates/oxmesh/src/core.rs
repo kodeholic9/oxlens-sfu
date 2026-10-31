@@ -253,10 +253,15 @@ impl Core {
         for a in self.accepts.drain(..) {
             a.abort();
         }
+        self.l_tsubs.clear();
+        self.l_subs.clear();
+        self.l_qabls.clear();
+        self.pending.clear();
         let uids: Vec<u64> = self.sessions.keys().copied().collect();
         for u in uids {
             self.close(u, CloseReason::Shutdown);
         }
+        tracing::info!(kind = "diag", node = %self.node, "mesh closed");
     }
 
     fn on_tick(&mut self) {
@@ -826,9 +831,7 @@ impl Core {
                         TokenEvent::Put(key)
                     }
                     TokenEvtKind::Delete => {
-                        if !t.seen.remove(&key) {
-                            return;
-                        }
+                        t.seen.remove(&key);
                         TokenEvent::Delete(key)
                     }
                     TokenEvtKind::BatchEnd => TokenEvent::BatchEnd,
