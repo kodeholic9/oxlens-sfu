@@ -200,6 +200,25 @@ impl Failure {
     }
 }
 
+pub fn body<T: serde::de::DeserializeOwned>(v: &serde_json::Value) -> Result<T, Failure> {
+    serde_json::from_value(v.clone()).map_err(|e| {
+        let m = e.to_string();
+        let code = if m.starts_with("missing field") { Code::MissingField } else { Code::InvalidPayload };
+        code.failure().with_message(m)
+    })
+}
+
+pub fn field<T: serde::de::DeserializeOwned>(v: &serde_json::Value, k: &str) -> Result<Option<T>, Failure> {
+    match v.get(k) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(x) => serde_json::from_value(x.clone()).map(Some).map_err(|_| Code::InvalidPayload.failure().with_message(k.to_string())),
+    }
+}
+
+pub fn need<T: serde::de::DeserializeOwned>(v: &serde_json::Value, k: &str) -> Result<T, Failure> {
+    field(v, k)?.ok_or_else(|| Code::MissingField.failure().with_message(k.to_string()))
+}
+
 impl From<Code> for Failure {
     fn from(c: Code) -> Self {
         c.failure()

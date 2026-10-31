@@ -141,6 +141,7 @@ pub struct SyncOut {
     pub changes: Vec<Change>,
     pub changed: bool,
     pub mid_limit: bool,
+    pub budget: Option<(usize, usize)>,
 }
 
 #[derive(Default)]
@@ -187,7 +188,7 @@ impl Table {
         if self.pc_mode == PcMode::One { START_1PC } else { START_2PC }
     }
 
-    fn limit(&self) -> usize {
+    pub fn limit(&self) -> usize {
         if self.pc_mode == PcMode::One { SUB_1PC } else { SUB_2PC }
     }
 
@@ -424,6 +425,7 @@ impl Table {
                     let slot_rows = s.rows.iter().filter(|r| r.class == Class::Slot).count();
                     if slot_rows >= self.slot_budget || s.rows.len() >= self.limit() {
                         out.mid_limit = true;
+                        out.budget = Some(if slot_rows >= self.slot_budget { (self.slot_budget, slot_rows) } else { (self.limit(), s.rows.len()) });
                         break;
                     }
                     self.new_row(&mut s, c.kind, Class::Slot, &c.codec)

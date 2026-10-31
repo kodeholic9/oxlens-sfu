@@ -70,6 +70,9 @@ impl Accounts {
         let Some(acc) = self.find(&req.api_key).filter(|a| a.secret == req.api_secret) else {
             return Err(Code::InvalidApiKey.failure());
         };
+        if !common::keyspace::valid_piece(&req.user_id) {
+            return Err(Code::InvalidPayload.failure().with_message("user_id"));
+        }
         let pt = req.participant_type.unwrap_or(0);
         if pt > 2 {
             return Err(Code::InvalidPayload.failure().with_message("unknown participant_type"));
@@ -117,7 +120,7 @@ impl Accounts {
             match decode::<UserClaims>(token, &DecodingKey::from_secret(s.as_bytes()), &validation()) {
                 Ok(d) => {
                     let c = d.claims;
-                    let Some(user) = c.sub.clone().or(c.user_id.clone()).filter(|u| !u.is_empty()) else {
+                    let Some(user) = c.sub.clone().or(c.user_id.clone()).filter(|u| common::keyspace::valid_piece(u)) else {
                         return Err(Code::TokenInvalid);
                     };
                     return Ok(Identity {

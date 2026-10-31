@@ -13,6 +13,7 @@ use crate::bus::Bus;
 
 pub const CREATE_VISIBLE_WAIT: Duration = Duration::from_secs(1);
 pub const PERMANENT_TTL: u32 = u32::MAX;
+pub const MAX_CAPACITY: u32 = 1_000;
 
 pub fn valid_room_id(r: &str) -> bool {
     !r.is_empty() && r.len() <= 255 && common::keyspace::valid_piece(r)
@@ -37,10 +38,15 @@ pub async fn create(bus: &Bus, policy: &Policy, mut body: serde_json::Value) -> 
         }
         Some(_) => return Err(Code::InvalidPayload.failure().with_message("name")),
     }
-    let room = match obj.get("room_id").and_then(|v| v.as_str()) {
-        Some(r) if !r.is_empty() => r.to_string(),
-        _ => uuid::Uuid::new_v4().to_string(),
+    let room = match obj.get("room_id") {
+        Some(serde_json::Value::String(r)) if !r.is_empty() => r.clone(),
+        None | Some(serde_json::Value::Null) | Some(serde_json::Value::String(_)) => uuid::Uuid::new_v4().to_string(),
+        Some(_) => return Err(Code::InvalidPayload.failure().with_message("room_id")),
     };
+    match oxsig::code::field::<u32>(&serde_json::Value::Object(obj.clone()), "capacity")? {
+        Some(c) if c > MAX_CAPACITY => return Err(Code::InvalidPayload.failure().with_message("capacity")),
+        _ => {}
+    }
     if !valid_room_id(&room) {
         return Err(Code::InvalidPayload.failure().with_message("room_id"));
     }

@@ -25,7 +25,7 @@ fn sfu() -> Result<&'static Arc<super::Sfu>, Failure> {
 }
 
 fn parse<T: serde::de::DeserializeOwned>(v: &Value) -> Result<T, Failure> {
-    serde_json::from_value(v.clone()).map_err(|e| Code::InvalidPayload.failure().with_message(e.to_string()))
+    oxsig::code::body(v)
 }
 
 fn ok<T: serde::Serialize>(v: &T) -> Result<Value, Failure> {
@@ -183,17 +183,20 @@ fn item<T: serde::de::DeserializeOwned>(v: &Value, k: &str) -> Option<T> {
 }
 
 pub fn publish(c: &Ctx, body: &Value) -> Result<Value, Failure> {
-    if body.get("action").and_then(|v| v.as_str()) == Some("remove") {
-        return match parse::<PublishTracksReq>(body)? {
-            PublishTracksReq::Remove { room_id, track_ids, .. } => unpublish(c, &room_id, &track_ids),
-            PublishTracksReq::Add { .. } => Err(Code::InvalidPayload.failure()),
-        };
+    match oxsig::code::field::<String>(body, "action")?.as_deref() {
+        None | Some("add") => {}
+        Some("remove") => {
+            let room_id: String = oxsig::code::need(body, "room_id")?;
+            let track_ids: Vec<String> = oxsig::code::need(body, "track_ids")?;
+            return unpublish(c, &room_id, &track_ids);
+        }
+        Some(_) => return Err(Code::InvalidPayload.failure().with_message("action")),
     }
-    let room_id: String = item(body, "room_id").ok_or_else(|| Code::MissingField.failure().with_message("room_id"))?;
-    let items: Vec<Value> = item(body, "tracks").ok_or_else(|| Code::MissingField.failure().with_message("tracks"))?;
-    let ext = |k: &str| -> Option<u8> { item(body, k) };
+    let room_id: String = oxsig::code::need(body, "room_id")?;
+    let items: Vec<Value> = oxsig::code::need(body, "tracks")?;
+    let ext = |k: &str| -> Result<Option<u8>, Failure> { oxsig::code::field(body, k) };
     let (twcc_extmap_id, rid_extmap_id, repair_rid_extmap_id, mid_extmap_id, audio_level_extmap_id) =
-        (ext("twcc_extmap_id"), ext("rid_extmap_id"), ext("repair_rid_extmap_id"), ext("mid_extmap_id"), ext("audio_level_extmap_id"));
+        (ext("twcc_extmap_id")?, ext("rid_extmap_id")?, ext("repair_rid_extmap_id")?, ext("mid_extmap_id")?, ext("audio_level_extmap_id")?);
     {
         {
             let s = sfu()?;
@@ -215,8 +218,11 @@ pub fn publish(c: &Ctx, body: &Value) -> Result<Value, Failure> {
                 return Err(Code::NotPubRoom.failure());
             }
             let ctx = s.pubs.ctx(&c.user);
-            if items.len() > PER_REQUEST || ctx.active() + items.len() > PER_PERSON {
-                return Err(Code::TrackLimit.failure().with_details(json!({ "per_request": PER_REQUEST, "per_person": PER_PERSON })));
+            if items.len() > PER_REQUEST {
+                return Err(Code::TrackLimit.failure().with_details(json!({ "limit": PER_REQUEST, "current": items.len() })));
+            }
+            if ctx.active() + items.len() > PER_PERSON {
+                return Err(Code::TrackLimit.failure().with_details(json!({ "limit": PER_PERSON, "current": ctx.active() + items.len() })));
             }
             let mut tracks: Vec<PublishTrack> = Vec::with_capacity(items.len());
             for v in &items {
@@ -250,7 +256,7 @@ pub fn publish(c: &Ctx, body: &Value) -> Result<Value, Failure> {
                     return Err(Code::CodecRequired.failure().with_details(json!({ "supported": crate::trk::supported_list() })));
                 };
                 if !crate::trk::matches_room(Kind::Video, Some(name), t.fmtp.as_deref(), &room.media_codecs) {
-                    return Err(Code::CodecMismatch.failure().with_details(json!({ "codec": t.codec, "fmtp": t.fmtp })));
+                    return Err(crate::trk::mismatch(Kind::Video, &room.media_codecs));
                 }
             }
             let tr = peer.publish.clone();

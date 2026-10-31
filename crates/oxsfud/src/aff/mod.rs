@@ -46,7 +46,7 @@ pub fn bit_name(kind: Kind, source: Option<Source>) -> &'static str {
 pub fn recheck(to: &Room, user: &str, streams: &[Arc<PubStream>], token: Option<oxsig::msg::Permission>) -> Result<(), Failure> {
     for s in streams {
         if !crate::trk::matches_room(s.kind, s.codec.as_deref().or(Some(if s.kind == Kind::Audio { "opus" } else { "" })), s.fmtp.as_deref(), &to.media_codecs) {
-            return Err(Code::CodecMismatch.failure().with_details(serde_json::json!({ "codec": s.codec_name(), "fmtp": s.fmtp })));
+            return Err(crate::trk::mismatch(s.kind, &to.media_codecs));
         }
     }
     let perm = to.permission_for(user, token);

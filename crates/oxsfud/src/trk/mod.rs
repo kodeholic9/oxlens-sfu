@@ -32,6 +32,18 @@ pub fn row_fmtp(codec: &str) -> Option<String> {
     }
 }
 
+pub fn mismatch(kind: Kind, room: &MediaCodecs) -> oxsig::Failure {
+    let codec = match kind {
+        Kind::Audio => room.audio.clone().unwrap_or_else(|| DEFAULT_AUDIO.to_string()),
+        Kind::Video => room_video(room).to_string(),
+    };
+    let mut d = serde_json::json!({ "codec": codec });
+    if let Some(f) = row_fmtp(&codec) {
+        d["fmtp"] = serde_json::json!(f);
+    }
+    oxsig::Code::CodecMismatch.failure().with_details(d)
+}
+
 pub fn fmtp_param(fmtp: Option<&str>, key: &str) -> Option<String> {
     fmtp?.split(';').map(|kv| kv.trim()).find_map(|kv| {
         let (k, v) = kv.split_once('=')?;

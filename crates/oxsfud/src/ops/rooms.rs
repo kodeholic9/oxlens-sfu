@@ -25,7 +25,7 @@ fn sfu() -> Result<&'static Arc<super::Sfu>, Failure> {
 }
 
 fn parse<T: serde::de::DeserializeOwned>(v: &Value) -> Result<T, Failure> {
-    serde_json::from_value(v.clone()).map_err(|e| Code::InvalidPayload.failure().with_message(e.to_string()))
+    oxsig::code::body(v)
 }
 
 fn ok<T: serde::Serialize>(v: &T) -> Result<Value, Failure> {
@@ -133,13 +133,13 @@ pub fn join(c: &Ctx, body: &Value) -> Result<Value, Failure> {
     }
     let hidden = c.hidden();
     if !rejoin && room.full_for(hidden) {
-        return Err(Code::RoomFull.failure());
+        return Err(Code::RoomFull.failure().with_details(serde_json::json!({ "capacity": room.capacity })));
     }
     let existing = s.peer(&c.user);
     if let Some(p) = &existing
         && p.rooms().len() >= MAX_ROOMS
     {
-        return Err(Code::ListenLimit.failure());
+        return Err(Code::ListenLimit.failure().with_details(serde_json::json!({ "limit": MAX_ROOMS, "current": p.rooms().len() })));
     }
     let peer = match existing {
         Some(p) => p,
@@ -170,7 +170,8 @@ pub fn join(c: &Ctx, body: &Value) -> Result<Value, Failure> {
         if rejoin && room.remove(&c.user).is_some() {
             room.announce_left(&c.user);
         }
-        return Err(Code::MidLimit.failure());
+        let (limit, current) = out.budget.unwrap_or((table.limit(), table.limit()));
+        return Err(Code::MidLimit.failure().with_details(serde_json::json!({ "limit": limit, "current": current })));
     }
     let claims = c.claims.clone().unwrap_or_default();
     let select = req.select.unwrap_or(true);

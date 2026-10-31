@@ -556,17 +556,17 @@ async fn route(ctx: &Arc<Ctx>, s: &Arc<Session>, op: Op, body: serde_json::Value
         Op::Resume => resume(ctx, s).await,
         Op::Task => crate::aux::task_from_client(&ctx.probes, &s.fp, &body),
         Op::IceRestart => {
-            let sfu = body.get("sfu_id").and_then(|v| v.as_str()).ok_or_else(|| Code::MissingField.failure())?;
-            let node = ctx.bus.node_of_epoch(sfu).ok_or_else(|| Code::PeerNotFound.failure())?;
+            let sfu: String = oxsig::code::need(&body, "sfu_id")?;
+            let node = ctx.bus.node_of_epoch(&sfu).ok_or_else(|| Code::PeerNotFound.failure())?;
             call_node(ctx, s, &node, op, body).await
         }
         Op::Affiliation => {
-            let room = body
-                .get("pub_select")
-                .or_else(|| body.get("pub_deselect"))
-                .and_then(|v| v.as_str())
-                .map(|x| x.to_string())
-                .ok_or_else(|| Code::MissingField.failure())?;
+            let sel: Option<String> = oxsig::code::field(&body, "pub_select")?;
+            let de: Option<String> = oxsig::code::field(&body, "pub_deselect")?;
+            let room = sel.or(de).ok_or_else(|| Code::MissingField.failure().with_message("pub_select/pub_deselect"))?;
+            if !valid_room_id(&room) {
+                return Err(Code::InvalidPayload.failure().with_message("room_id"));
+            }
             let loc = ctx.bus.room_route(&room).ok_or_else(|| Code::RoomNotFound.failure())?;
             let v = call_node(ctx, s, &loc.node, op, body).await?;
             if let Ok(a) = serde_json::from_value::<AffiliationRes>(v.clone()) {
@@ -579,9 +579,11 @@ async fn route(ctx: &Arc<Ctx>, s: &Arc<Session>, op: Op, body: serde_json::Value
             if !valid_room_id(&room) {
                 return Err(Code::InvalidPayload.failure().with_message("room_id"));
             }
-            match (s.pc_mode, body.get("extmap").is_some() || body.get("codecs").is_some()) {
-                (PcMode::One, false) => return Err(Code::MissingField.failure().with_message("extmap/codecs")),
-                (PcMode::Two, true) => return Err(Code::InvalidPayload.failure().with_message("extmap/codecs in 2pc")),
+            let has = |k: &str| body.get(k).map(|v| !v.is_null()).unwrap_or(false);
+            match s.pc_mode {
+                PcMode::One if !has("extmap") => return Err(Code::MissingField.failure().with_message("extmap")),
+                PcMode::One if !has("codecs") => return Err(Code::MissingField.failure().with_message("codecs")),
+                PcMode::Two if has("extmap") || has("codecs") => return Err(Code::InvalidPayload.failure().with_message("extmap/codecs in 2pc")),
                 _ => {}
             }
             admit(ctx)?;
@@ -601,6 +603,9 @@ async fn route(ctx: &Arc<Ctx>, s: &Arc<Session>, op: Op, body: serde_json::Value
         }
         Op::RoomLeave => {
             let room = room_of(&body)?;
+            if !valid_room_id(&room) {
+                return Err(Code::InvalidPayload.failure().with_message("room_id"));
+            }
             let loc = ctx.bus.room_route(&room).ok_or_else(|| Code::RoomNotFound.failure())?;
             let v = call_node(ctx, s, &loc.node, op, body).await?;
             if let Ok(l) = serde_json::from_value::<RoomLeaveRes>(v.clone()) {
