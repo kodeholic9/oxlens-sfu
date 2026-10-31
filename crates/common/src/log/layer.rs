@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.6 · 운영:RULE-LOG-SENDER · 운영:RULE-LOG-CONTEXT · 운영:RULE-LOG-LEVEL · 정:RULE-OPS-LOGGER · 정:CAND-OPS-FOREIGN-LOG · model: claude-opus-5-5
-//! `tracing` Layer 하나 — 사건 칸 + span 문맥(`session` · `room` · `user` · `epoch`)으로 줄을 짓는다 · 수준은 `diag` 만 거른다 · 남의 크레이트는 `warn` 이상(zenoh 는 `info`).
+//! `tracing` Layer 하나 — 사건 칸 + span 문맥(`session` · `room` · `user` · `epoch`)으로 줄을 짓는다 · 수준은 `diag` 만 거른다 · 남의 크레이트는 `warn` 이상(버스 — zenoh · oxmesh 는 `info`).
 
 use std::sync::Arc;
 
@@ -106,7 +106,7 @@ where
         let target = meta.target();
         let rank = level_rank(meta.level());
         if !own_target(target) {
-            let floor = if target.starts_with("zenoh") { 2 } else { 3 };
+            let floor = if target.starts_with("zenoh") || target.starts_with("oxmesh") { 2 } else { 3 };
             if rank < floor {
                 return;
             }

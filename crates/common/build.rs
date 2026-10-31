@@ -17,7 +17,7 @@ fn main() {
     if let Err(e) = tonic_build::configure().compile_protos(&["proto/handle.proto"], &["proto"]) {
         panic!("handle.proto: {e}");
     }
-    for p in ["src", "../oxsig/src", "../oxhubd/src", "../oxsfud/src", "../../.git/HEAD", "../../.git/index"] {
+    for p in ["src", "../oxsig/src", "../oxmesh/src", "../oxhubd/src", "../oxsfud/src", "../../.git/HEAD", "../../.git/index"] {
         println!("cargo:rerun-if-changed={p}");
     }
     let sha = git(&["rev-parse", "HEAD"]).map(|s| s.chars().take(12).collect::<String>()).unwrap_or_else(|| "unknown".into());

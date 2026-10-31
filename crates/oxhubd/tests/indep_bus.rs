@@ -6,7 +6,7 @@ use common::keyspace::{Keys, Parsed, valid_piece};
 use oxhubd::bus::placement::{fnv1a64, pick, score, splitmix_finish};
 use oxhubd::bus::view::{SETTLE_MS, TokenEv, View};
 use std::collections::BTreeSet;
-use zenoh::key_expr::keyexpr;
+use oxmesh::keyexpr;
 
 fn o_fnv(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -44,8 +44,21 @@ fn o_pick(nodes: &[String], room: &str) -> Option<String> {
     best.map(|(_, n)| n.clone())
 }
 
-fn ke(s: &str) -> &keyexpr {
-    keyexpr::new(s).unwrap_or_else(|e| panic!("not a zenoh key expression {s:?}: {e}"))
+struct Ke<'a>(&'a str);
+
+impl Ke<'_> {
+    fn includes(&self, o: Ke<'_>) -> bool {
+        keyexpr::includes(self.0, o.0)
+    }
+
+    fn intersects(&self, o: Ke<'_>) -> bool {
+        keyexpr::intersects(self.0, o.0)
+    }
+}
+
+fn ke(s: &str) -> Ke<'_> {
+    assert!(keyexpr::valid(s), "not a key expression {s:?}");
+    Ke(s)
 }
 
 struct Rng(u64);
@@ -271,7 +284,7 @@ fn forbidden_pieces_are_rejected() {
     for good in ["room-1", "회의실", "a.b_c", "R9", "0"] {
         assert!(valid_piece(good), "S-sym-RULE-BUS-KEYSPACE-4 {good:?} is a valid key piece");
         let k = Keys::new("ox");
-        assert!(keyexpr::new(k.room_token(good, "n", "i").as_str()).is_ok(), "S-sym-RULE-BUS-KEYSPACE-4 a valid room id makes a valid zenoh key");
+        assert!(keyexpr::valid(k.room_token(good, "n", "i").as_str()), "S-sym-RULE-BUS-KEYSPACE-4 a valid room id makes a valid key expression");
     }
 }
 

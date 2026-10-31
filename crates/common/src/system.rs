@@ -134,6 +134,8 @@ pub struct Zenoh {
     #[serde(default)]
     pub listen: Vec<String>,
     #[serde(default)]
+    pub advertise: Vec<String>,
+    #[serde(default)]
     pub connect: Vec<String>,
     #[serde(default)]
     pub multicast_scouting: bool,
@@ -282,6 +284,7 @@ impl System {
         let z = &self.zenoh;
         v.push(("zenoh.mode".into(), z.mode.clone()));
         v.push(("zenoh.listen".into(), z.listen.join(",")));
+        v.push(("zenoh.advertise".into(), if z.advertise.is_empty() { "-".into() } else { z.advertise.join(",") }));
         v.push(("zenoh.connect".into(), if z.connect.is_empty() { "-".into() } else { z.connect.join(",") }));
         v.push(("zenoh.multicast_scouting".into(), z.multicast_scouting.to_string()));
         v.push(("zenoh.qos_enabled".into(), z.qos_enabled.to_string()));

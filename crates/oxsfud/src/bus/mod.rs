@@ -1,16 +1,14 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.6 · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · 정:RULE-BUS-PRESENCE · 정:RULE-BUS-EVENTS · 정:IMPL-BUS-HOME-LOST · model: claude-opus-5-5
-//! sfud 의 버스 — zenoh client(로컬 hub 에만) · `room` 토큰 선언 · `ev` put 은 낸 차례 그대로 한 줄로(`Drop`) · `node` 토큰 history 구독(홈 잃음).
+//! sfud 의 버스 — oxmesh client(로컬 hub 에만 · 202610/20261031e) · `room` 토큰 선언 · `ev` put 은 낸 차례 그대로 한 줄로(데이터 레인 — 차면 버리고 센다) · `node` 토큰 history 구독(홈 잃음).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use common::envelope::Notice;
 use common::keyspace::{Keys, Parsed};
+use oxmesh::{Mesh, Token, TokenEvent};
 use tokio::sync::mpsc;
-use zenoh::Session;
-use zenoh::liveliness::LivelinessToken;
-use zenoh::qos::CongestionControl;
 
 static BUS: OnceLock<Arc<Bus>> = OnceLock::new();
 
@@ -23,13 +21,13 @@ pub struct Bus {
     pub keys: Keys,
     pub node: String,
     pub epoch: String,
-    session: Session,
+    session: Mesh,
     tx: mpsc::UnboundedSender<Put>,
-    room_tokens: Mutex<HashMap<String, LivelinessToken>>,
+    room_tokens: Mutex<HashMap<String, Token>>,
     pub nodes: Mutex<HashMap<String, (String, bool, u64)>>,
     pub seen_other: Mutex<bool>,
     pub ev_drop: std::sync::atomic::AtomicU64,
-    _subs: Mutex<Vec<zenoh::pubsub::Subscriber<()>>>,
+    _subs: Mutex<Vec<tokio::task::AbortHandle>>,
 }
 
 pub fn get() -> Option<&'static Arc<Bus>> {
@@ -38,14 +36,7 @@ pub fn get() -> Option<&'static Arc<Bus>> {
 
 impl Bus {
     pub async fn open(node: &str, epoch: &str, ns: &str, connect: &str) -> Result<Arc<Bus>, String> {
-        let mut cfg = zenoh::Config::default();
-        let set = |cfg: &mut zenoh::Config, k: &str, v: String| cfg.insert_json5(k, &v).map_err(|e| format!("zenoh {k}: {e}"));
-        set(&mut cfg, "mode", "\"client\"".into())?;
-        set(&mut cfg, "connect/endpoints", serde_json::to_string(&vec![connect]).unwrap_or_default())?;
-        set(&mut cfg, "scouting/multicast/enabled", "false".into())?;
-        set(&mut cfg, "transport/unicast/qos/enabled", "true".into())?;
-        set(&mut cfg, "transport/unicast/lowlatency", "false".into())?;
-        let session = zenoh::open(cfg).await.map_err(|e| format!("zenoh open: {e}"))?;
+        let session = Mesh::open(oxmesh::Config::client(&format!("{node}.sfud"), oxmesh::endpoint(connect))).await.map_err(|e| format!("mesh open: {e}"))?;
         let (tx, mut rx) = mpsc::unbounded_channel::<Put>();
         let bus = Arc::new(Bus {
             keys: Keys::new(ns),
@@ -67,22 +58,22 @@ impl Bus {
                     Put::User(u, n) => (b2.keys.ev_user(&u), n),
                 };
                 let payload = serde_json::to_vec(&n).unwrap_or_default();
-                if b2.session.put(key, payload).congestion_control(CongestionControl::Drop).await.is_err() {
+                if b2.session.put(&key, payload).is_err() {
                     b2.ev_drop.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
             }
         });
         let me = Arc::downgrade(&bus);
         let keys = bus.keys.clone();
-        let rt = tokio::runtime::Handle::current();
-        let sub = bus
-            .session
-            .liveliness()
-            .declare_subscriber(keys.node_all())
-            .history(true)
-            .callback(move |s| {
-                if let (Some(b), Some(Parsed::Node { node, inst })) = (me.upgrade(), keys.parse(s.key_expr().as_str())) {
-                    let put = s.kind() == zenoh::sample::SampleKind::Put;
+        let mut sub = bus.session.token_sub(&keys.node_all(), true).await.map_err(|e| format!("node sub: {e}"))?;
+        let h = tokio::spawn(async move {
+            while let Some(ev) = sub.recv().await {
+                let (k, put) = match ev {
+                    TokenEvent::Put(k) => (k, true),
+                    TokenEvent::Delete(k) => (k, false),
+                    TokenEvent::BatchEnd => continue,
+                };
+                if let (Some(b), Some(Parsed::Node { node, inst })) = (me.upgrade(), keys.parse(&k)) {
                     let back = match b.nodes.lock() {
                         Ok(mut g) => {
                             if node != b.node && put && let Ok(mut so) = b.seen_other.lock() {
@@ -97,14 +88,13 @@ impl Bus {
                         Err(_) => false,
                     };
                     if back {
-                        rt.spawn(async move { b.redeclare_rooms().await });
+                        tokio::spawn(async move { b.redeclare_rooms().await });
                     }
                 }
-            })
-            .await
-            .map_err(|e| format!("node sub: {e}"))?;
+            }
+        });
         if let Ok(mut g) = bus._subs.lock() {
-            g.push(sub);
+            g.push(h.abort_handle());
         }
         let _ = BUS.set(bus.clone());
         Ok(bus)
@@ -120,7 +110,7 @@ impl Bus {
 
     pub async fn declare_room(&self, room: &str) {
         let key = self.keys.room_token(room, &self.node, &self.epoch);
-        match self.session.liveliness().declare_token(key).await {
+        match self.session.declare_token(&key).await {
             Ok(t) => {
                 if let Ok(mut g) = self.room_tokens.lock() {
                     g.insert(room.to_string(), t);
@@ -180,7 +170,12 @@ impl Bus {
         if let Ok(mut g) = self.room_tokens.lock() {
             g.clear();
         }
-        let _ = self.session.close().await;
+        if let Ok(mut g) = self._subs.lock() {
+            for h in g.drain(..) {
+                h.abort();
+            }
+        }
+        self.session.close().await;
     }
 }
 

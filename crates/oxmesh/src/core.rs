@@ -261,7 +261,7 @@ impl Core {
         for u in uids {
             self.close(u, CloseReason::Shutdown);
         }
-        tracing::info!(kind = "diag", node = %self.node, "mesh closed");
+        tracing::info!(kind = "diag", me = %self.node, "mesh closed");
     }
 
     fn on_tick(&mut self) {
@@ -292,7 +292,7 @@ impl Core {
     }
 
     fn fence(&mut self, gap: u64) {
-        tracing::warn!(kind = "diag", node = %self.node, gap_ms = gap, "mesh fenced — tick gap over lease − keepalive · all sessions closed · stale bytes not trusted");
+        tracing::warn!(kind = "diag", me = %self.node, gap_ms = gap, "mesh fenced — tick gap over lease − keepalive · all sessions closed · stale bytes not trusted");
         let uids: Vec<u64> = self.sessions.keys().copied().collect();
         for u in uids {
             self.close(u, CloseReason::Fenced);
@@ -357,7 +357,7 @@ impl Core {
             let e = self.partial.entry(n.clone()).or_insert((now, false));
             if !e.1 && now.saturating_sub(e.0) > self.lease_ms {
                 e.1 = true;
-                tracing::warn!(kind = "diag", node = %self.node, missing = %n, seen_by = %by.join(","), "mesh partial — router seen by neighbours but not linked to me");
+                tracing::warn!(kind = "diag", me = %self.node, missing = %n, seen_by = %by.join(","), "mesh partial — router seen by neighbours but not linked to me");
             }
         }
     }
@@ -475,7 +475,7 @@ impl Core {
                 self.known.insert(n.clone(), a.clone());
             }
         }
-        tracing::info!(kind = "diag", node = %self.node, peer = %hello.node, dialer = %dialer, sno, addr = %addr, role = ?hello.role, "mesh session up");
+        tracing::info!(kind = "diag", me = %self.node, peer = %hello.node, dialer = %dialer, sno, addr = %addr, role = ?hello.role, "mesh session up");
         let s = Sess {
             peer: hello.node.clone(),
             role: hello.role,
@@ -536,7 +536,7 @@ impl Core {
         s.reader.abort();
         let say = matches!(reason, CloseReason::Shutdown | CloseReason::Replaced | CloseReason::Refused | CloseReason::Duplicate | CloseReason::Protocol);
         s.ob.close(say.then_some(reason));
-        tracing::info!(kind = "diag", node = %self.node, peer = %s.peer, dialer = %s.dialer, sno = s.sno, reason = reason.name(), "mesh session down");
+        tracing::info!(kind = "diag", me = %self.node, peer = %s.peer, dialer = %s.dialer, sno = s.sno, reason = reason.name(), "mesh session down");
         let mut deleted = false;
         for ((k, cid), e) in &s.decls {
             match k {

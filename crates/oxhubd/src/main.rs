@@ -102,6 +102,7 @@ async fn run(cfg: HubCfg) -> i32 {
     let (bus, bus_rx) = loop {
         let zc = ZenohCfg {
             listen: z.listen.clone(),
+            advertise: z.advertise.clone(),
             connect: z.connect.clone(),
             multicast_scouting: z.multicast_scouting,
             namespace: z.namespace.clone(),

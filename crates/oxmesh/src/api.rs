@@ -35,17 +35,18 @@ pub struct Config {
     pub node: String,
     pub router: bool,
     pub listen: Vec<String>,
+    pub advertise: Vec<String>,
     pub connect: Vec<String>,
     pub lease: Duration,
 }
 
 impl Config {
     pub fn router(node: &str) -> Config {
-        Config { node: node.to_string(), router: true, listen: Vec::new(), connect: Vec::new(), lease: Duration::from_secs(10) }
+        Config { node: node.to_string(), router: true, listen: Vec::new(), advertise: Vec::new(), connect: Vec::new(), lease: Duration::from_secs(10) }
     }
 
     pub fn client(node: &str, router: &str) -> Config {
-        Config { node: node.to_string(), router: false, listen: Vec::new(), connect: vec![router.to_string()], lease: Duration::from_secs(10) }
+        Config { node: node.to_string(), router: false, listen: Vec::new(), advertise: Vec::new(), connect: vec![router.to_string()], lease: Duration::from_secs(10) }
     }
 }
 
@@ -125,13 +126,25 @@ impl Mesh {
                 listeners.push(li);
             }
         }
-        let adv: Vec<String> = bound.iter().map(|a| a.to_string()).collect();
+        let adv: Vec<String> =
+            if cfg.advertise.is_empty() { bound.iter().map(|a| a.to_string()).collect() } else { cfg.advertise.iter().map(|a| endpoint(a).to_string()).collect() };
         let seeds: Vec<String> = cfg.connect.iter().map(|c| endpoint(c).to_string()).collect();
         let accepts = listeners.into_iter().map(|li| tokio::spawn(accept_loop(li, ev_tx.clone())).abort_handle()).collect();
         let core = Core::new(cfg.node.clone(), cfg.router, cfg.lease, adv, seeds, Wiring { cmd_tx: cmd_tx.clone(), ev_tx, sess_tx, accepts });
         tokio::spawn(core.run(cmd_rx, ev_rx, sess_rx));
-        let listen: Vec<String> = bound.iter().map(|a| a.to_string()).collect();
-        tracing::info!(kind = "diag", node = %cfg.node, router = cfg.router, listen = %listen.join(","), connect = %cfg.connect.join(","), lease_ms = cfg.lease.as_millis() as u64, "mesh open");
+        let listen = bound.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(",");
+        let some = |s: String| (!s.is_empty()).then_some(s);
+        let (listen, advertise, connect) = (some(listen), some(cfg.advertise.join(",")), some(cfg.connect.join(",")));
+        tracing::info!(
+            kind = "diag",
+            me = %cfg.node,
+            router = cfg.router,
+            listen = listen.as_deref(),
+            advertise = advertise.as_deref(),
+            connect = connect.as_deref(),
+            lease_ms = cfg.lease.as_millis() as u64,
+            "mesh open"
+        );
         Ok(Mesh { cmd: cmd_tx, node: cfg.node, bound })
     }
 

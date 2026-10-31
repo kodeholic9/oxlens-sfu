@@ -213,3 +213,35 @@ async fn both_seeding_each_other_keeps_one_session_dialed_by_the_smaller() {
     let again = x.info().await.expect("info").sessions;
     assert_eq!((again.len(), again[0].sno), (1, sx[0].sno), "stable — no churn");
 }
+
+#[tokio::test]
+async fn advertised_address_is_the_one_others_dial() {
+    let real = free_port();
+    let front = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("front");
+    let front_addr = front.local_addr().expect("addr");
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let h2 = hits.clone();
+    tokio::spawn(async move {
+        while let Ok((mut inbound, _)) = front.accept().await {
+            h2.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tokio::spawn(async move {
+                if let Ok(mut out) = tokio::net::TcpStream::connect(("127.0.0.1", real)).await {
+                    let _ = tokio::io::copy_bidirectional(&mut inbound, &mut out).await;
+                }
+            });
+        }
+    });
+    let a = router("a", &[]).await;
+    let mut c = Config::router("z");
+    c.listen = vec![format!("127.0.0.1:{real}")];
+    c.advertise = vec![front_addr.to_string()];
+    c.connect = vec![a.bound()[0].to_string()];
+    c.lease = LEASE;
+    let z = Mesh::open(c).await.expect("open z");
+    let b = router("b", &[&a]).await;
+    eventually("b links z", || async { router_peers(&b).await.iter().any(|(p, _)| p == "z") }).await;
+    let bz = b.info().await.expect("info").sessions.into_iter().find(|s| s.peer == "z").map(|s| (s.dialer, s.addr));
+    assert_eq!(bz, Some(("b".to_string(), front_addr.to_string())), "b dials z at the advertised address");
+    assert!(hits.load(std::sync::atomic::Ordering::Relaxed) >= 1);
+    drop(z);
+}

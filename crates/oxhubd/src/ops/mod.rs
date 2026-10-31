@@ -55,9 +55,9 @@ pub async fn dispatch(hub: Arc<Hub>, mut rx: mpsc::UnboundedReceiver<BusEvent>) 
     }
 }
 
-async fn answer(hub: &Arc<Hub>, q: zenoh::query::Query) {
-    let what = q.key_expr().as_str().rsplit('/').next().unwrap_or("").to_string();
-    let payload = q.payload().map(|p| p.to_bytes().to_vec()).unwrap_or_default();
+async fn answer(hub: &Arc<Hub>, q: oxmesh::Query) {
+    let what = q.key_expr().rsplit('/').next().unwrap_or("").to_string();
+    let payload = q.payload().to_vec();
     let key = hub.bus.keys.q_node(&hub.node, &what);
     let out: Vec<u8> = match what.as_str() {
         "call" => match Envelope::decode(&payload) {

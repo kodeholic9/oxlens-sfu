@@ -23,7 +23,7 @@ futures-util = { workspace = true }
 jsonwebtoken = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
-zenoh = { workspace = true }
+oxmesh = { workspace = true }
 tonic = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
