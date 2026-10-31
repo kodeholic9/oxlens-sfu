@@ -383,6 +383,14 @@ mod tests {
     }
 
     #[test]
+    fn v1_reads_no_subscriber_estimate() {
+        let needle = concat!("re", "mb");
+        for (name, src) in [("sim/mod.rs", include_str!("mod.rs")), ("sim/core.rs", include_str!("core.rs"))] {
+            assert!(!src.to_lowercase().contains(needle), "정:RULE-SIM-TICK v1 has no subscriber bandwidth estimate input · {name}");
+        }
+    }
+
+    #[test]
     fn nack_rate_is_a_per_tick_window() {
         let mut prev = HashMap::new();
         assert_eq!(nack_per_s(&mut prev, 1, 0), 0.0);
