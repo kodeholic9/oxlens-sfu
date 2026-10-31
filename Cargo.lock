@@ -2236,6 +2236,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxmesh"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "oxsfud"
 version = "0.1.0"
 dependencies = [

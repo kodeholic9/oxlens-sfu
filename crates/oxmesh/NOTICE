@@ -1,0 +1,10 @@
+oxmesh — node 사이 그물
+
+src/keyexpr.rs 의 겹침(intersects) · 포함(includes)은 Eclipse zenoh 1.10.1 에서 가져와 줄였다:
+  commons/zenoh-keyexpr/src/key_expr/intersect/classical.rs
+  commons/zenoh-keyexpr/src/key_expr/include.rs
+  Copyright (c) 2023 ZettaScale Technology · https://github.com/eclipse-zenoh/zenoh
+  EPL-2.0 OR Apache-2.0 — 여기서는 Apache-2.0 으로 받는다(http://www.apache.org/licenses/LICENSE-2.0).
+
+선언 다시 보내기(새 세션이면 내 선언 전부) · 레인 · 조각 · 핸드셰이크 · lease 의 꼴은 같은 판의
+zenoh/src/net/routing/hat/peer · io/zenoh-transport 를 참고해 새로 썼다(코드는 가져오지 않았다).
