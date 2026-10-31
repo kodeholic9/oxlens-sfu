@@ -48,7 +48,7 @@ pub struct Local {
     pub unit: String,
 }
 
-type SubMap = Mutex<HashMap<String, (usize, Subscriber<()>)>>;
+type SubMap = Mutex<HashMap<String, (usize, Option<Subscriber<()>>)>>;
 
 pub struct Bus {
     pub keys: Keys,
@@ -173,13 +173,6 @@ impl Bus {
                 for r in s.dropped_rooms {
                     let why = if s.released.contains(&r) { "held room released — owner node not live" } else { "room token delete settled" };
                     tracing::info!(kind = "diag", room = %r, "drop candidate: {why} (live view {live})");
-                    if let Some((node, inst)) = b.room_token(&r).await {
-                        if let Ok(mut v) = b.view.lock() {
-                            v.on_token(TokenEv::RoomPut { room: r.clone(), node, inst }, common::now_ms());
-                        }
-                        tracing::info!(kind = "diag", room = %r, "room token delete was stale — token still stands, routing kept");
-                        continue;
-                    }
                     tracing::info!(kind = "diag", room = %r, "room token gone — local routing dropped");
                     let _ = b.tx.send(BusEvent::RoomDropped(r));
                 }
@@ -249,18 +242,6 @@ impl Bus {
         None
     }
 
-    pub async fn room_token(&self, room: &str) -> Option<(String, String)> {
-        let replies = self.session.liveliness().get(self.keys.room_where(room)).timeout(SESS_GET_TIMEOUT).await.ok()?;
-        while let Ok(r) = replies.recv_async().await {
-            if let Ok(s) = r.result()
-                && let Some(Parsed::Room { node, inst, .. }) = self.keys.parse(s.key_expr().as_str())
-            {
-                return Some((node, inst));
-            }
-        }
-        None
-    }
-
     pub async fn session_users(&self) -> Vec<String> {
         let mut out = Vec::new();
         if let Ok(replies) = self.session.liveliness().get(self.keys.sess_all()).timeout(SESS_GET_TIMEOUT).await {
@@ -313,7 +294,10 @@ impl Bus {
                     e.0 += 1;
                     true
                 }
-                None => false,
+                None => {
+                    g.insert(name.clone(), (1, None));
+                    false
+                }
             })
             .unwrap_or(true);
         if bumped {
@@ -336,13 +320,14 @@ impl Bus {
                 }
             })
             .await;
-        if let (Ok(sub), Ok(mut g)) = (sub, map.lock()) {
-            match g.get_mut(&name) {
-                Some(e) => e.0 += 1,
-                None => {
-                    g.insert(name, (1, sub));
-                }
+        let Ok(mut g) = map.lock() else { return };
+        match (sub, g.get_mut(&name)) {
+            (Ok(sub), Some(e)) if e.1.is_none() => e.1 = Some(sub),
+            (Err(err), Some(e)) if e.1.is_none() => {
+                tracing::warn!(kind = "diag", key = %name, "interest subscriber: {err}");
+                g.remove(&name);
             }
+            _ => {}
         }
     }
 

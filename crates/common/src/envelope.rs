@@ -64,6 +64,8 @@ pub struct Envelope {
     pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_user: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admit_retry_after_ms: Option<u64>,
 }
 
 impl Envelope {
@@ -81,6 +83,7 @@ impl Envelope {
             method: None,
             path: None,
             target_user: None,
+            admit_retry_after_ms: None,
         }
     }
 

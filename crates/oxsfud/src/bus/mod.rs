@@ -74,6 +74,7 @@ impl Bus {
         });
         let me = Arc::downgrade(&bus);
         let keys = bus.keys.clone();
+        let rt = tokio::runtime::Handle::current();
         let sub = bus
             .session
             .liveliness()
@@ -82,11 +83,21 @@ impl Bus {
             .callback(move |s| {
                 if let (Some(b), Some(Parsed::Node { node, inst })) = (me.upgrade(), keys.parse(s.key_expr().as_str())) {
                     let put = s.kind() == zenoh::sample::SampleKind::Put;
-                    if let Ok(mut g) = b.nodes.lock() {
-                        if node != b.node && put && let Ok(mut so) = b.seen_other.lock() {
-                            let _ = std::mem::replace(&mut *so, true);
+                    let back = match b.nodes.lock() {
+                        Ok(mut g) => {
+                            if node != b.node && put && let Ok(mut so) = b.seen_other.lock() {
+                                let _ = std::mem::replace(&mut *so, true);
+                            }
+                            let key = format!("{node}/{inst}");
+                            let was = g.get(&key).map(|(_, l, _)| *l).unwrap_or(false);
+                            let back = node == b.node && put && !was;
+                            g.insert(key, (node, put, common::now_ms()));
+                            back
                         }
-                        g.insert(format!("{node}/{inst}"), (node, put, common::now_ms()));
+                        Err(_) => false,
+                    };
+                    if back {
+                        rt.spawn(async move { b.redeclare_rooms().await });
                     }
                 }
             })
@@ -117,6 +128,20 @@ impl Bus {
             }
             Err(e) => tracing::warn!(kind = "diag", room = %room, "room token: {e}"),
         }
+    }
+
+    pub async fn redeclare_rooms(&self) {
+        let rooms: Vec<String> = self.room_tokens.lock().map(|g| g.keys().cloned().collect()).unwrap_or_default();
+        if rooms.is_empty() {
+            return;
+        }
+        for r in &rooms {
+            let held = self.room_tokens.lock().map(|mut g| g.remove(r).is_some()).unwrap_or(false);
+            if held {
+                self.declare_room(r).await;
+            }
+        }
+        tracing::info!(kind = "diag", "local hub token back — room tokens redeclared ({})", rooms.len());
     }
 
     pub fn undeclare_room(&self, room: &str) {

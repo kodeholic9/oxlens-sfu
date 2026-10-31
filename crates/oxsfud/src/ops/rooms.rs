@@ -122,6 +122,11 @@ pub fn join(c: &Ctx, body: &Value) -> Result<Value, Failure> {
     let req: RoomJoinReq = parse(body)?;
     let s = sfu()?;
     let room = s.rooms.get(&req.room_id).ok_or_else(|| Code::RoomNotFound.failure())?;
+    if let Some(ms) = c.over
+        && !room.has(&c.user)
+    {
+        return Err(Code::Overloaded.failure().with_details(serde_json::json!({ "retry_after_ms": ms })));
+    }
     let mut rejoin = false;
     if let Some(old) = s.peer(&c.user) {
         if old.in_room(&req.room_id) {

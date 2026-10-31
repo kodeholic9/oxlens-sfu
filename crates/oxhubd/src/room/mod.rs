@@ -63,10 +63,16 @@ pub async fn create(bus: &Bus, policy: &Policy, mut body: serde_json::Value) -> 
             return Err(Code::QuotaExceeded.failure());
         }
     }
-    let (node, live) = bus.place(&room).ok_or_else(|| Code::SfuUnavailable.failure())?;
-    if !live {
-        return Err(Code::SfuUnavailable.failure().with_details(serde_json::json!({ "node": node })));
-    }
+    let node = match bus.room_route(&room) {
+        Some(loc) => loc.node,
+        None => {
+            let (node, live) = bus.place(&room).ok_or_else(|| Code::SfuUnavailable.failure())?;
+            if !live {
+                return Err(Code::SfuUnavailable.failure().with_details(serde_json::json!({ "node": node })));
+            }
+            node
+        }
+    };
     let mut env = Envelope::new(CallKind::CreateRoom);
     env.body = body;
     let out = unwrap(bus.call(&node, &env).await)?;

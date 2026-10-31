@@ -208,13 +208,35 @@ pub async fn serve(ws: WebSocket, ctx: Arc<Ctx>) {
         let op = Op::from_u16(h.op);
         let Some(s) = session.clone() else {
             if op == Some(Op::Bind) {
-                match super::bind(&ctx, &conn, h.op, h.pid, h.flags, f.body).await {
-                    Some(s) => {
-                        session = Some(s);
-                        continue;
+                let judge = super::bind(&ctx, &conn, h.op, h.pid, h.flags, f.body);
+                tokio::pin!(judge);
+                let mut early = false;
+                let mut gone = false;
+                let got = loop {
+                    tokio::select! {
+                        biased;
+                        r = &mut judge => break r,
+                        m = stream.next(), if !early && !gone => match m {
+                            Some(Ok(Message::Binary(b))) => {
+                                super::pre_bind_other(&ctx, frame::decode(&b).ok().and_then(|x| Op::from_u16(x.header.op)));
+                                conn.leave(Code::NotBound);
+                                early = true;
+                            }
+                            Some(Ok(Message::Text(_))) => {
+                                super::pre_bind_other(&ctx, None);
+                                conn.leave(Code::NotBound);
+                                early = true;
+                            }
+                            Some(Ok(Message::Close(_))) | Some(Err(_)) | None => gone = true,
+                            Some(Ok(_)) => {}
+                        },
                     }
-                    None => continue,
+                };
+                session = got;
+                if early || gone {
+                    break;
                 }
+                continue;
             }
             super::pre_bind_other(&ctx, op);
             conn.leave(Code::NotBound);

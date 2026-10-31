@@ -242,7 +242,7 @@ pub async fn bind(ctx: &Arc<Ctx>, conn: &Conn, op: u16, pid: u32, flags: u8, bod
         }
     };
     if ctx.policy.quota.max_sessions > 0 {
-        let local = ctx.by_sid.lock().map(|g| g.len()).unwrap_or(0) as u32;
+        let local = ctx.by_sid.lock().map(|g| g.values().filter(|s| s.user_id != id.user_id).count()).unwrap_or(0) as u32;
         let deploy = ctx.bus.session_users().await.into_iter().filter(|u| u != &id.user_id).count() as u32;
         let n = local.max(deploy);
         ctx.full.store(n >= ctx.policy.quota.max_sessions, Ordering::Relaxed);
@@ -484,10 +484,10 @@ async fn set_rooms(ctx: &Ctx, s: &Session, node: &str, rooms: &[String]) {
     }
 }
 
-fn admit(ctx: &Ctx) -> Result<(), Failure> {
+fn admit(ctx: &Ctx) -> Result<Option<u64>, Failure> {
     let lim = ctx.policy.hub.join_admit_per_sec;
     if lim == 0 {
-        return Ok(());
+        return Ok(None);
     }
     let sec = common::now_ms() / 1000;
     let mut g = ctx.admit.lock().map_err(|_| Code::InternalError.failure())?;
@@ -497,11 +497,11 @@ fn admit(ctx: &Ctx) -> Result<(), Failure> {
     }
     g.1 += 1;
     if g.1 <= lim {
-        return Ok(());
+        return Ok(None);
     }
     let base = ctx.policy.hub.join_retry_after_ms as u64;
     let jitter = u64::from_be_bytes(common::random_bytes(8).try_into().unwrap_or([0; 8])) % base.max(1);
-    Err(Code::Overloaded.failure().with_details(serde_json::json!({ "retry_after_ms": base + jitter })))
+    Ok(Some(base + jitter))
 }
 
 pub async fn handle_request(ctx: &Arc<Ctx>, s: &Arc<Session>, conn: &Conn, r: Request) {
@@ -538,12 +538,24 @@ pub async fn handle_request(ctx: &Arc<Ctx>, s: &Arc<Session>, conn: &Conn, r: Re
 }
 
 async fn call_node(ctx: &Ctx, s: &Session, node: &str, op: Op, body: serde_json::Value) -> Result<serde_json::Value, Failure> {
+    call_node_over(ctx, s, node, op, body, None).await
+}
+
+async fn call_node_over(
+    ctx: &Ctx,
+    s: &Session,
+    node: &str,
+    op: Op,
+    body: serde_json::Value,
+    over: Option<u64>,
+) -> Result<serde_json::Value, Failure> {
     if let Ok(mut st) = s.st.lock() {
         st.touched.insert(node.to_string());
     }
     let mut env = ctx.envelope(s, CallKind::Op);
     env.op = Some(op.as_u16());
     env.body = body;
+    env.admit_retry_after_ms = over;
     match ctx.bus.call(node, &env).await {
         Reply::Ok { body } => Ok(body),
         Reply::Fail { failure } => Err(failure),
@@ -586,10 +598,10 @@ async fn route(ctx: &Arc<Ctx>, s: &Arc<Session>, op: Op, body: serde_json::Value
                 PcMode::Two if has("extmap") || has("codecs") => return Err(Code::InvalidPayload.failure().with_message("extmap/codecs in 2pc")),
                 _ => {}
             }
-            admit(ctx)?;
+            let over = admit(ctx)?;
             let loc = ctx.bus.room_route(&room).ok_or_else(|| Code::RoomNotFound.failure())?;
             ctx.bus.interest_room(&room, 1).await;
-            let r = call_node(ctx, s, &loc.node, op, body).await;
+            let r = call_node_over(ctx, s, &loc.node, op, body, over).await;
             if let Ok(v) = &r
                 && let Ok(j) = serde_json::from_value::<RoomJoinRes>(v.clone())
             {

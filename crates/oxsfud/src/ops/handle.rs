@@ -16,6 +16,7 @@ pub struct Ctx {
     pub pc_mode: PcMode,
     pub home: Option<Home>,
     pub claims: Option<Claims>,
+    pub over: Option<u64>,
 }
 
 impl Ctx {
@@ -28,6 +29,7 @@ impl Ctx {
             pc_mode: env.pc_mode.unwrap_or(PcMode::Two),
             home: env.home.clone(),
             claims: env.claims.clone(),
+            over: env.admit_retry_after_ms,
         })
     }
 
@@ -68,7 +70,18 @@ fn reply(r: Result<Value, Failure>) -> Reply {
     }
 }
 
+fn follow_home(env: &Envelope) {
+    if let (Some(s), Some(u), Some(h)) = (super::sfu(), env.user_id.as_deref(), env.home.as_ref())
+        && let Some(p) = s.peer(u)
+    {
+        p.set_home(h);
+    }
+}
+
 pub async fn dispatch(env: &Envelope) -> Reply {
+    if matches!(env.kind, CallKind::Op | CallKind::Resume) {
+        follow_home(env);
+    }
     match env.kind {
         CallKind::Op => reply(op(env)),
         CallKind::SessionGone => reply(super::rooms::session_gone(env)),
@@ -84,11 +97,6 @@ pub async fn dispatch(env: &Envelope) -> Reply {
 fn op(env: &Envelope) -> Result<Value, Failure> {
     let c = Ctx::from(env)?;
     let op = env.op.and_then(Op::from_u16).ok_or_else(|| Code::UnknownOp.failure())?;
-    if let (Some(s), Some(h)) = (super::sfu(), c.home.as_ref())
-        && let Some(p) = s.peer(&c.user)
-    {
-        p.set_home(h);
-    }
     let b = &env.body;
     match op {
         Op::RoomJoin => super::rooms::join(&c, b),
