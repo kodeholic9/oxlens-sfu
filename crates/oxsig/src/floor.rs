@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 연:RULE-FLR-HEADER · 연:RULE-FLR-MSG-TYPES · 연:RULE-FLR-TLV · 연:RULE-FLR-TIMERS · 연:FLR.wire · 연:RULE-FLR-MSG-GRANTED · 연:RULE-FLR-MSG-TAKEN · 연:RULE-FLR-MSG-ACK · 연:RULE-FLR-MSG-QUEUE · 연:RULE-FLR-MSG-REQUEST · 연:RULE-FLR-MSG-DENY · 연:RULE-FLR-TLV-MATRIX · 연:RULE-FLR-ACK-BIT · 연:RULE-FLR-RTCP-HEADER-DROPPED · 연:RULE-FLR-T9-VALUE · 연:DEV-FLR-TLV-EXT · 연:DEV-FLR-DENY-101 · 연:DEV-FLR-DENY-102 · 연:DEV-FLR-DENY-255 · 연:DEV-FLR-T7-VALUE · 연:DEV-FLR-T9 · 연:DEV-FLR-CAUSE-U8 · 연:DEV-FLR-ACK-NOSRC · 연:DEV-FLR-CLIENT-RETX · 연:RULE-ERR-FLOOR-OUTSIDE · 연:RULE-ERR-NOT-MIXED · model: claude-opus-5-5
+// spec: v1.7 · 연:RULE-FLR-HEADER · 연:RULE-FLR-MSG-TYPES · 연:RULE-FLR-TLV · 연:RULE-FLR-TIMERS · 연:FLR.wire · 연:RULE-FLR-MSG-GRANTED · 연:RULE-FLR-MSG-TAKEN · 연:RULE-FLR-MSG-ACK · 연:RULE-FLR-MSG-QUEUE · 연:RULE-FLR-MSG-REQUEST · 연:RULE-FLR-MSG-DENY · 연:RULE-FLR-TLV-MATRIX · 연:RULE-FLR-ACK-BIT · 연:RULE-FLR-RTCP-HEADER-DROPPED · 연:RULE-FLR-T9-VALUE · 연:DEV-FLR-TLV-EXT · 연:DEV-FLR-DENY-101 · 연:DEV-FLR-DENY-102 · 연:DEV-FLR-DENY-255 · 연:DEV-FLR-T7-VALUE · 연:DEV-FLR-T9 · 연:DEV-FLR-CAUSE-U8 · 연:DEV-FLR-ACK-NOSRC · 연:DEV-FLR-CLIENT-RETX · 연:RULE-ERR-FLOOR-OUTSIDE · 연:RULE-ERR-NOT-MIXED · model: claude-opus-5-5
 //! 발언권 메시지(MBCP) 부호화 — 머리(V · R · A · Type) · TLV 개수 · TLV. 원문 번호 · 사유 · 타이머 값.
 
 pub const REQUEST: u8 = 0;
@@ -210,12 +210,8 @@ pub fn request(room: &str, priority: Option<u8>) -> Msg {
     }
 }
 
-pub fn granted(priority: u8, duration_s: u16, seq: u16, room: &str) -> Msg {
-    Msg::new(GRANTED, true)
-        .push(tlv::PRIORITY, u8spare(priority))
-        .push(tlv::DURATION, u16be(duration_s))
-        .push(tlv::SEQ, u16be(seq))
-        .push(tlv::ROOM, utf8(room))
+pub fn granted(priority: u8, duration_s: u16, room: &str) -> Msg {
+    Msg::new(GRANTED, true).push(tlv::PRIORITY, u8spare(priority)).push(tlv::DURATION, u16be(duration_s)).push(tlv::ROOM, utf8(room))
 }
 
 pub fn taken(speaker: &str, seq: u16, room: &str) -> Msg {
@@ -258,12 +254,8 @@ pub fn queue_info(position: u8, priority: u8, room: &str) -> Msg {
     Msg::new(QINFO, false).push(tlv::QINFO, vec![position, priority]).push(tlv::ROOM, utf8(room))
 }
 
-pub fn ack(of: u8, room: &str, seq: Option<u16>) -> Msg {
-    let m = Msg::new(ACK, false).push(tlv::ACKTYPE, u8spare(of)).push(tlv::ROOM, utf8(room));
-    match seq {
-        Some(s) => m.push(tlv::SEQ, u16be(s)),
-        None => m,
-    }
+pub fn ack(of: u8, room: &str) -> Msg {
+    Msg::new(ACK, false).push(tlv::ACKTYPE, u8spare(of)).push(tlv::ROOM, utf8(room))
 }
 
 #[cfg(test)]
@@ -272,12 +264,12 @@ mod tests {
 
     #[test]
     fn granted_roundtrip() {
-        let m = granted(5, 30, 7, "r1");
+        let m = granted(5, 30, "r1");
         let b = encode(&m).unwrap();
         assert_eq!(b[0], 0x11);
         let d = decode(&b).unwrap();
         assert_eq!(d.priority(), Some(5));
-        assert_eq!(d.seq(), Some(7));
+        assert_eq!(d.seq(), None);
         assert_eq!(d.room().as_deref(), Some("r1"));
         assert!(d.ack);
     }

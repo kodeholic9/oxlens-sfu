@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-FLR-LOCK · 정:IMPL-FLR-RTP-OBSERVE · 정:IMPL-FLR-MEDIA-BIND · 정:IMPL-FLR-FIRST-NOTICE · 정:IMPL-FLR-MEMBER-JOIN · 정:RULE-FLR-SNAPSHOT · 연:RULE-FLR-TIMERS · 연:TRN.frame.DC · 정:IMPL-FLR-POLICY · 정:CAND-FLR-RELEASE-SILENCE-SPEAKER · 정:CAND-FWD-PRIME-SOURCE · 정:CAND-FWD-PRIME-EPISODE · model: claude-opus-5-5
+// spec: v1.7 · 정:IMPL-FLR-LOCK · 정:IMPL-FLR-RTP-OBSERVE · 정:IMPL-FLR-MEDIA-BIND · 정:IMPL-FLR-FIRST-NOTICE · 정:IMPL-FLR-MEMBER-JOIN · 정:RULE-FLR-SNAPSHOT · 연:RULE-FLR-TIMERS · 연:TRN.frame.DC · 정:IMPL-FLR-POLICY · 정:CAND-FLR-RELEASE-SILENCE-SPEAKER · 정:CAND-FWD-PRIME-SOURCE · 정:CAND-FWD-PRIME-EPISODE · model: claude-opus-5-5
 //! 발언권 집행 — 판정은 방 락 안(보낼 것 · 걸 타이머 · 효과에 `grant_no`) · 집행은 락 밖(MBCP 를 DC 로 · 타이머는 가장 이른 만료 시각에 깨어난다 · 슬롯 결합 · 예열 CN · 해제 무음 · PLI burst).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -176,13 +176,13 @@ fn execute(room: &Arc<Room>, p: &Plan) {
 
 pub fn to_mbcp(m: &Msg, room: &str, reason: Option<&str>) -> Option<mbcp::Msg> {
     Some(match m.t {
-        Mt::Granted => mbcp::granted(m.n as u8, m.d as u16, m.q as u16, room),
+        Mt::Granted => mbcp::granted(m.n as u8, m.d as u16, room),
         Mt::Taken => mbcp::taken(m.a.as_deref().unwrap_or(""), m.q as u16, room),
         Mt::Idle => mbcp::idle(m.q as u16, room, m.a.as_deref()),
         Mt::Deny => mbcp::deny_msg(m.n as u8, room, reason),
         Mt::Revoke => mbcp::revoke_msg(m.n as u8, room, None),
         Mt::Qinfo => mbcp::queue_info(m.n.min(255) as u8, m.d as u8, room),
-        Mt::Ack => mbcp::ack(m.n as u8, room, Some(m.q as u16)),
+        Mt::Ack => mbcp::ack(m.n as u8, room),
         _ => return None,
     })
 }
@@ -192,11 +192,7 @@ pub fn from_mbcp(m: &mbcp::Msg) -> Option<Msg> {
         mbcp::REQUEST => Msg::new(Mt::Request, None, m.priority().unwrap_or(0) as u32, 0),
         mbcp::RELEASE => Msg::new(Mt::Release, None, 0, 0),
         mbcp::QPOS_REQ => Msg::new(Mt::QposReq, None, 0, 0),
-        mbcp::ACK => {
-            let mut x = Msg::new(Mt::Ack, None, m.ack_of().unwrap_or(0) as u32, 0);
-            x.q = m.seq().unwrap_or(0) as u32;
-            x
-        }
+        mbcp::ACK => Msg::new(Mt::Ack, None, m.ack_of().unwrap_or(0) as u32, 0),
         _ => return None,
     })
 }

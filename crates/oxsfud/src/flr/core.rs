@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 연:FLR.S.G · 연:FLR.S.P · 연:FLR.S.gate · 연:FLR.S.perm · 연:FLR.S.ws · 연:RULE-FLR-TIMERS · 정:IMPL-FLR-LOCK · 정:RULE-CONC-SIX · 정:CAND-FLR-MEMBER-JOIN-INIT · 연:RULE-FLR-SEQ · 연:RULE-FLR-SERVER-STATE-SEPARATE · 연:RULE-FLR-MSG-IDLE · 연:RULE-FLR-MSG-REVOKE · 연:RULE-FLR-MSG-RELEASE · 연:RULE-FLR-SERVER-POLICY · 연:DEV-FLR-PUBROOM · 연:DEV-FLR-QUEUE-MAX · 연:DEV-FLR-NO-MCPRIO · 연:DEV-FLR-PREEMPT-RELATIVE · 연:DEV-FLR-PUB-AWAY · 연:DEV-FLR-RECVONLY-TRIGGER · 연:DEV-FLR-DENY-2-6 · 연:DEV-FLR-REGRANT-FWD · 연:DEV-FLR-TAKEN-ACK · 연:DEV-FLR-ACK-DROP · 연:DEV-FLR-T21-SAME-SEQ · 연:DEV-FLR-GRANTED-SEQ · 연:DEV-FLR-ACK-SEQ · 연:DEV-FLR-ROOM-GONE · model: claude-opus-5-5
+// spec: v1.7 · 연:FLR.S.G · 연:FLR.S.P · 연:FLR.S.gate · 연:FLR.S.perm · 연:FLR.S.ws · 연:RULE-FLR-TIMERS · 정:IMPL-FLR-LOCK · 정:RULE-CONC-SIX · 정:CAND-FLR-MEMBER-JOIN-INIT · 연:RULE-FLR-SEQ · 연:RULE-FLR-SERVER-STATE-SEPARATE · 연:RULE-FLR-MSG-IDLE · 연:RULE-FLR-MSG-REVOKE · 연:RULE-FLR-MSG-RELEASE · 연:RULE-FLR-SERVER-POLICY · 연:DEV-FLR-PUBROOM · 연:DEV-FLR-QUEUE-MAX · 연:DEV-FLR-NO-MCPRIO · 연:DEV-FLR-PREEMPT-RELATIVE · 연:DEV-FLR-PUB-AWAY · 연:DEV-FLR-RECVONLY-TRIGGER · 연:DEV-FLR-DENY-2-6 · 연:DEV-FLR-REGRANT-FWD · 연:DEV-FLR-TAKEN-ACK · 연:DEV-FLR-ACK-DROP · 연:DEV-FLR-T21-SAME-SEQ · 연:DEV-FLR-GRANTED-SEQ · 연:DEV-FLR-ACK-SEQ · 연:DEV-FLR-ROOM-GONE · model: claude-opus-5-5
 //! 발언권 판정 로직 — 생성 서버 상태기(`protocol/out/floor/server/floor_server.ts`)의 이식 · 걸음마다 보낼 것 · 지난 경우 라벨 · 효과를 돌려준다(판정은 락 안 · 집행은 락 밖).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -115,7 +115,6 @@ pub struct Part {
     pub g_taken: bool,
     pub c8: u32,
     pub c21: u32,
-    pub tq: u32,
     pub rcause: u32,
 }
 
@@ -239,10 +238,6 @@ impl Floor {
         r.out.push(Out { to: u.to_string(), m: Msg { t, a, n, d: if seqd { 0 } else { d }, q } });
     }
 
-    fn send_q(&mut self, r: &mut Step, u: &str, t: Mt, n: u32, d: u32, q: u32) {
-        r.out.push(Out { to: u.to_string(), m: Msg { t, a: None, n, d, q } });
-    }
-
     fn fan(&mut self, r: &mut Step, ev: Msg, skip: Option<&str>) {
         let rest: Vec<String> = self.members.iter().filter(|x| Some(x.as_str()) != skip).cloned().collect();
         let mut ev = ev;
@@ -259,7 +254,7 @@ impl Floor {
         r.labels.push("FLR.S.G.TAKEN.enter");
         self.idle_bcast = false;
         let sp = self.speaker.clone().unwrap_or_default();
-        let m = Msg { t: Mt::Granted, a: None, n: self.sprio, d: self.t2_full(), q: self.seq };
+        let m = Msg::new(Mt::Granted, None, self.sprio, self.t2_full());
         self.part_a(r, &sp, &m);
         self.fan(r, Msg::new(Mt::Taken, Some(sp.clone()), 0, 0), Some(&sp));
         r.fx.push(Fx::Bind(sp));
@@ -332,7 +327,7 @@ impl Floor {
         if self.g == G::Taken && self.speaker.as_deref() == Some(u) {
             r.labels.push("FLR.S.G.TAKEN.req_regrant");
             let d = if self.first_rtp { t2_left } else { self.t2_full() };
-            let m = Msg { t: Mt::Granted, a: None, n: self.sprio, d, q: self.seq };
+            let m = Msg::new(Mt::Granted, None, self.sprio, d);
             self.part_a(r, u, &m);
             return;
         }
@@ -523,7 +518,6 @@ impl Floor {
         p.perm = perm;
         p.retry = false;
         p.released = false;
-        p.tq = 0;
         p.rcause = 0;
         r
     }
@@ -565,11 +559,6 @@ impl Floor {
         self.send(r, u, m.t, m.a, m.n, m.d);
     }
 
-    fn send_eq(&mut self, r: &mut Step, u: &str, to: P, m: Msg) {
-        self.enter_r(r, u, to);
-        self.send_q(r, u, m.t, m.n, m.d, m.q);
-    }
-
     fn part_a(&mut self, r: &mut Step, u: &str, ev: &Msg) {
         let st = self.part_of(u);
         match (ev.t, st) {
@@ -583,11 +572,10 @@ impl Floor {
             }
             (Mt::Granted, Some(P::NpIdle)) => {
                 r.labels.push("FLR.S.P.NP_IDLE.a_GRANTED");
-                self.send_eq(r, u, P::Permitted, Msg { t: Mt::Granted, a: None, n: ev.n, d: ev.d, q: ev.q });
+                self.send_e(r, u, P::Permitted, Msg::new(Mt::Granted, None, ev.n, ev.d));
             }
             (Mt::Taken, Some(P::NpIdle)) => {
                 r.labels.push("FLR.S.P.NP_IDLE.a_TAKEN");
-                self.p(u).tq = ev.q;
                 self.send_e(r, u, P::NpTaken, Msg::new(Mt::Taken, ev.a.clone(), 0, ev.q));
             }
             (Mt::Idle, Some(P::NpIdle)) => {
@@ -597,13 +585,11 @@ impl Floor {
             (_, Some(P::NpIdle)) => r.labels.push("FLR.S.P.NP_IDLE.a_other"),
             (Mt::Granted, Some(P::NpTaken)) => {
                 r.labels.push("FLR.S.P.NP_TAKEN.a_GRANTED");
-                self.send_eq(r, u, P::Permitted, Msg { t: Mt::Granted, a: None, n: ev.n, d: ev.d, q: ev.q });
+                self.send_e(r, u, P::Permitted, Msg::new(Mt::Granted, None, ev.n, ev.d));
             }
             (Mt::Taken, Some(P::NpTaken)) => {
                 r.labels.push("FLR.S.P.NP_TAKEN.a_TAKEN");
-                let p = self.p(u);
-                p.tq = ev.q;
-                p.c21 = 1;
+                self.p(u).c21 = 1;
                 self.send(r, u, Mt::Taken, ev.a.clone(), 0, ev.q);
             }
             (Mt::Idle, Some(P::NpTaken)) => {
@@ -613,7 +599,7 @@ impl Floor {
             (_, Some(P::NpTaken)) => r.labels.push("FLR.S.P.NP_TAKEN.a_other"),
             (Mt::Granted, Some(P::Permitted)) => {
                 r.labels.push("FLR.S.P.PERMITTED.a_GRANTED");
-                self.send_q(r, u, Mt::Granted, ev.n, ev.d, ev.q);
+                self.send(r, u, Mt::Granted, None, ev.n, ev.d);
             }
             (Mt::Idle, Some(P::Permitted)) => {
                 r.labels.push("FLR.S.P.PERMITTED.a_IDLE");
@@ -621,7 +607,6 @@ impl Floor {
             }
             (Mt::Taken, Some(P::Permitted)) => {
                 r.labels.push("FLR.S.P.PERMITTED.a_TAKEN");
-                self.p(u).tq = ev.q;
                 self.send_e(r, u, P::NpTaken, Msg::new(Mt::Taken, ev.a.clone(), 0, ev.q));
             }
             (Mt::Revoke, Some(P::Permitted)) => {
@@ -636,7 +621,6 @@ impl Floor {
             }
             (Mt::Taken, Some(P::Prevoke)) => {
                 r.labels.push("FLR.S.P.PREVOKE.a_TAKEN");
-                self.p(u).tq = ev.q;
                 self.send_e(r, u, P::NpTaken, Msg::new(Mt::Taken, ev.a.clone(), 0, ev.q));
             }
             (_, Some(P::Prevoke)) => r.labels.push("FLR.S.P.PREVOKE.a_other"),
@@ -708,19 +692,15 @@ impl Floor {
             }
             (Some(P::NpTaken), Mt::Release) => {
                 r.labels.push("FLR.S.P.NP_TAKEN.rx_RELEASE");
-                let next = if self.seq + 1 == SEQ_WRAP { 0 } else { self.seq + 1 };
-                let p = self.p(u);
-                p.tq = next;
-                p.c21 = 1;
+                self.p(u).c21 = 1;
                 self.dequeue(u);
                 let h = self.holder();
                 self.send(r, u, Mt::Taken, h, 0, 0);
             }
-            (Some(P::NpTaken), Mt::Ack) if ev.n == 2 && ev.q == pp.tq => {
+            (Some(P::NpTaken), Mt::Ack) if ev.n == 2 => {
                 r.labels.push("FLR.S.P.NP_TAKEN.rx_ACK_taken");
                 self.p(u).c21 = 0;
             }
-            (Some(P::NpTaken), Mt::Ack) if ev.n == 2 => r.labels.push("FLR.S.P.NP_TAKEN.rx_ACK_taken_stale"),
             (Some(P::NpTaken), Mt::Ack) => r.labels.push("FLR.S.P.NP_TAKEN.rx_ACK_other"),
             (Some(P::NpTaken), Mt::QposReq) => {
                 r.labels.push("FLR.S.P.NP_TAKEN.rx_QPOS_REQ");
@@ -757,8 +737,6 @@ impl Floor {
             (Some(P::Prevoke), _) => r.labels.push("FLR.S.P.PREVOKE.rx_other"),
             (_, Mt::Release) if pp.g_taken => {
                 r.labels.push("FLR.S.P.NPSENDS.rx_RELEASE_taken");
-                let next = if self.seq + 1 == SEQ_WRAP { 0 } else { self.seq + 1 };
-                self.p(u).tq = next;
                 let h = self.holder();
                 self.send_e(r, u, P::NpTaken, Msg::new(Mt::Taken, h, 0, 0));
             }
@@ -827,7 +805,7 @@ impl Floor {
             r.labels.push("FLR.S.G.TAKEN.T20");
             self.c20 += 1;
             let sp = self.speaker.clone().unwrap_or_default();
-            let m = Msg { t: Mt::Granted, a: None, n: self.sprio, d: self.t2_full(), q: self.seq };
+            let m = Msg::new(Mt::Granted, None, self.sprio, self.t2_full());
             self.part_a(&mut r, &sp, &m);
         } else {
             r.labels.push("FLR.S.G.TAKEN.T20_exhaust");
@@ -857,11 +835,10 @@ impl Floor {
         let p = self.p(u);
         let c = p.c21;
         p.c21 += 1;
-        let tq = p.tq;
         if c < timers::C21 as u32 {
             r.labels.push("FLR.S.P.NP_TAKEN.T21");
             let h = self.holder();
-            self.send(&mut r, u, Mt::Taken, h, 0, tq);
+            self.send(&mut r, u, Mt::Taken, h, 0, 0);
         } else {
             r.labels.push("FLR.S.P.NP_TAKEN.T21_exhaust");
         }
