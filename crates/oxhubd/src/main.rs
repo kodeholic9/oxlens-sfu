@@ -1,12 +1,12 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.6 · 정:RULE-BUS-FATE · 정:RULE-OPS-SURFACE · 정:RULE-OPS-LOGGER · 운영:RULE-BOOT-ARGS · model: claude-opus-5-5
-//! oxhubd — 기동(로거 → zenoh → sfu) · 정지(클라 `LEAVE 5004` → 유닛 → zenoh → hub).
+//! oxhubd — 기동(로거 → 버스 → sfu) · 정지(클라 `LEAVE 5004` → 유닛 → 버스 → hub).
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use common::log::{Setup, Sink};
-use oxhubd::bus::{Bus, ZenohCfg};
+use oxhubd::bus::{Bus, BusCfg};
 use oxhubd::cfg::HubCfg;
 use oxhubd::ops::supervisor::{Role, SupCfg, Supervisor, UnitState};
 use oxhubd::ops::{self, Hub};
@@ -96,35 +96,28 @@ async fn run(cfg: HubCfg) -> i32 {
         }
         (None, _) => sup.mark_state(Role::Log, UnitState::Disabled, "no log_socket"),
     }
-    sup.mark_state(Role::Zenoh, UnitState::Starting, "start");
-    let z = &cfg.system.zenoh;
+    sup.mark_state(Role::Bus, UnitState::Starting, "start");
+    let z = &cfg.system.bus;
     let mut tries = 0u32;
     let (bus, bus_rx) = loop {
-        let zc = ZenohCfg {
-            listen: z.listen.clone(),
-            advertise: z.advertise.clone(),
-            connect: z.connect.clone(),
-            multicast_scouting: z.multicast_scouting,
-            namespace: z.namespace.clone(),
-            base_config: z.base_config.clone(),
-        };
+        let zc = BusCfg { listen: z.listen.clone(), advertise: z.advertise.clone(), connect: z.connect.clone(), namespace: z.namespace.clone() };
         match Bus::open(&cfg.node, &inst, cfg.system.supervisor.node_grace_secs * 1000, zc).await {
             Ok(b) => break b,
             Err(e) => {
                 tries += 1;
-                tracing::warn!(kind = "diag", unit = "zenoh", "zenoh open failed: {e}");
-                sup.mark_state(Role::Zenoh, UnitState::Down, "open failed");
+                tracing::warn!(kind = "diag", unit = "bus", "bus open failed: {e}");
+                sup.mark_state(Role::Bus, UnitState::Down, "open failed");
                 if tries > cfg.system.supervisor.intensity_max {
-                    sup.mark_state(Role::Zenoh, UnitState::Blocked, "intensity");
+                    sup.mark_state(Role::Bus, UnitState::Blocked, "intensity");
                     return 1;
                 }
                 let b = cfg.system.supervisor.backoff_ms.get(tries as usize - 1).copied().unwrap_or(1000);
                 tokio::time::sleep(Duration::from_millis(b)).await;
-                sup.mark_state(Role::Zenoh, UnitState::Starting, "backoff");
+                sup.mark_state(Role::Bus, UnitState::Starting, "backoff");
             }
         }
     };
-    sup.mark_state(Role::Zenoh, UnitState::Running, "open");
+    sup.mark_state(Role::Bus, UnitState::Running, "open");
     let accounts = Accounts { keys: cfg.system.hub.auth.api_keys.clone(), jwt_secret: cfg.system.hub.auth.jwt_secret.clone() };
     let ctx = ses::Ctx::new(cfg.policy.clone(), accounts, bus.clone());
     let (shut_tx, mut shut_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -138,7 +131,6 @@ async fn run(cfg: HubCfg) -> i32 {
         bus: bus.clone(),
         sup: sup.clone(),
         sender: sender.clone(),
-        mode: z.mode.clone(),
         namespace: z.namespace.clone(),
         shutdown: shut_tx,
     });
@@ -166,11 +158,11 @@ async fn run(cfg: HubCfg) -> i32 {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     sup.stop_all().await;
-    sup.mark_state(Role::Zenoh, UnitState::Stopping, "shutdown");
+    sup.mark_state(Role::Bus, UnitState::Stopping, "shutdown");
     bus.close().await;
-    sup.mark_state(Role::Zenoh, UnitState::Stopped, "shutdown");
+    sup.mark_state(Role::Bus, UnitState::Stopped, "shutdown");
     sup.mark_state(Role::Log, UnitState::Stopped, "shutdown");
     tokio::time::sleep(Duration::from_millis(50)).await;
     sender.detach_inproc();
-    if reason.starts_with("zenoh") { 1 } else { 0 }
+    if reason.starts_with("bus") { 1 } else { 0 }
 }

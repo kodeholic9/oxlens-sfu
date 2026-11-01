@@ -35,6 +35,10 @@ pub fn get() -> Option<&'static Arc<Bus>> {
 }
 
 impl Bus {
+    pub fn ev_dropped(&self) -> u64 {
+        self.ev_drop.load(std::sync::atomic::Ordering::Relaxed) + self.session.dropped()
+    }
+
     pub async fn open(node: &str, epoch: &str, ns: &str, connect: &str) -> Result<Arc<Bus>, String> {
         let session = Mesh::open(oxmesh::Config::client(&format!("{node}.sfud"), oxmesh::endpoint(connect))).await.map_err(|e| format!("mesh open: {e}"))?;
         let (tx, mut rx) = mpsc::unbounded_channel::<Put>();

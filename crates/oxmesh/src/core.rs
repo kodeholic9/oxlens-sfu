@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-BUS-SHAPE · 정:RULE-BUS-PRESENCE · 정:RULE-BUS-EVENTS · 정:RULE-BUS-REQUEST · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-MESH-SHAPE · 정:RULE-MESH-SESSION · 정:RULE-MESH-FENCE · 정:RULE-MESH-DECL · 정:RULE-MESH-REQUEST · model: claude-opus-5-5
 //! 그물 코어 — 상태를 혼자 쥐는 태스크 하나 · 세션 신원(dialer · boot · sno)으로 판정(S1 새 세션만 · S2 정리는 세션으로) · 세션이 서면 선언 전부(S3) · 한 홉 · lease · 틱 공백 울타리(S4) · 질의 펜싱.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -20,7 +20,7 @@ use crate::wire::{CloseReason, DeclKind, Hello, Msg, PROTO, Role, TokenEvtKind};
 const TICK: Duration = Duration::from_millis(100);
 const HANDSHAKE: Duration = Duration::from_secs(5);
 const BACKOFF_MIN: u64 = 100;
-const BACKOFF_MAX: u64 = 1000;
+const BACKOFF_MAX: u64 = 250;
 
 pub enum Cmd {
     DeclareToken { key: String, ack: oneshot::Sender<u64> },
@@ -164,6 +164,7 @@ pub struct Core {
     partial: HashMap<String, (u64, bool)>,
     last_partial_check: u64,
     accepts: Vec<tokio::task::AbortHandle>,
+    dropped: Arc<AtomicU64>,
 }
 
 pub struct Wiring {
@@ -171,6 +172,7 @@ pub struct Wiring {
     pub ev_tx: mpsc::UnboundedSender<Ev>,
     pub sess_tx: mpsc::UnboundedSender<SessEv>,
     pub accepts: Vec<tokio::task::AbortHandle>,
+    pub dropped: Arc<AtomicU64>,
 }
 
 impl Core {
@@ -183,7 +185,7 @@ impl Core {
             node,
             router,
             lease_ms,
-            fence_ms: lease_ms - ka_ms,
+            fence_ms: lease_ms,
             ka: Duration::from_millis(ka_ms),
             boot,
             listen,
@@ -210,6 +212,7 @@ impl Core {
             partial: HashMap::new(),
             last_partial_check: 0,
             accepts: w.accepts,
+            dropped: w.dropped,
         }
     }
 
@@ -292,7 +295,7 @@ impl Core {
     }
 
     fn fence(&mut self, gap: u64) {
-        tracing::warn!(kind = "diag", me = %self.node, gap_ms = gap, "mesh fenced — tick gap over lease − keepalive · all sessions closed · stale bytes not trusted");
+        tracing::warn!(kind = "diag", me = %self.node, gap_ms = gap, "mesh fenced — tick gap over lease · all sessions closed · stale bytes not trusted");
         let uids: Vec<u64> = self.sessions.keys().copied().collect();
         for u in uids {
             self.close(u, CloseReason::Fenced);
@@ -455,7 +458,7 @@ impl Core {
         let (r, w) = stream.into_split();
         let uid = self.next_uid;
         self.next_uid += 1;
-        let ob = Arc::new(Outbox::new());
+        let ob = Arc::new(Outbox::new(self.dropped.clone()));
         let last_rx = Arc::new(AtomicU64::new(self.now()));
         let stop = Arc::new(AtomicBool::new(false));
         tokio::spawn(session::write_loop(w, ob.clone(), self.ka));

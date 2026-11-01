@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-CFG-SYSTEM-FILE · 정:RULE-CFG-THREE-PLACES · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · model: claude-opus-5-5
-//! 시스템 파일(hub 전용) — 키 전량 strict(모르는 키 = 기동 실패) · zenoh 전제 둘은 다른 값이면 기동 실패.
+// spec: v1.6 · 정:IMPL-CFG-SYSTEM-FILE · 정:RULE-CFG-THREE-PLACES · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · 정:RULE-MESH-SHAPE · model: claude-opus-5-5
+//! 시스템 파일(hub 전용) — 키 전량 strict(모르는 키 = 기동 실패) · `[bus]` 는 oxmesh router 의 접속 좌표와 배포 이름공간.
 
 use serde::Deserialize;
 
@@ -21,7 +21,7 @@ pub struct System {
     pub hub: HubSection,
     #[serde(default)]
     pub unit: Vec<Unit>,
-    pub zenoh: Zenoh,
+    pub bus: Bus,
     #[serde(default)]
     pub supervisor: Supervisor,
     #[serde(default)]
@@ -129,23 +129,14 @@ fn default_true() -> bool {
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Zenoh {
-    pub mode: String,
+pub struct Bus {
     #[serde(default)]
     pub listen: Vec<String>,
     #[serde(default)]
     pub advertise: Vec<String>,
     #[serde(default)]
     pub connect: Vec<String>,
-    #[serde(default)]
-    pub multicast_scouting: bool,
-    #[serde(default = "default_true")]
-    pub qos_enabled: bool,
-    #[serde(default)]
-    pub lowlatency: bool,
     pub namespace: String,
-    #[serde(default)]
-    pub base_config: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -218,17 +209,8 @@ impl System {
     }
 
     pub fn validate(&self) -> Result<(), SystemError> {
-        if self.zenoh.mode != "router" {
-            return Err(SystemError(format!("zenoh.mode {} — router 고정", self.zenoh.mode)));
-        }
-        if !self.zenoh.qos_enabled {
-            return Err(SystemError("zenoh.qos_enabled false — true 고정".into()));
-        }
-        if self.zenoh.lowlatency {
-            return Err(SystemError("zenoh.lowlatency true — false 고정".into()));
-        }
-        if !crate::keyspace::valid_piece(&self.zenoh.namespace) {
-            return Err(SystemError(format!("zenoh.namespace {:?} 는 키 조각이 못 된다", self.zenoh.namespace)));
+        if !crate::keyspace::valid_piece(&self.bus.namespace) {
+            return Err(SystemError(format!("bus.namespace {:?} 는 키 조각이 못 된다", self.bus.namespace)));
         }
         let mut seen = std::collections::HashSet::new();
         for u in &self.unit {
@@ -281,16 +263,11 @@ impl System {
             v.push((format!("{p}.cmd"), if u.cmd.is_empty() { "-".into() } else { u.cmd.join(" ") }));
             v.push((format!("{p}.enabled"), u.enabled.to_string()));
         }
-        let z = &self.zenoh;
-        v.push(("zenoh.mode".into(), z.mode.clone()));
-        v.push(("zenoh.listen".into(), z.listen.join(",")));
-        v.push(("zenoh.advertise".into(), if z.advertise.is_empty() { "-".into() } else { z.advertise.join(",") }));
-        v.push(("zenoh.connect".into(), if z.connect.is_empty() { "-".into() } else { z.connect.join(",") }));
-        v.push(("zenoh.multicast_scouting".into(), z.multicast_scouting.to_string()));
-        v.push(("zenoh.qos_enabled".into(), z.qos_enabled.to_string()));
-        v.push(("zenoh.lowlatency".into(), z.lowlatency.to_string()));
-        v.push(("zenoh.namespace".into(), z.namespace.clone()));
-        v.push(("zenoh.base_config".into(), opt(&z.base_config)));
+        let b = &self.bus;
+        v.push(("bus.listen".into(), b.listen.join(",")));
+        v.push(("bus.advertise".into(), if b.advertise.is_empty() { "-".into() } else { b.advertise.join(",") }));
+        v.push(("bus.connect".into(), if b.connect.is_empty() { "-".into() } else { b.connect.join(",") }));
+        v.push(("bus.namespace".into(), b.namespace.clone()));
         let s = &self.supervisor;
         v.push(("supervisor.backoff_ms".into(), s.backoff_ms.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",")));
         v.push(("supervisor.intensity_max".into(), s.intensity_max.to_string()));
@@ -314,7 +291,7 @@ impl System {
 mod tests {
     use super::*;
 
-    const MIN: &str = "[hub]\nlisten = \"0.0.0.0:1974\"\n[zenoh]\nmode = \"router\"\nnamespace = \"ox\"\n";
+    const MIN: &str = "[hub]\nlisten = \"0.0.0.0:1974\"\n[bus]\nnamespace = \"ox\"\n";
 
     #[test]
     fn strict_and_fixed() {
@@ -322,7 +299,8 @@ mod tests {
         assert_eq!(s.hub.base_path, "/media");
         assert_eq!(s.supervisor.node_grace_secs, 30);
         assert!(System::parse(&format!("{MIN}typo = 1\n")).is_err());
-        assert!(System::parse(&MIN.replace("router", "peer")).is_err());
+        assert!(System::parse(&MIN.replace("[bus]", "[zenoh]")).is_err());
+        assert!(System::parse(&format!("{MIN}mode = \"router\"\n")).is_err());
         assert!(System::parse(&MIN.replace("\"ox\"", "\"o/x\"")).is_err());
         assert!(s.banner_fields().iter().any(|(k, v)| k == "hub.auth.jwt_secret" && v == "-"));
     }

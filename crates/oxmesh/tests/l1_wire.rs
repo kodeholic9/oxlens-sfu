@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-MESH-WIRE · 정:RULE-MESH-LANE · model: claude-opus-5-5
 //! 1층 — wire 왕복 · 조각 이어 붙이기 · 키 식 겹침 · 포함(202610/20261031e 단계 B).
 
 use oxmesh::keyexpr::{includes, intersects, valid};

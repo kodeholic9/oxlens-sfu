@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-BUS-KEYSPACE · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-MESH-DECL · model: claude-opus-5-5
 //! 키 식 — `*`(한 조각) · `**`(여러 조각) 둘만 · 겹침 · 포함은 zenoh 1.10.1 `commons/zenoh-keyexpr/src/key_expr/intersect/classical.rs` · `include.rs` 에서 가져와 `$*` · `@` 갈래를 걷었다(Apache-2.0 · crate NOTICE).
 
 const FORBIDDEN: &[char] = &['$', '?', '#'];

@@ -110,7 +110,7 @@ pub async fn drops(hub: &Hub) -> Value {
     let mut mine = json!({
         "unit": "hub",
         "notice_no_socket": hub.ses.counters.notice_no_socket.load(Ordering::Relaxed),
-        "bus_ev_drop": hub.bus.ev_drop.load(Ordering::Relaxed),
+        "bus_ev_drop": hub.bus.ev_dropped(),
         "log_queue_full": c.queue_full.load(Ordering::Relaxed),
         "log_spool_full": c.spool_full.load(Ordering::Relaxed),
     });
@@ -171,7 +171,7 @@ pub async fn sfu_rooms(hub: &Hub, id: &str) -> AdminResult {
 }
 
 pub async fn bus_view(hub: &Hub) -> Value {
-    let peers: Vec<Value> = hub.bus.peers().await.into_iter().map(|(z, w, l)| json!({ "zid": z, "whatami": w, "links": l })).collect();
+    let peers: Vec<Value> = hub.bus.peers().await.into_iter().map(|(z, w, l)| json!({ "node": z, "role": w, "links": l })).collect();
     let v = match hub.bus.view.lock() {
         Ok(v) => v.clone(),
         Err(_) => return json!({}),
@@ -202,7 +202,6 @@ pub async fn bus_view(hub: &Hub) -> Value {
     json!({
         "node": hub.node,
         "inst": hub.inst,
-        "mode": hub.mode,
         "namespace": hub.namespace,
         "listen": hub.bus.cfg_listen,
         "connect": hub.bus.cfg_connect,

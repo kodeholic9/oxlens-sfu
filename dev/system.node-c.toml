@@ -39,11 +39,7 @@ role = "sfu"
 addr = "127.0.0.1:50063"
 cmd = ["./target/debug/oxsfud", "--grpc-listen", "127.0.0.1:50063", "--udp-port", "20002", "--tcp-port", "20002", "--policy", "policy.toml", "--public-ip", "auto"]
 
-[zenoh]
-mode = "router"
+[bus]
 listen = ["tcp/127.0.0.1:7449"]
 connect = ["tcp/127.0.0.1:7447", "tcp/127.0.0.1:7448"]
-multicast_scouting = false
-qos_enabled = true
-lowlatency = false
 namespace = "oxdev"

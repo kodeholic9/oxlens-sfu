@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-BUS-SHAPE · 정:RULE-BUS-PRESENCE · 정:RULE-BUS-EVENTS · 정:RULE-BUS-REQUEST · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-MESH-SHAPE · 정:RULE-MESH-SESSION · 정:RULE-MESH-DECL · 정:RULE-MESH-REQUEST · 정:PROP-MESH-CONVERGE · 정:PROP-MESH-NO-STALE-REPLY · model: claude-opus-5-5
 //! 1층 — 한 프로세스 안 router 셋 + client 로 그물을 세운다(127.0.0.1 · lease 1 s · 202610/20261031e 단계 B · C).
 
 use std::time::Duration;

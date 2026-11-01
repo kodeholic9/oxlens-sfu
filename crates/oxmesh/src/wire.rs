@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-BUS-SHAPE · 정:RULE-BUS-EVENTS · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-MESH-WIRE · 정:RULE-MESH-LANE · model: claude-opus-5-5
 //! 그물 wire — 메시지 열넷 · 손 부호화(varint · 길이 붙은 바이트) · 프레임 = 길이 4 + 레인 1 + 깃발 1 + 조각(16 KiB 까지) · 레인마다 조각 이어 붙이기.
 
 pub const PROTO: u8 = 1;

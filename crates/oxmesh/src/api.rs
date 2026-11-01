@@ -1,8 +1,10 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-BUS-SHAPE · 정:RULE-BUS-PRESENCE · 정:RULE-BUS-REQUEST · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-MESH-SHAPE · 정:RULE-MESH-DECL · 정:RULE-MESH-LANE · 정:RULE-MESH-REQUEST · model: claude-opus-5-5
 //! 그물을 쓰는 꼴 — 열기(router · client) · 토큰 · 토큰 구독(history · 일괄 끝) · put · 구독 · 응답자 · get · 진단(info) · 닫기. 손잡이를 놓으면 철회한다.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
@@ -102,6 +104,7 @@ pub struct Mesh {
     cmd: mpsc::UnboundedSender<Cmd>,
     node: String,
     bound: Vec<SocketAddr>,
+    dropped: Arc<AtomicU64>,
 }
 
 fn check(e: &str) -> Result<(), MeshError> {
@@ -129,8 +132,9 @@ impl Mesh {
         let adv: Vec<String> =
             if cfg.advertise.is_empty() { bound.iter().map(|a| a.to_string()).collect() } else { cfg.advertise.iter().map(|a| endpoint(a).to_string()).collect() };
         let seeds: Vec<String> = cfg.connect.iter().map(|c| endpoint(c).to_string()).collect();
+        let dropped = Arc::new(AtomicU64::new(0));
         let accepts = listeners.into_iter().map(|li| tokio::spawn(accept_loop(li, ev_tx.clone())).abort_handle()).collect();
-        let core = Core::new(cfg.node.clone(), cfg.router, cfg.lease, adv, seeds, Wiring { cmd_tx: cmd_tx.clone(), ev_tx, sess_tx, accepts });
+        let core = Core::new(cfg.node.clone(), cfg.router, cfg.lease, adv, seeds, Wiring { cmd_tx: cmd_tx.clone(), ev_tx, sess_tx, accepts, dropped: dropped.clone() });
         tokio::spawn(core.run(cmd_rx, ev_rx, sess_rx));
         let listen = bound.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(",");
         let some = |s: String| (!s.is_empty()).then_some(s);
@@ -145,11 +149,15 @@ impl Mesh {
             lease_ms = cfg.lease.as_millis() as u64,
             "mesh open"
         );
-        Ok(Mesh { cmd: cmd_tx, node: cfg.node, bound })
+        Ok(Mesh { cmd: cmd_tx, node: cfg.node, bound, dropped })
     }
 
     pub fn node(&self) -> &str {
         &self.node
+    }
+
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
     }
 
     pub fn bound(&self) -> &[SocketAddr] {

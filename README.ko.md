@@ -24,7 +24,7 @@
 | ICE-lite · UDP 와 TCP 위 ICE · DTLS-SRTP · SCTP DataChannel | ✅ |
 | 서버가 끝내는 RTCP — RR · TWCC 피드백 · REMB · NACK / RTX · PLI 스로틀(정책 손잡이) | ✅ |
 | 구독 m-line 마다 고정된 다운링크 SSRC · 출처가 바뀌어도 seq / timestamp 를 이어 다시 씀 | ✅ |
-| 다중 node — node 하나 = 게이트웨이 + 미디어 서버 · [zenoh](https://zenoh.io) 버스로 잇는다 · 방 배치는 HRW(rendezvous hash) | ✅ |
+| 다중 node — node 하나 = 게이트웨이 + 미디어 서버 · 자체 버스 `oxmesh`(router 직접 그물 · 한 홉 · [zenoh](https://zenoh.io) 일부를 가져와 줄였다)로 잇는다 · 방 배치는 HRW(rendezvous hash) | ✅ |
 | 운영 — `oxadmin` CLI · `/admin/*` 읽기와 제어 · `/healthz/live` · `/healthz/ready` · node 마다 logfmt 로그 파일 하나 · 해석된 설정 전량을 남기는 기동 배너 | ✅ |
 | 영상 무전(영상 발언권) | ⏸ 보류 — 브라우저 송신 pacer 를 이쪽에서 쥘 수 없다 |
 | 대외 발행(webhook · 사건을 제3 서버로) | ⏳ 규격만 있고 미구현 |
@@ -44,15 +44,16 @@ flowchart LR
   N2["다른 node"]
   C -- "WebSocket / HTTP<br/>시그널링" --> H
   C -- "ICE · DTLS-SRTP · DataChannel<br/>UDP 또는 TCP" --> S
-  H <-- "zenoh 버스" --> N2
+  H <-- "oxmesh 버스" --> N2
 ```
 
 | 크레이트 | 역할 |
 |---|---|
 | `oxsig` | 클라 프로토콜의 wire 형 — 프레임 · op · 오류 코드 · DataChannel 과 발언권 메시지 |
-| `common` | 엄격한 설정(시스템 파일 · 정책 · CLI) · JWT · zenoh 버스 · 로그 보내는 쪽 · 빌드 신원 · 기동 배너 |
+| `common` | 엄격한 설정(시스템 파일 · 정책 · CLI) · JWT · 버스 배선 · 로그 보내는 쪽 · 빌드 신원 · 기동 배너 |
 | `oxhubd` | 게이트웨이 — 세션 · 방 배치와 라우팅 · HTTP / WebSocket · `/admin` · 프로세스 supervisor · 프로세스 안 로거 |
 | `oxsfud` | 미디어 서버 — 방 · Peer · 발행 / 구독 · 발언권 · 전달 · RTCP · 시뮬캐스트 |
+| `oxmesh` | node 버스 — router 직접 그물 한 홉 · 세션 신원(세대) · 레인 넷 · 토큰 · 구독 · 질의(hub 가 router · 미디어 서버가 client) |
 | `oxadmin` | `/admin/*` 를 부르는 운영 CLI |
 
 ## 빠른 시작
@@ -71,7 +72,7 @@ cd oxlens-sfu && cargo build
 ./target/debug/oxhubd --system system.toml --policy policy.toml
 ```
 
-hub 는 `system.toml` 의 미디어 서버 유닛(`./target/debug/oxsfud` · gRPC `127.0.0.1:50061` · 미디어 UDP `20000`)을 띄우고, HTTP / WebSocket 을 `0.0.0.0:1974` 에, zenoh 버스를 `127.0.0.1:7447` 에 엽니다. 다른 셸에서 확인합니다.
+hub 는 `system.toml` 의 미디어 서버 유닛(`./target/debug/oxsfud` · gRPC `127.0.0.1:50061` · 미디어 UDP `20000`)을 띄우고, HTTP / WebSocket 을 `0.0.0.0:1974` 에, oxmesh 버스를 `127.0.0.1:7447` 에 엽니다. 다른 셸에서 확인합니다.
 
 ```bash
 curl http://127.0.0.1:1974/healthz/ready
@@ -93,7 +94,7 @@ curl http://127.0.0.1:1974/healthz/ready
 
 | 자리 | 무엇 |
 |---|---|
-| 시스템 파일(`system.toml`) | 접속 주소 · 로그 디렉터리와 소켓 · 계정 · 유닛 목록 · zenoh · supervisor |
+| 시스템 파일(`system.toml`) | 접속 주소 · 로그 디렉터리와 소켓 · 계정 · 유닛 목록 · 버스(`[bus]`) · supervisor |
 | 정책 파일(`policy.toml`) | 게이트웨이와 미디어 서버가 함께 읽는 손잡이 — 로깅 · 미디어(비트레이트 · 시뮬캐스트 · PLI 스로틀) · 발언권. 키마다 범위가 있고, 모르는 키는 기동 실패입니다 |
 | CLI 인자 | 프로세스별 값(node id · 포트 · 공인 IP). 공유해야 하는 값(로그 경로 · 버스 주소)은 hub 가 유닛을 띄울 때 덧붙입니다 |
 

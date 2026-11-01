@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-BUS-PRESENCE · 정:RULE-BUS-EVENTS · 정:RULE-BUS-REQUEST · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-MESH-DECL · 정:RULE-MESH-LANE · 정:REJ-MESH-ZENOH-FORK · model: claude-opus-5-5
 //! 1층 — zenoh 1.10.1 자체 시험의 대조판(202610/20261031e). 시험 이름은 원본 이름을 그대로 따른다 — 원본: `zenoh/tests/liveliness.rs` · `unicity.rs` ·
 //! `queryable.rs` · `session.rs` · `io/zenoh-transport/tests/unicast_{fragmentation,priorities,openclose,intermittent,simultaneous}.rs`.
 //! 형상 바꿈: zenoh 의 peer 는 우리에게 없어 router 로 둔다 · history 구독의 「일괄 끝」(zenoh 에 없음)은 견줄 때 뺀다 · 원본의 1 s 잠은 짧게.

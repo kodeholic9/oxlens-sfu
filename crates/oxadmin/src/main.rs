@@ -371,9 +371,9 @@ fn bus(c: &Ctx, all: bool) -> Result<(), String> {
     if !all {
         let v = c.get("/admin/bus")?;
         if !c.raw(&v) {
-            kv(&v, &["node", "inst", "mode", "namespace", "listen", "connect"]);
+            kv(&v, &["node", "inst", "namespace", "listen", "connect"]);
             println!("\npeers");
-            table(arr(&v, "peers"), &["zid", "whatami", "links"]);
+            table(arr(&v, "peers"), &["node", "role", "links"]);
             println!("\nnodes");
             table(arr(&v, "nodes"), &["node", "inst", "self"]);
             println!("\nrooms_seen");

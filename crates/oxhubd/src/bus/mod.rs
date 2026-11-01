@@ -30,13 +30,11 @@ pub enum BusEvent {
     Query(Query),
 }
 
-pub struct ZenohCfg {
+pub struct BusCfg {
     pub listen: Vec<String>,
     pub advertise: Vec<String>,
     pub connect: Vec<String>,
-    pub multicast_scouting: bool,
     pub namespace: String,
-    pub base_config: Option<String>,
 }
 
 #[derive(Clone)]
@@ -80,15 +78,16 @@ enum Ev {
 }
 
 impl Bus {
+    pub fn ev_dropped(&self) -> u64 {
+        self.ev_drop.load(std::sync::atomic::Ordering::Relaxed) + self.session.dropped()
+    }
+
     pub async fn open(
         node: &str,
         inst: &str,
         grace_ms: u64,
-        z: ZenohCfg,
+        z: BusCfg,
     ) -> Result<(Arc<Bus>, mpsc::UnboundedReceiver<BusEvent>), String> {
-        if z.base_config.is_some() || z.multicast_scouting {
-            tracing::warn!(kind = "diag", "bus — base_config · multicast_scouting are zenoh knobs · oxmesh ignores them");
-        }
         let mut mc = oxmesh::Config::router(node);
         mc.listen = z.listen.iter().map(|l| oxmesh::endpoint(l).to_string()).collect();
         mc.advertise = z.advertise.iter().map(|l| oxmesh::endpoint(l).to_string()).collect();

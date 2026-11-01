@@ -42,7 +42,7 @@ impl UnitState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     Log,
-    Zenoh,
+    Bus,
     Sfu,
 }
 
@@ -161,15 +161,15 @@ impl Supervisor {
             units.push(mk(u.clone(), Role::Log));
         }
         let z = Unit {
-            id: "zenoh".into(),
+            id: "bus".into(),
             kind: UnitKind::Inproc,
             order: 0,
-            role: "zenoh".into(),
+            role: "bus".into(),
             addr: None,
             cmd: Vec::new(),
             enabled: true,
         };
-        units.push(mk(z, Role::Zenoh));
+        units.push(mk(z, Role::Bus));
         let mut rest: Vec<&Unit> = units_cfg.iter().filter(|u| u.role != "log").collect();
         rest.sort_by_key(|u| u.order);
         for u in rest {
@@ -452,13 +452,13 @@ impl Supervisor {
 
     pub async fn request(&self, id: &str, which: &str) -> Result<(UnitState, UnitState), String> {
         let u = self.unit(id).ok_or_else(|| "no unit".to_string())?;
-        if u.role == Role::Zenoh || u.role == Role::Log {
+        if u.role == Role::Bus || u.role == Role::Log {
             if which == "load" {
                 return Err("inproc unit".into());
             }
             let from = u.state();
-            if u.role == Role::Zenoh {
-                let _ = self.fatal.send(format!("zenoh unit {which}"));
+            if u.role == Role::Bus {
+                let _ = self.fatal.send(format!("bus unit {which}"));
             }
             return Ok((from, if which == "kill" { UnitState::Down } else { UnitState::Stopped }));
         }

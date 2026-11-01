@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-BUS-SHAPE · 정:RULE-BUS-EVENTS · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-MESH-SESSION · 정:RULE-MESH-FENCE · 정:RULE-MESH-LANE · model: claude-opus-5-5
 //! 세션 하나 = TCP 연결 하나 — 레인 넷의 송신 큐(제어 · 선언은 무한 · 요청은 차면 거절 · 데이터는 차면 버리고 센다) · 쓰기 태스크(높은 레인부터 · 놀면 keepalive) · 읽기 태스크(틱 공백 울타리 뒤에만 lease 갱신).
 
 use std::collections::VecDeque;
@@ -62,6 +62,7 @@ pub struct Outbox {
     notify: Notify,
     pub dropped: AtomicU64,
     pub full: AtomicU64,
+    total_dropped: Arc<AtomicU64>,
 }
 
 enum Pop {
@@ -71,12 +72,13 @@ enum Pop {
 }
 
 impl Outbox {
-    pub fn new() -> Outbox {
+    pub fn new(total_dropped: Arc<AtomicU64>) -> Outbox {
         Outbox {
             lanes: Mutex::new(Lanes { q: Default::default(), closing: None }),
             notify: Notify::new(),
             dropped: AtomicU64::new(0),
             full: AtomicU64::new(0),
+            total_dropped,
         }
     }
 
@@ -98,6 +100,7 @@ impl Outbox {
             drop(g);
             if lane == Lane::Data {
                 self.dropped.fetch_add(1, Ordering::Relaxed);
+                self.total_dropped.fetch_add(1, Ordering::Relaxed);
                 return Push::Dropped;
             }
             self.full.fetch_add(1, Ordering::Relaxed);
@@ -250,4 +253,30 @@ pub async fn recv_direct(s: &mut TcpStream, timeout: Duration) -> Option<Msg> {
         return None;
     }
     Msg::decode(&chunk)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn data_lane_full_drops_and_counts_into_the_process_total() {
+        let total = Arc::new(AtomicU64::new(0));
+        let a = Outbox::new(total.clone());
+        let b = Outbox::new(total.clone());
+        let put = Msg::Put { key: "ox/t/int/ev/room/r1".into(), payload: vec![0; 8] };
+        for _ in 0..DATA_CAP {
+            assert_eq!(a.push(&put), Push::Queued);
+        }
+        assert_eq!(a.push(&put), Push::Dropped);
+        assert_eq!(b.push(&put), Push::Queued);
+        let req = Msg::Request { qid: 1, expr: "ox/t/int/q/node/n1/call".into(), payload: Vec::new(), timeout_ms: 10 };
+        for _ in 0..REQ_CAP {
+            assert_eq!(a.push(&req), Push::Queued);
+        }
+        assert_eq!(a.push(&req), Push::Full);
+        assert_eq!(a.dropped.load(Ordering::Relaxed), 1);
+        assert_eq!(a.full.load(Ordering::Relaxed), 1);
+        assert_eq!(total.load(Ordering::Relaxed), 1);
+    }
 }

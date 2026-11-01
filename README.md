@@ -24,7 +24,7 @@
 | ICE-lite · ICE over UDP and TCP · DTLS-SRTP · SCTP DataChannel | ✅ |
 | Server-terminated RTCP — RR · TWCC feedback · REMB · NACK / RTX · PLI throttling (policy knobs) | ✅ |
 | Stable downlink SSRC per subscribed m-line, with sequence / timestamp rewriting across source switches | ✅ |
-| Multi-node — each node = gateway + media server, connected by a [zenoh](https://zenoh.io) bus · rendezvous-hash room placement | ✅ |
+| Multi-node — each node = gateway + media server, connected by our own bus `oxmesh` (direct one-hop mesh of routers, adapted from parts of [zenoh](https://zenoh.io)) · rendezvous-hash room placement | ✅ |
 | Operations — `oxadmin` CLI · `/admin/*` read and control · `/healthz/live` · `/healthz/ready` · logfmt logging to one file per node · boot banner with every resolved setting | ✅ |
 | Video PTT (video floor) | ⏸ shelved — the browser send pacer cannot be controlled from here |
 | Outbound hooks (webhooks / events to a third-party server) | ⏳ specified, not implemented |
@@ -44,15 +44,16 @@ flowchart LR
   N2["other nodes"]
   C -- "WebSocket / HTTP<br/>signaling" --> H
   C -- "ICE · DTLS-SRTP · DataChannel<br/>UDP or TCP" --> S
-  H <-- "zenoh bus" --> N2
+  H <-- "oxmesh bus" --> N2
 ```
 
 | Crate | Role |
 |---|---|
 | `oxsig` | Wire types of the client protocol — frames, ops, error codes, DataChannel and floor messages |
-| `common` | Strict configuration (system file · policy · CLI), JWT, the zenoh bus, the log sender, build identity, the boot banner |
+| `common` | Strict configuration (system file · policy · CLI), JWT, the bus wiring, the log sender, build identity, the boot banner |
 | `oxhubd` | Gateway: sessions, room placement and routing, HTTP / WebSocket, `/admin`, the process supervisor, the in-process logger |
 | `oxsfud` | Media server: rooms, peers, publish / subscribe, floor control, forwarding, RTCP, simulcast |
+| `oxmesh` | The node bus — routers in a direct one-hop mesh, session identity (generation), four lanes, tokens · subscriptions · queries (the hub is a router, the media server a client) |
 | `oxadmin` | Operator CLI over `/admin/*` |
 
 ## Quick start
@@ -71,7 +72,7 @@ cd oxlens-sfu && cargo build
 ./target/debug/oxhubd --system system.toml --policy policy.toml
 ```
 
-The hub starts the media server unit listed in `system.toml` (`./target/debug/oxsfud`, gRPC `127.0.0.1:50061`, media UDP `20000`), opens HTTP / WebSocket on `0.0.0.0:1974`, and runs the zenoh bus on `127.0.0.1:7447`. In another shell:
+The hub starts the media server unit listed in `system.toml` (`./target/debug/oxsfud`, gRPC `127.0.0.1:50061`, media UDP `20000`), opens HTTP / WebSocket on `0.0.0.0:1974`, and runs the oxmesh bus on `127.0.0.1:7447`. In another shell:
 
 ```bash
 curl http://127.0.0.1:1974/healthz/ready
@@ -93,7 +94,7 @@ Every value lives in exactly one of three places, and the boot banner prints the
 
 | Place | What goes there |
 |---|---|
-| System file (`system.toml`) | Listen addresses, log directory and socket, accounts, the unit list, zenoh, the supervisor |
+| System file (`system.toml`) | Listen addresses, log directory and socket, accounts, the unit list, the bus (`[bus]`), the supervisor |
 | Policy file (`policy.toml`) | Tunables shared by gateway and media server — logging, media (bitrate · simulcast · PLI throttle), floor. Every key has a range. Unknown keys fail the boot |
 | CLI arguments | Per-process values (node id · ports · public IP). The hub adds the shared ones (log paths · bus address) when it starts a unit |
 

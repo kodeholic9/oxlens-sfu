@@ -29,7 +29,6 @@ pub struct Hub {
     pub bus: Arc<Bus>,
     pub sup: Arc<Supervisor>,
     pub sender: Arc<Sender>,
-    pub mode: String,
     pub namespace: String,
     pub shutdown: mpsc::UnboundedSender<String>,
 }

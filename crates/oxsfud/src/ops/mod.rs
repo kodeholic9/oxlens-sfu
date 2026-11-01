@@ -260,7 +260,7 @@ pub fn drops_json() -> serde_json::Value {
             }
         }
         if let Some(b) = crate::bus::get() {
-            o.insert("bus_ev_drop".into(), serde_json::json!(b.ev_drop.load(Ordering::Relaxed) + s.drops[DROP_NAMES.len() - 1].load(Ordering::Relaxed)));
+            o.insert("bus_ev_drop".into(), serde_json::json!(b.ev_dropped() + s.drops[DROP_NAMES.len() - 1].load(Ordering::Relaxed)));
         }
         if let Some(l) = common::log::global() {
             o.insert("log_queue_full".into(), serde_json::json!(l.counters.queue_full.load(Ordering::Relaxed)));

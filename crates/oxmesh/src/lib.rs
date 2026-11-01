@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-BUS-SHAPE · 정:RULE-BUS-PRESENCE · 정:RULE-BUS-EVENTS · 정:RULE-BUS-REQUEST · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-MESH-SHAPE · 정:RULE-MESH-SESSION · 정:RULE-MESH-DECL · 정:RULE-MESH-LANE · 정:RULE-MESH-REQUEST · model: claude-opus-5-5
 //! node 사이 그물(zenoh 를 대신한다 · 202610/20261031e) — router 한 가지 · 직접 그물 한 홉 · 세션 신원(세대)으로 판정 · 레인 넷 · 토큰 · 구독 · 응답자.
 
 mod api;

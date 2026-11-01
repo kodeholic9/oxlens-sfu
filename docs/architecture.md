@@ -22,7 +22,7 @@
 
 서버는 프로세스 둘로 나뉜다.
 
-- **oxhubd(게이트웨이)** — 클라이언트의 HTTP · WebSocket 을 받는다. 세션 · 토큰 · 방이 어느 node 에 있는지를 알고, 요청을 맞는 미디어 서버로 넘긴다. sfud 를 자식 프로세스로 띄우고 지켜보는 supervisor 이며, zenoh router 를 품고 있다.
+- **oxhubd(게이트웨이)** — 클라이언트의 HTTP · WebSocket 을 받는다. 세션 · 토큰 · 방이 어느 node 에 있는지를 알고, 요청을 맞는 미디어 서버로 넘긴다. sfud 를 자식 프로세스로 띄우고 지켜보는 supervisor 이며, 버스(oxmesh) router 를 품고 있다.
 - **oxsfud(미디어 서버)** — 미디어(UDP · TCP)를 직접 받고 보낸다. 방 · 참가자 · 발행 · 구독 상태와 그 판정, 발언권(무전) 판정을 든다.
 
 ```mermaid
@@ -39,14 +39,14 @@ flowchart LR
             WS["WS 연결마다 태스크"]
             SES["세션 표 · 방→node 맵"]
             SUP["supervisor<br/>자식 프로세스 수명"]
-            ZR["zenoh router (임베드)"]
+            ZR["oxmesh router (임베드)"]
             LOG["로거<br/>unix datagram"]
         end
         subgraph SFU["oxsfud (미디어 서버)"]
             GRPC["gRPC Handle<br/>Hello · Call"]
             CORE["상태 + 판정<br/>방 · Peer · 발언권"]
             MEDIA["미디어 경로<br/>수신 스레드 + 미디어 워커 N"]
-            ZC["zenoh client"]
+            ZC["oxmesh client"]
         end
     end
 
@@ -60,9 +60,9 @@ flowchart LR
     WS -->|"op 요청<br/>gRPC Call(봉투)"| GRPC
     GRPC --> CORE
     CORE -->|"통지 put<br/>ev/room · ev/user"| ZC
-    ZC <-->|"zenoh"| ZR
+    ZC <-->|"oxmesh"| ZR
     ZR -->|"통지 구독"| WS
-    ZR <-->|"zenoh<br/>토큰 · q/node/*/call"| OTHER
+    ZR <-->|"oxmesh<br/>토큰 · q/node/*/call"| OTHER
     SUP -->|"spawn + stdin 생존 채널"| SFU
     SFU -.->|"로그 줄"| LOG
     CORE --- MEDIA
@@ -73,9 +73,9 @@ flowchart LR
 | WebSocket | 클라 ↔ hub | 요청 · 응답 · 통지 | 8바이트 머리(ver · flags · op · pid) + JSON 몸통 (`oxsig/src/frame.rs`) |
 | HTTP | 클라 ↔ hub | 토큰 발급 · 방 목록 · 생성 · 상세, 운영 `/admin` | REST |
 | gRPC `Call` | hub → 같은 node 의 sfud | op 요청 봉투 하나 = 판정 하나 | `Call` / `Reply` 봉투 (`common/src/bus/env.rs`) |
-| zenoh `ev/room/{방}` · `ev/user/{사용자}` | sfud → hub | 방 통지 · 개인 통지 | `Notice` 봉투 |
-| zenoh 토큰(liveliness) | node 사이 | node · 방 · 세션이 어디 살아 있는지 | 키에 모든 정보를 적는다 (`common/src/bus/keys.rs`) |
-| zenoh `q/node/{node}/call` | hub → 다른 node | 다른 node 에 있는 방으로 가는 op | gRPC 와 같은 봉투 |
+| 버스 `ev/room/{방}` · `ev/user/{사용자}` | sfud → hub | 방 통지 · 개인 통지 | `Notice` 봉투 |
+| 버스 토큰 | node 사이 | node · 방 · 세션이 어디 살아 있는지 | 키에 모든 정보를 적는다 (`common/src/bus/keys.rs`) |
+| 버스 `q/node/{node}/call` | hub → 다른 node | 다른 node 에 있는 방으로 가는 op | gRPC 와 같은 봉투 |
 | stdin 생존 채널 | hub → sfud | 부모가 죽으면 stdin 이 닫혀 sfud 도 끝난다 | 파이프 |
 | unix datagram | sfud → hub 로거 | 로그 한 줄씩 | 텍스트 줄 |
 | UDP 한 포트 | 클라 ↔ sfud | STUN · DTLS · SRTP · SRTCP 를 첫 바이트로 가른다 | RFC 7983 식 demux |
@@ -109,7 +109,7 @@ flowchart TB
         DT["DTLS · SCTP 태스크<br/>(전송 객체마다 하나)"]
         FL["발언권 구동<br/>(방마다 타이머 태스크)"]
         TM["주기 태스크<br/>쌍별 생존 1s · 빈 방 sweep 5s · 정체 · stat 줄 5s"]
-        BUS["zenoh client"]
+        BUS["oxmesh client"]
     end
 
     POLL --> DEMUX
@@ -403,7 +403,7 @@ sequenceDiagram
     participant RT as hub 라우팅
     participant S as sfud gRPC Handle
     participant ST as State 락
-    participant Z as zenoh
+    participant Z as oxmesh
     participant O as 같은 방 다른 클라
 
     C->>WS: 프레임 (op · pid · JSON)
@@ -453,7 +453,7 @@ sequenceDiagram
 | 품질 | 업링크 NACK · 재전송 캐시 · RTX(예산 · 창) · PLI 스로틀 | 손실 복구와 키프레임 폭주 방지 | `rtcp/*` · `fwd/egress.rs` |
 | 품질 | 시뮬캐스트 층 전환은 목표 층 키프레임에서만 · 자동 층(trendline · AIMD) · RTX 패딩 probe | 층 바꿀 때 깨짐 없음 · 대역에 맞춤 | `fwd/mod.rs` `layer_ok` · `sim/*` |
 | 무전 | 방 슬롯 + 발언권(3GPP TS 24.380 판정) + 데이터 채널 MBCP | 청취자는 m-line 하나로 화자 전환을 받음 | `flr/*` · `ops/floor.rs` |
-| 분산 | zenoh 토큰(liveliness)으로 node · 방 · 세션 위치, 통지 put, node 사이 query | 방이 어느 node 에 있든 같은 봉투로 라우팅 | `common/bus/*` · `oxhubd/bus` |
+| 분산 | 버스(oxmesh) 토큰으로 node · 방 · 세션 위치, 통지 put, node 사이 query | 방이 어느 node 에 있든 같은 봉투로 라우팅 | `common/bus/*` · `oxhubd/bus` |
 
 ---
 

@@ -16,8 +16,8 @@ pub const ARGS: &[&str] = &[
     "tcp-port",
     "policy",
     "public-ip",
-    "zenoh-namespace",
-    "zenoh-connect",
+    "bus-namespace",
+    "bus-connect",
     "log-dir",
     "log-socket",
     "node-grace-secs",
@@ -87,11 +87,11 @@ impl SfuCfg {
             Some(v) => v.parse().map_err(|x| format!("--public-ip {v}: {x}"))?,
         };
         let bind_ip = if is_local(ip) { ip } else { IpAddr::V4(Ipv4Addr::UNSPECIFIED) };
-        let namespace = args.get("zenoh-namespace").unwrap_or("oxlens").to_string();
+        let namespace = args.get("bus-namespace").unwrap_or("oxlens").to_string();
         if !common::keyspace::valid_piece(&namespace) {
-            return Err(format!("zenoh-namespace {namespace:?} 는 키 조각이 못 된다"));
+            return Err(format!("bus-namespace {namespace:?} 는 키 조각이 못 된다"));
         }
-        let connect = args.require("zenoh-connect").map_err(e)?.to_string();
+        let connect = args.require("bus-connect").map_err(e)?.to_string();
         let log_dir = args.get("log-dir").map(PathBuf::from);
         let log_socket = args.get("log-socket").map(PathBuf::from);
         let grace_secs = args.parse_num::<u64>("node-grace-secs").map_err(e)?.ok_or("--node-grace-secs is required")?;

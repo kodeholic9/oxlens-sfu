@@ -58,9 +58,9 @@ impl HubCfg {
     }
 
     pub fn child_args(&self) -> Vec<String> {
-        let mut a = vec!["--zenoh-namespace".to_string(), self.system.zenoh.namespace.clone()];
-        if let Some(l) = self.system.zenoh.listen.first() {
-            a.push("--zenoh-connect".into());
+        let mut a = vec!["--bus-namespace".to_string(), self.system.bus.namespace.clone()];
+        if let Some(l) = self.system.bus.listen.first() {
+            a.push("--bus-connect".into());
             a.push(l.clone());
         }
         if let Some(d) = &self.log_dir {
