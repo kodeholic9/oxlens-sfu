@@ -80,7 +80,7 @@
 | `1` | `x0001` | `GRANTED` · `FLOOR_GRANTED` | Floor Granted 8.2.5 | S→C | 쓸 수 있다 | ★세운다 | priority(PRIORITY) · duration(DURATION) · room(ROOM — gate) | 1 — 말해라 |
 | `2` | `x0010` | `TAKEN` · `FLOOR_TAKEN` | Floor Taken 8.2.9 | S→C | 쓸 수 있다 | ★세운다 | speaker(SPEAKER) · seq(SEQ — seq) · room(ROOM — gate) | 2 — 누가 말하고 있다 |
 | `3` | `x0011` | `DENY` · `FLOOR_DENY` | Floor Deny 8.2.6 | S→C | 쓸 수 있다 | ★세운다 | cause(CAUSE) · reason(REASON?) · room(ROOM — gate) | 3 — 안 된다 |
-| `4` | `x0100` | `RELEASE` · `FLOOR_RELEASE` | Floor Release 8.2.7 | C→S | 쓸 수 있다 | 안 세운다 | room(ROOM — gate) | 4 — 다 말했다 |
+| `4` | `x0100` | `RELEASE` · `FLOOR_RELEASE` | Floor Release 8.2.7 | C→S | 쓸 수 있다 | ★세운다 | room(ROOM — gate) | 4 — 다 말했다 |
 | `5` | `x0101` | `IDLE` · `FLOOR_IDLE` | Floor Idle 8.2.8 | S→C | 쓸 수 있다 | 안 세운다 | prev(PREV?) · seq(SEQ — seq) · room(ROOM — gate) | 5 — 아무도 안 말한다 |
 | `6` | `00110` | `REVOKE` · `FLOOR_REVOKE` | Floor Revoke 8.2.10 | S→C | 못 쓴다 | — | cause(CAUSE) · reason(REASON?) · room(ROOM — gate) | 6 — 그만 말해라(원문이 A 비트를 못 쓰게 한다) |
 | `8` | `01000` | `QPOS_REQ` · `FLOOR_QUEUE_POS_REQUEST` | Floor Queue Position Request 8.2.11 | C→S | 못 쓴다 | — | room(ROOM — gate) | 8 — 내 차례는 몇 번째인가 |
@@ -303,9 +303,11 @@
 |---|---|---|---|
 | <a id="FLR.C.PREL.rtp_rx"></a>`FLR.C.PREL.rtp_rx` | cs == 'PREL' | 효과 media.render | 6.2.4.6.6 |
 | <a id="FLR.C.PREL.rx_IDLE"></a>`FLR.C.PREL.rx_IDLE` | cs == 'PREL' && m.t == 'IDLE' | cs ← 'NOPERM'; shown ← none · 효과 app.speaker_none | 6.2.4.6.4 |
+| <a id="FLR.C.PREL.rx_ACK_release"></a>`FLR.C.PREL.rx_ACK_release` | cs == 'PREL' && m.t == 'ACK' && m.n == 4 | cs ← 'NOPERM' | 6.2.4.6.1 x:6.2.4.5.3 DEV-FLR-RELEASE-ACK R-FLR-RELEASE-ACK — Message Type 4 = Floor Release — 서버가 내 놓음을 받았다(원문 6.3.5.x 의 shall) · Floor Ack 을 어떻게 다룰지는 원문이 구현 선택으로 둔다(6.2.4.5.3 NOTE) — 놓음 끝으로 다룬다 · 화자 표시는 뒤따르는 TAKEN 이 고친다 |
+| <a id="FLR.C.PREL.rx_ACK_other"></a>`FLR.C.PREL.rx_ACK_other` | cs == 'PREL' && m.t == 'ACK' | — | 6.2.4.1 |
 | <a id="FLR.C.PREL.rx_TAKEN"></a>`FLR.C.PREL.rx_TAKEN` | cs == 'PREL' && m.t == 'TAKEN' | cs ← 'NOPERM'; shown ← m.a · ack TAKEN · 효과 app.speaker | 6.2.4.6.5 |
 | <a id="FLR.C.PREL.rx_REVOKE"></a>`FLR.C.PREL.rx_REVOKE` | cs == 'PREL' && m.t == 'REVOKE' | 효과 app.revoked | 6.2.4.6.7 |
-| <a id="FLR.C.PREL.rx_GRANTED"></a>`FLR.C.PREL.rx_GRANTED` | cs == 'PREL' && m.t == 'GRANTED' | ack GRANTED | 6.2.4.6.8 |
+| <a id="FLR.C.PREL.rx_GRANTED"></a>`FLR.C.PREL.rx_GRANTED` | cs == 'PREL' && m.t == 'GRANTED' | shown ← none · ack GRANTED · 효과 app.speaker_none | 6.2.4.6.8 DEV-FLR-PREL-GRANTED-DISPLAY R-FLR-PREL-GRANTED-DISPLAY |
 | <a id="FLR.C.PREL.rx_other"></a>`FLR.C.PREL.rx_other` | cs == 'PREL' | — | 6.2.4.1 |
 | <a id="FLR.C.PREL.T100"></a>`FLR.C.PREL.T100` | c100 < Cap('C100') | c100 ← c100 + 1 · 보낸다 RELEASE | 6.2.4.6.2 DEV-FLR-CLIENT-RETX |
 | <a id="FLR.C.PREL.T100_exhaust"></a>`FLR.C.PREL.T100_exhaust` | 나머지 | cs ← 'NOPERM' | 6.2.4.6.3 |
@@ -394,26 +396,26 @@
 | <a id="FLR.S.P.NPSENDS.a_TAKEN"></a>`FLR.S.P.NPSENDS.a_TAKEN` | ev.t == 'TAKEN' | gTaken[u] ← true | 6.3.5.7.5 |
 | <a id="FLR.S.P.NPSENDS.a_other"></a>`FLR.S.P.NPSENDS.a_other` | 나머지 | — | 6.3.5.1 |
 | <a id="FLR.S.P.NP_IDLE.rx_REQUEST"></a>`FLR.S.P.NP_IDLE.rx_REQUEST` | part[u] == 'NP_IDLE' && ev.t == 'REQUEST' | call ArbReqIdle | 6.3.5.3.4 |
-| <a id="FLR.S.P.NP_IDLE.rx_RELEASE"></a>`FLR.S.P.NP_IDLE.rx_RELEASE` | part[u] == 'NP_IDLE' && ev.t == 'RELEASE' | dequeue u · send u IDLE prev | 6.3.5.3.7 |
+| <a id="FLR.S.P.NP_IDLE.rx_RELEASE"></a>`FLR.S.P.NP_IDLE.rx_RELEASE` | part[u] == 'NP_IDLE' && ev.t == 'RELEASE' | send u ACK 4 · dequeue u · send u IDLE prev | 6.3.5.3.7 R-FLR-RELEASE-ACK |
 | <a id="FLR.S.P.NP_IDLE.rx_RTP_after_release"></a>`FLR.S.P.NP_IDLE.rx_RTP_after_release` | part[u] == 'NP_IDLE' && ev.t == 'RTP' && released[u] | call Revoke3 | 6.3.5.3.8 |
 | <a id="FLR.S.P.NP_IDLE.rx_RTP_drop"></a>`FLR.S.P.NP_IDLE.rx_RTP_drop` | part[u] == 'NP_IDLE' && ev.t == 'RTP' | — | 6.3.5.3.8 6.3.5.1 |
 | <a id="FLR.S.P.NP_IDLE.rx_other"></a>`FLR.S.P.NP_IDLE.rx_other` | part[u] == 'NP_IDLE' | — | 6.3.5.1 |
 | <a id="FLR.S.P.NP_TAKEN.rx_REQUEST"></a>`FLR.S.P.NP_TAKEN.rx_REQUEST` | part[u] == 'NP_TAKEN' && ev.t == 'REQUEST' | call TakenReq | 6.3.5.4.4 |
-| <a id="FLR.S.P.NP_TAKEN.rx_RELEASE"></a>`FLR.S.P.NP_TAKEN.rx_RELEASE` | part[u] == 'NP_TAKEN' && ev.t == 'RELEASE' | c21[u] ← 1 · dequeue u · send u TAKEN Holder() | 6.3.5.4.5 DEV-FLR-TAKEN-ACK |
+| <a id="FLR.S.P.NP_TAKEN.rx_RELEASE"></a>`FLR.S.P.NP_TAKEN.rx_RELEASE` | part[u] == 'NP_TAKEN' && ev.t == 'RELEASE' | c21[u] ← 1 · send u ACK 4 · dequeue u · send u TAKEN Holder() | 6.3.5.4.5 DEV-FLR-TAKEN-ACK R-FLR-RELEASE-ACK |
 | <a id="FLR.S.P.NP_TAKEN.rx_ACK_taken"></a>`FLR.S.P.NP_TAKEN.rx_ACK_taken` | part[u] == 'NP_TAKEN' && ev.t == 'ACK' && ev.n == 2 | c21[u] ← 0 · — | x:6.3.5.3.3 x:8.2.3.14 DEV-FLR-TAKEN-ACK |
 | <a id="FLR.S.P.NP_TAKEN.rx_ACK_other"></a>`FLR.S.P.NP_TAKEN.rx_ACK_other` | part[u] == 'NP_TAKEN' && ev.t == 'ACK' | — | 6.3.5.1 DEV-FLR-ACK-DROP |
 | <a id="FLR.S.P.NP_TAKEN.rx_QPOS_REQ"></a>`FLR.S.P.NP_TAKEN.rx_QPOS_REQ` | part[u] == 'NP_TAKEN' && ev.t == 'QPOS_REQ' | send u QINFO Pos(u) QPrio(u) | 6.3.5.4.7 x:8.2.3.5 |
 | <a id="FLR.S.P.NP_TAKEN.rx_RTP"></a>`FLR.S.P.NP_TAKEN.rx_RTP` | part[u] == 'NP_TAKEN' && ev.t == 'RTP' | call Revoke3 | 6.3.5.4.6 |
 | <a id="FLR.S.P.NP_TAKEN.rx_other"></a>`FLR.S.P.NP_TAKEN.rx_other` | part[u] == 'NP_TAKEN' | — | 6.3.5.1 |
-| <a id="FLR.S.P.PERMITTED.rx_RELEASE"></a>`FLR.S.P.PERMITTED.rx_RELEASE` | part[u] == 'PERMITTED' && ev.t == 'RELEASE' | released[u] ← true · call ArbRel | 6.3.5.5.3 |
+| <a id="FLR.S.P.PERMITTED.rx_RELEASE"></a>`FLR.S.P.PERMITTED.rx_RELEASE` | part[u] == 'PERMITTED' && ev.t == 'RELEASE' | released[u] ← true · send u ACK 4 · call ArbRel | 6.3.5.5.3 R-FLR-RELEASE-ACK |
 | <a id="FLR.S.P.PERMITTED.rx_REQUEST"></a>`FLR.S.P.PERMITTED.rx_REQUEST` | part[u] == 'PERMITTED' && ev.t == 'REQUEST' | call ArbReqPermitted | 6.3.5.5.7 |
 | <a id="FLR.S.P.PERMITTED.rx_RTP"></a>`FLR.S.P.PERMITTED.rx_RTP` | part[u] == 'PERMITTED' && ev.t == 'RTP' | call ArbRtp | 6.3.5.5.6 |
 | <a id="FLR.S.P.PERMITTED.rx_other"></a>`FLR.S.P.PERMITTED.rx_other` | part[u] == 'PERMITTED' | — | 6.3.5.1 |
-| <a id="FLR.S.P.PREVOKE.rx_RELEASE"></a>`FLR.S.P.PREVOKE.rx_RELEASE` | part[u] == 'PREVOKE' && ev.t == 'RELEASE' | call ArbRel | 6.3.5.6.5 R-FLR-REVOKE-RELEASE |
+| <a id="FLR.S.P.PREVOKE.rx_RELEASE"></a>`FLR.S.P.PREVOKE.rx_RELEASE` | part[u] == 'PREVOKE' && ev.t == 'RELEASE' | send u ACK 4 · call ArbRel | 6.3.5.6.5 R-FLR-REVOKE-RELEASE R-FLR-RELEASE-ACK |
 | <a id="FLR.S.P.PREVOKE.rx_RTP"></a>`FLR.S.P.PREVOKE.rx_RTP` | part[u] == 'PREVOKE' && ev.t == 'RTP' | call ArbRtp | 6.3.5.6.4 R-FLR-T3-GRACE |
 | <a id="FLR.S.P.PREVOKE.rx_other"></a>`FLR.S.P.PREVOKE.rx_other` | part[u] == 'PREVOKE' | — | 6.3.5.1 |
-| <a id="FLR.S.P.NPSENDS.rx_RELEASE_taken"></a>`FLR.S.P.NPSENDS.rx_RELEASE_taken` | ev.t == 'RELEASE' && gTaken[u] | send u TAKEN Holder() NP_TAKEN | 6.3.5.7.4 6.3.5.7.5 |
-| <a id="FLR.S.P.NPSENDS.rx_RELEASE_idle"></a>`FLR.S.P.NPSENDS.rx_RELEASE_idle` | ev.t == 'RELEASE' | send u IDLE prev NP_IDLE | 6.3.5.7.4 |
+| <a id="FLR.S.P.NPSENDS.rx_RELEASE_taken"></a>`FLR.S.P.NPSENDS.rx_RELEASE_taken` | ev.t == 'RELEASE' && gTaken[u] | send u ACK 4 · send u TAKEN Holder() NP_TAKEN | 6.3.5.7.4 6.3.5.7.5 R-FLR-RELEASE-ACK |
+| <a id="FLR.S.P.NPSENDS.rx_RELEASE_idle"></a>`FLR.S.P.NPSENDS.rx_RELEASE_idle` | ev.t == 'RELEASE' | send u ACK 4 · send u IDLE prev NP_IDLE | 6.3.5.7.4 R-FLR-RELEASE-ACK |
 | <a id="FLR.S.P.NPSENDS.rx_RTP"></a>`FLR.S.P.NPSENDS.rx_RTP` | ev.t == 'RTP' | — | 6.3.5.7.2 |
 | <a id="FLR.S.P.NPSENDS.rx_other"></a>`FLR.S.P.NPSENDS.rx_other` | 나머지 | — | 6.3.5.1 |
 | <a id="FLR.S.P.NP_IDLE.enter"></a>`FLR.S.P.NP_IDLE.enter` | p == 'NP_IDLE' | part[u] ← p; gTaken[u] ← false; c21[u] ← 0 | 6.3.5.3.2 |
@@ -491,7 +493,7 @@
 
 #### 10-3-1. 흐름 F3 — 선점
 선점은 세 걸음이다 — 화자에게 회수, 선점자는 큐 맨 앞, 화자가 놓으면(또는 T3 가 지나면) 승계. 회수와 승계 사이에 회수 유예(T3)가 있다.
-모형 검사: 걸음 18 도달 · 갈래 144
+모형 검사: 걸음 18 도달 · 갈래 154
 
 1. **A press** — A 가 누른다. 클라는 REQUEST 를 보내고 요청 중(pending Request)으로 간다. T101 이 돈다. ★마이크는 아직 열지 않는다 — 허가(GRANTED)가 와야 연다.
 2. **A up REQUEST** — 서버가 REQUEST 를 받는다. 판정 로직이 비어 있으므로 A 에게 허가하고, 나머지에게 TAKEN 을 방송한다. ★허가와 방송은 판정 로직이 직접 보내지 않고 참가자 상태기를 거친다 — 참가자 상태가 보낼지를 정한다.
@@ -514,7 +516,7 @@
 
 #### 10-3-2. 흐름 F2 — 줄 서서 이어받기
 큐를 항상 켜는 우리 규격의 기본 경로다. 점유 중의 요청은 거절이 아니라 대기이고, 승계에는 IDLE 이 끼지 않으며, 승계 허가 뒤에 의지 표시 창(T132)이 있다.
-모형 검사: 걸음 18 도달 · 갈래 149
+모형 검사: 걸음 18 도달 · 갈래 160
 
 1. **A press** — A 가 누른다. 클라는 REQUEST 를 보내고 요청 중(pending Request)으로 간다. T101 이 돈다. ★마이크는 아직 열지 않는다 — 허가(GRANTED)가 와야 연다.
 2. **A up REQUEST** — 서버가 REQUEST 를 받는다. 판정 로직이 비어 있으므로 A 에게 허가하고, 나머지에게 TAKEN 을 방송한다. ★허가와 방송은 판정 로직이 직접 보내지 않고 참가자 상태기를 거친다 — 참가자 상태가 보낼지를 정한다.
@@ -537,7 +539,7 @@
 
 #### 10-3-3. 흐름 F1 — 빈 방에서 말하고 놓기
 발언권의 줄기다. 다른 흐름은 모두 이 흐름의 어느 걸음에서 갈라진다.
-모형 검사: 걸음 13 도달 · 갈래 108
+모형 검사: 걸음 11 도달 · 갈래 91
 
 1. **A press** — A 가 누른다. 클라는 REQUEST 를 보내고 요청 중(pending Request)으로 간다. T101 이 돈다. ★마이크는 아직 열지 않는다 — 허가(GRANTED)가 와야 연다.
 2. **A up REQUEST** — 서버가 REQUEST 를 받는다. 판정 로직이 비어 있으므로 A 에게 허가하고, 나머지에게 TAKEN 을 방송한다. ★허가와 방송은 판정 로직이 직접 보내지 않고 참가자 상태기를 거친다 — 참가자 상태가 보낼지를 정한다.
@@ -547,11 +549,9 @@
 6. **B up ACK** — 서버의 B 참가자가 ACK(TAKEN)을 받고 T21 을 멈춘다. 답하지는 않는다. ★TAKEN 이 사라지면 이 ACK 이 오지 않아 서버가 T21 마다 TAKEN 을 다시 보낸다 — 듣는 사람 화면의 화자 표시를 지키는 장치다.
 7. **A rtp** — A 의 목소리(RTP)가 서버에 닿는다. 서버는 이때부터 T2(발화 상한)를 센다.
 8. **A release** — A 가 뗀다. 마이크를 닫고 RELEASE 를 보내고 반환 중(pending Release)으로 간다. T100 이 돈다.
-9. **A up RELEASE** — 서버가 RELEASE 를 받는다. 대기줄이 비었으므로 판정 로직은 Idle 로 가고 IDLE 을 방송한다. T7 이 돈다. ★방송은 A 에게 가지 않는다 — A 의 참가자(permitted)는 IDLE 을 보내지 않고 상태만 바꾼다(원문 6.3.5.5.4).
+9. **A up RELEASE** — 서버가 RELEASE 를 받는다. A 비트가 섰으므로 A 의 참가자가 먼저 ACK(RELEASE)을 보낸다(원문 6.3.5.5.3 1). 대기줄이 비었으므로 판정 로직은 Idle 로 가고 IDLE 을 방송한다. T7 이 돈다. ★방송은 A 에게 가지 않는다 — A 의 참가자(permitted)는 IDLE 을 보내지 않고 상태만 바꾼다(원문 6.3.5.5.4). A 의 반환 확인은 그 앞의 ACK 이다.
 10. **B down IDLE** — B 가 IDLE 을 받는다. 화자 표시를 내린다.
-11. **A T100** — A 는 IDLE 을 받지 못했으므로 T100 이 만료하고 RELEASE 를 다시 보낸다. ★직전 화자의 반환 확인은 늘 이 재전송으로 받는다. 첫 RELEASE 의 답은 오지 않는 것이 정상이다.
-12. **A up RELEASE** — 서버의 A 참가자(Idle)가 다시 온 RELEASE 에 IDLE 을 A 에게만 보낸다.
-13. **A down IDLE** — A 가 IDLE 을 받는다. 말할 수 없음(has no permission)으로 돌아가고 T100 을 멈춘다. 흐름이 처음으로 돌아왔다.
+11. **A down ACK** — A 가 ACK(RELEASE)을 받는다. 말할 수 없음(has no permission)으로 돌아가고 T100 을 멈춘다. 흐름이 처음으로 돌아왔다. ★A 비트가 없던 때는 첫 RELEASE 의 답이 오지 않아 T100 을 다 기다려 다시 보내고서야 IDLE 로 확인을 받았다 — 그동안의 누름은 버려졌다.
 
 ### 10-4. 주제
 
@@ -968,11 +968,11 @@ TS 24.379(SIP 호 제어)·TS 23.379(참조 구조)는 ★**미채택**이라 �
 | ★`GRANTED` | 유실되면 ★**서버는 허가로 아는데 클라는 말을 못 한다** — `T101` 재요청이 덮긴 하나 1.5초가 무전엔 길다 |
 | ★`DENY` | ★**unicast 라 비용이 1개**이고, 거절 사유(§10-4-31)를 사용자에게 보여야 한다 |
 | ★`TAKEN` | 유실되면 ★**그 발화 내내 듣는 사람 화면에 화자가 없다** — 대신 지켜 줄 다른 장치가 없어 ACK 을 얹고 `T21` 로 다시 보낸다(DEV-FLR-TAKEN-ACK · R-FLR-TAKEN-ACK) |
+| ★`RELEASE` | `T100` 은 ★**배달**을 지키지만 ★**끝남**을 알려 주지 않는다 — 서버는 놓은 사람에게 `IDLE` 을 보내지 않으므로(원문 6.3.5.5.4) A 비트가 없으면 놓은 사람은 ★**매번 `T100` 을 다 기다려 다시 보내고서야** 쉼으로 돌아온다. A 비트를 세우면 서버가 곧바로 ACK 한다(원문 6.3.5.x 의 shall · DEV-FLR-RELEASE-ACK · R-FLR-RELEASE-ACK) |
 
 | 안 세우는 것 | 무엇이 대신 지키나 |
 |---|---|
 | `IDLE` | ★**`T7`/`C7` 재전송**(§10-4-32) |
-| `RELEASE` | ★**`T100`/`C100` — 클라가 직접 재전송**한다 |
 | `QUEUE_INFO` | ★**`T104`/`C104` — 클라가 다시 물어본다** |
 | `REVOKE` | ★**`T8` 재전송.** 원문이 `A` 를 못 쓰게 한 자리다 |
 
@@ -1657,6 +1657,12 @@ TAKEN 에 A 비트를 세우고(원문 6.3.5.3.3 의 may) ACK 이 없으면 T21(
 
 *근거: R-FLR-TAKEN-ACK*
 
+<a id="DEV-FLR-RELEASE-ACK"></a>**DEV-FLR-RELEASE-ACK** · 자체 확장
+
+RELEASE 에 A 비트를 세우고(원문 6.2.4.5.3 · 6.2.4.6.2 의 may) `U: pending Release` 에서 ACK(Message Type 4)을 받으면 놓음이 끝난 것으로 다룬다 — Floor Ack 을 어떻게 다룰지는 원문이 구현 선택으로 둔다(6.2.4.5.3 NOTE). 서버의 ACK 은 원문 그대로다(RELEASE 를 받는 다섯 상태 6.3.5.3.7 · 6.3.5.4.5 · 6.3.5.5.3 · 6.3.5.6.5 · 6.3.5.7.4 의 shall) — RELEASE 는 늘 A 비트를 달고 오므로 서버는 RELEASE 마다 ACK 한다. ACK 이 사라지면 `T100` 재전송이 그대로 진다
+
+*근거: R-FLR-RELEASE-ACK*
+
 <a id="DEV-FLR-ACK-DROP"></a>**DEV-FLR-ACK-DROP** · 자체 확장
 
 서버는 FLOOR_ACK 에 답하지 않고 도달 관측에만 쓴다(원문은 ACK 처리를 구현 선택으로 둔다, 6.3.5.3.5 NOTE) · 직접 허가·거절은 재전송하지 않는다
@@ -1891,6 +1897,12 @@ DC 만 끊긴 사이 승계·선점·회수가 지나가면 다시 열린 뒤에
 
 *원문: 6.2.4.9.4 · 근거: R-FLR-T132*
 
+<a id="DEV-FLR-PREL-GRANTED-DISPLAY"></a>**DEV-FLR-PREL-GRANTED-DISPLAY** · 자체 확장
+
+놓는 중(`pending Release`)에 허가(GRANTED)를 받으면 화자 표시를 내린다 — 원문 6.2.4.6.8 은 Ack 하고 머문다고만 하고 표시를 정하지 않는다. 그 허가 뒤 내 RELEASE 로 쉬면 서버는 허가 상태였던 나에게 IDLE 을 보내지 않으므로(6.3.5.5.4), 내리지 않으면 ACK(DEV-FLR-RELEASE-ACK)로 놓음이 끝난 뒤에도 앞 화자가 남는다
+
+*원문: 6.2.4.6.8 · 근거: R-FLR-PREL-GRANTED-DISPLAY*
+
 <a id="DEV-FLR-PREQ-IDLE-DISPLAY"></a>**DEV-FLR-PREQ-IDLE-DISPLAY** · 자체 확장
 
 요청 중(`pending Request`)에 `IDLE` 을 받으면 상태는 그대로 두고 화자 표시만 내린다
@@ -2121,6 +2133,12 @@ RTP 수신은 강제 권위(prefan 게이트)를 통과한 것만 센다
 
 *없으면: 서버도 재전송하면 같은 허가가 두 갈래로 온다*
 
+<a id="R-FLR-RELEASE-ACK"></a>**R-FLR-RELEASE-ACK** · 근거
+
+놓은 사람의 「끝남」 신호가 첫 RELEASE 에 오게 한다 — 서버는 놓은 사람에게 IDLE 을 보내지 않는다(원문 6.3.5.5.4). 원문 상태도에는 `U: pending Release` 를 Floor Ack 으로 빠져나가는 화살표가 있었는데, 본문에 그 갈래가 없어 2021 정정(C1-210598 · NIST · FirstNet · Rel-17)이 상태도의 화살표를 지웠다 — 서버 쪽 shall ACK 과 짝이던 길이다
+
+*없으면: 놓은 사람이 매번 `T100`(500ms) 동안 「놓는 중」에 머물고 그동안의 누름이 버려진다(DEV-FLR-PRESS-DROP) — 실측 놓음 → 다시 누름 100ms 뒤 `press_drop`, RELEASE 재전송 뒤 512ms 에야 쉼*
+
 <a id="R-FLR-ACK-NO-REPLY"></a>**R-FLR-ACK-NO-REPLY** · 근거
 
 ACK 에 답하지 않는다 — DENY 로 답하면 그 DENY 가 다시 ACK 을 부른다
@@ -2228,6 +2246,12 @@ Floor Queued Cancel — dual floor 축 미채택
 overriding without revoke(dual floor) 일 때만의 절 — override 선점 미채택
 
 *무늬: Send RTP Media \(S: media\)*
+
+<a id="R-FLR-PREL-GRANTED-DISPLAY"></a>**R-FLR-PREL-GRANTED-DISPLAY** · 근거
+
+줄을 철회하는 사이 앞 화자가 놓아 승계 허가가 오면, 클라는 놓는 중에 허가를 받고 서버는 이어 온 철회 RELEASE 로 쉰다 — 허가 상태였던 클라에게는 IDLE 이 없어 화면에 앞 화자가 남는다
+
+*없으면: 아무도 말하지 않는데 앞 화자가 말하는 것으로 보인다(FL3 반례 live_show) — 예전에는 T100 재전송의 IDLE 답이 고쳤으나 ACK 이 놓음을 먼저 끝낸다*
 
 <a id="R-FLR-PREQ-IDLE-DISPLAY"></a>**R-FLR-PREQ-IDLE-DISPLAY** · 근거
 

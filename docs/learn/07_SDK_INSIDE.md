@@ -88,7 +88,7 @@ sequenceDiagram
 | SUB | 방마다 READY `NONE · WANT · SENT · OK` | 위 §3 |
 | PUB | 트랙마다 `IDLE · STAGED · REGISTERED · SENDING` · 반이중 | `PUB.C.STAGED.pub_ok`(01) · `PUB.C.REGISTERED.floor_open`(03) |
 | TRK | 트랙 층 · muted | `TRK.C.any.track_event`(01) |
-| FLR | 방마다 `NOPERM · PREQ · PERM · PREL · QUEUED …` | `FLR.C.NOPERM.press` · `FLR.C.PREL.T100`(03) |
+| FLR | 방마다 `NOPERM · PREQ · PERM · PREL · QUEUED …` | `FLR.C.NOPERM.press` · `FLR.C.PREL.rx_ACK_release`(03) |
 
 ## 5. 손 코드가 맡는 것 — 생성 파일 밖
 
