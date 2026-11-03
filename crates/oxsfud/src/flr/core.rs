@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.7 · 연:FLR.S.G · 연:FLR.S.P · 연:FLR.S.gate · 연:FLR.S.perm · 연:FLR.S.ws · 연:RULE-FLR-TIMERS · 정:IMPL-FLR-LOCK · 정:RULE-CONC-SIX · 정:CAND-FLR-MEMBER-JOIN-INIT · 연:RULE-FLR-SEQ · 연:RULE-FLR-SERVER-STATE-SEPARATE · 연:RULE-FLR-MSG-IDLE · 연:RULE-FLR-MSG-REVOKE · 연:RULE-FLR-MSG-RELEASE · 연:RULE-FLR-SERVER-POLICY · 연:DEV-FLR-PUBROOM · 연:DEV-FLR-QUEUE-MAX · 연:DEV-FLR-NO-MCPRIO · 연:DEV-FLR-PREEMPT-RELATIVE · 연:DEV-FLR-PUB-AWAY · 연:DEV-FLR-RECVONLY-TRIGGER · 연:DEV-FLR-DENY-2-6 · 연:DEV-FLR-REGRANT-FWD · 연:DEV-FLR-TAKEN-ACK · 연:DEV-FLR-ACK-DROP · 연:DEV-FLR-T21-SAME-SEQ · 연:DEV-FLR-GRANTED-SEQ · 연:DEV-FLR-ACK-SEQ · 연:DEV-FLR-ROOM-GONE · model: claude-opus-5-5
+// spec: v1.8 · 연:FLR.S.G · 연:FLR.S.P · 연:FLR.S.gate · 연:FLR.S.perm · 연:FLR.S.ws · 연:RULE-FLR-TIMERS · 정:IMPL-FLR-LOCK · 정:RULE-CONC-SIX · 정:CAND-FLR-MEMBER-JOIN-INIT · 연:RULE-FLR-SEQ · 연:RULE-FLR-SERVER-STATE-SEPARATE · 연:RULE-FLR-MSG-IDLE · 연:RULE-FLR-MSG-REVOKE · 연:RULE-FLR-MSG-RELEASE · 연:RULE-FLR-SERVER-POLICY · 연:DEV-FLR-PUBROOM · 연:DEV-FLR-QUEUE-MAX · 연:DEV-FLR-NO-MCPRIO · 연:DEV-FLR-PREEMPT-RELATIVE · 연:DEV-FLR-PUB-AWAY · 연:DEV-FLR-RECVONLY-TRIGGER · 연:DEV-FLR-DENY-2-6 · 연:DEV-FLR-REGRANT-FWD · 연:DEV-FLR-TAKEN-ACK · 연:DEV-FLR-ACK-DROP · 연:DEV-FLR-T21-SAME-SEQ · 연:DEV-FLR-GRANTED-SEQ · 연:DEV-FLR-ACK-SEQ · 연:DEV-FLR-ROOM-GONE · 연:DEV-FLR-RELEASE-ACK · model: claude-opus-5-5
 //! 발언권 판정 로직 — 생성 서버 상태기(`protocol/out/floor/server/floor_server.ts`)의 이식 · 걸음마다 보낼 것 · 지난 경우 라벨 · 효과를 돌려준다(판정은 락 안 · 집행은 락 밖).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use oxsig::floor::{deny, qpos, revoke, timers};
 
 pub const SEQ_WRAP: u32 = 65_536;
+const RELEASE_TYPE: u32 = oxsig::floor::RELEASE as u32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum G {
@@ -676,6 +677,7 @@ impl Floor {
             }
             (Some(P::NpIdle), Mt::Release) => {
                 r.labels.push("FLR.S.P.NP_IDLE.rx_RELEASE");
+                self.send(r, u, Mt::Ack, None, RELEASE_TYPE, 0);
                 self.dequeue(u);
                 let prev = self.prev.clone();
                 self.send(r, u, Mt::Idle, prev, 0, 0);
@@ -692,6 +694,7 @@ impl Floor {
             }
             (Some(P::NpTaken), Mt::Release) => {
                 r.labels.push("FLR.S.P.NP_TAKEN.rx_RELEASE");
+                self.send(r, u, Mt::Ack, None, RELEASE_TYPE, 0);
                 self.p(u).c21 = 1;
                 self.dequeue(u);
                 let h = self.holder();
@@ -715,6 +718,7 @@ impl Floor {
             (Some(P::Permitted), Mt::Release) => {
                 r.labels.push("FLR.S.P.PERMITTED.rx_RELEASE");
                 self.p(u).released = true;
+                self.send(r, u, Mt::Ack, None, RELEASE_TYPE, 0);
                 self.arb_rel(r, u);
             }
             (Some(P::Permitted), Mt::Request) => {
@@ -728,6 +732,7 @@ impl Floor {
             (Some(P::Permitted), _) => r.labels.push("FLR.S.P.PERMITTED.rx_other"),
             (Some(P::Prevoke), Mt::Release) => {
                 r.labels.push("FLR.S.P.PREVOKE.rx_RELEASE");
+                self.send(r, u, Mt::Ack, None, RELEASE_TYPE, 0);
                 self.arb_rel(r, u);
             }
             (Some(P::Prevoke), Mt::Rtp) => {
@@ -737,11 +742,13 @@ impl Floor {
             (Some(P::Prevoke), _) => r.labels.push("FLR.S.P.PREVOKE.rx_other"),
             (_, Mt::Release) if pp.g_taken => {
                 r.labels.push("FLR.S.P.NPSENDS.rx_RELEASE_taken");
+                self.send(r, u, Mt::Ack, None, RELEASE_TYPE, 0);
                 let h = self.holder();
                 self.send_e(r, u, P::NpTaken, Msg::new(Mt::Taken, h, 0, 0));
             }
             (_, Mt::Release) => {
                 r.labels.push("FLR.S.P.NPSENDS.rx_RELEASE_idle");
+                self.send(r, u, Mt::Ack, None, RELEASE_TYPE, 0);
                 let prev = self.prev.clone();
                 self.send_e(r, u, P::NpIdle, Msg::new(Mt::Idle, prev, 0, 0));
             }
@@ -909,5 +916,22 @@ mod tests {
         let r = f.server_rx("a", &Msg::new(Mt::Release, None, 0, 0), 0);
         assert_eq!(f.g, G::Idle);
         assert_eq!(r.fx, vec![Fx::Release(Some("a".into()))]);
+        assert!(r.out.iter().any(|o| o.to == "a" && o.m.t == Mt::Ack && o.m.n == RELEASE_TYPE));
+        assert!(!r.out.iter().any(|o| o.to == "a" && o.m.t == Mt::Idle));
+    }
+
+    #[test]
+    fn release_acked_in_every_state() {
+        let mut f = Floor::new(10, 30);
+        f.ws_join("a", true, true);
+        f.ws_join("b", true, true);
+        f.ws_pub_select("a");
+        f.ws_pub_select("b");
+        let acked = |r: &Step, u: &str| r.out.iter().any(|o| o.to == u && o.m.t == Mt::Ack && o.m.n == RELEASE_TYPE);
+        let r = f.server_rx("b", &Msg::new(Mt::Release, None, 0, 0), 0);
+        assert!(acked(&r, "b"));
+        f.server_rx("a", &Msg::new(Mt::Request, None, 5, 0), 0);
+        let r = f.server_rx("b", &Msg::new(Mt::Release, None, 0, 0), 0);
+        assert!(acked(&r, "b"));
     }
 }
