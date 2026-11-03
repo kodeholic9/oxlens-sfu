@@ -136,6 +136,16 @@ In round 6, blind independent tests caught 50 of 52 planted symptoms (96 %). Tes
 - Some things are specified but not yet followed by the code. They are tracked as numbered rows in the server spec's implementation ledger, and each one names the code location and the test that will close it.
 - The web SDK is younger than the server and has not yet gone through regeneration rounds.
 
+## Documentation
+
+| Document | What | How it is made |
+|---|---|---|
+| [Client protocol](docs/protocol/README.md) | The client ↔ server contract — wire messages, state machines, timers, flows, error codes, floor control | Generated from the spec sources |
+| [Server architecture](docs/architecture.md) | Static structure — processes, threads, shared data, the path of one packet | Hand-written from the source (the base commit is stated at the top) |
+| [Learning guide](docs/learn/00_INDEX.md) | Measured flows — what the server and the web SDK actually exchange (WebSocket frames, SDP, logs), in time order | Written from one run of a browser probe; re-running the probe checks that the shape of the flow has not changed |
+
+The documents are in Korean. The published documents are rebuilt for every version tag.
+
 ## Related repositories
 
 - [Client protocol](docs/protocol/README.md) — the published protocol contract (Korean, generated from the spec sources).

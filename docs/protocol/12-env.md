@@ -20,6 +20,7 @@
 | `ASM-FLR-RTP-INSTANT` | 환경 | has permission 클라의 RTP 가 곧바로 서버 참가자에 닿는다 — 망 지연 · 서버 관측 주기 |
 | `ASM-FLR-HUMAN-SPEED` | 환경 | 사람 속도 — 한 사용자의 두 동작 사이에 통이 한 번은 빈다 |
 | `ASM-FLR-STALE-GUARD` | 환경 | 앱 · 사람이 자기 REQUEST 가 떠 있는 동안 지난 주기의 뗌을 보내지 않는다 |
+| `ASM-FLR-DELIVER-FIRST` | 환경 | 전달(ms)이 사람 동작 사이(초)보다 짧다 — 원문이 깔고 있는 UDP 한 경로의 전제와 같다 · 「드물게 겹친다」는 모형이 못 쓴다 — 겹치는 창의 결말은 경주 진술과 그 1층 시험(진술의 시험 칸)이 잰다 |
 | `COND-LINK-REBUILD` | 문서 규율 | 서버 동작이다 — egress 다시 짓기(PT 는 구독자 표 · 헤더 확장은 통째로 버리고 구독자 ID 로 새로 쓴다 · mid 확장 = 구독 m-line mid)는 서버 정의서가 서버 동작으로 정하고 이 성립 조건을 위로 인용한다 · 연동규격서 모형 밖 |
 | `COND-ROOM-BUDGET` | 산수(원장) | `Sub1pc(96) == BundleCap(128) - ClientMlines(32) && Sub2pc(128) == BundleCap(128) && SlotBudget(40) == DispatchCh(20) * 2 && SlotBudget(40) <= Sub1pc(96) && SlotBudget(40) < MaxRooms(100)` — 참 |
 | `COND-LINK-SFU-ID-UNIQUE` | 환경 | 서버의 기동 단위(epoch)는 서버마다 고유하다 — 배포의 사실(서버 구현이 기동마다 고유 값을 낸다) · 다판 two_servers 는 epoch = 서버 번호로 둔다 |
@@ -37,7 +38,7 @@
 
 | 곳 | 영역 | 칸 | 무엇 | 효과를 따라 닿을 수 있는 경우 |
 |---|---|---|---|---|
-| 클라 | SES | 입구 | `CDrop` | SES: `SES.C.any.drop_final` · `SES.C.any.drop_reclaimed` · `SES.C.any.drop_carry` · `SES.C.any.drop` / FLR: `FLR.C.any.down` / ROOM: `ROOM.C.any.close_all` · `ROOM.C.LEAVING.down` · `ROOM.C.any.down` / LINK: `LINK.C.any.close_all` / PUB: `PUB.C.SENDING.floor_close` · `PUB.C.any.floor_close_other` · `PUB.C.any.drop_server` / TRK: `TRK.C.any.store_drop` / AFF: `AFF.C.any.left` · `AFF.C.any.left_join` · `AFF.C.any.left_want` · `AFF.C.any.left_other` / SUB: `SUB.C.any.drop` |
+| 클라 | SES | 입구 | `CDrop` | SES: `SES.C.any.drop_final` · `SES.C.any.drop_reclaimed` · `SES.C.any.drop_carry` · `SES.C.any.drop` / FLR: `FLR.C.any.down` / ROOM: `ROOM.C.any.close_all` · `ROOM.C.LEAVING.down` · `ROOM.C.JOINING.down_quit` · `ROOM.C.any.down` / LINK: `LINK.C.any.close_all` / PUB: `PUB.C.SENDING.floor_close` · `PUB.C.any.floor_close_other` · `PUB.C.STAGED.drop_server` · `PUB.C.any.drop_server` / TRK: `TRK.C.any.store_drop` / AFF: `AFF.C.any.left` · `AFF.C.any.left_back` · `AFF.C.any.left_from` · `AFF.C.any.left_join` · `AFF.C.any.left_want` · `AFF.C.any.left_other` · `AFF.C.any.down` · `AFF.C.any.down_join` · `AFF.C.any.down_want` · `AFF.C.any.down_other` / SUB: `SUB.C.any.drop` |
 | 클라 | LINK | 무관 | WS 만 끊긴 것 — 미디어 연결은 닫지 않는다(RULE-SES-ON-DROP 5 · R-SES-RESUME-KEEPS-MEDIA) |  |
 | 클라 | ROOM | 무관 | 연결이 RESUMING 이면 방 상태는 그대로 둔다(RULE-ROOM-RESUMING-KEEPS) |  |
 | 클라 | AFF | 무관 | 소속은 세션 것 — 재접속 복원은 RESUME 스냅샷이 전담한다(REJ-AFF-NO-RECONNECT-RESTORE) |  |
@@ -55,7 +56,7 @@
 | 곳 | 영역 | 칸 | 무엇 | 효과를 따라 닿을 수 있는 경우 |
 |---|---|---|---|---|
 | 게이트웨이 | SES | 입구 | `SRestart` | SES: `SES.S.restart` |
-| 클라 | SES | 입구 | `CDrop` — LEAVE 없이 끊긴다 — 다시 붙으면 RESUME 2008 · 세션 전체 재구축(RULE-SES-REBUILD) | SES: `SES.C.any.drop_final` · `SES.C.any.drop_reclaimed` · `SES.C.any.drop_carry` · `SES.C.any.drop` / FLR: `FLR.C.any.down` / ROOM: `ROOM.C.any.close_all` · `ROOM.C.LEAVING.down` · `ROOM.C.any.down` / LINK: `LINK.C.any.close_all` / PUB: `PUB.C.SENDING.floor_close` · `PUB.C.any.floor_close_other` · `PUB.C.any.drop_server` / TRK: `TRK.C.any.store_drop` / AFF: `AFF.C.any.left` · `AFF.C.any.left_join` · `AFF.C.any.left_want` · `AFF.C.any.left_other` / SUB: `SUB.C.any.drop` |
+| 클라 | SES | 입구 | `CDrop` — LEAVE 없이 끊긴다 — 다시 붙으면 RESUME 2008 · 세션 전체 재구축(RULE-SES-REBUILD) | SES: `SES.C.any.drop_final` · `SES.C.any.drop_reclaimed` · `SES.C.any.drop_carry` · `SES.C.any.drop` / FLR: `FLR.C.any.down` / ROOM: `ROOM.C.any.close_all` · `ROOM.C.LEAVING.down` · `ROOM.C.JOINING.down_quit` · `ROOM.C.any.down` / LINK: `LINK.C.any.close_all` / PUB: `PUB.C.SENDING.floor_close` · `PUB.C.any.floor_close_other` · `PUB.C.STAGED.drop_server` · `PUB.C.any.drop_server` / TRK: `TRK.C.any.store_drop` / AFF: `AFF.C.any.left` · `AFF.C.any.left_back` · `AFF.C.any.left_from` · `AFF.C.any.left_join` · `AFF.C.any.left_want` · `AFF.C.any.left_other` · `AFF.C.any.down` · `AFF.C.any.down_join` · `AFF.C.any.down_want` · `AFF.C.any.down_other` / SUB: `SUB.C.any.drop` |
 | 클라 | LINK | 무관 | 세션 축이 먼저다 — 재구축이면 SES 가 media.close_all 로 알린다(①) |  |
 | 클라 | ROOM | 무관 | SES 가 rooms.down_all · rooms.rejoin 으로 알린다(①) |  |
 | 클라 | AFF | 무관 | 방을 내릴 때 ROOM 이 aff.leave 로 알린다(①) |  |
@@ -102,7 +103,7 @@
 | 곳 | 영역 | 칸 | 무엇 | 효과를 따라 닿을 수 있는 경우 |
 |---|---|---|---|---|
 | 클라 | SES | 무관 | 세션은 미디어 연결의 사본을 두지 않는다 — RESUME 응답 때 LINK 상태를 읽어 되살림을 고른다(CResumeRes 의 reads · CAND-SES-CARRY-COPY) |  |
-| 클라 | LINK | 입구 | `CAssocLost` | LINK: `LINK.C.any.assoc_lost_leaving` · `LINK.C.REBUILD.assoc_lost_absorbed` · `LINK.C.any.assoc_lost` · `LINK.C.any.renego_queued` · `LINK.C.any.renego` / FLR: `FLR.C.any.down` / ROOM: `ROOM.C.LEAVING.down` · `ROOM.C.any.down` · `ROOM.C.NONE.rejoin` / PUB: `PUB.C.any.reregister` · `PUB.C.any.reregister_off` · `PUB.C.SENDING.floor_close` · `PUB.C.any.floor_close_other` / TRK: `TRK.C.any.store_drop` / AFF: `AFF.C.any.left` · `AFF.C.any.left_join` · `AFF.C.any.left_want` · `AFF.C.any.left_other` / SUB: `SUB.C.any.drop` |
+| 클라 | LINK | 입구 | `CAssocLost` | LINK: `LINK.C.any.assoc_lost_leaving` · `LINK.C.REBUILD.assoc_lost_absorbed` · `LINK.C.any.assoc_lost` · `LINK.C.any.renego_queued` · `LINK.C.any.renego` / FLR: `FLR.C.any.dc_down` · `FLR.C.any.down` / ROOM: `ROOM.C.LEAVING.down` · `ROOM.C.JOINING.down_quit` · `ROOM.C.any.down` · `ROOM.C.NONE.rejoin` / PUB: `PUB.C.any.reregister_moving` · `PUB.C.any.reregister` · `PUB.C.any.reregister_off` · `PUB.C.SENDING.floor_close` · `PUB.C.any.floor_close_other` / TRK: `TRK.C.any.store_drop` / AFF: `AFF.C.any.left` · `AFF.C.any.left_back` · `AFF.C.any.left_from` · `AFF.C.any.left_join` · `AFF.C.any.left_want` · `AFF.C.any.left_other` · `AFF.C.any.down` · `AFF.C.any.down_join` · `AFF.C.any.down_want` · `AFF.C.any.down_other` / SUB: `SUB.C.any.drop` |
 | 클라 | ROOM | 무관 | LINK 가 확정하면 store.drop_server · rooms.rejoin_server 로 알린다(①) |  |
 | 클라 | AFF | 무관 | 방을 내릴 때 ROOM 이 aff.leave 로 알린다(①) |  |
 | 클라 | PUB | 무관 | LINK 가 확정하면 pub.reregister_server 로 알린다(①) |  |
@@ -167,7 +168,7 @@
 | 미디어 서버 | FLR | 무관 | ROOM 이 floor.leave 로 알린다(① · CAND-FLR-ROOM-GONE) |  |
 | 클라 | SES | 무관 | 세션은 그대로다 |  |
 | 클라 | LINK | 무관 | 방이 link.room_left 로 알린다 — 그 서버의 마지막 방이면 연결을 닫는다(RULE-ROOM-LEAVE-RES 2 · RULE-SES-RES-RESUME-OK 4) |  |
-| 클라 | ROOM | 입구 | `CRoomEvent` — ROOM_EVENT{affiliation, kick} — ROOM.C.JOINED.kicked | ROOM: `ROOM.C.any.room_event_not_joined` · `ROOM.C.JOINED.kicked` · `ROOM.C.JOINED.sync_required_inflight` · `ROOM.C.JOINED.sync_required` / LINK: `LINK.C.any.renego_queued` · `LINK.C.any.renego` · `LINK.C.any.last_room_left` · `LINK.C.any.room_left` / TRK: `TRK.C.any.store_drop` / FLR: `FLR.C.any.leave` / AFF: `AFF.C.any.left` · `AFF.C.any.left_join` · `AFF.C.any.left_want` · `AFF.C.any.left_other` / SUB: `SUB.C.any.drop` / PUB: `PUB.C.any.room_gone` · `PUB.C.any.room_gone_other` · `PUB.C.SENDING.floor_close` · `PUB.C.any.floor_close_other` · `PUB.C.any.drop_server` |
+| 클라 | ROOM | 입구 | `CRoomEvent` — ROOM_EVENT{affiliation, kick} — ROOM.C.JOINED.kicked | ROOM: `ROOM.C.any.room_event_not_joined` · `ROOM.C.JOINED.kicked` · `ROOM.C.JOINED.sync_required_inflight` · `ROOM.C.JOINED.sync_required` / LINK: `LINK.C.any.renego_queued` · `LINK.C.any.renego` · `LINK.C.any.last_room_left` · `LINK.C.any.room_left` / TRK: `TRK.C.any.store_drop` / FLR: `FLR.C.any.leave` / AFF: `AFF.C.any.left` · `AFF.C.any.left_back` · `AFF.C.any.left_from` · `AFF.C.any.left_join` · `AFF.C.any.left_want` · `AFF.C.any.left_other` / SUB: `SUB.C.any.drop` / PUB: `PUB.C.any.room_gone` · `PUB.C.any.room_gone_other` · `PUB.C.SENDING.floor_close` · `PUB.C.any.floor_close_other` · `PUB.C.STAGED.drop_server` · `PUB.C.any.drop_server` |
 | 클라 | AFF | 무관 | 방을 내릴 때 ROOM 이 aff.leave 로 알린다(①) |  |
 | 클라 | PUB | 무관 | ROOM 이 pub.room_gone 으로 — 그 방의 전이중 발행을 IDLE 로(서버가 정리했다 · 원칙 ③) · 마지막 방이면 LINK 가 pub.drop_server 로 |  |
 | 클라 | SUB | 무관 | 방을 내릴 때 ROOM 이 str.drop 으로 · 다시 입장 응답이 ready.tracks 로 알린다(①) |  |
@@ -190,7 +191,7 @@
 | 미디어 서버 | FLR | 무관 | ROOM 이 floor.leave 로 알린다(① · CAND-FLR-ROOM-GONE) |  |
 | 클라 | SES | 무관 | 세션은 그대로다 |  |
 | 클라 | LINK | 무관 | 방이 link.room_left 로 알린다 — 그 서버의 마지막 방이면 연결을 닫는다(RULE-ROOM-LEAVE-RES 2 · RULE-SES-RES-RESUME-OK 4) |  |
-| 클라 | ROOM | 입구 | `CRoomEvent` — ROOM_EVENT{affiliation, room_closed} — ROOM.C.JOINED.kicked | ROOM: `ROOM.C.any.room_event_not_joined` · `ROOM.C.JOINED.kicked` · `ROOM.C.JOINED.sync_required_inflight` · `ROOM.C.JOINED.sync_required` / LINK: `LINK.C.any.renego_queued` · `LINK.C.any.renego` · `LINK.C.any.last_room_left` · `LINK.C.any.room_left` / TRK: `TRK.C.any.store_drop` / FLR: `FLR.C.any.leave` / AFF: `AFF.C.any.left` · `AFF.C.any.left_join` · `AFF.C.any.left_want` · `AFF.C.any.left_other` / SUB: `SUB.C.any.drop` / PUB: `PUB.C.any.room_gone` · `PUB.C.any.room_gone_other` · `PUB.C.SENDING.floor_close` · `PUB.C.any.floor_close_other` · `PUB.C.any.drop_server` |
+| 클라 | ROOM | 입구 | `CRoomEvent` — ROOM_EVENT{affiliation, room_closed} — ROOM.C.JOINED.kicked | ROOM: `ROOM.C.any.room_event_not_joined` · `ROOM.C.JOINED.kicked` · `ROOM.C.JOINED.sync_required_inflight` · `ROOM.C.JOINED.sync_required` / LINK: `LINK.C.any.renego_queued` · `LINK.C.any.renego` · `LINK.C.any.last_room_left` · `LINK.C.any.room_left` / TRK: `TRK.C.any.store_drop` / FLR: `FLR.C.any.leave` / AFF: `AFF.C.any.left` · `AFF.C.any.left_back` · `AFF.C.any.left_from` · `AFF.C.any.left_join` · `AFF.C.any.left_want` · `AFF.C.any.left_other` / SUB: `SUB.C.any.drop` / PUB: `PUB.C.any.room_gone` · `PUB.C.any.room_gone_other` · `PUB.C.SENDING.floor_close` · `PUB.C.any.floor_close_other` · `PUB.C.STAGED.drop_server` · `PUB.C.any.drop_server` |
 | 클라 | AFF | 무관 | 방을 내릴 때 ROOM 이 aff.leave 로 알린다(①) |  |
 | 클라 | PUB | 무관 | ROOM 이 pub.room_gone 으로 — 그 방의 전이중 발행을 IDLE 로(서버가 정리했다 · 원칙 ③) · 마지막 방이면 LINK 가 pub.drop_server 로 |  |
 | 클라 | SUB | 무관 | 방을 내릴 때 ROOM 이 str.drop 으로 · 다시 입장 응답이 ready.tracks 로 알린다(①) |  |

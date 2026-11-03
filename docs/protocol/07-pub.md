@@ -196,8 +196,10 @@
 | `room` | `0` |  |
 | `ps` | `'IDLE'` | 발행 상태(§7-2-2) |
 | `want` | `false` | 앱이 켜 두려 한다(카메라 · 마이크를 켰다) |
-| `half` | `false` | 반이중 트랙이다 — 발언권을 쥔 동안에만 SENDING(§7-2-2). 모형에서는 바뀌지 않는다 |
+| `half` | `false` | 반이중 트랙이다 — 발언권을 쥔 동안에만 SENDING(§7-2-2). TRACK_SET{duplex} 응답이 바꾼다(RULE-PUB-SET-PROC) |
 | `nego` | `false` | 발행 협상이 진행 중이다(브라우저 — §7-2-1 · §7-2-2) |
+| `mv` | `false` | ★서버를 건너는 발행 방 전환으로 옛 서버에서 내렸다 — 발행 방이 서면 그 서버에서 다시 켠다(RULE-AFF-SWITCH-TRACKS 서버 건너 행) |
+| `dset` | `false` | TRACK_SET{duplex} 응답을 기다린다 — 응답 전엔 게이트 · 반이중 여부를 바꾸지 않는다(RULE-PUB-SET-PROC) |
 
 ##### 상태 — 서버
 
@@ -214,6 +216,7 @@
 
 | 지금 | 사건 | 다음 | 라벨 |
 |---|---|---|---|
+| `IDLE` | 앱이 카메라 · 마이크를 켰다(§7-2-1) | 그대로 | `PUB.C.IDLE.on_moving` |
 | `IDLE` | 앱이 카메라 · 마이크를 켰다(§7-2-1) | `STAGED` | `PUB.C.IDLE.on` |
 | `STAGED` | 발행 협상이 끝났다(§7-2-2) | `IDLE` | `PUB.C.STAGED.nego_ok_unwanted` |
 | `STAGED` | 발행 협상이 끝났다(§7-2-2) | 그대로 | `PUB.C.STAGED.nego_ok` |
@@ -233,6 +236,7 @@
 | `SENDING` | 내 track_id 의 TRACK_EVENT{remove} — 서버가 내 발행을 지웠다(§7-2-5) | `IDLE` | `PUB.C.SENDING.revoked` |
 | `REGISTERED` | 내 track_id 의 TRACK_EVENT{remove} — 서버가 내 발행을 지웠다(§7-2-5) | `IDLE` | `PUB.C.REGISTERED.revoked` |
 | 어느 상태 | 내 track_id 의 TRACK_EVENT{remove} — 서버가 내 발행을 지웠다(§7-2-5) | — | `PUB.C.any.revoked_other` |
+| 어느 상태 | 그 서버 재구축 — 다시 발행한다(RULE-LINK-RECOVERY-REBUILD · 절차는 §7-2-1) | — | `PUB.C.any.reregister_moving` |
 | 어느 상태 | 그 서버 재구축 — 다시 발행한다(RULE-LINK-RECOVERY-REBUILD · 절차는 §7-2-1) | `STAGED` | `PUB.C.any.reregister` |
 | 어느 상태 | 그 서버 재구축 — 다시 발행한다(RULE-LINK-RECOVERY-REBUILD · 절차는 §7-2-1) | `IDLE` | `PUB.C.any.reregister_off` |
 | `REGISTERED` | 발언권을 얻었다 — 반이중 트랙이 보내기 시작한다(§7-2-2) | `SENDING` | `PUB.C.REGISTERED.floor_open` |
@@ -247,9 +251,28 @@
 | `STAGED` | RESUME 성공 — 응답의 publications[] 에 내 발행이 있나(listed)를 본다(RULE-SES-RES-RESUME-OK 2 ③ · 4) · 끊긴 동안 사라진 요청 · 응답도 이것으로 잡는다 | `IDLE` | `PUB.C.STAGED.resume_unlisted_unwanted` |
 | 어느 상태 | RESUME 성공 — 응답의 publications[] 에 내 발행이 있나(listed)를 본다(RULE-SES-RES-RESUME-OK 2 ③ · 4) · 끊긴 동안 사라진 요청 · 응답도 이것으로 잡는다 | — | `PUB.C.any.resume_orphan` |
 | 어느 상태 | RESUME 성공 — 응답의 publications[] 에 내 발행이 있나(listed)를 본다(RULE-SES-RES-RESUME-OK 2 ③ · 4) · 끊긴 동안 사라진 요청 · 응답도 이것으로 잡는다 | — | `PUB.C.any.resume_listed` |
+| `STAGED` | 그 서버 연결이 닫혔다 — 서버가 Peer 와 함께 발행 트랙을 풀었다(RULE-ROOM-LEAVE-RES 2) | `IDLE` | `PUB.C.STAGED.drop_server` |
 | 어느 상태 | 그 서버 연결이 닫혔다 — 서버가 Peer 와 함께 발행 트랙을 풀었다(RULE-ROOM-LEAVE-RES 2) | `IDLE` | `PUB.C.any.drop_server` |
 | 어느 상태 | 발행한 방을 잃었다(퇴장 · 강퇴 · 방 닫힘 · 스냅샷에 없는 방) — 서버가 그 방의 전이중 발행을 정리했다(원칙 ③) | `IDLE` | `PUB.C.any.room_gone` |
 | 어느 상태 | 발행한 방을 잃었다(퇴장 · 강퇴 · 방 닫힘 · 스냅샷에 없는 방) — 서버가 그 방의 전이중 발행을 정리했다(원칙 ③) | — | `PUB.C.any.room_gone_other` |
+| 어느 상태 | 서버를 건너는 전환 ① — 옛 서버의 내 발행 트랙을 내린다(PUBLISH_TRACKS{remove}) | — | `PUB.C.any.move_out_other` |
+| `SENDING` | 서버를 건너는 전환 ① — 옛 서버의 내 발행 트랙을 내린다(PUBLISH_TRACKS{remove}) | `IDLE` | `PUB.C.SENDING.move_out` |
+| `REGISTERED` | 서버를 건너는 전환 ① — 옛 서버의 내 발행 트랙을 내린다(PUBLISH_TRACKS{remove}) | `IDLE` | `PUB.C.REGISTERED.move_out` |
+| `STAGED` | 서버를 건너는 전환 ① — 옛 서버의 내 발행 트랙을 내린다(PUBLISH_TRACKS{remove}) | `IDLE` | `PUB.C.STAGED.move_out_sent` |
+| `STAGED` | 서버를 건너는 전환 ① — 옛 서버의 내 발행 트랙을 내린다(PUBLISH_TRACKS{remove}) | `IDLE` | `PUB.C.STAGED.move_out_nego` |
+| `IDLE` | 서버를 건너는 전환 ① — 옛 서버의 내 발행 트랙을 내린다(PUBLISH_TRACKS{remove}) | 그대로 | `PUB.C.IDLE.move_out` |
+| 어느 상태 | 서버를 건너는 전환 ② · ③ — 발행 방이 섰다 · 내린 트랙을 그 서버에서 다시 켠다(처음 켤 때와 같은 절차 — §7-2-1 · 그 서버엔 내 업링크가 없어 재협상한다 §7-2-3) | `STAGED` | `PUB.C.any.move_in` |
+| 어느 상태 | 서버를 건너는 전환 ② · ③ — 발행 방이 섰다 · 내린 트랙을 그 서버에서 다시 켠다(처음 켤 때와 같은 절차 — §7-2-1 · 그 서버엔 내 업링크가 없어 재협상한다 §7-2-3) | — | `PUB.C.any.move_in_off` |
+| 어느 상태 | 서버를 건너는 전환 ② · ③ — 발행 방이 섰다 · 내린 트랙을 그 서버에서 다시 켠다(처음 켤 때와 같은 절차 — §7-2-1 · 그 서버엔 내 업링크가 없어 재협상한다 §7-2-3) | — | `PUB.C.any.move_in_other` |
+| 어느 상태 | 무전 ↔ 회의 전환을 보낸다(TRACK_SET{duplex} — 이 경로로만 · RULE-PUB-SET-PROC) · 응답 전엔 아무것도 바꾸지 않는다 | — | `PUB.C.any.set_duplex` |
+| 어느 상태 | TRACK_SET{duplex} 응답을 받았다 — 적용됐으면 게이트 · 반이중 여부를 바꾼다(RULE-PUB-SET-PROC) | — | `PUB.C.any.set_res_other` |
+| 어느 상태 | TRACK_SET{duplex} 응답을 받았다 — 적용됐으면 게이트 · 반이중 여부를 바꾼다(RULE-PUB-SET-PROC) | — | `PUB.C.any.set_res_gone` |
+| 어느 상태 | TRACK_SET{duplex} 응답을 받았다 — 적용됐으면 게이트 · 반이중 여부를 바꾼다(RULE-PUB-SET-PROC) | — | `PUB.C.any.set_fail` |
+| 어느 상태 | TRACK_SET{duplex} 응답을 받았다 — 적용됐으면 게이트 · 반이중 여부를 바꾼다(RULE-PUB-SET-PROC) | — | `PUB.C.any.set_noop` |
+| `SENDING` | TRACK_SET{duplex} 응답을 받았다 — 적용됐으면 게이트 · 반이중 여부를 바꾼다(RULE-PUB-SET-PROC) | `REGISTERED` | `PUB.C.SENDING.set_half` |
+| `REGISTERED` | TRACK_SET{duplex} 응답을 받았다 — 적용됐으면 게이트 · 반이중 여부를 바꾼다(RULE-PUB-SET-PROC) | 그대로 | `PUB.C.REGISTERED.set_half` |
+| `REGISTERED` | TRACK_SET{duplex} 응답을 받았다 — 적용됐으면 게이트 · 반이중 여부를 바꾼다(RULE-PUB-SET-PROC) | `SENDING` | `PUB.C.REGISTERED.set_full` |
+| 어느 상태 | TRACK_SET{duplex} 응답을 받았다 — 적용됐으면 게이트 · 반이중 여부를 바꾼다(RULE-PUB-SET-PROC) | — | `PUB.C.any.set_full` |
 
 <a id="PUB.C"></a>
 ### 7-2. 동작
@@ -259,8 +282,10 @@
 
 | 라벨 | 언제 | 하는 일 | 원문 · 근거 |
 |---|---|---|---|
+| <a id="PUB.C.IDLE.on_moving"></a>`PUB.C.IDLE.on_moving` | 받는 상태 ps == 'IDLE' · mv | want ← true | §5-1-2 §7-2-1 1 — 서버를 건너는 전환 중이다 — 지금 서버에 켜지 않는다 · 켜 둘 의지만 적는다(발행 방이 서면 pub.move_in 이 그 서버에서 켠다) |
 | <a id="PUB.C.IDLE.on"></a>`PUB.C.IDLE.on` | 받는 상태 ps == 'IDLE' · 나머지 | ps ← 'STAGED'; want ← true; nego ← true · 효과 sdp.rebuild → LINK.C.any.renego_queued · LINK.C.any.renego | §7-2-1 1 §7-2-1 2 §7-2-1 3 |
 | <a id="PUB.C.IDLE.off"></a>`PUB.C.IDLE.off` | 나머지 | want ← false | §7-2-5 DEV-PUB-OFF-BEFORE-SENDING — 협상이 실패해 IDLE 로 돌아온 뒤(바라는 것은 남아 있다) 끈다 — 바라는 것만 내린다 · STAGED 와 같다(칸 전수가 드러냄) |
+| <a id="PUB.C.IDLE.move_out"></a>`PUB.C.IDLE.move_out` | 받는 효과 AFF pub.move_out · 나머지 | mv ← want | §5-1-2 — 발행 전 — 켜 둘 의지가 있으면 함께 옮긴다 |
 
 <a id="RULE-PUB-ON"></a>**RULE-PUB-ON** · 규칙 — 앱이 카메라·마이크를 켰다 (`IDLE`)
 
@@ -273,7 +298,7 @@
 
 | 항목 | 경우 |
 |---|---|
-| 1 | [`PUB.C.IDLE.on`](#PUB.C.IDLE.on) · [`PUB.C.any.reregister`](#PUB.C.any.reregister) |
+| 1 | [`PUB.C.IDLE.on_moving`](#PUB.C.IDLE.on_moving) · [`PUB.C.IDLE.on`](#PUB.C.IDLE.on) · [`PUB.C.any.reregister`](#PUB.C.any.reregister) · [`PUB.C.any.move_in`](#PUB.C.any.move_in) |
 | 2 | [`PUB.C.IDLE.on`](#PUB.C.IDLE.on) |
 | 3 | [`PUB.C.IDLE.on`](#PUB.C.IDLE.on) |
 
@@ -283,7 +308,7 @@
 | 라벨 | 언제 | 하는 일 | 원문 · 근거 |
 |---|---|---|---|
 | <a id="PUB.C.STAGED.nego_ok_unwanted"></a>`PUB.C.STAGED.nego_ok_unwanted` | 받는 효과 LINK pub.nego_ok · LINK pub.nego_fail · 받는 상태 ps == 'STAGED' · ok && !want | ps ← 'IDLE'; nego ← false | §7-2-2 §7-1-2 DEV-PUB-OFF-BEFORE-SENDING — 원문은 SENDING 에서 끈 것만 정한다 — 되돌리기 하나(§7-2-2 · §7-1-2 절차)로 되돌린다 |
-| <a id="PUB.C.STAGED.nego_ok"></a>`PUB.C.STAGED.nego_ok` | 받는 효과 LINK pub.nego_ok · LINK pub.nego_fail · 받는 상태 ps == 'STAGED' · ok | nego ← false · 보낸다 PUBLISH_TRACKS.req {action: 'add'} | §7-2-2 1 §7-2-2 2 |
+| <a id="PUB.C.STAGED.nego_ok"></a>`PUB.C.STAGED.nego_ok` | 받는 효과 LINK pub.nego_ok · LINK pub.nego_fail · 받는 상태 ps == 'STAGED' · ok | nego ← false · 보낸다 PUBLISH_TRACKS.req {action: 'add', duplex: half ? 'half' : 'full'} | §7-2-2 1 §7-2-2 2 — ★발행 요청은 트랙의 duplex 를 싣는다 — 없으면 서버는 전이중으로 받는다(반이중 트랙을 다시 발행하면 서버와 어긋난다 · 검증 판 PH6 반례) |
 | <a id="PUB.C.STAGED.nego_fail"></a>`PUB.C.STAGED.nego_fail` | 받는 효과 LINK pub.nego_ok · LINK pub.nego_fail · 받는 상태 ps == 'STAGED' · 나머지 | ps ← 'IDLE'; nego ← false · 효과 app.publish_failed | §7-2-2 — 협상 실패 — 되돌리기는 하나(§7-2-2 · §7-1-2 절차 ①~③) |
 | <a id="PUB.C.STAGED.pub_ok_unwanted"></a>`PUB.C.STAGED.pub_ok_unwanted` | m.part == 'res' && !want | ps ← 'IDLE' · 보낸다 PUBLISH_TRACKS.req {action: 'remove'} | §7-1-2 §7-2-2 DEV-PUB-OFF-BEFORE-SENDING — 원문은 SENDING 에서 끈 것만 정한다 — 되돌리기 하나(§7-2-2 · §7-1-2 절차)로 되돌린다 |
 | <a id="PUB.C.STAGED.pub_ok_half"></a>`PUB.C.STAGED.pub_ok_half` | m.part == 'res' && half | ps ← 'REGISTERED' · 효과 floor.reg_half → FLR.C.any.reg_half | §7-2-2 1 §7-2-2 2 §7-2-2 DEV-FLR-RECVONLY-TRIGGER — 반이중 발행 — 그 서버의 마지막 방을 나갈 때까지 산다 · 발언권에 알린다(거절 사유 5 의 방아쇠) |
@@ -293,8 +318,11 @@
 | <a id="PUB.C.STAGED.resume_listed_unwanted"></a>`PUB.C.STAGED.resume_listed_unwanted` | 받는 효과 SES pub.resume_check · ps == 'STAGED' && !nego && listed && !want | ps ← 'IDLE' · 보낸다 PUBLISH_TRACKS.req {action: 'remove'} | §3-2-3 2 §7-1-2 DEV-PUB-RESUME-INFLIGHT — 발행 요청은 닿았고 응답이 사라졌다 · 그 사이 앱이 껐다 — 응답을 받은 것과 같다(PUB.C.STAGED.pub_ok_unwanted) |
 | <a id="PUB.C.STAGED.resume_listed_half"></a>`PUB.C.STAGED.resume_listed_half` | 받는 효과 SES pub.resume_check · ps == 'STAGED' && !nego && listed && half | ps ← 'REGISTERED' · 효과 floor.reg_half → FLR.C.any.reg_half | §3-2-3 2 §7-2-2 1 §7-2-2 DEV-PUB-RESUME-INFLIGHT — 발행 요청은 닿았고 응답이 사라졌다 — 응답을 받은 것과 같다(PUB.C.STAGED.pub_ok_half) |
 | <a id="PUB.C.STAGED.resume_listed"></a>`PUB.C.STAGED.resume_listed` | 받는 효과 SES pub.resume_check · ps == 'STAGED' && !nego && listed | ps ← 'REGISTERED' | §3-2-3 2 §7-2-2 1 DEV-PUB-RESUME-INFLIGHT — 발행 요청은 닿았고 응답이 사라졌다 — 응답을 받은 것과 같다(PUB.C.STAGED.pub_ok) |
-| <a id="PUB.C.STAGED.resume_unlisted"></a>`PUB.C.STAGED.resume_unlisted` | 받는 효과 SES pub.resume_check · ps == 'STAGED' && !nego && want | 보낸다 PUBLISH_TRACKS.req {action: 'add'} | §3-2-3 2 §7-2-2 1 DEV-PUB-RESUME-INFLIGHT — 발행 요청이 닿지 않았거나 거절됐고 그 응답이 사라졌다 — 서버에 없음을 확인했으니 새 요청으로 다시 묻는다(중복 발행이 아니다 · RULE-SES-RES-BACKOFF-END 2 의 재전송과 다르다) |
+| <a id="PUB.C.STAGED.resume_unlisted"></a>`PUB.C.STAGED.resume_unlisted` | 받는 효과 SES pub.resume_check · ps == 'STAGED' && !nego && want | 보낸다 PUBLISH_TRACKS.req {action: 'add', duplex: half ? 'half' : 'full'} | §3-2-3 2 §7-2-2 1 DEV-PUB-RESUME-INFLIGHT — 발행 요청이 닿지 않았거나 거절됐고 그 응답이 사라졌다 — 서버에 없음을 확인했으니 새 요청으로 다시 묻는다(중복 발행이 아니다 · RULE-SES-RES-BACKOFF-END 2 의 재전송과 다르다) |
 | <a id="PUB.C.STAGED.resume_unlisted_unwanted"></a>`PUB.C.STAGED.resume_unlisted_unwanted` | 받는 효과 SES pub.resume_check · ps == 'STAGED' && !nego | ps ← 'IDLE' | §3-2-3 2 §7-1-2 DEV-PUB-RESUME-INFLIGHT — 서버에 없고 앱도 껐다 — 할 일 없이 IDLE |
+| <a id="PUB.C.STAGED.drop_server"></a>`PUB.C.STAGED.drop_server` | 받는 효과 LINK pub.drop_server · ps == 'STAGED' | ps ← 'IDLE'; nego ← false · 효과 app.publish_failed | §4-2-5 2 §7-2-2 — 발행을 기다리던 중에 그 서버 연결이 닫혔다(세션 끝 · 마지막 방 퇴장) — 발행은 실패다 · 기다리는 앱에 알린다(app.publish_failed · 없으면 enable 이 영영 정착하지 않는다) |
+| <a id="PUB.C.STAGED.move_out_sent"></a>`PUB.C.STAGED.move_out_sent` | 받는 효과 AFF pub.move_out · ps == 'STAGED' && !nego | ps ← 'IDLE'; mv ← true · 보낸다 PUBLISH_TRACKS.req {action: 'remove'} | §5-1-2 §7-1-2 — add 를 보내고 응답을 기다리던 트랙 — remove 를 뒤따라 보낸다(한 WS 의 차례대로 서버가 add 뒤 remove 를 처리한다) · 늦게 온 add 응답은 STAGED 가 아니라 버려진다(PUB.C.any.pub_res_other) |
+| <a id="PUB.C.STAGED.move_out_nego"></a>`PUB.C.STAGED.move_out_nego` | 받는 효과 AFF pub.move_out · ps == 'STAGED' | ps ← 'IDLE'; nego ← false; mv ← true | §5-1-2 §7-2-2 — 협상 중이라 서버엔 아직 없다 — 협상을 버리고 옮긴다(보낼 것 없다) |
 
 <a id="RULE-PUB-STATES"></a>**RULE-PUB-STATES** · 규칙 — 발행 상태 — 트랙마다 따로 갖는다
 
@@ -340,6 +368,7 @@
 |---|---|---|---|
 | <a id="PUB.C.any.pub_res_other"></a>`PUB.C.any.pub_res_other` | ps != 'STAGED' \|\| (m.part == 'res' && m.action == 'remove') \|\| m.code == 3005 | — | §7-2-3 §7-1-2 — remove 의 응답(성공 { action:"remove" } · 3005) — 원문은 remove 응답을 기다리지 않는다(§7-2-5 3). 응답의 action 이 add 와 remove 를 가른다(§7-1-2) |
 | <a id="PUB.C.any.revoked_other"></a>`PUB.C.any.revoked_other` | 받는 효과 TRK pub.revoked · 나머지 | — | §7-2-5 — IDLE · STAGED 에서 받은 내 트랙 remove — 원문이 정하지 않는다(무시) |
+| <a id="PUB.C.any.reregister_moving"></a>`PUB.C.any.reregister_moving` | 받는 효과 LINK pub.reregister_server · SES pub.reregister_all · mv | — | §9-2-1 2 §5-1-2 — 서버를 건너 옮기는 중인 트랙 — 이 서버에 다시 발행하지 않는다(발행 방이 서면 pub.move_in 이 그 서버에서 켠다) |
 | <a id="PUB.C.any.reregister"></a>`PUB.C.any.reregister` | 받는 효과 LINK pub.reregister_server · SES pub.reregister_all · want | ps ← 'STAGED'; nego ← true · 효과 sdp.rebuild → LINK.C.any.renego_queued · LINK.C.any.renego | §9-2-1 2 §7-2-1 1 — 옛 연결의 트랜시버 · 발행은 연결과 함께 사라졌다 — 처음 켤 때와 같은 절차 |
 | <a id="PUB.C.any.reregister_off"></a>`PUB.C.any.reregister_off` | 받는 효과 LINK pub.reregister_server · SES pub.reregister_all · 나머지 | ps ← 'IDLE'; nego ← false | §9-2-1 2 — 앱이 꺼 둔 트랙 — 다시 발행하지 않는다 |
 | <a id="PUB.C.any.floor_open_other"></a>`PUB.C.any.floor_open_other` | 받는 효과 FLR mic.open · 나머지 | — | §7-2-2 — 전이중 트랙 · 발행 전 — 발언권과 무관 |
@@ -350,6 +379,16 @@
 | <a id="PUB.C.any.drop_server"></a>`PUB.C.any.drop_server` | 받는 효과 LINK pub.drop_server · 나머지 | ps ← 'IDLE'; nego ← false | §4-2-5 2 — 클라는 PUBLISH_TRACKS{remove} 를 보내지 않고 발행 상태를 IDLE 로 내린다 — 트랙은 세션 것(앱이 켜 둔 의지 want 는 그대로) |
 | <a id="PUB.C.any.room_gone"></a>`PUB.C.any.room_gone` | 받는 효과 ROOM pub.room_gone · !half && (ps == 'REGISTERED' \|\| ps == 'SENDING') | ps ← 'IDLE'; nego ← false · 효과 track.detach | §4-2-6 §4-2-5 — 클라는 PUBLISH_TRACKS{remove} 를 보내지 않는다 — 서버가 이미 정리했다(RULE-ROOM-SEQ-UP · RULE-ROOM-LEAVE-RES 2 와 같은 꼴) |
 | <a id="PUB.C.any.room_gone_other"></a>`PUB.C.any.room_gone_other` | 받는 효과 ROOM pub.room_gone · 나머지 | — | §4-2-5 — 반이중 발행은 그 서버의 마지막 방을 나갈 때까지 산다 · 발행 전이면 할 일이 없다 |
+| <a id="PUB.C.any.move_out_other"></a>`PUB.C.any.move_out_other` | 받는 효과 AFF pub.move_out · !here | — | §5-1-2 — 다른 서버의 트랙 — 할 일이 없다 |
+| <a id="PUB.C.any.move_in"></a>`PUB.C.any.move_in` | 받는 효과 AFF pub.move_in · mv && want | mv ← false; ps ← 'STAGED'; nego ← true · 효과 sdp.rebuild → LINK.C.any.renego_queued · LINK.C.any.renego | §5-1-2 §7-2-1 1 §7-2-3 — ★트랙의 서버가 발행 방의 서버로 바뀐다(결합 몫) — 그 서버 연결에서 다시 조립한다 |
+| <a id="PUB.C.any.move_in_off"></a>`PUB.C.any.move_in_off` | 받는 효과 AFF pub.move_in · mv | mv ← false | §5-1-2 §7-2-5 — 옮기는 사이 앱이 껐다 — 다시 켜지 않는다 |
+| <a id="PUB.C.any.move_in_other"></a>`PUB.C.any.move_in_other` | 받는 효과 AFF pub.move_in · 나머지 | — | §5-1-2 — 옮기던 트랙이 아니다 — 할 일이 없다 |
+| <a id="PUB.C.any.set_duplex"></a>`PUB.C.any.set_duplex` | 받는 상태 (ps == 'REGISTERED' \|\| ps == 'SENDING') && !dset · 나머지 | dset ← true · 보낸다 TRACK_SET.req {duplex: d} | §7-1-4 |
+| <a id="PUB.C.any.set_res_other"></a>`PUB.C.any.set_res_other` | !dset | — | §7-1-4 — 기다리지 않던 응답(muted 축 · 늦은 것) — 이 갈래 밖 |
+| <a id="PUB.C.any.set_res_gone"></a>`PUB.C.any.set_res_gone` | ps != 'REGISTERED' && ps != 'SENDING' | dset ← false · 효과 app.duplex_failed | §7-1-4 §7-1-2 — 응답을 기다리는 사이 그 발행이 끝났다(끔 · 회수 · 옮김 — 다시 켜는 중이면 새 발행이다) — 옛 발행에 적용된 응답이라 반영하지 않는다(없으면 새 발행의 반이중 여부가 서버와 어긋난다 — 검증 판 PH6 반례) · SDK 는 트랙 변경 락으로 이 겹침을 막는다 |
+| <a id="PUB.C.any.set_fail"></a>`PUB.C.any.set_fail` | m.part != 'res' | dset ← false · 효과 app.duplex_failed | §7-1-4 §5-1-2 — 거절(3005 · 3011 전이중은 발행 방에서만 · 시뮬캐스트 영상은 TRACK_OP_UNSUPPORTED) — 아무것도 바꾸지 않는다 |
+| <a id="PUB.C.any.set_noop"></a>`PUB.C.any.set_noop` | m.noop | dset ← false · 효과 app.duplex | §7-1-4 — 이미 그 상태다(noop:true) |
+| <a id="PUB.C.any.set_full"></a>`PUB.C.any.set_full` | 나머지 | dset ← false; half ← false · 효과 app.duplex | §7-1-4 — 전이중이 됐다 — 보내는 중이면 게이트는 이미 열려 있다(반이중 SENDING 은 발언 중) |
 
 <a id="RULE-PUB-2PC-1PC"></a>**RULE-PUB-2PC-1PC** · 규칙 — 트랙을 보내기 — 상태: 발행
 
@@ -392,6 +431,9 @@
 | <a id="PUB.C.REGISTERED.off"></a>`PUB.C.REGISTERED.off` | ps == 'REGISTERED' | ps ← 'IDLE'; want ← false · 보낸다 PUBLISH_TRACKS.req {action: 'remove'} | §7-2-5 §7-1-2 DEV-PUB-OFF-BEFORE-SENDING — 원문은 SENDING 에서 끈 것만 정한다 — 되돌리기 하나(§7-2-2 · §7-1-2 절차)로 되돌린다 |
 | <a id="PUB.C.REGISTERED.revoked"></a>`PUB.C.REGISTERED.revoked` | 받는 효과 TRK pub.revoked · ps == 'REGISTERED' | ps ← 'IDLE' · 효과 track.detach · 효과 transceiver.inactive · 효과 app.revoked | §7-2-5 1 §7-2-5 2 §7-2-5 3 §7-2-5 4 R-PUB-REVOKED-WHY — 첫 프레임 전(REGISTERED)에 지워져도 SENDING 과 같다(칸 전수가 드러냄) |
 | <a id="PUB.C.REGISTERED.floor_open"></a>`PUB.C.REGISTERED.floor_open` | 받는 효과 FLR mic.open · half && ps == 'REGISTERED' | ps ← 'SENDING' · 효과 track.attach | §7-2-2 — ★게이트를 여는 곳은 여기 하나다 — 반이중 소리는 허가 뒤에만 나간다 |
+| <a id="PUB.C.REGISTERED.move_out"></a>`PUB.C.REGISTERED.move_out` | 받는 효과 AFF pub.move_out · ps == 'REGISTERED' | ps ← 'IDLE'; mv ← true · 보낸다 PUBLISH_TRACKS.req {action: 'remove'} | §5-1-2 §7-1-2 |
+| <a id="PUB.C.REGISTERED.set_half"></a>`PUB.C.REGISTERED.set_half` | m.duplex == 'half' && ps == 'REGISTERED' | dset ← false; half ← true · 효과 floor.reg_half → FLR.C.any.reg_half · 효과 app.duplex | §7-1-4 §7-2-2 — 아직 붙이기 전(또는 이미 반이중) — 반이중 발행이 섰다고 발언권에 알린다 |
+| <a id="PUB.C.REGISTERED.set_full"></a>`PUB.C.REGISTERED.set_full` | half && ps == 'REGISTERED' | dset ← false; half ← false; ps ← 'SENDING' · 효과 track.attach · 효과 app.duplex | §7-1-4 §7-2-2 — 무전 → 회의 — 게이트를 상시 연다(서버가 그 트랙 발언권을 먼저 해제했다 — 발언권 쪽은 서버 통지가 알린다) |
 
 <a id="RULE-PUB-ATTACH"></a>**RULE-PUB-ATTACH** · 규칙 — RTP 를 시작했다 (`REGISTERED`)
 
@@ -413,6 +455,8 @@
 | <a id="PUB.C.SENDING.off"></a>`PUB.C.SENDING.off` | ps == 'SENDING' | ps ← 'IDLE'; want ← false · 보낸다 PUBLISH_TRACKS.req {action: 'remove'} · 효과 track.detach | §7-2-5 1 §7-2-5 2 §7-2-5 3 |
 | <a id="PUB.C.SENDING.revoked"></a>`PUB.C.SENDING.revoked` | 받는 효과 TRK pub.revoked · ps == 'SENDING' | ps ← 'IDLE' · 효과 track.detach · 효과 transceiver.inactive · 효과 app.revoked | §7-2-5 1 §7-2-5 2 §7-2-5 3 §7-2-5 4 R-PUB-REVOKED-WHY |
 | <a id="PUB.C.SENDING.floor_close"></a>`PUB.C.SENDING.floor_close` | 받는 효과 FLR mic.close · half && ps == 'SENDING' | ps ← 'REGISTERED' · 효과 track.detach | §7-2-2 — 발행된 채 REGISTERED 에 머무는 것이 정상이다 · 게이트는 곧바로 닫는다(회수의 유예는 클라가 소리를 더 내는 창이 아니다) |
+| <a id="PUB.C.SENDING.move_out"></a>`PUB.C.SENDING.move_out` | 받는 효과 AFF pub.move_out · ps == 'SENDING' | ps ← 'IDLE'; mv ← true · 보낸다 PUBLISH_TRACKS.req {action: 'remove'} · 효과 track.detach | §5-1-2 §7-2-5 1 — 내린다 — 끄기와 같은 remove · 다만 앱의 켜 둘 의지는 그대로(want) · 발행 방이 서면 그 서버에서 다시 켠다 |
+| <a id="PUB.C.SENDING.set_half"></a>`PUB.C.SENDING.set_half` | m.duplex == 'half' && ps == 'SENDING' | dset ← false; half ← true; ps ← 'REGISTERED' · 효과 track.detach · 효과 floor.reg_half → FLR.C.any.reg_half · 효과 app.duplex | §7-1-4 §7-2-2 — 회의 → 무전 — 게이트를 닫는다(발언권 없이는 안 나간다 · 허가 뒤 CFloorOpen 이 연다) · 반이중 발행이 섰다고 발언권에 알린다 |
 
 <a id="RULE-PUB-OFF"></a>**RULE-PUB-OFF** · 규칙 — 앱이 껐다 (`SENDING`)
 
@@ -424,7 +468,7 @@
 
 | 항목 | 경우 |
 |---|---|
-| 1 | [`PUB.C.SENDING.off`](#PUB.C.SENDING.off) |
+| 1 | [`PUB.C.SENDING.off`](#PUB.C.SENDING.off) · [`PUB.C.SENDING.move_out`](#PUB.C.SENDING.move_out) |
 | 2 | [`PUB.C.SENDING.off`](#PUB.C.SENDING.off) |
 | 3 | [`PUB.C.SENDING.off`](#PUB.C.SENDING.off) |
 
@@ -484,9 +528,9 @@
 | <a id="PUB.S.add_2006"></a>`PUB.S.add_2006` | m.t == 'PUBLISH_TRACKS' && !perm | 답한다 PUBLISH_TRACKS.fail {code: 2006} | §7-1-2 |
 | <a id="PUB.S.add_3011"></a>`PUB.S.add_3011` | m.t == 'PUBLISH_TRACKS' && !atPub && m.duplex == 'full' | 답한다 PUBLISH_TRACKS.fail {code: 3011} | §5-1-2 |
 | <a id="PUB.S.add_4002"></a>`PUB.S.add_4002` | m.t == 'PUBLISH_TRACKS' && full | 답한다 PUBLISH_TRACKS.fail {code: 4002} | §7-1-2 |
-| <a id="PUB.S.add"></a>`PUB.S.add` | m.t == 'PUBLISH_TRACKS' | reg ← true · 답한다 PUBLISH_TRACKS.res {action: 'add'} | §7-1-2 |
+| <a id="PUB.S.add"></a>`PUB.S.add` | m.t == 'PUBLISH_TRACKS' | reg ← true; half ← m.duplex == 'half' · 답한다 PUBLISH_TRACKS.res {action: 'add'} | §7-1-2 §7-1-2 |
 | <a id="PUB.S.rx_other"></a>`PUB.S.rx_other` | 나머지 | — | §7-1-2 |
-| <a id="PUB.S.perm_down_revoke"></a>`PUB.S.perm_down_revoke` | 받는 효과 ROOM pub.perm_down · ROOM pub.perm_up · perm && reg | perm ← false; reg ← false · 답한다 TRACK_EVENT.body {action: 'remove'} | §4-2-6 §7-2-5 |
+| <a id="PUB.S.perm_down_revoke"></a>`PUB.S.perm_down_revoke` | 받는 효과 ROOM pub.perm_down · ROOM pub.perm_up · perm && reg && !half | perm ← false; reg ← false · 답한다 TRACK_EVENT.body {action: 'remove'} | §4-2-6 §7-2-5 |
 | <a id="PUB.S.perm_down"></a>`PUB.S.perm_down` | 받는 효과 ROOM pub.perm_down · ROOM pub.perm_up · perm | perm ← false | §4-2-6 |
 | <a id="PUB.S.perm_up"></a>`PUB.S.perm_up` | 받는 효과 ROOM pub.perm_down · ROOM pub.perm_up · 나머지 | perm ← true | §4-2-6 |
 | <a id="PUB.S.full_flip"></a>`PUB.S.full_flip` | 나머지 | full ← !full | §7-1-2 |

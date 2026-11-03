@@ -76,7 +76,7 @@
 
 ★★**한 메시지는 한 방 것이다.** `version.seq` 가 ★**방마다**의 일련번호라(§4-1-6) 그것을 나르는
 메시지도 방 단위여야 견줄 곳이 정해진다 — 통지 넷이 전부 같은 꼴이 된다(`room_id` + `version`).
-여러 방이 한꺼번에 바뀌면 ★**방마다 한 메시지씩** 온다(같은 1단 FIFO 라 순서는 안전하다, §2-2-1).
+여러 방이 한꺼번에 바뀌면 ★**방마다 한 메시지씩** 온다(같은 1단 FIFO 라 순서는 안전하다, §2-3-1).
 원소가 `room_id` 를 따로 갖는 것은 §6-1-1 의 보관본 규칙 그대로다(컨테이너가 방을 정해도 원소는 갖는다).
 
 → 구조 — [`TRK.op.TRACK_EVENT`](#TRK.op.TRACK_EVENT)
@@ -182,11 +182,11 @@
 
 | 지금 | 사건 | 다음 | 라벨 |
 |---|---|---|---|
-| 어느 상태 | TRACK_EVENT 를 받았다 — 트랙 목록(보기용)을 고친다(RULE-TRK-STORE-UPDATE · 키 = track_id) · mine = 내 track_id(version 은 ROOM 이 본다 — 낡은 델타는 ROOM 이 버린다 · RULE-TRK-TRACK-EVENT-PROC) · ★배정표는 건드리지 않는다 | — | `TRK.C.any.mine_removed` |
-| 어느 상태 | TRACK_EVENT 를 받았다 — 트랙 목록(보기용)을 고친다(RULE-TRK-STORE-UPDATE · 키 = track_id) · mine = 내 track_id(version 은 ROOM 이 본다 — 낡은 델타는 ROOM 이 버린다 · RULE-TRK-TRACK-EVENT-PROC) · ★배정표는 건드리지 않는다 | — | `TRK.C.any.mine_other` |
-| 어느 상태 | TRACK_EVENT 를 받았다 — 트랙 목록(보기용)을 고친다(RULE-TRK-STORE-UPDATE · 키 = track_id) · mine = 내 track_id(version 은 ROOM 이 본다 — 낡은 델타는 ROOM 이 버린다 · RULE-TRK-TRACK-EVENT-PROC) · ★배정표는 건드리지 않는다 | `NONE` | `TRK.C.any.remove` |
-| 어느 상태 | TRACK_EVENT 를 받았다 — 트랙 목록(보기용)을 고친다(RULE-TRK-STORE-UPDATE · 키 = track_id) · mine = 내 track_id(version 은 ROOM 이 본다 — 낡은 델타는 ROOM 이 버린다 · RULE-TRK-TRACK-EVENT-PROC) · ★배정표는 건드리지 않는다 | — | `TRK.C.any.track_event` |
-| 어느 상태 | TRACK_STATE 를 받았다 — track_id 가 식별 키(RULE-TRK-TRACK-STATE-PROC) · muted 는 트랙 층이라 보관본의 그 값이 바뀐다(아직 구독하지 않은 트랙도 · RULE-TRK-TRACK-STATE-TO-ALL) | — | `TRK.C.any.track_state` |
+| 어느 상태 | TRACK_EVENT 를 받았다 — 트랙 목록(보기용)을 고친다(RULE-TRK-STORE-UPDATE · 키 = track_id) · mine = 내 track_id(★ROOM 이 받은 델타만 온다 — version 판정은 ROOM 한 곳 · trk.delta · RULE-TRK-TRACK-EVENT-PROC) · ★배정표는 건드리지 않는다 | — | `TRK.C.any.mine_removed` |
+| 어느 상태 | TRACK_EVENT 를 받았다 — 트랙 목록(보기용)을 고친다(RULE-TRK-STORE-UPDATE · 키 = track_id) · mine = 내 track_id(★ROOM 이 받은 델타만 온다 — version 판정은 ROOM 한 곳 · trk.delta · RULE-TRK-TRACK-EVENT-PROC) · ★배정표는 건드리지 않는다 | — | `TRK.C.any.mine_other` |
+| 어느 상태 | TRACK_EVENT 를 받았다 — 트랙 목록(보기용)을 고친다(RULE-TRK-STORE-UPDATE · 키 = track_id) · mine = 내 track_id(★ROOM 이 받은 델타만 온다 — version 판정은 ROOM 한 곳 · trk.delta · RULE-TRK-TRACK-EVENT-PROC) · ★배정표는 건드리지 않는다 | `NONE` | `TRK.C.any.remove` |
+| 어느 상태 | TRACK_EVENT 를 받았다 — 트랙 목록(보기용)을 고친다(RULE-TRK-STORE-UPDATE · 키 = track_id) · mine = 내 track_id(★ROOM 이 받은 델타만 온다 — version 판정은 ROOM 한 곳 · trk.delta · RULE-TRK-TRACK-EVENT-PROC) · ★배정표는 건드리지 않는다 | — | `TRK.C.any.track_event` |
+| 어느 상태 | TRACK_STATE 를 받았다(★ROOM 이 받은 델타만 온다 — trk.delta) — track_id 가 식별 키(RULE-TRK-TRACK-STATE-PROC) · muted 는 트랙 층이라 보관본의 그 값이 바뀐다(아직 구독하지 않은 트랙도 · RULE-TRK-TRACK-STATE-TO-ALL) | — | `TRK.C.any.track_state` |
 | 어느 상태 | 스냅샷(입장 응답 · RESUME · GET)의 tracks 를 받았다 — 그 방 트랙 목록 전부다(보기용 · RULE-TRK-FOUR-PATHS · RULE-TRK-PER-PATH) · ★배정표는 실려 오지 않는다(입장 응답 · RESUME 의 표는 MLINE_EVENT 와 같은 길로 받는다) | — | `TRK.C.any.snapshot` |
 | 어느 상태 | 스냅샷(입장 응답 · RESUME · GET)의 tracks 를 받았다 — 그 방 트랙 목록 전부다(보기용 · RULE-TRK-FOUR-PATHS · RULE-TRK-PER-PATH) · ★배정표는 실려 오지 않는다(입장 응답 · RESUME 의 표는 MLINE_EVENT 와 같은 길로 받는다) | — | `TRK.C.any.snapshot_same` |
 | 어느 상태 | 그 방을 떠났다 · 내렸다 — 그 방 트랙 목록 보관본을 버린다(RULE-ROOM-LEAVE-RES) · 배정표는 연결의 것이라 서버가 새 표(MLINE_EVENT)로 고친다 | — | `TRK.C.any.store_drop` |
@@ -199,14 +199,14 @@
 
 | 라벨 | 언제 | 하는 일 | 원문 · 근거 |
 |---|---|---|---|
-| <a id="TRK.C.any.mine_removed"></a>`TRK.C.any.mine_removed` | mine && m.action == 'remove' | 효과 pub.revoked → PUB.C.SENDING.revoked · PUB.C.REGISTERED.revoked · PUB.C.any.revoked_other | §4-2-6 — 서버가 내 발행을 지웠다 — PUB 가 받는다(RULE-PUB-REVOKED) |
-| <a id="TRK.C.any.mine_other"></a>`TRK.C.any.mine_other` | mine | — | §4-2-6 §6-2-2 — 내 트랙의 항목 — 받을 트랙이 아니다(표에 줄이 없다 · 고갈이 아니다 · RULE-SUB-NO-ASSIGN-NO-SDP) |
-| <a id="TRK.C.any.remove"></a>`TRK.C.any.remove` | m.action == 'remove' | lay[m.tracks.track_id] ← 'NONE'; muted[m.tracks.track_id] ← false · 효과 app.tracks | §6-2-2 §4-2-6 — 항목을 지운다 — 화면에서 내린다 · m-line 은 배정표가 따로 다룬다(그 줄은 빈 줄이 된다) |
-| <a id="TRK.C.any.track_event"></a>`TRK.C.any.track_event` | 나머지 | lay[m.tracks.track_id] ← m.tracks.active ? 'ACTIVE' : 'RESTING'; muted[m.tracks.track_id] ← m.tracks.muted · 효과 app.tracks | §6-2-2 §4-2-6 — 트랙 층은 통째 교체 — 받는 트랙(active:true) · 쉬는 트랙(active:false) · 화면만 고친다(SDP 는 배정표 몫) |
-| <a id="TRK.C.any.track_state"></a>`TRK.C.any.track_state` | 나머지 | muted[m.track_id] ← m.muted · 효과 app.track_state | §4-2-6 |
+| <a id="TRK.C.any.mine_removed"></a>`TRK.C.any.mine_removed` | 받는 효과 ROOM trk.delta · 받는 상태 m.t == 'TRACK_EVENT' · mine && m.action == 'remove' | 효과 pub.revoked → PUB.C.SENDING.revoked · PUB.C.REGISTERED.revoked · PUB.C.any.revoked_other | §4-2-6 — 서버가 내 발행을 지웠다 — PUB 가 받는다(RULE-PUB-REVOKED) |
+| <a id="TRK.C.any.mine_other"></a>`TRK.C.any.mine_other` | 받는 효과 ROOM trk.delta · 받는 상태 m.t == 'TRACK_EVENT' · mine | — | §4-2-6 §6-2-2 — 내 트랙의 항목 — 받을 트랙이 아니다(표에 줄이 없다 · 고갈이 아니다 · RULE-SUB-NO-ASSIGN-NO-SDP) |
+| <a id="TRK.C.any.remove"></a>`TRK.C.any.remove` | 받는 효과 ROOM trk.delta · 받는 상태 m.t == 'TRACK_EVENT' · m.action == 'remove' | lay[m.tracks.track_id] ← 'NONE'; muted[m.tracks.track_id] ← false · 효과 app.tracks | §6-2-2 §4-2-6 — 항목을 지운다 — 화면에서 내린다 · m-line 은 배정표가 따로 다룬다(그 줄은 빈 줄이 된다) |
+| <a id="TRK.C.any.track_event"></a>`TRK.C.any.track_event` | 받는 효과 ROOM trk.delta · 받는 상태 m.t == 'TRACK_EVENT' · 나머지 | lay[m.tracks.track_id] ← m.tracks.active ? 'ACTIVE' : 'RESTING'; muted[m.tracks.track_id] ← m.tracks.muted · 효과 app.tracks | §6-2-2 §4-2-6 — 트랙 층은 통째 교체 — 받는 트랙(active:true) · 쉬는 트랙(active:false) · 화면만 고친다(SDP 는 배정표 몫) |
+| <a id="TRK.C.any.track_state"></a>`TRK.C.any.track_state` | 받는 효과 ROOM trk.delta · 받는 상태 m.t == 'TRACK_STATE' · 나머지 | muted[m.track_id] ← m.muted · 효과 app.track_state | §4-2-6 |
 | <a id="TRK.C.any.snapshot"></a>`TRK.C.any.snapshot` | 받는 효과 ROOM trk.snapshot · sLay != lay \|\| sMuted != muted | lay ← sLay; muted ← sMuted · 효과 app.tracks | §6-1-1 §6-2-2 §3-2-3 3 — 스냅샷은 목록 전부라 목록을 통째로 바꾼다 · 화면만 고친다(SDP 는 배정표 몫이라 재협상이 없다) |
 | <a id="TRK.C.any.snapshot_same"></a>`TRK.C.any.snapshot_same` | 받는 효과 ROOM trk.snapshot · 나머지 | — | §3-2-3 3 — 목록 그대로 — 아무것도 하지 않는다 |
-| <a id="TRK.C.any.store_drop"></a>`TRK.C.any.store_drop` | 받는 효과 ROOM store.drop · 나머지 | lay ← {A: 'NONE', B: 'NONE', S: 'NONE'}; muted ← {A: false, B: false, S: false} | §4-2-5 §6-2-2 |
+| <a id="TRK.C.any.store_drop"></a>`TRK.C.any.store_drop` | 받는 효과 ROOM store.drop · 나머지 | lay ← {A: 'NONE', B: 'NONE', S: 'NONE'}; muted ← {A: false, B: false, S: false} · 효과 app.tracks | §4-2-5 §6-2-2 — 목록이 비었다 — 앱의 트랙 목록도 비운다(app.tracks · 없으면 받던 트랙의 끝을 앱이 모른다) |
 
 <a id="TRK.S"></a>
 #### 6-2-2. 서버

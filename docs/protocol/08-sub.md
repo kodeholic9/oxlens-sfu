@@ -157,6 +157,18 @@
 
 → 구조 — [`SUB.op.READY`](#SUB.op.READY)
 
+<a id="PROP-SUB-READY-OPENS"></a>**PROP-SUB-READY-OPENS** · 성질
+
+방에 들어가 구독 협상이 성공했으면, 통이 비었을 때 그 방의 `READY` 가 성공 응답을 받았고 서버의 구독 게이트가 풀려 있다(RULE-SUB-READY-PROC · RULE-SUB-TGATE).
+
+*식: SG1 · 깨지면: 받는 영상이 영구히 검다(R-SUB-READY-SYMPTOMS)*
+
+<a id="PROP-SUB-READY-AGAIN"></a>**PROP-SUB-READY-AGAIN** · 성질
+
+남의 트랙이 붙어 다시 협상했거나 배정표가 다시 왔으면, 그 협상이 성공한 뒤 그 방의 `READY` 를 다시 보냈다(RULE-TRK-TRACK-EVENT-PROC · RULE-SUB-EGRESS-ACKED).
+
+*식: SG3 · 깨지면: 서버는 확인받지 못한 줄로 보내지 않는다 — 새로 붙은 트랙 · 옮겨 간 줄의 영상이 검다*
+
 <a id="SUB.op.SUBSCRIBE_LAYER"></a>
 #### 8-1-4. `0x0303 SUBSCRIBE_LAYER` — 받을 레이어 고르기   **C→S** · 응답 있음
 단 1 · 출처 §7-1-2
@@ -366,6 +378,12 @@
 | 이름 | 값 | 시작 | 정상 정지 | 끝나면 |
 |---|---|---|---|---|
 | `T-gate`(서버) | **5초** | 받을 트랙을 막았다 | `READY` 를 받았다 | 서버가 스스로 푼다(안전망) |
+
+<a id="PROP-SUB-DROP-REGATES"></a>**PROP-SUB-DROP-REGATES** · 성질
+
+방을 떠나면(떠남 · 강퇴 · 방 닫힘) 통이 비었을 때 그 방의 구독 게이트는 처음처럼 닫혀 있다(`SUB.S.drop` · RULE-SUB-TGATE).
+
+*식: SG2 · 깨지면: 다시 들어간 방에 `READY` 전에 영상이 흐른다 — 클라가 아직 적용하지 않은 SDP 에 대고 흘린다(R-SUB-READY-SYMPTOMS 의 셋째 증상)*
 
 ### 8-4. 근거 · 기각 — 규격이 아니다
 

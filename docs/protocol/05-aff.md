@@ -62,7 +62,7 @@
 
 ★★**소속만 나르는 프레임에는 `version` 이 없다**(`AFFILIATION` 응답 · `ROOM_EVENT{affiliation}` · `ROOM_LEAVE` 응답 — §4-2-3. `ROOM_JOIN` 응답은 스냅샷 갈래라 싣는다). ★`pub_room` 은 ★**내 세션 것**이라 방 공통
 스냅샷에 들어 있지 않고(§4-2-6), 같은 payload 를 나르는 broadcast 도 없어 ★**되감길 대상이 없다.**
-신선도는 전송 계층이 지킨다 — 윈도우 기본 1 · 받은 순서대로 처리(§2-2-1) · 출처는 나 하나.
+신선도는 전송 계층이 지킨다 — 윈도우 기본 1 · 받은 순서대로 처리(§2-3-1) · 출처는 나 하나.
 
 → 구조 — [`AFF.op.AFFILIATION`](#AFF.op.AFFILIATION) · [`ROOM.op.ROOM_EVENT`](04-room.md#ROOM.op.ROOM_EVENT)
 
@@ -240,6 +240,8 @@ H264 방에서 발행한 트랙을 `pub_select` 로 VP8 방에 끌고 가는 구
 | `pub` | `'NONE'` | 세션의 발행 방 — 방 하나 또는 없음(응답이 그렇게 말했다 — 직접 고치지 않는다 · RULE-AFF-PROC) |
 | `wait` | `'NONE'` | 기다리는 응답 — 요청은 한 번에 하나(서버를 건너면 옛 서버 해제 → 응답 → 새 서버 선택 · RULE-AFF-SWITCH-TRACKS) |
 | `want` | `'NONE'` | 옮겨 갈 방 — 서버를 건너는 전환에서 옛 서버 해제 응답을 기다리는 동안 |
+| `from` | `'NONE'` | 서버를 건너는 전환의 옛 발행 방 — 새 서버 선택이 실패하면 되돌아갈 곳(RULE-AFF-SWITCH-TRACKS ③) |
+| `back` | `'NONE'` | 재구축으로 내린 발행 방 — 다시 들어간 뒤 pub_select 로 되찾는다(RULE-LINK-RECOVERY-REBUILD) |
 
 ##### 상태 — 서버
 
@@ -251,28 +253,44 @@ H264 방에서 발행한 트랙을 `pub_select` 로 VP8 방에 끌고 가는 구
 
 | 지금 | 사건 | 다음 | 라벨 |
 |---|---|---|---|
-| `NOPUB` | 방 r 을 발행 방으로(§5-2-2 — 같은 서버면 요청 하나 · 서버를 건너면 옛 서버 해제 먼저 · RULE-AFF-SWITCH-TRACKS) | `SELECT` | `AFF.C.NOPUB.select` |
-| `PUB` | 방 r 을 발행 방으로(§5-2-2 — 같은 서버면 요청 하나 · 서버를 건너면 옛 서버 해제 먼저 · RULE-AFF-SWITCH-TRACKS) | `SELECT` | `AFF.C.PUB.switch_same` |
+| `NOPUB` | 방 r 을 발행 방으로(§5-2-2 — 같은 서버면 요청 하나 · 서버를 건너면 옛 서버 해제 먼저 · RULE-AFF-SWITCH-TRACKS) | `SELECT · NONE` | `AFF.C.NOPUB.select` |
+| `PUB` | 방 r 을 발행 방으로(§5-2-2 — 같은 서버면 요청 하나 · 서버를 건너면 옛 서버 해제 먼저 · RULE-AFF-SWITCH-TRACKS) | `SELECT · NONE` | `AFF.C.PUB.switch_same` |
 | `PUB` | 방 r 을 발행 방으로(§5-2-2 — 같은 서버면 요청 하나 · 서버를 건너면 옛 서버 해제 먼저 · RULE-AFF-SWITCH-TRACKS) | `DESELECT` | `AFF.C.PUB.switch_cross` |
 | `PUB` | 발행 방을 뺀다(§5-2-2) | `DESELECT · NONE` | `AFF.C.PUB.deselect` |
+| `PUB` | AFFILIATION 응답 — ok = 성공 응답 · p = 응답한 서버가 아는 발행 방(그 서버의 방 하나 또는 없음 — 부분 목록) · onPub · onWant = 응답한 서버가 지금 발행 방 · 옮겨 갈 방의 서버다(§5-2-2 3 · 4) | `NONE` | `AFF.C.PUB.switch_back` |
+| `PUB` | AFFILIATION 응답 — ok = 성공 응답 · p = 응답한 서버가 아는 발행 방(그 서버의 방 하나 또는 없음 — 부분 목록) · onPub · onWant = 응답한 서버가 지금 발행 방 · 옮겨 갈 방의 서버다(§5-2-2 3 · 4) | `NONE` | `AFF.C.PUB.switch_out_fail` |
 | 어느 상태 | AFFILIATION 응답 — ok = 성공 응답 · p = 응답한 서버가 아는 발행 방(그 서버의 방 하나 또는 없음 — 부분 목록) · onPub · onWant = 응답한 서버가 지금 발행 방 · 옮겨 갈 방의 서버다(§5-2-2 3 · 4) | `NONE` | `AFF.C.any.fail` |
+| `PUB` | AFFILIATION 응답 — ok = 성공 응답 · p = 응답한 서버가 아는 발행 방(그 서버의 방 하나 또는 없음 — 부분 목록) · onPub · onWant = 응답한 서버가 지금 발행 방 · 옮겨 갈 방의 서버다(§5-2-2 3 · 4) | `SELECT · NONE` | `AFF.C.PUB.res_gone_back` |
+| 어느 상태 | AFFILIATION 응답 — ok = 성공 응답 · p = 응답한 서버가 아는 발행 방(그 서버의 방 하나 또는 없음 — 부분 목록) · onPub · onWant = 응답한 서버가 지금 발행 방 · 옮겨 갈 방의 서버다(§5-2-2 3 · 4) | `NONE` | `AFF.C.any.res_gone` |
 | `PUB` | AFFILIATION 응답 — ok = 성공 응답 · p = 응답한 서버가 아는 발행 방(그 서버의 방 하나 또는 없음 — 부분 목록) · onPub · onWant = 응답한 서버가 지금 발행 방 · 옮겨 갈 방의 서버다(§5-2-2 3 · 4) | `NONE · SELECT` | `AFF.C.PUB.switch_in` |
 | `PUB` | AFFILIATION 응답 — ok = 성공 응답 · p = 응답한 서버가 아는 발행 방(그 서버의 방 하나 또는 없음 — 부분 목록) · onPub · onWant = 응답한 서버가 지금 발행 방 · 옮겨 갈 방의 서버다(§5-2-2 3 · 4) | `NONE` | `AFF.C.PUB.switch_stuck` |
+| `PUB` | AFFILIATION 응답 — ok = 성공 응답 · p = 응답한 서버가 아는 발행 방(그 서버의 방 하나 또는 없음 — 부분 목록) · onPub · onWant = 응답한 서버가 지금 발행 방 · 옮겨 갈 방의 서버다(§5-2-2 3 · 4) | `NONE` | `AFF.C.PUB.switch_in_skipped` |
 | `NOPUB` | AFFILIATION 응답 — ok = 성공 응답 · p = 응답한 서버가 아는 발행 방(그 서버의 방 하나 또는 없음 — 부분 목록) · onPub · onWant = 응답한 서버가 지금 발행 방 · 옮겨 갈 방의 서버다(§5-2-2 3 · 4) | `NONE` | `AFF.C.NOPUB.res_pub` |
 | `PUB` | AFFILIATION 응답 — ok = 성공 응답 · p = 응답한 서버가 아는 발행 방(그 서버의 방 하나 또는 없음 — 부분 목록) · onPub · onWant = 응답한 서버가 지금 발행 방 · 옮겨 갈 방의 서버다(§5-2-2 3 · 4) | `NONE` | `AFF.C.PUB.res_moved` |
 | `PUB` | AFFILIATION 응답 — ok = 성공 응답 · p = 응답한 서버가 아는 발행 방(그 서버의 방 하나 또는 없음 — 부분 목록) · onPub · onWant = 응답한 서버가 지금 발행 방 · 옮겨 갈 방의 서버다(§5-2-2 3 · 4) | `NONE` | `AFF.C.PUB.res_away` |
 | 어느 상태 | AFFILIATION 응답 — ok = 성공 응답 · p = 응답한 서버가 아는 발행 방(그 서버의 방 하나 또는 없음 — 부분 목록) · onPub · onWant = 응답한 서버가 지금 발행 방 · 옮겨 갈 방의 서버다(§5-2-2 3 · 4) | `NONE` | `AFF.C.any.res_same` |
-| `NOPUB` | select:true 입장을 보낸다 — 입장이 곁들여 발행 방을 바꾸므로 ★소속 전환이 떠 있는 것과 같다(RULE-ROOM-JOIN-START 2 · 그 응답이 올 때까지 다른 전환을 막는다) | `JOIN` | `AFF.C.NOPUB.join_select` |
+| `NOPUB` | select:true 입장을 보낸다 — 입장이 곁들여 발행 방을 바꾸므로 ★소속 전환이 떠 있는 것과 같다(RULE-ROOM-JOIN-START 2 · 그 응답이 올 때까지 다른 전환을 막는다) | `JOIN · NONE` | `AFF.C.NOPUB.join_select` |
+| 어느 상태 | 입장 응답의 affiliation — 입장이 곁들여 바꾼 발행 방(RULE-AFF-CAUSE-USER · cause 없음) · r = 그 입장의 방 · sel = 그 입장 요청이 select:true 였다(응답은 pid 로 제 요청과 짝지어진다 — RULE-TRN-ONE-REPLY) · p = 그 응답이 말한 발행 방(그 서버의 방 하나 또는 없음 — 부분 목록) · onPub = 지금 발행 방이 그 응답을 낸 서버의 방 | `NONE` | `AFF.C.any.implicit_back_held` |
+| 어느 상태 | 입장 응답의 affiliation — 입장이 곁들여 바꾼 발행 방(RULE-AFF-CAUSE-USER · cause 없음) · r = 그 입장의 방 · sel = 그 입장 요청이 select:true 였다(응답은 pid 로 제 요청과 짝지어진다 — RULE-TRN-ONE-REPLY) · p = 그 응답이 말한 발행 방(그 서버의 방 하나 또는 없음 — 부분 목록) · onPub = 지금 발행 방이 그 응답을 낸 서버의 방 | `NONE · SELECT` | `AFF.C.any.implicit_back` |
+| 어느 상태 | 입장 응답의 affiliation — 입장이 곁들여 바꾼 발행 방(RULE-AFF-CAUSE-USER · cause 없음) · r = 그 입장의 방 · sel = 그 입장 요청이 select:true 였다(응답은 pid 로 제 요청과 짝지어진다 — RULE-TRN-ONE-REPLY) · p = 그 응답이 말한 발행 방(그 서버의 방 하나 또는 없음 — 부분 목록) · onPub = 지금 발행 방이 그 응답을 낸 서버의 방 | `NONE` | `AFF.C.any.implicit_back_busy` |
 | 어느 상태 | 입장 응답의 affiliation — 입장이 곁들여 바꾼 발행 방(RULE-AFF-CAUSE-USER · cause 없음) · r = 그 입장의 방 · sel = 그 입장 요청이 select:true 였다(응답은 pid 로 제 요청과 짝지어진다 — RULE-TRN-ONE-REPLY) · p = 그 응답이 말한 발행 방(그 서버의 방 하나 또는 없음 — 부분 목록) · onPub = 지금 발행 방이 그 응답을 낸 서버의 방 | `NONE` | `AFF.C.any.implicit_joined` |
 | 어느 상태 | 입장 응답의 affiliation — 입장이 곁들여 바꾼 발행 방(RULE-AFF-CAUSE-USER · cause 없음) · r = 그 입장의 방 · sel = 그 입장 요청이 select:true 였다(응답은 pid 로 제 요청과 짝지어진다 — RULE-TRN-ONE-REPLY) · p = 그 응답이 말한 발행 방(그 서버의 방 하나 또는 없음 — 부분 목록) · onPub = 지금 발행 방이 그 응답을 낸 서버의 방 | `NONE` | `AFF.C.any.implicit_join_unselected` |
 | 어느 상태 | 입장 응답의 affiliation — 입장이 곁들여 바꾼 발행 방(RULE-AFF-CAUSE-USER · cause 없음) · r = 그 입장의 방 · sel = 그 입장 요청이 select:true 였다(응답은 pid 로 제 요청과 짝지어진다 — RULE-TRN-ONE-REPLY) · p = 그 응답이 말한 발행 방(그 서버의 방 하나 또는 없음 — 부분 목록) · onPub = 지금 발행 방이 그 응답을 낸 서버의 방 | — | `AFF.C.any.implicit_busy` |
+| 어느 상태 | 입장 응답의 affiliation — 입장이 곁들여 바꾼 발행 방(RULE-AFF-CAUSE-USER · cause 없음) · r = 그 입장의 방 · sel = 그 입장 요청이 select:true 였다(응답은 pid 로 제 요청과 짝지어진다 — RULE-TRN-ONE-REPLY) · p = 그 응답이 말한 발행 방(그 서버의 방 하나 또는 없음 — 부분 목록) · onPub = 지금 발행 방이 그 응답을 낸 서버의 방 | — | `AFF.C.any.implicit_gone` |
 | 어느 상태 | 입장 응답의 affiliation — 입장이 곁들여 바꾼 발행 방(RULE-AFF-CAUSE-USER · cause 없음) · r = 그 입장의 방 · sel = 그 입장 요청이 select:true 였다(응답은 pid 로 제 요청과 짝지어진다 — RULE-TRN-ONE-REPLY) · p = 그 응답이 말한 발행 방(그 서버의 방 하나 또는 없음 — 부분 목록) · onPub = 지금 발행 방이 그 응답을 낸 서버의 방 | — | `AFF.C.any.implicit_pub` |
 | 어느 상태 | 입장 응답의 affiliation — 입장이 곁들여 바꾼 발행 방(RULE-AFF-CAUSE-USER · cause 없음) · r = 그 입장의 방 · sel = 그 입장 요청이 select:true 였다(응답은 pid 로 제 요청과 짝지어진다 — RULE-TRN-ONE-REPLY) · p = 그 응답이 말한 발행 방(그 서버의 방 하나 또는 없음 — 부분 목록) · onPub = 지금 발행 방이 그 응답을 낸 서버의 방 | `NONE` | `AFF.C.any.implicit_away` |
 | 어느 상태 | 입장 응답의 affiliation — 입장이 곁들여 바꾼 발행 방(RULE-AFF-CAUSE-USER · cause 없음) · r = 그 입장의 방 · sel = 그 입장 요청이 select:true 였다(응답은 pid 로 제 요청과 짝지어진다 — RULE-TRN-ONE-REPLY) · p = 그 응답이 말한 발행 방(그 서버의 방 하나 또는 없음 — 부분 목록) · onPub = 지금 발행 방이 그 응답을 낸 서버의 방 | — | `AFF.C.any.implicit_same` |
 | 어느 상태 | 듣던 방 r 을 떠났다 — 그 방이 발행 방이면 발행도 함께 풀린다(RULE-AFF-PROC 끝 항) | `NONE` | `AFF.C.any.left` |
+| 어느 상태 | 듣던 방 r 을 떠났다 — 그 방이 발행 방이면 발행도 함께 풀린다(RULE-AFF-PROC 끝 항) | `NONE` | `AFF.C.any.left_back` |
+| 어느 상태 | 듣던 방 r 을 떠났다 — 그 방이 발행 방이면 발행도 함께 풀린다(RULE-AFF-PROC 끝 항) | `NONE` | `AFF.C.any.left_from` |
 | 어느 상태 | 듣던 방 r 을 떠났다 — 그 방이 발행 방이면 발행도 함께 풀린다(RULE-AFF-PROC 끝 항) | `NONE` | `AFF.C.any.left_join` |
 | 어느 상태 | 듣던 방 r 을 떠났다 — 그 방이 발행 방이면 발행도 함께 풀린다(RULE-AFF-PROC 끝 항) | `NONE` | `AFF.C.any.left_want` |
 | 어느 상태 | 듣던 방 r 을 떠났다 — 그 방이 발행 방이면 발행도 함께 풀린다(RULE-AFF-PROC 끝 항) | — | `AFF.C.any.left_other` |
+| 어느 상태 | 재구축이 방 r 을 내렸다 — 다시 들어간다(RULE-LINK-RECOVERY-REBUILD · RULE-SES-REBUILD) · 떠남과 달리 발행 방은 다시 들어간 뒤 되찾는다 | `NONE` | `AFF.C.any.down` |
+| 어느 상태 | 재구축이 방 r 을 내렸다 — 다시 들어간다(RULE-LINK-RECOVERY-REBUILD · RULE-SES-REBUILD) · 떠남과 달리 발행 방은 다시 들어간 뒤 되찾는다 | `NONE` | `AFF.C.any.down_join` |
+| 어느 상태 | 재구축이 방 r 을 내렸다 — 다시 들어간다(RULE-LINK-RECOVERY-REBUILD · RULE-SES-REBUILD) · 떠남과 달리 발행 방은 다시 들어간 뒤 되찾는다 | `NONE` | `AFF.C.any.down_want` |
+| 어느 상태 | 재구축이 방 r 을 내렸다 — 다시 들어간다(RULE-LINK-RECOVERY-REBUILD · RULE-SES-REBUILD) · 떠남과 달리 발행 방은 다시 들어간 뒤 되찾는다 | — | `AFF.C.any.down_other` |
+| 어느 상태 | 방 r 입장이 실패했다(응답이 실패 · 응답의 pc_mode 불일치로 되돌림) — select:true 입장이 건 기다림이면 푼다(소속 요청의 실패 응답이 AFF.C.any.fail 로 푸는 것과 같은 꼴) | `NONE` | `AFF.C.any.join_failed_back` |
 | 어느 상태 | 방 r 입장이 실패했다(응답이 실패 · 응답의 pc_mode 불일치로 되돌림) — select:true 입장이 건 기다림이면 푼다(소속 요청의 실패 응답이 AFF.C.any.fail 로 푸는 것과 같은 꼴) | `NONE` | `AFF.C.any.join_failed` |
 | 어느 상태 | 방 r 입장이 실패했다(응답이 실패 · 응답의 pc_mode 불일치로 되돌림) — select:true 입장이 건 기다림이면 푼다(소속 요청의 실패 응답이 AFF.C.any.fail 로 푸는 것과 같은 꼴) | — | `AFF.C.any.join_failed_other` |
 
@@ -284,22 +302,26 @@ H264 방에서 발행한 트랙을 `pub_select` 로 VP8 방에 끌고 가는 구
 
 | 라벨 | 언제 | 하는 일 | 원문 · 근거 |
 |---|---|---|---|
-| <a id="AFF.C.NOPUB.select"></a>`AFF.C.NOPUB.select` | 받는 상태 wait == 'NONE' && pub != r · pub == 'NONE' | wait ← 'SELECT'; want ← r · 보낸다 AFFILIATION.req {pub_select: r} | §5-2-2 1 §5-2-2 3 — 말하려는 방에 먼저 입장해 있어야 한다(RULE-AFF-PROC) — 미리 고치지 않는다 |
-| <a id="AFF.C.NOPUB.res_pub"></a>`AFF.C.NOPUB.res_pub` | p != 'NONE' && pub == 'NONE' | pub ← p; wait ← 'NONE'; want ← 'NONE' · 효과 floor.pub_select → FLR.C.any.pub_select · 효과 app.affiliation | §5-1-2 §5-2-2 3 §5-2-2 5 |
-| <a id="AFF.C.NOPUB.join_select"></a>`AFF.C.NOPUB.join_select` | 받는 상태 wait == 'NONE' && pub == 'NONE' · 나머지 | wait ← 'JOIN'; want ← r | §4-2-1 2 §5-2-2 3 — 발행 방이 없을 때만 select:true 로 들어간다 — 요청은 ROOM 이 보낸다(ROOM_JOIN) · 여기는 기다림만 건다(20261023 TLC: 응답 전에 다른 서버 방을 고르면 두 서버가 발행 방을 갖던 것) |
+| <a id="AFF.C.NOPUB.select"></a>`AFF.C.NOPUB.select` | 받는 상태 wait == 'NONE' && pub != r · pub == 'NONE' | wait ← 'SELECT'; want ← r; back ← 'NONE' · 보낸다 AFFILIATION.req {pub_select: r} | §5-2-2 1 §5-2-2 3 — 말하려는 방에 먼저 입장해 있어야 한다(RULE-AFF-PROC) — 미리 고치지 않는다 · 앱이 새로 고르면 재구축 뒤 되찾을 방(back)은 버린다(앱의 마지막 의지가 이긴다) |
+| <a id="AFF.C.NOPUB.res_pub"></a>`AFF.C.NOPUB.res_pub` | p != 'NONE' && pub == 'NONE' | pub ← p; wait ← 'NONE'; want ← 'NONE'; from ← 'NONE' · 효과 floor.pub_select → FLR.C.any.pub_select · 효과 pub.move_in → PUB.C.any.move_in · PUB.C.any.move_in_off · PUB.C.any.move_in_other · 효과 app.affiliation | §5-1-2 §5-2-2 3 §5-2-2 5 §5-1-2 — 발행 방이 섰다 · ★서버를 건너며 내린 트랙이 있으면 이 서버에서 다시 켠다(pub.move_in — PUBLISH_TRACKS{add} · RULE-AFF-SWITCH-TRACKS ② · 되돌림 ③ 도 같다 · 내린 트랙이 없으면 받는 쪽이 할 일이 없다) |
+| <a id="AFF.C.NOPUB.join_select"></a>`AFF.C.NOPUB.join_select` | 받는 상태 wait == 'NONE' && pub == 'NONE' · 나머지 | wait ← 'JOIN'; want ← r; back ← 'NONE' | §4-2-1 2 §5-2-2 3 — 발행 방이 없을 때만 select:true 로 들어간다 — 요청은 ROOM 이 보낸다(ROOM_JOIN) · 여기는 기다림만 건다(20261023 TLC: 응답 전에 다른 서버 방을 고르면 두 서버가 발행 방을 갖던 것) |
 
 <a id="AFF.C.PUB"></a>
 #### 5-2-2. 클라 · `PUB`
 
 | 라벨 | 언제 | 하는 일 | 원문 · 근거 |
 |---|---|---|---|
-| <a id="AFF.C.PUB.switch_same"></a>`AFF.C.PUB.switch_same` | 받는 상태 wait == 'NONE' && pub != r · same | wait ← 'SELECT'; want ← r · 보낸다 AFFILIATION.req {pub_deselect: pub, pub_select: r} | §5-2-2 1 §5-2-2 3 §5-1-2 — 같은 서버 안 — 요청 하나(해제 후 선택 · RULE-AFF-PROC 적용 순서 · RULE-AFF-SWITCH-TRACKS 같은 서버 행) |
-| <a id="AFF.C.PUB.switch_cross"></a>`AFF.C.PUB.switch_cross` | 받는 상태 wait == 'NONE' && pub != r · 나머지 | wait ← 'DESELECT'; want ← r · 보낸다 AFFILIATION.req {pub_deselect: pub} | §5-2-2 2 §5-1-2 — 서버를 건넌다 — ★옛 서버에 해제를 먼저 보내고 응답을 기다린다(새 서버 선택은 그 뒤 · RULE-AFF-SWITCH-TRACKS 순서 계약 ② → ③ · 두 서버가 동시에 발행 방을 갖지 않는다) |
-| <a id="AFF.C.PUB.deselect"></a>`AFF.C.PUB.deselect` | 받는 상태 wait == 'NONE' && pub != 'NONE' · 나머지 | wait ← 'DESELECT'; want ← 'NONE' · 보낸다 AFFILIATION.req {pub_deselect: pub} | §5-2-2 1 §5-2-2 3 |
+| <a id="AFF.C.PUB.switch_same"></a>`AFF.C.PUB.switch_same` | 받는 상태 wait == 'NONE' && pub != r · same | wait ← 'SELECT'; want ← r; back ← 'NONE' · 보낸다 AFFILIATION.req {pub_deselect: pub, pub_select: r} | §5-2-2 1 §5-2-2 3 §5-1-2 — 같은 서버 안 — 요청 하나(해제 후 선택 · RULE-AFF-PROC 적용 순서 · RULE-AFF-SWITCH-TRACKS 같은 서버 행) |
+| <a id="AFF.C.PUB.switch_cross"></a>`AFF.C.PUB.switch_cross` | 받는 상태 wait == 'NONE' && pub != r · 나머지 | wait ← 'DESELECT'; want ← r; from ← pub · 보낸다 AFFILIATION.req {pub_deselect: pub} · 효과 pub.move_out → PUB.C.any.move_out_other · PUB.C.SENDING.move_out · PUB.C.REGISTERED.move_out · PUB.C.STAGED.move_out_sent · PUB.C.STAGED.move_out_nego · PUB.C.IDLE.move_out | §5-2-2 2 §5-1-2 §5-1-2 — 서버를 건넌다 — ★옛 서버에 해제를 먼저 보내고 응답을 기다린다(새 서버 선택은 그 뒤 · 두 서버가 동시에 발행 방을 갖지 않는다) · ★옛 서버의 내 발행 트랙을 내린다(pub.move_out — PUBLISH_TRACKS{remove} · RULE-AFF-SWITCH-TRACKS 서버 건너 행 ①) · 되돌아갈 옛 방을 기억한다(from — ③) |
+| <a id="AFF.C.PUB.deselect"></a>`AFF.C.PUB.deselect` | 받는 상태 wait == 'NONE' && pub != 'NONE' · 나머지 | wait ← 'DESELECT'; want ← 'NONE'; back ← 'NONE' · 보낸다 AFFILIATION.req {pub_deselect: pub} | §5-2-2 1 §5-2-2 3 |
+| <a id="AFF.C.PUB.switch_back"></a>`AFF.C.PUB.switch_back` | !ok && wait == 'SELECT' && from != 'NONE' | want ← from; from ← 'NONE' · 보낸다 AFFILIATION.req {pub_select: from} · 효과 app.aff_failed | §5-1-2 §5-1-2 — ★서버를 건너는 전환 ② 가 실패했다(새 서버가 선택을 거절) — 옛 방으로 되돌린다(RULE-AFF-SWITCH-TRACKS ③ · 실패한 채 두면 발행 축이 어디에도 없다) · 옛 서버에 다시 선택을 보낸다 · 서면 내린 트랙을 옛 서버에서 다시 켠다(res_pub 의 pub.move_in) |
+| <a id="AFF.C.PUB.switch_out_fail"></a>`AFF.C.PUB.switch_out_fail` | !ok && wait == 'DESELECT' && want != 'NONE' | wait ← 'NONE'; want ← 'NONE'; from ← 'NONE' · 효과 pub.move_in → PUB.C.any.move_in · PUB.C.any.move_in_off · PUB.C.any.move_in_other · 효과 app.aff_failed | §5-1-2 §5-1-2 — 서버를 건너는 전환 ① 에서 옛 서버가 해제를 거절했다 — 발행 방은 그대로다 · 내린 트랙을 옛 서버에서 다시 켠다(pub.move_in) |
+| <a id="AFF.C.PUB.res_gone_back"></a>`AFF.C.PUB.res_gone_back` | p != 'NONE' && !pIn && from != 'NONE' | wait ← 'SELECT'; want ← from; from ← 'NONE' · 보낸다 AFFILIATION.req {pub_select: from} · 효과 app.aff_failed | §5-1-2 §5-1-2 — 서버를 건너 옮겨 가던 새 방을 응답 전에 떠났다 — 서버는 떠남에 그 발행 방을 풀었다(RULE-AFF-PROC 끝 항) · 옛 방으로 되돌린다(③) |
 | <a id="AFF.C.PUB.switch_in"></a>`AFF.C.PUB.switch_in` | wait == 'DESELECT' && want != 'NONE' && !onWant && p == 'NONE' | pub ← 'NONE'; wait ← 'SELECT' · 보낸다 AFFILIATION.req {pub_select: want} · 효과 floor.pub_away → FLR.C.any.pub_away · 효과 app.affiliation | §5-2-2 2 §5-1-2 — 서버를 건너는 전환 — 옛 서버가 해제를 확인했다 · 이제 새 서버에 선택을 보낸다(그 사이 발행 방은 없다) |
-| <a id="AFF.C.PUB.switch_stuck"></a>`AFF.C.PUB.switch_stuck` | wait == 'DESELECT' && want != 'NONE' && !onWant | wait ← 'NONE'; want ← 'NONE' · 효과 app.aff_failed | §5-1-2 §5-2-2 3 — 옛 서버가 해제를 건너뛰었다(응답의 pub_room 이 그대로 — 건너뛴 항목은 안 바뀐 것 · RULE-AFF-PROC) — 새 서버에 선택을 보내지 않는다(두 서버가 동시에 갖게 된다) · 전환을 멈춘다 |
-| <a id="AFF.C.PUB.res_moved"></a>`AFF.C.PUB.res_moved` | p != 'NONE' && pub != p | pub ← p; wait ← 'NONE'; want ← 'NONE' · 효과 floor.pub_away → FLR.C.any.pub_away · 효과 floor.pub_select → FLR.C.any.pub_select · 효과 app.affiliation | §5-1-2 §5-2-2 3 §5-2-2 5 — 같은 서버 안 전환 — 옛 방은 내려가고(그 방 RELEASE · 대기 철회와 같다 · RULE-AFF-PROC) 새 방이 발행 방이다 |
-| <a id="AFF.C.PUB.res_away"></a>`AFF.C.PUB.res_away` | p == 'NONE' && onPub && pub != 'NONE' | pub ← 'NONE'; wait ← 'NONE'; want ← 'NONE' · 효과 floor.pub_away → FLR.C.any.pub_away · 효과 app.affiliation | §5-1-2 §5-2-2 3 §5-2-2 5 — pub_deselect — 그 서버의 발행 방이 없다 · 그 방 RELEASE · 대기 철회와 같다 |
+| <a id="AFF.C.PUB.switch_stuck"></a>`AFF.C.PUB.switch_stuck` | wait == 'DESELECT' && want != 'NONE' && !onWant | wait ← 'NONE'; want ← 'NONE'; from ← 'NONE' · 효과 pub.move_in → PUB.C.any.move_in · PUB.C.any.move_in_off · PUB.C.any.move_in_other · 효과 app.aff_failed | §5-1-2 §5-2-2 3 — 옛 서버가 해제를 건너뛰었다(응답의 pub_room 이 그대로 — 건너뛴 항목은 안 바뀐 것 · RULE-AFF-PROC) — 새 서버에 선택을 보내지 않는다(두 서버가 동시에 갖게 된다) · 전환을 멈춘다 · 내린 트랙을 옛 서버에서 다시 켠다(pub.move_in) |
+| <a id="AFF.C.PUB.switch_in_skipped"></a>`AFF.C.PUB.switch_in_skipped` | wait == 'SELECT' && from != 'NONE' && p != want | want ← from; from ← 'NONE' · 보낸다 AFFILIATION.req {pub_select: from} · 효과 app.aff_failed | §5-1-2 §5-1-2 — 새 서버가 선택을 건너뛰었다(응답의 pub_room 이 옮겨 갈 방이 아니다 — RULE-AFF-PROC) — ② 실패와 같다 · 옛 방으로 되돌린다(③) |
+| <a id="AFF.C.PUB.res_moved"></a>`AFF.C.PUB.res_moved` | p != 'NONE' && pub != p | pub ← p; wait ← 'NONE'; want ← 'NONE'; from ← 'NONE' · 효과 floor.pub_away → FLR.C.any.pub_away · 효과 floor.pub_select → FLR.C.any.pub_select · 효과 app.affiliation | §5-1-2 §5-2-2 3 §5-2-2 5 — 같은 서버 안 전환 — 옛 방은 내려가고(그 방 RELEASE · 대기 철회와 같다 · RULE-AFF-PROC) 새 방이 발행 방이다 |
+| <a id="AFF.C.PUB.res_away"></a>`AFF.C.PUB.res_away` | p == 'NONE' && onPub && pub != 'NONE' | pub ← 'NONE'; wait ← 'NONE'; want ← 'NONE'; from ← 'NONE' · 효과 floor.pub_away → FLR.C.any.pub_away · 효과 app.affiliation | §5-1-2 §5-2-2 3 §5-2-2 5 — pub_deselect — 그 서버의 발행 방이 없다 · 그 방 RELEASE · 대기 철회와 같다 |
 
 <a id="RULE-AFF-CHANGE-PROC"></a>**RULE-AFF-CHANGE-PROC** · 규칙 — 소속을 바꾸려 한다 (`JOINED`)
 
@@ -313,9 +335,9 @@ H264 방에서 발행한 트랙을 `pub_select` 로 VP8 방에 끌고 가는 구
 
 | 항목 | 경우 |
 |---|---|
-| 1 | [`AFF.C.NOPUB.select`](#AFF.C.NOPUB.select) · [`AFF.C.PUB.switch_same`](#AFF.C.PUB.switch_same) · [`AFF.C.PUB.deselect`](#AFF.C.PUB.deselect) |
+| 1 | [`AFF.C.NOPUB.select`](#AFF.C.NOPUB.select) · [`AFF.C.PUB.switch_same`](#AFF.C.PUB.switch_same) · [`AFF.C.PUB.deselect`](#AFF.C.PUB.deselect) · [`AFF.C.any.implicit_back`](#AFF.C.any.implicit_back) |
 | 2 | [`AFF.C.PUB.switch_cross`](#AFF.C.PUB.switch_cross) · [`AFF.C.PUB.switch_in`](#AFF.C.PUB.switch_in) |
-| 3 | [`AFF.C.NOPUB.select`](#AFF.C.NOPUB.select) · [`AFF.C.PUB.switch_same`](#AFF.C.PUB.switch_same) · [`AFF.C.PUB.deselect`](#AFF.C.PUB.deselect) · [`AFF.C.any.fail`](#AFF.C.any.fail) · [`AFF.C.PUB.switch_stuck`](#AFF.C.PUB.switch_stuck) · [`AFF.C.NOPUB.res_pub`](#AFF.C.NOPUB.res_pub) · [`AFF.C.PUB.res_moved`](#AFF.C.PUB.res_moved) · [`AFF.C.PUB.res_away`](#AFF.C.PUB.res_away) · [`AFF.C.NOPUB.join_select`](#AFF.C.NOPUB.join_select) · [`AFF.C.any.implicit_busy`](#AFF.C.any.implicit_busy) · [`AFF.C.any.join_failed`](#AFF.C.any.join_failed) |
+| 3 | [`AFF.C.NOPUB.select`](#AFF.C.NOPUB.select) · [`AFF.C.PUB.switch_same`](#AFF.C.PUB.switch_same) · [`AFF.C.PUB.deselect`](#AFF.C.PUB.deselect) · [`AFF.C.any.fail`](#AFF.C.any.fail) · [`AFF.C.any.res_gone`](#AFF.C.any.res_gone) · [`AFF.C.PUB.switch_stuck`](#AFF.C.PUB.switch_stuck) · [`AFF.C.NOPUB.res_pub`](#AFF.C.NOPUB.res_pub) · [`AFF.C.PUB.res_moved`](#AFF.C.PUB.res_moved) · [`AFF.C.PUB.res_away`](#AFF.C.PUB.res_away) · [`AFF.C.NOPUB.join_select`](#AFF.C.NOPUB.join_select) · [`AFF.C.any.implicit_back_busy`](#AFF.C.any.implicit_back_busy) · [`AFF.C.any.implicit_busy`](#AFF.C.any.implicit_busy) · [`AFF.C.any.join_failed`](#AFF.C.any.join_failed) |
 | 4 | [`AFF.C.any.res_same`](#AFF.C.any.res_same) |
 | 5 | [`AFF.C.NOPUB.res_pub`](#AFF.C.NOPUB.res_pub) · [`AFF.C.PUB.res_moved`](#AFF.C.PUB.res_moved) · [`AFF.C.PUB.res_away`](#AFF.C.PUB.res_away) · [`AFF.C.any.res_same`](#AFF.C.any.res_same) · [`AFF.C.any.implicit_pub`](#AFF.C.any.implicit_pub) |
 
@@ -324,18 +346,30 @@ H264 방에서 발행한 트랙을 `pub_select` 로 VP8 방에 끌고 가는 구
 
 | 라벨 | 언제 | 하는 일 | 원문 · 근거 |
 |---|---|---|---|
-| <a id="AFF.C.any.fail"></a>`AFF.C.any.fail` | !ok | wait ← 'NONE'; want ← 'NONE' · 효과 app.aff_failed | §5-1-2 §5-2-2 3 — 1006 미디어 코덱 불일치 · 2006 새 방 권한(내 트랙 하나라도 — 전환 전체 실패) · 2001 · 5003(RULE-AFF-FAIL) — 상태는 고치지 않는다 · 전환도 멈춘다 |
-| <a id="AFF.C.any.res_same"></a>`AFF.C.any.res_same` | 나머지 | wait ← 'NONE'; want ← 'NONE' | §5-1-2 §5-2-2 4 §5-2-2 5 — 발행 방이 그대로다 — 다른 서버의 응답은 그 서버가 아는 만큼이다(전체로 덮어쓰지 않는다 · RULE-AFF-PARTIAL) · 건너뛴 항목은 안 바뀐 것(RULE-AFF-PROC) |
+| <a id="AFF.C.any.fail"></a>`AFF.C.any.fail` | !ok | wait ← 'NONE'; want ← 'NONE'; from ← 'NONE' · 효과 app.aff_failed | §5-1-2 §5-2-2 3 — 1006 미디어 코덱 불일치 · 2006 새 방 권한(내 트랙 하나라도 — 전환 전체 실패) · 2001 · 5003(RULE-AFF-FAIL) — 상태는 고치지 않는다 · 전환도 멈춘다 · ★되돌림(switch_back)마저 실패하면 서버를 건너며 내린 트랙은 발행 방이 다시 설 때(res_pub) 그 서버에서 켜진다 |
+| <a id="AFF.C.any.res_gone"></a>`AFF.C.any.res_gone` | p != 'NONE' && !pIn | pub ← 'NONE'; wait ← 'NONE'; want ← 'NONE' · 효과 floor.pub_away → FLR.C.any.pub_away · 효과 app.affiliation · 효과 app.aff_failed | §5-1-2 §5-2-2 3 — 응답이 말한 발행 방을 응답 전에 떠났다 — 서버는 떠남에 그 발행을 풀었다(RULE-AFF-PROC 끝 항 · 응답이 떠남보다 먼저 처리됐다) · 발행 방은 없다(없으면 떠난 방에 소속이 굳고 다음 전환마다 그 방 해제가 실패한다) |
+| <a id="AFF.C.any.res_same"></a>`AFF.C.any.res_same` | 나머지 | wait ← 'NONE'; want ← 'NONE'; from ← 'NONE' | §5-1-2 §5-2-2 4 §5-2-2 5 — 발행 방이 그대로다 — 다른 서버의 응답은 그 서버가 아는 만큼이다(전체로 덮어쓰지 않는다 · RULE-AFF-PARTIAL) · 건너뛴 항목은 안 바뀐 것(RULE-AFF-PROC) |
+| <a id="AFF.C.any.implicit_back_held"></a>`AFF.C.any.implicit_back_held` | 받는 효과 ROOM aff.implicit · back != 'NONE' && back == r && p == r | pub ← p; back ← 'NONE' · 효과 floor.pub_select → FLR.C.any.pub_select | §9-2-1 §5-1-2 — 재구축으로 내린 발행 방에 다시 들어갔고 그 서버가 이미 이 방을 발행 방으로 안다 — 되찾았다(앱에는 내린 적을 알리지 않았다) |
+| <a id="AFF.C.any.implicit_back"></a>`AFF.C.any.implicit_back` | 받는 효과 ROOM aff.implicit · back != 'NONE' && back == r && wait == 'NONE' | back ← 'NONE'; wait ← 'SELECT'; want ← r · 보낸다 AFFILIATION.req {pub_select: r} | §9-2-1 §5-2-2 1 — ★재구축으로 내린 발행 방에 다시 들어갔다 — 다시 들어간 뒤 pub_select(RULE-LINK-RECOVERY-REBUILD · 없으면 재구축 뒤 발언 방이 사라진다) |
+| <a id="AFF.C.any.implicit_back_busy"></a>`AFF.C.any.implicit_back_busy` | 받는 효과 ROOM aff.implicit · back != 'NONE' && back == r | back ← 'NONE' · 효과 app.affiliation | §9-2-1 §5-2-2 3 — 되찾으려는데 다른 전환 요청이 떠 있다 — 요청은 한 번에 하나 · 그 응답이 정한다 · 발언 방이 비었다고 앱에 알린다 |
 | <a id="AFF.C.any.implicit_joined"></a>`AFF.C.any.implicit_joined` | 받는 효과 ROOM aff.implicit · sel && wait == 'JOIN' && want == r && p == r | pub ← p; wait ← 'NONE'; want ← 'NONE' · 효과 floor.pub_select → FLR.C.any.pub_select · 효과 app.affiliation | §4-2-1 2 §5-1-2 — select:true 입장이 발행 방을 이 방으로 정했다 — 기다림을 푼다 |
 | <a id="AFF.C.any.implicit_join_unselected"></a>`AFF.C.any.implicit_join_unselected` | 받는 효과 ROOM aff.implicit · sel && wait == 'JOIN' && want == r | wait ← 'NONE'; want ← 'NONE' · 효과 app.aff_failed | §4-2-1 2 §5-1-2 — 입장은 됐는데 그 서버가 이 방을 발행 방으로 두지 않았다 — 기다림을 풀고 실패로 알린다(입장은 그대로) |
 | <a id="AFF.C.any.implicit_busy"></a>`AFF.C.any.implicit_busy` | 받는 효과 ROOM aff.implicit · wait != 'NONE' | — | §5-1-2 §5-2-2 3 — 다른 전환 요청이 떠 있다 — 그 응답이 정한다(요청은 한 번에 하나 · 응답이 온 것만 반영) |
+| <a id="AFF.C.any.implicit_gone"></a>`AFF.C.any.implicit_gone` | 받는 효과 ROOM aff.implicit · p != 'NONE' && !pIn | — | §5-1-2 §5-1-2 — 입장 응답이 말한 발행 방을 그 사이 떠났다 — 서버는 떠남에 그 발행을 풀었다(RULE-AFF-PROC 끝 항 · 응답이 떠남보다 먼저 지어졌다) · 반영하지 않는다(없으면 떠난 방이 발행 방으로 되살아나 서버와 어긋난다 — 검증 판 AH3 반례 · AFF.C.any.res_gone 과 같은 꼴) |
 | <a id="AFF.C.any.implicit_pub"></a>`AFF.C.any.implicit_pub` | 받는 효과 ROOM aff.implicit · p != 'NONE' && pub != p | pub ← p · 효과 floor.pub_away → FLR.C.any.pub_away · 효과 floor.pub_select → FLR.C.any.pub_select · 효과 app.affiliation | §5-1-2 §5-2-2 5 — 입장 응답이 그 서버의 발행 방을 이 값으로 말한다(같은 서버의 옛 발행 방은 서버가 내렸다) |
 | <a id="AFF.C.any.implicit_away"></a>`AFF.C.any.implicit_away` | 받는 효과 ROOM aff.implicit · p == 'NONE' && onPub && pub != 'NONE' | pub ← 'NONE' · 효과 floor.pub_away → FLR.C.any.pub_away · 효과 app.affiliation | §5-1-2 §5-1-1 — 그 서버가 내 발행 방을 없다고 말한다 — 그 서버의 방이었을 때만 믿는다(다른 서버의 발행 방은 그 서버가 모른다 · 전체로 덮어쓰지 않는다) |
 | <a id="AFF.C.any.implicit_same"></a>`AFF.C.any.implicit_same` | 받는 효과 ROOM aff.implicit · 나머지 | — | §5-1-2 §5-1-1 — 발행 방이 그대로다 — select:false 입장 · 다른 서버의 응답 |
-| <a id="AFF.C.any.left"></a>`AFF.C.any.left` | 받는 효과 ROOM aff.leave · pub == r | pub ← 'NONE' | §5-1-2 — 그 방이 발행 방이었으면 pub_room 이 null 이 된다 — 발언권은 ROOM 이 floor.leave 로 직접 알린다 |
+| <a id="AFF.C.any.left"></a>`AFF.C.any.left` | 받는 효과 ROOM aff.leave · pub != 'NONE' && pub == r | pub ← 'NONE'; from ← from == r ? 'NONE' : from · 효과 app.affiliation | §5-1-2 — 그 방이 발행 방이었으면 pub_room 이 null 이 된다 — 발언권은 ROOM 이 floor.leave 로 직접 알린다 · ★소속이 바뀌었으니 앱에 알린다(app.affiliation — 없으면 앱이 발언 방이 빈 것을 모른다) · 서버를 건너는 전환의 옛 방이기도 하면 되돌아갈 곳도 지운다(from — 검증 판 AH3 반례) |
+| <a id="AFF.C.any.left_back"></a>`AFF.C.any.left_back` | 받는 효과 ROOM aff.leave · back != 'NONE' && back == r | back ← 'NONE' · 효과 app.affiliation | §5-1-2 §9-2-1 — 재구축으로 내려 되찾으려던 발행 방을 떠났다(다시 들어가기 전 퇴장 · 세션 끝) — 되찾지 않는다 · 발언 방이 비었다고 앱에 알린다 |
+| <a id="AFF.C.any.left_from"></a>`AFF.C.any.left_from` | 받는 효과 ROOM aff.leave · from != 'NONE' && from == r | from ← 'NONE' | §5-1-2 §5-1-2 — 서버를 건너는 전환의 옛 방을 떠났다 — 되돌아갈 곳이 없다(③ 을 하지 않는다) |
 | <a id="AFF.C.any.left_join"></a>`AFF.C.any.left_join` | 받는 효과 ROOM aff.leave · wait == 'JOIN' && want == r | wait ← 'NONE'; want ← 'NONE' · 효과 app.aff_failed | §4-2-1 2 §5-1-2 — select:true 로 들어가던 방이 응답 전에 내려갔다 — 그 입장의 응답은 오지 않는다(기다림을 풀 소속 응답도 없다) · 기다림을 풀고 실패로 알린다 |
-| <a id="AFF.C.any.left_want"></a>`AFF.C.any.left_want` | 받는 효과 ROOM aff.leave · want == r | want ← 'NONE' | §5-1-2 — 옮겨 가려던 방을 떠났다 — 그 전환은 멈춘다(입장하지 않은 방으로는 말할 수 없다 · RULE-AFF-PROC) |
+| <a id="AFF.C.any.left_want"></a>`AFF.C.any.left_want` | 받는 효과 ROOM aff.leave · want != 'NONE' && want == r | want ← 'NONE' | §5-1-2 — 옮겨 가려던 방을 떠났다 — 그 전환은 멈춘다(입장하지 않은 방으로는 말할 수 없다 · RULE-AFF-PROC) |
 | <a id="AFF.C.any.left_other"></a>`AFF.C.any.left_other` | 받는 효과 ROOM aff.leave · 나머지 | — | §5-1-2 — 듣기만 하던 방 — 소속의 발행 방은 그대로 |
+| <a id="AFF.C.any.down"></a>`AFF.C.any.down` | 받는 효과 ROOM aff.down · pub != 'NONE' && pub == r | pub ← 'NONE'; back ← r | §9-2-1 §5-1-2 — ★발행 방이 그 서버였다 — 서버는 옛 Peer 와 함께 발행 방을 잃는다 · 다시 들어간 뒤 pub_select 로 되찾는다(back · 앱에는 알리지 않는다 — 재구축 중임은 방의 rebuilding 이 알린다) |
+| <a id="AFF.C.any.down_join"></a>`AFF.C.any.down_join` | 받는 효과 ROOM aff.down · wait == 'JOIN' && want == r | wait ← 'NONE'; want ← 'NONE'; back ← r | §4-2-1 2 §9-2-1 — select:true 로 들어가던 방이 재구축으로 내려갔다 — 그 응답은 오지 않는다 · 다시 들어간 뒤 그 방을 고른다(back) |
+| <a id="AFF.C.any.down_want"></a>`AFF.C.any.down_want` | 받는 효과 ROOM aff.down · want != 'NONE' && want == r | want ← 'NONE' | §5-1-2 — 옮겨 가려던 방이 내려갔다 — 그 전환의 응답이 정한다(떠난 방이면 res_gone) |
+| <a id="AFF.C.any.down_other"></a>`AFF.C.any.down_other` | 받는 효과 ROOM aff.down · 나머지 | — | §5-1-2 — 듣기만 하던 방 — 소속은 그대로 |
+| <a id="AFF.C.any.join_failed_back"></a>`AFF.C.any.join_failed_back` | 받는 효과 ROOM aff.join_failed · back != 'NONE' && back == r | back ← 'NONE' · 효과 app.affiliation | §9-2-1 §4-2-1 2 — 되찾으려던 발행 방에 다시 들어가지 못했다 — 발언 방이 비었다고 앱에 알린다 |
 | <a id="AFF.C.any.join_failed"></a>`AFF.C.any.join_failed` | 받는 효과 ROOM aff.join_failed · wait == 'JOIN' && want == r | wait ← 'NONE'; want ← 'NONE' · 효과 app.aff_failed | §4-2-1 2 §5-2-2 3 — 발행 방은 그대로(서버가 입장을 받지 않았으니 곁들인 select 도 없다) |
 | <a id="AFF.C.any.join_failed_other"></a>`AFF.C.any.join_failed_other` | 받는 효과 ROOM aff.join_failed · 나머지 | — | §4-2-1 2 — select:false 입장 — 소속은 그대로 |
 
@@ -371,7 +405,7 @@ H264 방에서 발행한 트랙을 `pub_select` 로 VP8 방에 끌고 가는 구
 
 <a id="R-AFF-FRESHNESS-BY-TRANSPORT"></a>**R-AFF-FRESHNESS-BY-TRANSPORT** · 근거
 
-★**신선도는 전송 계층이 지킨다** — §2-2-1 가 윈도우 기본 1 이고 *"서버는 받은 순서대로 처리한다"* 를
+★**신선도는 전송 계층이 지킨다** — §2-3-1 가 윈도우 기본 1 이고 *"서버는 받은 순서대로 처리한다"* 를
 못박았으며 `pub_room` 은 ★**출처가 나 하나**다. 경주가 성립할 두 경로가 없다.
 
 <a id="R-AFF-FORCED-SYMPTOM"></a>**R-AFF-FORCED-SYMPTOM** · 근거

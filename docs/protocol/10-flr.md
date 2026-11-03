@@ -66,7 +66,7 @@
 | `2` | `CAUSE` | u8 | Reject Cause | 8.2.3.4 | `DENY` · `REVOKE` | 원문은 16bit + 구문 — u8 + 0x1B 로 가른다(DEV-FLR-CAUSE-U8) |
 | `3` | `QINFO` | pair(position u8 · priority u8) | Queue Info | 8.2.3.5 | `QINFO` | 순번 1부터 · 254 큐에 없음 · 255 큐에 있으나 순번 미상 · byte1 = 허가된 우선순위(원문 8.2.3.5) |
 | `4` | `SPEAKER` | user | Granted Party's Identity | 8.2.3.6 | `TAKEN` |  |
-| `8` | `SEQ` | u16be | Message Sequence Number | 8.2.3.10 | `GRANTED` · `TAKEN` · `IDLE` · `ACK`? | 보낼 때마다 1 증가 · 0~65535 감김 |
+| `8` | `SEQ` | u16be | Message Sequence Number | 8.2.3.10 | `TAKEN` · `IDLE` | 보낼 때마다 1 증가 · 0~65535 감김 |
 | `12` | `ACKTYPE` | u8spare | Message Type | 8.2.3.14 | `ACK` | 무엇에 대한 ACK 인가(상대 Type 값) · 값 + 예비(Table 8.2.3.14-1) |
 | `26` | `PREV` | user | 직전에 말한 사람 | DEV-FLR-TLV-EXT | `IDLE`? |  |
 | `27` | `REASON` | utf8 | 사유 설명 | DEV-FLR-TLV-EXT | `DENY`? · `REVOKE`? |  |
@@ -77,7 +77,7 @@
 | 종류 | 원문 subtype | 이름 | 원문 | 방향 | 원문 `A` | ★우리 `A` | 칸 | 뜻 |
 |---|---|---|---|---|---|---|---|---|
 | `0` | `00000` | `REQUEST` · `FLOOR_REQUEST` | Floor Request 8.2.4 | C→S | 못 쓴다 | — | priority(PRIORITY?) · room(ROOM — gate) | 0 — 말하게 해달라. 우선순위는 보통(0)과 다를 때만 싣는다(원문 6.2.4 · 8.2.3.2) |
-| `1` | `x0001` | `GRANTED` · `FLOOR_GRANTED` | Floor Granted 8.2.5 | S→C | 쓸 수 있다 | ★세운다 | priority(PRIORITY) · duration(DURATION) · seq(SEQ — seq) · room(ROOM — gate) | 1 — 말해라 |
+| `1` | `x0001` | `GRANTED` · `FLOOR_GRANTED` | Floor Granted 8.2.5 | S→C | 쓸 수 있다 | ★세운다 | priority(PRIORITY) · duration(DURATION) · room(ROOM — gate) | 1 — 말해라 |
 | `2` | `x0010` | `TAKEN` · `FLOOR_TAKEN` | Floor Taken 8.2.9 | S→C | 쓸 수 있다 | ★세운다 | speaker(SPEAKER) · seq(SEQ — seq) · room(ROOM — gate) | 2 — 누가 말하고 있다 |
 | `3` | `x0011` | `DENY` · `FLOOR_DENY` | Floor Deny 8.2.6 | S→C | 쓸 수 있다 | ★세운다 | cause(CAUSE) · reason(REASON?) · room(ROOM — gate) | 3 — 안 된다 |
 | `4` | `x0100` | `RELEASE` · `FLOOR_RELEASE` | Floor Release 8.2.7 | C→S | 쓸 수 있다 | 안 세운다 | room(ROOM — gate) | 4 — 다 말했다 |
@@ -85,7 +85,7 @@
 | `6` | `00110` | `REVOKE` · `FLOOR_REVOKE` | Floor Revoke 8.2.10 | S→C | 못 쓴다 | — | cause(CAUSE) · reason(REASON?) · room(ROOM — gate) | 6 — 그만 말해라(원문이 A 비트를 못 쓰게 한다) |
 | `8` | `01000` | `QPOS_REQ` · `FLOOR_QUEUE_POS_REQUEST` | Floor Queue Position Request 8.2.11 | C→S | 못 쓴다 | — | room(ROOM — gate) | 8 — 내 차례는 몇 번째인가 |
 | `9` | `x1001` | `QINFO` · `FLOOR_QUEUE_INFO` | Floor Queue Position Info 8.2.12 | S→C | 쓸 수 있다 | 안 세운다 | info(QINFO) · room(ROOM — gate) | 9 — 대기 정보 |
-| `10` | `01010` | `ACK` · `FLOOR_ACK` | Floor Ack 8.2.13 | 양방향 | 못 쓴다 | — | of(ACKTYPE) · seq(SEQ?) · room(ROOM — gate) | 10 — 받았다 |
+| `10` | `01010` | `ACK` · `FLOOR_ACK` | Floor Ack 8.2.13 | 양방향 | 못 쓴다 | — | of(ACKTYPE) · room(ROOM — gate) | 10 — 받았다 |
 
 ##### 거절 사유
 
@@ -176,7 +176,6 @@
 | `gTaken` | `false` (참가자마다) | NPSENDS 가 아는 판정 로직 상태 |
 | `c8` | `0` (참가자마다) | T8(REVOKE 재전송) 횟수 |
 | `c21` | `0` (참가자마다) | T21(TAKEN 재전송) 횟수 — 0 이면 멈춤(DEV-FLR-TAKEN-ACK) |
-| `tq` | `0` (참가자마다) | 이 참가자에게 마지막으로 보낸 TAKEN 의 일련번호 — T21 재전송이 같은 번호를 다시 싣는다(DEV-FLR-T21-SAME-SEQ) |
 | `rcause` | `0` (참가자마다) | 이 참가자에게 낸 회수 사유 — T8 재전송이 다시 싣는다 |
 | `seq` | `0` | TLV 8 일련번호 |
 
@@ -197,7 +196,6 @@
 | `hasHalf` | `!EnAffil` | 반이중 발행 트랙을 발행했나 |
 | `left` | `false` | 방을 나갔다 |
 | `shown` | `none` | 화자 표시 — 화면에 보이는 화자(내가 말하는 중이면 없음) |
-| `seen` | `0` | 화자 표시에 마지막으로 쓴 TAKEN · IDLE 의 일련번호(DEV-FLR-SEQ-DISPLAY) |
 
 ##### 값 — 원문이 부르는 이름
 
@@ -228,10 +226,8 @@
 |---|---|---|---|
 | <a id="FLR.C.NOPERM.press"></a>`FLR.C.NOPERM.press` | cs == 'NOPERM' | cs ← 'PREQ'; want ← true; presses ← presses + 1; prio ← p; c101 ← 1 · 보낸다 REQUEST | 6.2.4.3.5 |
 | <a id="FLR.C.NOPERM.rtp_rx"></a>`FLR.C.NOPERM.rtp_rx` | cs == 'NOPERM' | 효과 media.render | 6.2.4.3.4 |
-| <a id="FLR.C.NOPERM.rx_TAKEN"></a>`FLR.C.NOPERM.rx_TAKEN` | cs == 'NOPERM' && m.t == 'TAKEN' && Newer(m.q, seen) | shown ← m.a; seen ← m.q · ack TAKEN m.q · 효과 app.speaker | 6.2.4.3.3 |
-| <a id="FLR.C.NOPERM.rx_TAKEN_stale"></a>`FLR.C.NOPERM.rx_TAKEN_stale` | cs == 'NOPERM' && m.t == 'TAKEN' | ack TAKEN m.q | 6.2.4.3.3 DEV-FLR-SEQ-DISPLAY |
-| <a id="FLR.C.NOPERM.rx_IDLE"></a>`FLR.C.NOPERM.rx_IDLE` | cs == 'NOPERM' && m.t == 'IDLE' && Newer(m.q, seen) | shown ← none; seen ← m.q · 효과 app.speaker_none | 6.2.4.3.2 R-FLR-NO-T103 |
-| <a id="FLR.C.NOPERM.rx_IDLE_stale"></a>`FLR.C.NOPERM.rx_IDLE_stale` | cs == 'NOPERM' && m.t == 'IDLE' | — | 6.2.4.3.2 DEV-FLR-SEQ-DISPLAY |
+| <a id="FLR.C.NOPERM.rx_TAKEN"></a>`FLR.C.NOPERM.rx_TAKEN` | cs == 'NOPERM' && m.t == 'TAKEN' | shown ← m.a · ack TAKEN · 효과 app.speaker | 6.2.4.3.3 |
+| <a id="FLR.C.NOPERM.rx_IDLE"></a>`FLR.C.NOPERM.rx_IDLE` | cs == 'NOPERM' && m.t == 'IDLE' | shown ← none · 효과 app.speaker_none | 6.2.4.3.2 R-FLR-NO-T103 |
 | <a id="FLR.C.NOPERM.rx_other"></a>`FLR.C.NOPERM.rx_other` | cs == 'NOPERM' | — | 6.2.4.1 |
 
 <a id="FLR.C.any"></a>
@@ -243,9 +239,9 @@
 | <a id="FLR.C.any.reg_half"></a>`FLR.C.any.reg_half` | 받는 효과 PUB floor.reg_half · 나머지 | hasHalf ← true | DEV-FLR-RECVONLY-TRIGGER R-FLR-DENY-RECVONLY |
 | <a id="FLR.C.any.pub_select"></a>`FLR.C.any.pub_select` | 받는 효과 AFF floor.pub_select · 나머지 | isPub ← true | DEV-FLR-PUBROOM R-FLR-PUBROOM-ORDER |
 | <a id="FLR.C.any.pub_away"></a>`FLR.C.any.pub_away` | 받는 효과 AFF floor.pub_away · 나머지 | cs ← 'NOPERM'; want ← false; isPub ← false · 효과 mic.close → PUB.C.SENDING.floor_close · PUB.C.any.floor_close_other | DEV-FLR-PUB-AWAY |
-| <a id="FLR.C.any.leave"></a>`FLR.C.any.leave` | 받는 효과 ROOM floor.leave · 나머지 | cs ← 'NOPERM'; want ← false; isPub ← false; shown ← none; left ← true · 효과 mic.close → PUB.C.SENDING.floor_close · PUB.C.any.floor_close_other | DEV-FLR-PUB-AWAY — 발언권은 방에 든 동안만 있다(관계 FLR → ROOM) — 떠난 방의 화자 표시를 지운다 · 일련번호는 둔다(서버 번호가 이어진다 — 지우는 것은 재구축 · DEV-FLR-DOWN-FRESH) |
-| <a id="FLR.C.any.join"></a>`FLR.C.any.join` | 받는 효과 ROOM floor.join · 나머지 | sub ← 'WAIT'; want ← false; prio ← 0; grant ← 0; isPub ← false; shown ← none; left ← false | DEV-FLR-JOIN-FRESH R-FLR-JOIN-FRESH — 처음부터 든 사람과 같은 칸 — 요청 없음 · 발행 방 아님(전환 응답이 따로 온다) · 화자 표시는 READY 의 첫 알림이 채운다 · 일련번호는 둔다(서버 번호가 이어진다 — CLeave 와 같은 까닭) · 상태는 떠날 때 이미 NOPERM 이다(CLeave) |
-| <a id="FLR.C.any.down"></a>`FLR.C.any.down` | 받는 효과 SES floor.down_all · LINK floor.down_server · 나머지 | cs ← 'NOPERM'; want ← false; isPub ← false; hasHalf ← false; shown ← none; seen ← 0 · 효과 mic.close → PUB.C.SENDING.floor_close · PUB.C.any.floor_close_other | DEV-FLR-DOWN-FRESH R-FLR-DOWN-FRESH — DC 가 없으니 통지가 오지 않는다 — 클라가 스스로 내린다(§3-2-3 1-1) |
+| <a id="FLR.C.any.leave"></a>`FLR.C.any.leave` | 받는 효과 ROOM floor.leave · 나머지 | cs ← 'NOPERM'; want ← false; isPub ← false; shown ← none; left ← true · 효과 mic.close → PUB.C.SENDING.floor_close · PUB.C.any.floor_close_other | DEV-FLR-PUB-AWAY — 발언권은 방에 든 동안만 있다(관계 FLR → ROOM) — 떠난 방의 화자 표시를 지운다 |
+| <a id="FLR.C.any.join"></a>`FLR.C.any.join` | 받는 효과 ROOM floor.join · 나머지 | sub ← 'WAIT'; want ← false; prio ← 0; grant ← 0; isPub ← false; shown ← none; left ← false | DEV-FLR-JOIN-FRESH R-FLR-JOIN-FRESH — 처음부터 든 사람과 같은 칸 — 요청 없음 · 발행 방 아님(전환 응답이 따로 온다) · 화자 표시는 READY 의 첫 알림이 채운다 · 상태는 떠날 때 이미 NOPERM 이다(CLeave) |
+| <a id="FLR.C.any.down"></a>`FLR.C.any.down` | 받는 효과 SES floor.down_all · LINK floor.down_server · 나머지 | cs ← 'NOPERM'; want ← false; isPub ← false; hasHalf ← false; shown ← none · 효과 app.speaker_none · 효과 mic.close → PUB.C.SENDING.floor_close · PUB.C.any.floor_close_other | DEV-FLR-DOWN-FRESH R-FLR-DOWN-FRESH — DC 가 없으니 통지가 오지 않는다 — 클라가 스스로 내린다(§3-2-3 1-1) |
 | <a id="FLR.C.any.dc_down"></a>`FLR.C.any.dc_down` | 받는 효과 LINK floor.dc_down · 나머지 | 효과 app.floor_unreliable | DEV-FLR-DC-DOWN R-FLR-DC-ONLY-DOWN |
 | <a id="FLR.C.any.dc_reopen"></a>`FLR.C.any.dc_reopen` | 받는 효과 LINK floor.dc_up · 나머지 | 효과 app.floor_reliable | DEV-FLR-DC-DOWN R-FLR-DC-ONLY-DOWN |
 
@@ -256,13 +252,11 @@
 |---|---|---|---|
 | <a id="FLR.C.PREQ.release"></a>`FLR.C.PREQ.release` | 받는 상태 cs == 'PREQ' \|\| cs == 'PERM' \|\| cs == 'QUEUED' · cs == 'PREQ' | cs ← 'PREL'; want ← false; c100 ← 1 · 보낸다 RELEASE | 6.2.4.4.8 R-FLR-TAP-RELEASE |
 | <a id="FLR.C.PREQ.rtp_rx"></a>`FLR.C.PREQ.rtp_rx` | cs == 'PREQ' | 효과 media.render | 6.2.4.4.7 |
-| <a id="FLR.C.PREQ.rx_GRANTED"></a>`FLR.C.PREQ.rx_GRANTED` | cs == 'PREQ' && m.t == 'GRANTED' | cs ← 'PERM'; grant ← m.d; shown ← none; seen ← Newer(m.q, seen) ? m.q : seen · ack GRANTED m.q · 효과 app.granted · 효과 mic.open → PUB.C.REGISTERED.floor_open · PUB.C.any.floor_open_other | 6.2.4.4.2 DEV-FLR-GRANTED-SEQ |
+| <a id="FLR.C.PREQ.rx_GRANTED"></a>`FLR.C.PREQ.rx_GRANTED` | cs == 'PREQ' && m.t == 'GRANTED' | cs ← 'PERM'; grant ← m.d; shown ← none · ack GRANTED · 효과 app.granted · 효과 app.speaker_none · 효과 mic.open → PUB.C.REGISTERED.floor_open · PUB.C.any.floor_open_other | 6.2.4.4.2 |
 | <a id="FLR.C.PREQ.rx_DENY"></a>`FLR.C.PREQ.rx_DENY` | cs == 'PREQ' && m.t == 'DENY' | cs ← 'NOPERM'; want ← false · ack DENY · 효과 app.denied | 6.2.4.4.4 R-FLR-CAUSE-SPLIT |
 | <a id="FLR.C.PREQ.rx_QINFO"></a>`FLR.C.PREQ.rx_QINFO` | cs == 'PREQ' && m.t == 'QINFO' | cs ← 'QUEUED'; sub ← 'WAIT' · 효과 app.queued | 6.2.4.4.9 |
-| <a id="FLR.C.PREQ.rx_TAKEN"></a>`FLR.C.PREQ.rx_TAKEN` | cs == 'PREQ' && m.t == 'TAKEN' && Newer(m.q, seen) | shown ← m.a; seen ← m.q · ack TAKEN m.q · 효과 app.speaker | 6.2.4.4.11 DEV-FLR-PREQ-TAKEN-STAY |
-| <a id="FLR.C.PREQ.rx_TAKEN_stale"></a>`FLR.C.PREQ.rx_TAKEN_stale` | cs == 'PREQ' && m.t == 'TAKEN' | ack TAKEN m.q | 6.2.4.4.11 DEV-FLR-SEQ-DISPLAY |
-| <a id="FLR.C.PREQ.rx_IDLE"></a>`FLR.C.PREQ.rx_IDLE` | cs == 'PREQ' && m.t == 'IDLE' && Newer(m.q, seen) | shown ← none; seen ← m.q · 효과 app.speaker_none | 6.2.4.4 DEV-FLR-PREQ-IDLE-DISPLAY |
-| <a id="FLR.C.PREQ.rx_IDLE_stale"></a>`FLR.C.PREQ.rx_IDLE_stale` | cs == 'PREQ' && m.t == 'IDLE' | — | 6.2.4.4 DEV-FLR-SEQ-DISPLAY |
+| <a id="FLR.C.PREQ.rx_TAKEN"></a>`FLR.C.PREQ.rx_TAKEN` | cs == 'PREQ' && m.t == 'TAKEN' | shown ← m.a · ack TAKEN · 효과 app.speaker | 6.2.4.4.11 DEV-FLR-PREQ-TAKEN-STAY |
+| <a id="FLR.C.PREQ.rx_IDLE"></a>`FLR.C.PREQ.rx_IDLE` | cs == 'PREQ' && m.t == 'IDLE' | shown ← none · 효과 app.speaker_none | 6.2.4.4 DEV-FLR-PREQ-IDLE-DISPLAY |
 | <a id="FLR.C.PREQ.rx_other"></a>`FLR.C.PREQ.rx_other` | cs == 'PREQ' | — | 6.2.4.1 |
 | <a id="FLR.C.PREQ.T101"></a>`FLR.C.PREQ.T101` | c101 < Cap('C101') | c101 ← c101 + 1 · 보낸다 REQUEST | 6.2.4.4.5 DEV-FLR-CLIENT-RETX |
 | <a id="FLR.C.PREQ.T101_exhaust"></a>`FLR.C.PREQ.T101_exhaust` | 나머지 | cs ← 'NOPERM' · 효과 app.request_timeout | 6.2.4.4.6 |
@@ -276,7 +270,7 @@
 | <a id="FLR.C.PERM.rtp_tx"></a>`FLR.C.PERM.rtp_tx` | 나머지 | — | 6.2.4.5.2 |
 | <a id="FLR.C.PERM.rtp_rx"></a>`FLR.C.PERM.rtp_rx` | cs == 'PERM' | 효과 media.render | 6.2.4.5.6 |
 | <a id="FLR.C.PERM.rx_REVOKE"></a>`FLR.C.PERM.rx_REVOKE` | cs == 'PERM' && m.t == 'REVOKE' | cs ← 'PREL'; want ← false; c100 ← 1 · 효과 mic.close → PUB.C.SENDING.floor_close · PUB.C.any.floor_close_other · 효과 app.revoked · 보낸다 RELEASE | 6.2.4.5.4 R-FLR-REVOKE-MIC R-FLR-CAUSE-SPLIT |
-| <a id="FLR.C.PERM.rx_GRANTED"></a>`FLR.C.PERM.rx_GRANTED` | cs == 'PERM' && m.t == 'GRANTED' | grant ← m.d; seen ← Newer(m.q, seen) ? m.q : seen · ack GRANTED m.q | 6.2.4.5.5 DEV-FLR-GRANTED-SEQ R-FLR-REGRANT |
+| <a id="FLR.C.PERM.rx_GRANTED"></a>`FLR.C.PERM.rx_GRANTED` | cs == 'PERM' && m.t == 'GRANTED' | grant ← m.d · ack GRANTED | 6.2.4.5.5 R-FLR-REGRANT |
 | <a id="FLR.C.PERM.rx_IDLE"></a>`FLR.C.PERM.rx_IDLE` | cs == 'PERM' && m.t == 'IDLE' | — | 6.2.4.5.7 |
 | <a id="FLR.C.PERM.rx_TAKEN"></a>`FLR.C.PERM.rx_TAKEN` | cs == 'PERM' && m.t == 'TAKEN' | — | 6.2.4.5.8 |
 | <a id="FLR.C.PERM.rx_other"></a>`FLR.C.PERM.rx_other` | cs == 'PERM' | — | 6.2.4.1 |
@@ -290,13 +284,11 @@
 | <a id="FLR.C.QUEUED.intent"></a>`FLR.C.QUEUED.intent` | 받는 상태 cs == 'QUEUED' && sub == 'GRANTED' · 나머지 | cs ← 'PERM'; shown ← none · 효과 mic.open → PUB.C.REGISTERED.floor_open · PUB.C.any.floor_open_other | 6.2.4.9.12 R-FLR-T132 |
 | <a id="FLR.C.QUEUED.qpos"></a>`FLR.C.QUEUED.qpos` | 받는 상태 cs == 'QUEUED' && sub == 'WAIT' · 나머지 | sub ← 'QUERY'; c104 ← 1 · 보낸다 QPOS_REQ | 6.2.4.9.9 |
 | <a id="FLR.C.QUEUED.rtp_rx"></a>`FLR.C.QUEUED.rtp_rx` | 나머지 | 효과 media.render | 6.2.4.9.2 |
-| <a id="FLR.C.QUEUED.rx_TAKEN"></a>`FLR.C.QUEUED.rx_TAKEN` | m.t == 'TAKEN' && Newer(m.q, seen) | shown ← m.a; seen ← m.q · ack TAKEN m.q · 효과 app.speaker | 6.2.4.9.3 |
-| <a id="FLR.C.QUEUED.rx_TAKEN_stale"></a>`FLR.C.QUEUED.rx_TAKEN_stale` | m.t == 'TAKEN' | ack TAKEN m.q | 6.2.4.9.3 DEV-FLR-SEQ-DISPLAY |
-| <a id="FLR.C.QUEUED.rx_GRANTED"></a>`FLR.C.QUEUED.rx_GRANTED` | m.t == 'GRANTED' && sub != 'GRANTED' | sub ← 'GRANTED'; grant ← m.d; shown ← none; seen ← Newer(m.q, seen) ? m.q : seen · ack GRANTED m.q · 효과 app.granted_queued | 6.2.4.9.4 DEV-FLR-T132-DISPLAY DEV-FLR-GRANTED-SEQ R-FLR-T132 |
-| <a id="FLR.C.QUEUED.rx_GRANTED_again"></a>`FLR.C.QUEUED.rx_GRANTED_again` | m.t == 'GRANTED' | seen ← Newer(m.q, seen) ? m.q : seen · ack GRANTED m.q | 6.2.4.9.4 DEV-FLR-GRANTED-SEQ R-FLR-T132 |
+| <a id="FLR.C.QUEUED.rx_TAKEN"></a>`FLR.C.QUEUED.rx_TAKEN` | m.t == 'TAKEN' | shown ← m.a · ack TAKEN · 효과 app.speaker | 6.2.4.9.3 |
+| <a id="FLR.C.QUEUED.rx_GRANTED"></a>`FLR.C.QUEUED.rx_GRANTED` | m.t == 'GRANTED' && sub != 'GRANTED' | sub ← 'GRANTED'; grant ← m.d; shown ← none · ack GRANTED · 효과 app.granted_queued · 효과 app.speaker_none | 6.2.4.9.4 DEV-FLR-T132-DISPLAY R-FLR-T132 |
+| <a id="FLR.C.QUEUED.rx_GRANTED_again"></a>`FLR.C.QUEUED.rx_GRANTED_again` | m.t == 'GRANTED' | ack GRANTED | 6.2.4.9.4 R-FLR-T132 — 승계 의지 대기 중 T20 재전송 — ACK 만 한다 |
 | <a id="FLR.C.QUEUED.rx_DENY"></a>`FLR.C.QUEUED.rx_DENY` | m.t == 'DENY' | cs ← 'NOPERM'; want ← false · ack DENY · 효과 app.denied | 6.2.4.9.5 DEV-FLR-T132-SCOPE R-FLR-CAUSE-SPLIT |
-| <a id="FLR.C.QUEUED.rx_IDLE"></a>`FLR.C.QUEUED.rx_IDLE` | m.t == 'IDLE' && Newer(m.q, seen) | cs ← 'NOPERM'; shown ← none; seen ← m.q · 효과 app.speaker_none | 6.2.4.9.8 DEV-FLR-T132-SCOPE |
-| <a id="FLR.C.QUEUED.rx_IDLE_stale"></a>`FLR.C.QUEUED.rx_IDLE_stale` | m.t == 'IDLE' | — | 6.2.4.9.8 DEV-FLR-STALE-IDLE-STAY — 낡은 번호의 IDLE — 대기를 떠나지 않고 화자 표시도 그대로(서버 대기열과 어긋나지 않게) |
+| <a id="FLR.C.QUEUED.rx_IDLE"></a>`FLR.C.QUEUED.rx_IDLE` | m.t == 'IDLE' | cs ← 'NOPERM'; shown ← none · 효과 app.speaker_none | 6.2.4.9.8 DEV-FLR-T132-SCOPE |
 | <a id="FLR.C.QUEUED.rx_QINFO_answer"></a>`FLR.C.QUEUED.rx_QINFO_answer` | m.t == 'QINFO' && sub == 'QUERY' | sub ← 'WAIT' · 효과 app.queued | 6.2.4.9.7 |
 | <a id="FLR.C.QUEUED.rx_QINFO"></a>`FLR.C.QUEUED.rx_QINFO` | m.t == 'QINFO' | 효과 app.queued | 6.2.4.9.7 |
 | <a id="FLR.C.QUEUED.rx_other"></a>`FLR.C.QUEUED.rx_other` | 나머지 | — | 6.2.4.1 |
@@ -310,11 +302,10 @@
 | 라벨 | 언제 | 하는 일 | 원문 · 근거 |
 |---|---|---|---|
 | <a id="FLR.C.PREL.rtp_rx"></a>`FLR.C.PREL.rtp_rx` | cs == 'PREL' | 효과 media.render | 6.2.4.6.6 |
-| <a id="FLR.C.PREL.rx_IDLE"></a>`FLR.C.PREL.rx_IDLE` | cs == 'PREL' && m.t == 'IDLE' | cs ← 'NOPERM'; shown ← none; seen ← m.q · 효과 app.speaker_none | 6.2.4.6.4 |
-| <a id="FLR.C.PREL.rx_TAKEN"></a>`FLR.C.PREL.rx_TAKEN` | cs == 'PREL' && m.t == 'TAKEN' && Newer(m.q, seen) | cs ← 'NOPERM'; shown ← m.a; seen ← m.q · ack TAKEN m.q · 효과 app.speaker | 6.2.4.6.5 |
-| <a id="FLR.C.PREL.rx_TAKEN_seen"></a>`FLR.C.PREL.rx_TAKEN_seen` | cs == 'PREL' && m.t == 'TAKEN' | ack TAKEN m.q | 6.2.4.6.5 DEV-FLR-T21-SAME-SEQ — 이미 본 번호의 TAKEN(T21 재전송) — 반환 확인으로 쓰지 않는다 |
+| <a id="FLR.C.PREL.rx_IDLE"></a>`FLR.C.PREL.rx_IDLE` | cs == 'PREL' && m.t == 'IDLE' | cs ← 'NOPERM'; shown ← none · 효과 app.speaker_none | 6.2.4.6.4 |
+| <a id="FLR.C.PREL.rx_TAKEN"></a>`FLR.C.PREL.rx_TAKEN` | cs == 'PREL' && m.t == 'TAKEN' | cs ← 'NOPERM'; shown ← m.a · ack TAKEN · 효과 app.speaker | 6.2.4.6.5 |
 | <a id="FLR.C.PREL.rx_REVOKE"></a>`FLR.C.PREL.rx_REVOKE` | cs == 'PREL' && m.t == 'REVOKE' | 효과 app.revoked | 6.2.4.6.7 |
-| <a id="FLR.C.PREL.rx_GRANTED"></a>`FLR.C.PREL.rx_GRANTED` | cs == 'PREL' && m.t == 'GRANTED' | seen ← Newer(m.q, seen) ? m.q : seen · ack GRANTED m.q | 6.2.4.6.8 DEV-FLR-GRANTED-SEQ |
+| <a id="FLR.C.PREL.rx_GRANTED"></a>`FLR.C.PREL.rx_GRANTED` | cs == 'PREL' && m.t == 'GRANTED' | ack GRANTED | 6.2.4.6.8 |
 | <a id="FLR.C.PREL.rx_other"></a>`FLR.C.PREL.rx_other` | cs == 'PREL' | — | 6.2.4.1 |
 | <a id="FLR.C.PREL.T100"></a>`FLR.C.PREL.T100` | c100 < Cap('C100') | c100 ← c100 + 1 · 보낸다 RELEASE | 6.2.4.6.2 DEV-FLR-CLIENT-RETX |
 | <a id="FLR.C.PREL.T100_exhaust"></a>`FLR.C.PREL.T100_exhaust` | 나머지 | cs ← 'NOPERM' | 6.2.4.6.3 |
@@ -324,7 +315,7 @@
 
 | 라벨 | 언제 | 하는 일 | 원문 · 근거 |
 |---|---|---|---|
-| <a id="FLR.S.G.TAKEN.enter"></a>`FLR.S.G.TAKEN.enter` | 나머지 | idleBcast ← false · partA speaker GRANTED sprio Ms.T2 / 1000 seq · fan TAKEN speaker speaker | 6.3.4.4.2 |
+| <a id="FLR.S.G.TAKEN.enter"></a>`FLR.S.G.TAKEN.enter` | 나머지 | idleBcast ← false · partA speaker GRANTED sprio Ms.T2 / 1000 · fan TAKEN speaker speaker | 6.3.4.4.2 |
 | <a id="FLR.S.G.IDLE.enter_empty"></a>`FLR.S.G.IDLE.enter_empty` | len(queue) == 0 | g ← 'IDLE'; speaker ← none; revoking ← none; firstRtp ← false; idleBcast ← true; c7 ← 1 · fan IDLE prev none | 6.3.4.3.2 R-FLR-NO-IDLE-WHEN-QUEUE |
 | <a id="FLR.S.G.IDLE.enter_succession"></a>`FLR.S.G.IDLE.enter_succession` | 나머지 | g ← 'TAKEN'; speaker ← w.u; sprio ← w.p; revoking ← none; queue ← tail(queue); succ ← true; rtpSeen ← false; firstRtp ← false; c20 ← 1 · call EnterTaken | 6.3.4.3.2 R-FLR-NO-IDLE-WHEN-QUEUE |
 | <a id="FLR.S.G.PREVOKE.enter"></a>`FLR.S.G.PREVOKE.enter` | 나머지 | g ← 'PREVOKE'; revoking ← u; rprio ← sprio; rcauseG ← cause; speaker ← none · partA u REVOKE cause | 6.3.4.5.2 R-FLR-T3-GRACE |
@@ -332,7 +323,7 @@
 | <a id="FLR.S.G.IDLE.req_alone"></a>`FLR.S.G.IDLE.req_alone` | Alone() | partA u DENY Deny.ONLY_ONE | 6.3.4.3.3 |
 | <a id="FLR.S.G.IDLE.req_retry_after"></a>`FLR.S.G.IDLE.req_retry_after` | retry[u] | partA u DENY Deny.RETRY_AFTER | 6.3.4.3.3 DEV-FLR-T9 R-FLR-T9 |
 | <a id="FLR.S.G.IDLE.req_grant"></a>`FLR.S.G.IDLE.req_grant` | 나머지 | g ← 'TAKEN'; speaker ← u; sprio ← p; succ ← false; rtpSeen ← false; firstRtp ← false; c20 ← 0 · call EnterTaken | 6.3.4.3.3 |
-| <a id="FLR.S.G.TAKEN.req_regrant"></a>`FLR.S.G.TAKEN.req_regrant` | g == 'TAKEN' && speaker == u | partA u GRANTED sprio T2Left() seq | 6.3.4.4.8 R-FLR-REGRANT |
+| <a id="FLR.S.G.TAKEN.req_regrant"></a>`FLR.S.G.TAKEN.req_regrant` | g == 'TAKEN' && speaker == u | partA u GRANTED sprio T2Left() | 6.3.4.4.8 R-FLR-REGRANT |
 | <a id="FLR.S.G.any.regrant_discard"></a>`FLR.S.G.any.regrant_discard` | 나머지 | — | 6.3.4.1 |
 | <a id="FLR.S.G.TAKEN.preempt"></a>`FLR.S.G.TAKEN.preempt` | g == 'TAKEN' | queue ← cons({u: u, p: p, pre: true}, queue) · call PrevokeEnter · partA u QINFO 1 p | 6.3.4.4.7 DEV-FLR-PREEMPT-RELATIVE R-FLR-PREEMPT-OPEN |
 | <a id="FLR.S.G.PREVOKE.preempt_discard"></a>`FLR.S.G.PREVOKE.preempt_discard` | 나머지 | — | 6.3.4.1 |
@@ -349,7 +340,7 @@
 | <a id="FLR.S.G.TAKEN.T2"></a>`FLR.S.G.TAKEN.T2` | 나머지 | retry[u] ← true · call PrevokeEnter | 6.3.4.4.4 DEV-FLR-T9 R-FLR-T9 |
 | <a id="FLR.S.G.PREVOKE.T3"></a>`FLR.S.G.PREVOKE.T3` | 나머지 | prev ← revoking · call IdleEnter | 6.3.4.5.5 R-FLR-T3-GRACE |
 | <a id="FLR.S.G.IDLE.T7"></a>`FLR.S.G.IDLE.T7` | 나머지 | c7 ← c7 + 1 · fan IDLE prev none | 6.3.4.3.4 DEV-FLR-T7-VALUE R-FLR-NO-T103 |
-| <a id="FLR.S.G.TAKEN.T20"></a>`FLR.S.G.TAKEN.T20` | c20 < Cap('C20') | c20 ← c20 + 1 · partA speaker GRANTED sprio Ms.T2 / 1000 seq | 6.3.4.4.9 |
+| <a id="FLR.S.G.TAKEN.T20"></a>`FLR.S.G.TAKEN.T20` | c20 < Cap('C20') | c20 ← c20 + 1 · partA speaker GRANTED sprio Ms.T2 / 1000 | 6.3.4.4.9 |
 | <a id="FLR.S.G.TAKEN.T20_exhaust"></a>`FLR.S.G.TAKEN.T20_exhaust` | 나머지 | c20 ← c20 + 1 | 6.3.4.4.10 |
 
 <a id="FLR.S.gate"></a>
@@ -382,21 +373,21 @@
 | <a id="FLR.S.P.join.idle"></a>`FLR.S.P.join.idle` | 받는 효과 SUB floor.ready · 나머지 | send u IDLE prev | 6.3.5.2.2 DEV-FLR-FIRST-NOTIFY R-FLR-FIRST-NOTIFY |
 | <a id="FLR.S.P.any.a_QINFO"></a>`FLR.S.P.any.a_QINFO` | ev.t == 'QINFO' | send u QINFO ev.n ev.d | 6.3.5.4.7 |
 | <a id="FLR.S.P.any.a_DENY"></a>`FLR.S.P.any.a_DENY` | ev.t == 'DENY' | send u DENY ev.n | 6.3.5.3.6 |
-| <a id="FLR.S.P.NP_IDLE.a_GRANTED"></a>`FLR.S.P.NP_IDLE.a_GRANTED` | part[u] == 'NP_IDLE' && ev.t == 'GRANTED' | send u GRANTED ev.n ev.d ev.q PERMITTED | 6.3.5.3.5 |
-| <a id="FLR.S.P.NP_IDLE.a_TAKEN"></a>`FLR.S.P.NP_IDLE.a_TAKEN` | part[u] == 'NP_IDLE' && ev.t == 'TAKEN' | tq[u] ← ev.q · send u TAKEN ev.a ev.q NP_TAKEN | 6.3.5.3.3 |
+| <a id="FLR.S.P.NP_IDLE.a_GRANTED"></a>`FLR.S.P.NP_IDLE.a_GRANTED` | part[u] == 'NP_IDLE' && ev.t == 'GRANTED' | send u GRANTED ev.n ev.d PERMITTED | 6.3.5.3.5 |
+| <a id="FLR.S.P.NP_IDLE.a_TAKEN"></a>`FLR.S.P.NP_IDLE.a_TAKEN` | part[u] == 'NP_IDLE' && ev.t == 'TAKEN' | send u TAKEN ev.a ev.q NP_TAKEN | 6.3.5.3.3 |
 | <a id="FLR.S.P.NP_IDLE.a_IDLE"></a>`FLR.S.P.NP_IDLE.a_IDLE` | part[u] == 'NP_IDLE' && ev.t == 'IDLE' | send u IDLE ev.a ev.q | 6.3.5.3.10 |
 | <a id="FLR.S.P.NP_IDLE.a_other"></a>`FLR.S.P.NP_IDLE.a_other` | part[u] == 'NP_IDLE' | — | 6.3.5.1 |
-| <a id="FLR.S.P.NP_TAKEN.a_GRANTED"></a>`FLR.S.P.NP_TAKEN.a_GRANTED` | part[u] == 'NP_TAKEN' && ev.t == 'GRANTED' | send u GRANTED ev.n ev.d ev.q PERMITTED | 6.3.5.4.9 |
-| <a id="FLR.S.P.NP_TAKEN.a_TAKEN"></a>`FLR.S.P.NP_TAKEN.a_TAKEN` | part[u] == 'NP_TAKEN' && ev.t == 'TAKEN' | tq[u] ← ev.q; c21[u] ← 1 · send u TAKEN ev.a ev.q | 6.3.5.4.10 DEV-FLR-TAKEN-ACK |
+| <a id="FLR.S.P.NP_TAKEN.a_GRANTED"></a>`FLR.S.P.NP_TAKEN.a_GRANTED` | part[u] == 'NP_TAKEN' && ev.t == 'GRANTED' | send u GRANTED ev.n ev.d PERMITTED | 6.3.5.4.9 |
+| <a id="FLR.S.P.NP_TAKEN.a_TAKEN"></a>`FLR.S.P.NP_TAKEN.a_TAKEN` | part[u] == 'NP_TAKEN' && ev.t == 'TAKEN' | c21[u] ← 1 · send u TAKEN ev.a ev.q | 6.3.5.4.10 DEV-FLR-TAKEN-ACK |
 | <a id="FLR.S.P.NP_TAKEN.a_IDLE"></a>`FLR.S.P.NP_TAKEN.a_IDLE` | part[u] == 'NP_TAKEN' && ev.t == 'IDLE' | send u IDLE ev.a ev.q NP_IDLE | 6.3.5.4.3 |
 | <a id="FLR.S.P.NP_TAKEN.a_other"></a>`FLR.S.P.NP_TAKEN.a_other` | part[u] == 'NP_TAKEN' | — | 6.3.5.1 |
-| <a id="FLR.S.P.PERMITTED.a_GRANTED"></a>`FLR.S.P.PERMITTED.a_GRANTED` | part[u] == 'PERMITTED' && ev.t == 'GRANTED' | send u GRANTED ev.n ev.d ev.q | x:6.3.4.4.8 x:6.3.4.4.9 DEV-FLR-REGRANT-FWD R-FLR-REGRANT |
+| <a id="FLR.S.P.PERMITTED.a_GRANTED"></a>`FLR.S.P.PERMITTED.a_GRANTED` | part[u] == 'PERMITTED' && ev.t == 'GRANTED' | send u GRANTED ev.n ev.d | x:6.3.4.4.8 x:6.3.4.4.9 DEV-FLR-REGRANT-FWD R-FLR-REGRANT |
 | <a id="FLR.S.P.PERMITTED.a_IDLE"></a>`FLR.S.P.PERMITTED.a_IDLE` | part[u] == 'PERMITTED' && ev.t == 'IDLE' | enter u NP_IDLE | 6.3.5.5.4 |
-| <a id="FLR.S.P.PERMITTED.a_TAKEN"></a>`FLR.S.P.PERMITTED.a_TAKEN` | part[u] == 'PERMITTED' && ev.t == 'TAKEN' | tq[u] ← ev.q · send u TAKEN ev.a ev.q NP_TAKEN | 6.3.5.5.9 |
+| <a id="FLR.S.P.PERMITTED.a_TAKEN"></a>`FLR.S.P.PERMITTED.a_TAKEN` | part[u] == 'PERMITTED' && ev.t == 'TAKEN' | send u TAKEN ev.a ev.q NP_TAKEN | 6.3.5.5.9 |
 | <a id="FLR.S.P.PERMITTED.a_REVOKE"></a>`FLR.S.P.PERMITTED.a_REVOKE` | part[u] == 'PERMITTED' && ev.t == 'REVOKE' | rcause[u] ← ev.n · send u REVOKE ev.n PREVOKE | 6.3.5.5.5 R-FLR-T3-GRACE |
 | <a id="FLR.S.P.PERMITTED.a_other"></a>`FLR.S.P.PERMITTED.a_other` | part[u] == 'PERMITTED' | — | 6.3.5.1 |
 | <a id="FLR.S.P.PREVOKE.a_IDLE"></a>`FLR.S.P.PREVOKE.a_IDLE` | part[u] == 'PREVOKE' && ev.t == 'IDLE' | send u IDLE ev.a ev.q NP_IDLE | 6.3.5.6.6 |
-| <a id="FLR.S.P.PREVOKE.a_TAKEN"></a>`FLR.S.P.PREVOKE.a_TAKEN` | part[u] == 'PREVOKE' && ev.t == 'TAKEN' | tq[u] ← ev.q · send u TAKEN ev.a ev.q NP_TAKEN | 6.3.5.6.7 |
+| <a id="FLR.S.P.PREVOKE.a_TAKEN"></a>`FLR.S.P.PREVOKE.a_TAKEN` | part[u] == 'PREVOKE' && ev.t == 'TAKEN' | send u TAKEN ev.a ev.q NP_TAKEN | 6.3.5.6.7 |
 | <a id="FLR.S.P.PREVOKE.a_other"></a>`FLR.S.P.PREVOKE.a_other` | part[u] == 'PREVOKE' | — | 6.3.5.1 |
 | <a id="FLR.S.P.RELEASING.a_any"></a>`FLR.S.P.RELEASING.a_any` | part[u] == 'RELEASING' | — | 6.3.5.8.2 |
 | <a id="FLR.S.P.NPSENDS.a_IDLE"></a>`FLR.S.P.NPSENDS.a_IDLE` | ev.t == 'IDLE' | gTaken[u] ← false | 6.3.5.7.1 |
@@ -408,9 +399,8 @@
 | <a id="FLR.S.P.NP_IDLE.rx_RTP_drop"></a>`FLR.S.P.NP_IDLE.rx_RTP_drop` | part[u] == 'NP_IDLE' && ev.t == 'RTP' | — | 6.3.5.3.8 6.3.5.1 |
 | <a id="FLR.S.P.NP_IDLE.rx_other"></a>`FLR.S.P.NP_IDLE.rx_other` | part[u] == 'NP_IDLE' | — | 6.3.5.1 |
 | <a id="FLR.S.P.NP_TAKEN.rx_REQUEST"></a>`FLR.S.P.NP_TAKEN.rx_REQUEST` | part[u] == 'NP_TAKEN' && ev.t == 'REQUEST' | call TakenReq | 6.3.5.4.4 |
-| <a id="FLR.S.P.NP_TAKEN.rx_RELEASE"></a>`FLR.S.P.NP_TAKEN.rx_RELEASE` | part[u] == 'NP_TAKEN' && ev.t == 'RELEASE' | tq[u] ← seq + 1 == SeqWrap ? 0 : seq + 1; c21[u] ← 1 · dequeue u · send u TAKEN Holder() | 6.3.5.4.5 DEV-FLR-TAKEN-ACK DEV-FLR-T21-SAME-SEQ |
-| <a id="FLR.S.P.NP_TAKEN.rx_ACK_taken"></a>`FLR.S.P.NP_TAKEN.rx_ACK_taken` | part[u] == 'NP_TAKEN' && ev.t == 'ACK' && ev.n == 2 && Same(ev.q, tq[u]) | c21[u] ← 0 · — | x:6.3.5.3.3 x:8.2.3.14 DEV-FLR-TAKEN-ACK DEV-FLR-ACK-SEQ |
-| <a id="FLR.S.P.NP_TAKEN.rx_ACK_taken_stale"></a>`FLR.S.P.NP_TAKEN.rx_ACK_taken_stale` | part[u] == 'NP_TAKEN' && ev.t == 'ACK' && ev.n == 2 | — | x:6.3.5.3.3 x:8.2.3.14 DEV-FLR-ACK-SEQ |
+| <a id="FLR.S.P.NP_TAKEN.rx_RELEASE"></a>`FLR.S.P.NP_TAKEN.rx_RELEASE` | part[u] == 'NP_TAKEN' && ev.t == 'RELEASE' | c21[u] ← 1 · dequeue u · send u TAKEN Holder() | 6.3.5.4.5 DEV-FLR-TAKEN-ACK |
+| <a id="FLR.S.P.NP_TAKEN.rx_ACK_taken"></a>`FLR.S.P.NP_TAKEN.rx_ACK_taken` | part[u] == 'NP_TAKEN' && ev.t == 'ACK' && ev.n == 2 | c21[u] ← 0 · — | x:6.3.5.3.3 x:8.2.3.14 DEV-FLR-TAKEN-ACK |
 | <a id="FLR.S.P.NP_TAKEN.rx_ACK_other"></a>`FLR.S.P.NP_TAKEN.rx_ACK_other` | part[u] == 'NP_TAKEN' && ev.t == 'ACK' | — | 6.3.5.1 DEV-FLR-ACK-DROP |
 | <a id="FLR.S.P.NP_TAKEN.rx_QPOS_REQ"></a>`FLR.S.P.NP_TAKEN.rx_QPOS_REQ` | part[u] == 'NP_TAKEN' && ev.t == 'QPOS_REQ' | send u QINFO Pos(u) QPrio(u) | 6.3.5.4.7 x:8.2.3.5 |
 | <a id="FLR.S.P.NP_TAKEN.rx_RTP"></a>`FLR.S.P.NP_TAKEN.rx_RTP` | part[u] == 'NP_TAKEN' && ev.t == 'RTP' | call Revoke3 | 6.3.5.4.6 |
@@ -422,7 +412,7 @@
 | <a id="FLR.S.P.PREVOKE.rx_RELEASE"></a>`FLR.S.P.PREVOKE.rx_RELEASE` | part[u] == 'PREVOKE' && ev.t == 'RELEASE' | call ArbRel | 6.3.5.6.5 R-FLR-REVOKE-RELEASE |
 | <a id="FLR.S.P.PREVOKE.rx_RTP"></a>`FLR.S.P.PREVOKE.rx_RTP` | part[u] == 'PREVOKE' && ev.t == 'RTP' | call ArbRtp | 6.3.5.6.4 R-FLR-T3-GRACE |
 | <a id="FLR.S.P.PREVOKE.rx_other"></a>`FLR.S.P.PREVOKE.rx_other` | part[u] == 'PREVOKE' | — | 6.3.5.1 |
-| <a id="FLR.S.P.NPSENDS.rx_RELEASE_taken"></a>`FLR.S.P.NPSENDS.rx_RELEASE_taken` | ev.t == 'RELEASE' && gTaken[u] | tq[u] ← seq + 1 == SeqWrap ? 0 : seq + 1 · send u TAKEN Holder() NP_TAKEN | 6.3.5.7.4 6.3.5.7.5 DEV-FLR-T21-SAME-SEQ |
+| <a id="FLR.S.P.NPSENDS.rx_RELEASE_taken"></a>`FLR.S.P.NPSENDS.rx_RELEASE_taken` | ev.t == 'RELEASE' && gTaken[u] | send u TAKEN Holder() NP_TAKEN | 6.3.5.7.4 6.3.5.7.5 |
 | <a id="FLR.S.P.NPSENDS.rx_RELEASE_idle"></a>`FLR.S.P.NPSENDS.rx_RELEASE_idle` | ev.t == 'RELEASE' | send u IDLE prev NP_IDLE | 6.3.5.7.4 |
 | <a id="FLR.S.P.NPSENDS.rx_RTP"></a>`FLR.S.P.NPSENDS.rx_RTP` | ev.t == 'RTP' | — | 6.3.5.7.2 |
 | <a id="FLR.S.P.NPSENDS.rx_other"></a>`FLR.S.P.NPSENDS.rx_other` | 나머지 | — | 6.3.5.1 |
@@ -439,7 +429,7 @@
 | <a id="FLR.S.P.NP_TAKEN.req_enqueue"></a>`FLR.S.P.NP_TAKEN.req_enqueue` | 나머지 | queue ← insert(queue, {u: u, p: p, pre: false}) · send u QINFO Pos(u) p | 6.3.5.4.4 R-FLR-QUEUE-ALWAYS |
 | <a id="FLR.S.P.PREVOKE.T8"></a>`FLR.S.P.PREVOKE.T8` | part[u] == 'PREVOKE' | c8[u] ← c8[u] + 1 · send u REVOKE rcause[u] | 6.3.5.6.3 |
 | <a id="FLR.S.P.NPSENDS.T8"></a>`FLR.S.P.NPSENDS.T8` | 나머지 | c8[u] ← c8[u] + 1 · send u REVOKE Revoke.NO_PERMISSION | 6.3.5.7.3 |
-| <a id="FLR.S.P.NP_TAKEN.T21"></a>`FLR.S.P.NP_TAKEN.T21` | c21[u] < Cap('C21') | c21[u] ← c21[u] + 1 · send u TAKEN Holder() tq[u] | DEV-FLR-TAKEN-ACK R-FLR-TAKEN-ACK |
+| <a id="FLR.S.P.NP_TAKEN.T21"></a>`FLR.S.P.NP_TAKEN.T21` | c21[u] < Cap('C21') | c21[u] ← c21[u] + 1 · send u TAKEN Holder() | DEV-FLR-TAKEN-ACK R-FLR-TAKEN-ACK |
 | <a id="FLR.S.P.NP_TAKEN.T21_exhaust"></a>`FLR.S.P.NP_TAKEN.T21_exhaust` | 나머지 | c21[u] ← c21[u] + 1 | DEV-FLR-TAKEN-ACK |
 
 <a id="FLR.S.perm"></a>
@@ -469,8 +459,8 @@
 | <a id="FLR.S.ws.reg_half"></a>`FLR.S.ws.reg_half` | 나머지 | half[u] ← true | DEV-FLR-RECVONLY-TRIGGER R-FLR-DENY-RECVONLY |
 | <a id="FLR.S.ws.pub_away"></a>`FLR.S.ws.pub_away` | 받는 효과 AFF floor.pub_away · 나머지 | pub[u] ← false · call Away | DEV-FLR-PUB-AWAY |
 | <a id="FLR.S.ws.leave"></a>`FLR.S.ws.leave` | 받는 효과 ROOM floor.leave · 나머지 | pub[u] ← false · call Away · members ← without(members, u); retry[u] ← false; part[u] ← 'RELEASING' | x:6.3.5.8.2 DEV-FLR-PUB-AWAY |
-| <a id="FLR.S.ws.join_revoking"></a>`FLR.S.ws.join_revoking` | 받는 효과 ROOM floor.join · g == 'PREVOKE' && revoking == u | prev ← revoking · call IdleEnter · members ← adding(members, u); part[u] ← Holder() != none ? 'NP_TAKEN' : 'NP_IDLE'; gTaken[u] ← Holder() != none; pub[u] ← false; half[u] ← half; perm[u] ← perm; retry[u] ← false; released[u] ← false; tq[u] ← 0; rcause[u] ← 0 | 6.3.4.5.5 6.3.5.2.2 |
-| <a id="FLR.S.ws.join"></a>`FLR.S.ws.join` | 받는 효과 ROOM floor.join · 나머지 | members ← adding(members, u); part[u] ← Holder() != none ? 'NP_TAKEN' : 'NP_IDLE'; gTaken[u] ← Holder() != none; pub[u] ← false; half[u] ← half; perm[u] ← perm; retry[u] ← false; released[u] ← false; tq[u] ← 0; rcause[u] ← 0 | 6.3.5.2.2 |
+| <a id="FLR.S.ws.join_revoking"></a>`FLR.S.ws.join_revoking` | 받는 효과 ROOM floor.join · g == 'PREVOKE' && revoking == u | prev ← revoking · call IdleEnter · members ← adding(members, u); part[u] ← Holder() != none ? 'NP_TAKEN' : 'NP_IDLE'; gTaken[u] ← Holder() != none; pub[u] ← false; half[u] ← half; perm[u] ← perm; retry[u] ← false; released[u] ← false; rcause[u] ← 0 | 6.3.4.5.5 6.3.5.2.2 |
+| <a id="FLR.S.ws.join"></a>`FLR.S.ws.join` | 받는 효과 ROOM floor.join · 나머지 | members ← adding(members, u); part[u] ← Holder() != none ? 'NP_TAKEN' : 'NP_IDLE'; gTaken[u] ← Holder() != none; pub[u] ← false; half[u] ← half; perm[u] ← perm; retry[u] ← false; released[u] ← false; rcause[u] ← 0 | 6.3.5.2.2 |
 
 <a id="FLR.S.T9"></a>
 #### 10-2-14. 서버 · `T9`
@@ -641,7 +631,7 @@
 
 3. ★**원문과 다르다** — 원문(6.2.4.4.11 7)은 선점 우선순위로 요청했을 때만 남고 아니면 `has no permission` 으로 간다. 우리 선점 판정은 상대 비교라(§10-4-32) 클라가 자기 요청이 선점인지 모른다 — 그래서 늘 남는다(§10-4-27 관문 목록).
 
-→ 구조 — [`FLR.C.PREQ.rx_TAKEN`](#FLR.C.PREQ.rx_TAKEN) · [`FLR.C.PREQ.rx_TAKEN_stale`](#FLR.C.PREQ.rx_TAKEN_stale) · [`FLR.C.PREQ.T101`](#FLR.C.PREQ.T101)
+→ 구조 — [`FLR.C.PREQ.rx_TAKEN`](#FLR.C.PREQ.rx_TAKEN) · [`FLR.C.PREQ.T101`](#FLR.C.PREQ.T101)
 
 #### 10-4-9. `1 FLOOR_GRANTED` 를 받았다 (`pending Request` · `queued`) — 원문 6.2.4.4.2 · 6.2.4.9.4
 
@@ -753,7 +743,7 @@
 
 <a id="RULE-FLR-PROC-PREL-CONFIRM"></a>**RULE-FLR-PROC-PREL-CONFIRM** · 규칙 — 같은 것을 `pending Release` 에서 받았다 (★반환의 확인) — 원문 6.2.4.6.4 · 6.2.4.6.5
 
-→ 구조 — [`FLR.C.PREL.rx_IDLE`](#FLR.C.PREL.rx_IDLE) · [`FLR.C.PREL.rx_TAKEN`](#FLR.C.PREL.rx_TAKEN) · [`FLR.C.PREL.rx_TAKEN_seen`](#FLR.C.PREL.rx_TAKEN_seen) · [`FLR.wire`](#FLR.wire)
+→ 구조 — [`FLR.C.PREL.rx_IDLE`](#FLR.C.PREL.rx_IDLE) · [`FLR.C.PREL.rx_TAKEN`](#FLR.C.PREL.rx_TAKEN) · [`FLR.wire`](#FLR.wire)
 
 #### 10-4-23. DC 만 끊겼다 (미디어 생존)
 
@@ -1027,7 +1017,7 @@ TS 24.379(SIP 호 제어)·TS 23.379(참조 구조)는 ★**미채택**이라 �
 | `0` | 우선순위 | u8 | ★**요청에 실은 값이 곧 우선순위**다 — 서버는 그 값으로 허가하고 ★**선점 판정(§10-4-32)도 이 값으로 한다.** 상한을 씌우는 축은 없다 |
 | `1` | 말할 수 있는 시간 | u16 BE(초) | 원문 Floor Request 에 Duration 필드가 없다(8.2.4) |
 | `7` | 대기 인원 | — | ★**싣지 않는다** — 원문 Queue Size 는 Floor Granted 의 필드(8.2.5, 2 옥텟)이고 Floor Queue Position Info 에는 없다(8.2.12) |
-| ★`8` | ★**메시지 일련번호** | u16 BE | 보낼 때마다 **1 증가**(`T21` 재전송은 처음 그 번호 그대로 — DEV-FLR-T21-SAME-SEQ) · 클라는 화자 표시에만 견준다(DEV-FLR-SEQ-DISPLAY) · ★**GRANTED 필수** — 그 순간의 마지막 번호 그대로(DEV-FLR-GRANTED-SEQ) · ★**ACK** — 받은 메시지에 실려 왔으면 되돌린다(DEV-FLR-ACK-SEQ) |
+| ★`8` | ★**메시지 일련번호** | u16 BE | `IDLE` · `TAKEN` 에만 · 보낼 때마다 **1 증가**(재전송도 새로 보내는 것이다) · ★**클라는 보지 않는다**(원문 6.2.4 — §10-4-31) |
 | ★`0x1D` | ★★**방** (`room_id`) | 문자열 | ★ACK(대상 것 에코, §10-4-30) |
 
 
@@ -1090,13 +1080,13 @@ S→C  TAKEN   { 0x1D:"r1", 4:"u2" } →  r1 구독자 전원에게
 
 → 구조 — [`FLR.wire`](#FLR.wire)
 
-<a id="RULE-FLR-SEQ"></a>**RULE-FLR-SEQ** · 규칙 — ★`8` 메시지 일련번호 — 서버가 싣는다, 클라는 화자 표시 · 대기 이탈에만 견준다
+<a id="RULE-FLR-SEQ"></a>**RULE-FLR-SEQ** · 규칙 — ★`8` 메시지 일련번호 — 서버가 `IDLE` · `TAKEN` 에 싣는다, 클라는 보지 않는다
 
 | 규격 | |
 |---|---|
-| 어디에 | ★**`IDLE` · `TAKEN` 에 반드시**(원문 §6.3.4.3.2 · §6.3.4.4.2 · §6.3.5 의 unicast 확인 — 싣는 쪽(서버) 규정) · ★**`GRANTED` 에 반드시** — 그 순간 방의 마지막 번호(DEV-FLR-GRANTED-SEQ) · ★**`ACK`** — 받은 메시지에 실려 왔으면 그 번호를 되돌려 싣는다(DEV-FLR-ACK-SEQ) |
-| 값 | ★**보낼 때마다 1 증가.** 방마다 센다. ★**감김은 원문 정의 그대로다** — 0~65535, 65535 에 닿으면 0 부터(§8.2.3.10). ★**올리는 것은 `IDLE` · `TAKEN` 을 새로 보낼 때뿐이다** — `GRANTED` 와 `T21` 재전송은 올리지 않는다(DEV-FLR-GRANTED-SEQ · DEV-FLR-T21-SAME-SEQ) |
-| 클라 | ★**이 번호는 화자 표시와 대기 이탈에만 쓴다** — 낡은 번호의 `TAKEN` · `IDLE` 은 화자 표시를 바꾸지 않고(DEV-FLR-SEQ-DISPLAY) · 대기 중이면 대기를 떠나지 않는다(DEV-FLR-STALE-IDLE-STAY) · 반환 중에 이미 본 번호의 `TAKEN` 은 반환 확인으로 쓰지 않는다(DEV-FLR-T21-SAME-SEQ) · `GRANTED` 의 번호는 본 번호로 삼는다(DEV-FLR-GRANTED-SEQ). ★**ACK 은 낡은 번호에도 한다**(받은 번호를 되돌려 싣는다 — DEV-FLR-ACK-SEQ). 원문 on-network 클라는 이 번호를 보지 않는다(§6.2.4.3.2 — Idle 수신 시 ACK·알림·`T103` 정지뿐) — 비교 주체는 MBMS 로 중계하는 participating function 하나다(§10.2.3.2). ★원문은 데이터 채널이 순서를 바꾸는 경우를 다루지 않는다(우리 채널은 `ordered: false`, §9-4-13). `has permission` 에서는 둘을 버리고, 허가가 끝났음은 `REVOKE` 가 알린다(§10-4-3) |
+| 어디에 | ★**`IDLE` · `TAKEN` 에만 반드시**(원문 §6.3.4.3.2 · §6.3.4.4.2 · §6.3.5 의 unicast 확인 — 싣는 쪽(서버) 규정). `GRANTED` · `ACK` 에는 없다(원문 8.2.5 · 8.2.13) |
+| 값 | ★**보낼 때마다 1 증가.** 방마다 센다. ★**감김은 원문 정의 그대로다** — 0~65535, 65535 에 닿으면 0 부터(§8.2.3.10). 재전송(`T7` · `T21`)도 새로 보내는 것이라 올린다(원문 6.3.4.3.4 — `T7` 의 Floor Idle 도 "increased with 1") |
+| 클라 | ★**보지 않는다** — 원문 on-network 클라는 이 번호를 견주지 않는다(§6.2.4.3.2 — Idle 수신 시 ACK·알림·`T103` 정지뿐). 번호의 용도는 같은 메시지 되풀이를 묶는 것이고(§8.2.3.10) 견주는 쪽은 MBMS 로 중계하는 participating function 하나다(§10.2.3.2). 늦게 닿은 메시지는 원문대로 상태기가 거른다 — 원문 전송로(UDP 한 경로)도 순서를 보장하지 않고, 데이터 채널도 같은 조건이다(`ordered: false` · 재전송 0, §9-4-13). 그래도 남는 창은 받아들인다(RACE-FLR-LATE-TAKEN · RACE-FLR-T21-COPY · RACE-FLR-LATE-ACK · RACE-FLR-LATE-BCAST-IDLE) |
 
 ★**§4-1-6 의 `version{epoch,seq}` 과 다른 축이다** — 그쪽은 ★**WS 로 흐르는 방 상태**,
 이쪽은 ★**DC 로 흐르는 발언권**이다. 수명도 전송로도 다르므로 ★**서로 대신하지 못한다.**
@@ -1156,7 +1146,7 @@ S→C  TAKEN   { 0x1D:"r1", 4:"u2" } →  r1 구독자 전원에게
 ★**증상** — `0x1D` 없이 *"내 방"* 으로 가정하면 → 다방에서 ★**엉뚱한 방의 발언권 상태가 바뀐다.**
 DC 는 미디어 서버당 하나라 ★**여러 방 통지가 한 통로로 섞여 온다.**
 
-→ 구조 — [`FLR.C.NOPERM.rx_IDLE_stale`](#FLR.C.NOPERM.rx_IDLE_stale) · [`FLR.C.NOPERM.rx_TAKEN_stale`](#FLR.C.NOPERM.rx_TAKEN_stale)
+→ 구조 — [`FLR.wire`](#FLR.wire) · [`FLR.C.NOPERM.rx_TAKEN`](#FLR.C.NOPERM.rx_TAKEN) · [`FLR.C.NOPERM.rx_IDLE`](#FLR.C.NOPERM.rx_IDLE)
 
 #### 10-4-32. 발언권 규칙 — 자체 값과 절차
 
@@ -1727,6 +1717,12 @@ has permission 클라의 RTP 는 곧바로 서버 참가자에 닿는다
 
 *식: K5 · 조건: 손잡이 StaleGuard — N 경주 판정 때는 끈다*
 
+<a id="ASM-FLR-DELIVER-FIRST"></a>**ASM-FLR-DELIVER-FIRST** · 가정
+
+사람 동작은 모든 통이 빈 뒤에만 일어난다 — 화자 표시 성질(PROP-FLR-SHOWN-IS-HOLDER)은 이 가정 아래서만 잰다. 원문은 늦게 닿는 메시지를 드문 일로 감수한다(UDP 한 경로 — RULE-FLR-SEQ 클라 칸). 모형은 시계가 없어 「드물다」를 쓰지 못하고 「언제든 겹친다」(가정 없음)와 「겹치지 않는다」(이 가정) 둘만 고른다 — ★가정 없는 판의 반례는 규격을 고칠 근거가 아니다. 가정 밖 창(늦은 메시지와 사람 동작이 겹침)의 동작은 경주 진술(RACE-FLR-LATE-TAKEN · RACE-FLR-T21-COPY · RACE-FLR-LATE-ACK · RACE-FLR-LATE-BCAST-IDLE · RACE-FLR-UNICAST-OVERTAKES-BROADCAST)이 정하고 1층 시험이 잰다
+
+*식: K6 · 조건: 전달 지연(ms) < 사람 동작 사이 — 두 사람이 수 ms 안에 잇따라 움직이는 창은 모형 밖(손잡이 DeliverFirst · 화자 표시 판만 켠다)*
+
 <a id="PROP-FLR-ONE-SPEAKER"></a>**PROP-FLR-ONE-SPEAKER** · 성질
 
 두 사람이 함께 has permission 이 아니다
@@ -1833,7 +1829,7 @@ T101 재전송 REQUEST 를 뗌이 추월 — 회수 유예 중 선점 요청을 
 
 번호 없는 unicast(QINFO · DENY · REVOKE)가 그보다 먼저 보낸 방송(TAKEN · IDLE)을 앞지르면 대기 · 화자 표시가 서버와 어긋난다 — ★받아들인다: MBCP 는 UDP 위의 프로토콜이고 원문은 유실 · 순서 바뀜을 타이머 재전송 · 재요청 · 멱등 응답으로 견딘다. 데이터 채널은 UDP 와 같은 조건(순서 없음 · 한 번만 — RULE-LINK-SDP-DC-OPENER)이라 몇 ms 간격으로 보낸 두 패킷이 한 경로에서 뒤바뀌어야 일어난다
 
-*비고: 검증 모형은 아무렇게나 순서를 바꾸는 통(Fifo FALSE)이라 이 경주를 찾는다(h9s_core) — CAND-FLR-UNICAST-OVERTAKES-BROADCAST ③(20261010) · 깨는 성질: PROP-FLR-QUEUED-IN-QUEUE PROP-FLR-SHOWN-IS-HOLDER*
+*비고: 검증 모형은 아무렇게나 순서를 바꾸는 통(Fifo FALSE)이라 가정 없는 판에서 이 경주를 찾는다 — CAND-FLR-UNICAST-OVERTAKES-BROADCAST ③(20261010) · 결말은 RACE-FLR-LATE-BCAST-IDLE 과 같다 · 막는 가정: ASM-FLR-DELIVER-FIRST · 깨는 성질: PROP-FLR-QUEUED-IN-QUEUE PROP-FLR-SHOWN-IS-HOLDER*
 
 <a id="RACE-FLR-T132-PREEMPT"></a>**RACE-FLR-T132-PREEMPT** · 알려진 경주
 
@@ -1855,9 +1851,9 @@ queued 승계 의지 대기 중의 선점 — REVOKE 를 queued 가 버린다(6.
 
 <a id="RACE-FLR-LATE-BCAST-IDLE"></a>**RACE-FLR-LATE-BCAST-IDLE** · 알려진 경주
 
-대기 응답보다 먼저 보낸 방송 IDLE 이 나중에 닿으면 queued 클라가 대기를 버린다(6.2.4.9.8) — 서버 큐엔 남는다. 시범 F8 의 queued 판
+대기 응답보다 먼저 보낸 방송 IDLE 이 나중에 닿으면 queued 클라가 대기를 버린다(6.2.4.9.8) — 서버 큐엔 남는다. 시범 F8 의 queued 판 — ★받아들인다: 서버가 차례에 준 허가를 클라가 버려도 채널은 영구히 막히지 않는다 — 허가 재전송(`T20`)이 다 돌고 화자 RTP 가 없으면 `T1` 이 발언권을 거둔다
 
-*비고: (막는 가정 없음) · 깨는 성질: PROP-FLR-HOLDER-SPEAKS*
+*비고: 낡은 번호 IDLE 거르기(CAND-FLR-STALE-IDLE-LEAVES-QUEUE)를 20261101 걷었다 · 막는 가정: ASM-FLR-DELIVER-FIRST · 깨는 성질: PROP-FLR-HOLDER-SPEAKS*
 
 <a id="RACE-FLR-DC-STALE"></a>**RACE-FLR-DC-STALE** · 알려진 경주
 
@@ -1871,27 +1867,33 @@ DC 만 끊긴 사이 승계·선점·회수가 지나가면 다시 열린 뒤에
 
 *비고: (유실 0 이면 없다) · 깨는 성질: PROP-FLR-QUEUED-IN-QUEUE*
 
+<a id="RACE-FLR-LATE-TAKEN"></a>**RACE-FLR-LATE-TAKEN** · 알려진 경주
+
+늦게 닿은 `TAKEN` 이 그 뒤에 보낸 `IDLE` · 새 `TAKEN` · `GRANTED` 보다 나중에 처리되면 화면이 앞 화자로 되돌아간다 — ★받아들인다: 원문 클라는 일련번호를 보지 않는다(RULE-FLR-SEQ). 다음 `TAKEN` · `IDLE` 이 바로잡는다
+
+*비고: 클라 번호 견줌(CAND-FLR-SEQ-REORDER · CAND-FLR-GRANTED-OVERTAKES-TAKEN)을 20261101 걷었다 — 그 반례는 가정 없는 판(h9_core · h9s_core)에서만 난다 · 막는 가정: ASM-FLR-DELIVER-FIRST · 깨는 성질: PROP-FLR-SHOWN-IS-HOLDER*
+
+<a id="RACE-FLR-T21-COPY"></a>**RACE-FLR-T21-COPY** · 알려진 경주
+
+`T21` 재전송 `TAKEN` 이 통에 있는 사이 대기를 그만둔 클라(반환 중)가 그것을 반환 확인으로 읽어 앞 화자를 보인다 — 직전 화자에게는 `IDLE` 이 가지 않으므로(6.3.5.5.4) 다음 `TAKEN` 까지 남는다 — ★받아들인다: `T21` 은 원문이 구현에 맡긴 ACK 처리(6.3.5.3.3 NOTE)이고, 사본이 두 사람의 동작을 건너 통에 머물러야 일어난다
+
+*비고: 같은 번호 재전송 · 반환 중 본 번호 거르기(CAND-FLR-T21-RACE)를 20261101 걷었다 — 그 반례는 가정 없는 판(h9f_core)에서만 난다 · 막는 가정: ASM-FLR-DELIVER-FIRST · 깨는 성질: PROP-FLR-SHOWN-IS-HOLDER*
+
+<a id="RACE-FLR-LATE-ACK"></a>**RACE-FLR-LATE-ACK** · 알려진 경주
+
+옛 `TAKEN` 의 늦은 ACK 이 새 `TAKEN` 의 `T21` 을 멈춘다 — 새 `TAKEN` 이 유실되면 그 발화 동안 그 청취자 화면에 화자가 없다 — ★받아들인다: 원문 Floor Ack 에는 번호가 없고(8.2.13) 결과는 재전송이 없는 원문 동작과 같다
+
+*비고: ACK 번호 되돌리기(CAND-FLR-ACK-STALE)를 20261101 걷었다 · 막는 가정: ASM-FLR-DELIVER-FIRST · 깨는 성질: PROP-FLR-SHOWN-IS-HOLDER*
+
 <a id="DEV-FLR-T132-DISPLAY"></a>**DEV-FLR-T132-DISPLAY** · 자체 확장
 
 대기 중(queued)에 승계 허가(GRANTED)를 받으면 화자 표시를 내린다 — 원문 6.2.4.9.4 는 표시를 정하지 않고, 직전 화자에게는 IDLE 이 가지 않으므로(6.3.5.5.4) 내리지 않으면 T132 동안 앞 화자가 화면에 남는다
 
 *원문: 6.2.4.9.4 · 근거: R-FLR-T132*
 
-<a id="DEV-FLR-SEQ-DISPLAY"></a>**DEV-FLR-SEQ-DISPLAY** · 자체 확장
-
-화자 표시를 바꾸는 `TAKEN` · `IDLE` 은 메시지 일련번호(TLV `8`)가 마지막으로 표시에 쓴 번호보다 새것일 때만 표시에 쓴다(감김 0~65535 를 고려해 견준다). 상태 전이는 원문대로 둔다 — 견주는 것은 화자 표시 하나다(대기 중 낡은 `IDLE` 은 예외 — DEV-FLR-STALE-IDLE-STAY). 낡은 번호의 `TAKEN` 에도 ACK 은 한다. 데이터 채널이 순서를 보장하지 않아(`ordered: false`, §9-4-13) 승계 뒤에 옛 `TAKEN` 이 닿을 수 있다
-
-*원문: §10-4-31 "클라는 이 번호로 메시지를 버리지 않는다" — 원문 on-network 클라는 이 번호를 보지 않는다(6.2.4.3.2). 이 확장은 메시지를 버리지 않고 표시만 가른다 · 근거: R-FLR-SEQ-DISPLAY*
-
-<a id="DEV-FLR-T21-SAME-SEQ"></a>**DEV-FLR-T21-SAME-SEQ** · 자체 확장
-
-`T21` 재전송은 처음 보낸 그 `TAKEN` 의 일련번호를 다시 싣는다(같은 메시지의 재전송이다 — "보낼 때마다 1 증가"의 예외). 반환 중(`pending Release`) 클라는 이미 본 번호의 `TAKEN` 을 반환 확인으로 쓰지 않는다(ACK 만 한다)
-
-*원문: §10-4-31 일련번호 "보낼 때마다 1 증가" · 6.2.4.6.5 · 근거: R-FLR-T21-SAME-SEQ*
-
 <a id="DEV-FLR-PREQ-IDLE-DISPLAY"></a>**DEV-FLR-PREQ-IDLE-DISPLAY** · 자체 확장
 
-요청 중(`pending Request`)에 `IDLE` 을 받으면 상태는 그대로 두고 화자 표시만 내린다(일련번호가 새것일 때)
+요청 중(`pending Request`)에 `IDLE` 을 받으면 상태는 그대로 두고 화자 표시만 내린다
 
 *원문: 6.2.4.4 — pending Request 에 Floor Idle 절이 없다(원문 그대로면 IDLE 을 버려 앞 화자가 남는다) · 근거: R-FLR-PREQ-IDLE-DISPLAY*
 
@@ -1901,33 +1903,15 @@ DC 만 끊긴 사이 승계·선점·회수가 지나가면 다시 열린 뒤에
 
 *원문: 6.2.4.4 · 6.2.4.5 · 6.2.4.6 · 6.2.4.9 — 그 상태들에 누름(PTT 버튼 눌림) 절이 없다 · 근거: R-FLR-PRESS-DROP*
 
-<a id="DEV-FLR-GRANTED-SEQ"></a>**DEV-FLR-GRANTED-SEQ** · 자체 확장
-
-`GRANTED` 는 메시지 일련번호(TLV `8`)를 싣는다 — 그 순간 방의 마지막 번호 그대로(올리지 않는다). 클라는 그 번호가 새것이면 본 번호로 삼는다 — 그 뒤 닿는 더 옛 `TAKEN` · `IDLE` 은 낡은 것으로 걸러진다(DEV-FLR-SEQ-DISPLAY)
-
-*원문: 8.2.5 Floor Granted 에 Message Sequence Number 필드가 없다(8.2.3.10 은 Taken · Idle 만 묶는다) · 근거: R-FLR-GRANTED-SEQ*
-
-<a id="DEV-FLR-ACK-SEQ"></a>**DEV-FLR-ACK-SEQ** · 자체 확장
-
-`ACK` 은 받은 메시지에 일련번호가 실려 왔으면 그 번호를 되돌려 싣는다. 서버는 `TAKEN` 의 ACK 을 그 사람에게 마지막으로 보낸 `TAKEN` 의 번호와 같을 때만 확인으로 쓴다(`T21` 을 멈춘다) — 다르면 옛 `TAKEN` 의 늦은 ACK 이라 재전송을 이어 간다
-
-*원문: 8.2.13 Floor Ack 은 Source · Message Type · Track Info · Location 뿐이다(일련번호가 없다) · 근거: R-FLR-ACK-SEQ*
-
-<a id="DEV-FLR-STALE-IDLE-STAY"></a>**DEV-FLR-STALE-IDLE-STAY** · 자체 확장
-
-대기 중(`queued`) 클라는 낡은 번호의 `IDLE` 로 대기를 떠나지 않는다 — 상태도 화자 표시도 그대로 둔다(같은 번호 이후의 새 `IDLE` 은 원문대로 대기를 떠난다)
-
-*원문: 6.2.4.9.8 — Floor Idle 을 받으면 `has no permission` 으로 간다(번호를 보지 않는다) · 근거: R-FLR-STALE-IDLE-STAY*
-
 <a id="DEV-FLR-DOWN-FRESH"></a>**DEV-FLR-DOWN-FRESH** · 자체 확장
 
-재구축(세션 전체 · 그 서버)으로 그 방 발언권을 내릴 때 클라의 그 방 발언권 상태를 처음 값으로 돌린다 — 상태 `has no permission` · 누름 의지 · 발행 방(`isPub`) · 반이중 발행(`hasHalf`) · 화자 표시(`shown`) · 표시에 쓴 일련번호(`seen`)
+재구축(세션 전체 · 그 서버)으로 그 방 발언권을 내릴 때 클라의 그 방 발언권 상태를 처음 값으로 돌린다 — 상태 `has no permission` · 누름 의지 · 발행 방(`isPub`) · 반이중 발행(`hasHalf`) · 화자 표시(`shown` — 앱에도 화자 없음을 알린다)
 
 *원문: §3-2-3 1-1 · RULE-LINK-RECOVERY-REBUILD — 발언권을 `has no permission` 으로 내린다는 것만 정한다 · 근거: R-FLR-DOWN-FRESH*
 
 <a id="DEV-FLR-JOIN-FRESH"></a>**DEV-FLR-JOIN-FRESH** · 자체 확장
 
-방에 들 때(처음 · 다시 입장 — ROOM 효과 `floor.join`) 클라의 그 방 발언권 칸을 처음 값으로 둔다 — 요청 없음 · 누름 의지 없음 · 발행 방 아님(`isPub` — 전환 응답이 따로 온다) · 화자 표시 없음(READY 의 첫 알림이 채운다 — DEV-FLR-FIRST-NOTIFY) · ★표시에 쓴 일련번호(`seen`)는 둔다 — 같은 서버의 같은 방이라 번호가 이어진다(재구축의 DEV-FLR-DOWN-FRESH 와 다른 점). 서버는 참가자 기록을 원문 6.3.5.2.2 대로 만든다(`FLR.S.ws.join`)
+방에 들 때(처음 · 다시 입장 — ROOM 효과 `floor.join`) 클라의 그 방 발언권 칸을 처음 값으로 둔다 — 요청 없음 · 누름 의지 없음 · 발행 방 아님(`isPub` — 전환 응답이 따로 온다) · 화자 표시 없음(READY 의 첫 알림이 채운다 — DEV-FLR-FIRST-NOTIFY). 서버는 참가자 기록을 원문 6.3.5.2.2 대로 만든다(`FLR.S.ws.join`)
 
 *근거: R-FLR-JOIN-FRESH*
 
@@ -2245,18 +2229,6 @@ overriding without revoke(dual floor) 일 때만의 절 — override 선점 미�
 
 *무늬: Send RTP Media \(S: media\)*
 
-<a id="R-FLR-SEQ-DISPLAY"></a>**R-FLR-SEQ-DISPLAY** · 근거
-
-데이터 채널이 순서를 보장하지 않아(`ordered: false`, §9-4-13) 승계 뒤에 옛 `TAKEN` 이 닿으면 듣는 사람 화면이 앞 화자로 되돌아간다(H9 반례 h9_core). 원문 클라는 일련번호를 보지 않는다(RULE-FLR-SEQ) — 견줄 것이 번호뿐이다
-
-*없으면: 말하는 사람과 화면의 화자가 다르다(PROP-FLR-SHOWN-IS-HOLDER)*
-
-<a id="R-FLR-T21-SAME-SEQ"></a>**R-FLR-T21-SAME-SEQ** · 근거
-
-`T21` 재전송(DEV-FLR-TAKEN-ACK)이 떠 있는 사이 대기를 그만둔 클라가 재전송된 옛 `TAKEN` 을 반환 확인으로 읽으면 앞 화자를 보이고, 그 뒤 `IDLE` 은 직전 화자에게 오지 않는다(H9 반례 h9f_core · h9f_loss1_t7) — 재전송과 새 `TAKEN` 을 가를 것이 번호뿐이다(DEV-FLR-SEQ-DISPLAY)
-
-*없으면: 반환한 사람 화면에 앞 화자가 남는다*
-
 <a id="R-FLR-PREQ-IDLE-DISPLAY"></a>**R-FLR-PREQ-IDLE-DISPLAY** · 근거
 
 요청 중 클라가 `IDLE` 을 버리면 화면에 앞 화자가 남고 `T101` 을 다 쓴 뒤에도 그대로다(H9 반례 h9f_loss1_ack_t7)
@@ -2269,35 +2241,17 @@ overriding without revoke(dual floor) 일 때만의 절 — override 선점 미�
 
 *없으면: 같은 누름이 구현마다 다른 메시지가 된다*
 
-<a id="R-FLR-GRANTED-SEQ"></a>**R-FLR-GRANTED-SEQ** · 근거
-
-번호 없는 `GRANTED` 가 더 옛 `TAKEN` 을 앞지르면 대기 허가를 받은 클라가 화자 표시를 앞 화자로 되돌리고, `T132` 로 허가를 놓으면 서버는 반환한 사람에게 `IDLE` 을 보내지 않으므로(6.3.5.5.4) 표시가 굳는다(H9 반례 h9s_core)
-
-*없으면: 아무도 말하지 않는데 앞 화자가 보인다 — 다음 발언권 사건까지*
-
-<a id="R-FLR-ACK-SEQ"></a>**R-FLR-ACK-SEQ** · 근거
-
-청취자가 `TAKEN` 에 보내는 것은 ACK 뿐이라 `T21` 은 ACK 으로 멈추는데, 번호 없는 ACK 은 옛 `TAKEN` 의 늦은 ACK 과 가를 수 없다 — 새 `TAKEN` 이 유실되면 재전송 없이 표시가 빈다(H9 반례 h9f_loss1_ack_t7). 원문 `T20` 은 허가받은 사람의 RTP 로 멈춰(6.3.4.4.5) 이 문제가 없다
-
-*없으면: 유실 하나와 늦은 ACK 하나가 겹치면 그 발화 내내 그 청취자 화면에 화자가 없다*
-
-<a id="R-FLR-STALE-IDLE-STAY"></a>**R-FLR-STALE-IDLE-STAY** · 근거
-
-낡은 `IDLE` 이 원문대로 대기를 떠나게 하면 클라와 서버 대기열이 어긋난다 — 서버가 차례에 준 `GRANTED` 를 클라가 버리고(`has no permission`), 서버는 말하지 않는 사람을 화자로 쥔 채 `T20` 재전송을 다 쓰고 `T1` 까지 기다린다 — 그동안 다른 사람이 말할 수 없다(H9 반례 h9s_core)
-
-*없으면: 순서가 바뀐 메시지 하나로 채널이 몇 초 막힌다*
-
 <a id="R-FLR-DOWN-FRESH"></a>**R-FLR-DOWN-FRESH** · 근거
 
-재구축 뒤의 발언권은 새 연결 위의 새 관계다. 방 일련번호는 서버가 방마다 센다(RULE-FLR-SEQ 값 칸) — 미디어 서버가 재기동하면 다시 작은 값부터 오르고, MBCP 에는 WS 의 `epoch` 같은 축이 없다. 발행 방 · 반이중 발행도 재구축이 다시 한다(RULE-LINK-RECOVERY-REBUILD — 다시 발행 · 다시 `pub_select`)
+재구축 뒤의 발언권은 새 연결 위의 새 관계다. 발행 방 · 반이중 발행도 재구축이 다시 한다(RULE-LINK-RECOVERY-REBUILD — 다시 발행 · 다시 `pub_select`). 재구축 동안은 DC 가 없어 화자 통지가 오지 않으니 클라가 스스로 앱에 화자 없음을 알린다
 
-*없으면: 옛 `seen` 이 새 `TAKEN` · `IDLE` 을 낡은 것으로 읽어(DEV-FLR-SEQ-DISPLAY) 화자 표시가 굳는다 · 옛 `isPub` · `hasHalf` 로 누름 준비 단계를 건너뛰어 `DENY(101)` · `DENY(5)` 를 받는다*
+*없으면: 옛 `isPub` · `hasHalf` 로 누름 준비 단계를 건너뛰어 `DENY(101)` · `DENY(5)` 를 받는다 · 앱 화면에 재구축 앞의 화자가 남는다(다시 든 방의 첫 알림이 오기까지 · 다시 들지 못하면 계속)*
 
 <a id="R-FLR-JOIN-FRESH"></a>**R-FLR-JOIN-FRESH** · 근거
 
-다시 입장은 같은 방 · 같은 서버라 방 일련번호가 끊기지 않는다 — 떠날 때(`FLR.C.any.leave`)도 번호를 두었다. 나머지 칸은 떠날 때 이미 내렸거나 새 입장이 다시 알린다.
+나머지 칸은 떠날 때 이미 내렸거나 새 입장이 다시 알린다.
 
-*없으면: 떠난 채(`left`)인 클라 칸에 입장이 아무것도 안 해 재입장한 방의 발언권 클라가 떠난 사람으로 남는다 · `seen` 까지 지우면 다음 `TAKEN` · `IDLE` 의 번호 견주기(DEV-FLR-SEQ-DISPLAY)가 처음부터 다시 서 낡은 통지를 새것으로 읽을 수 있다*
+*없으면: 떠난 채(`left`)인 클라 칸에 입장이 아무것도 안 해 재입장한 방의 발언권 클라가 떠난 사람으로 남는다*
 
 <a id="R-FLR-ROOM-GONE"></a>**R-FLR-ROOM-GONE** · 근거
 
