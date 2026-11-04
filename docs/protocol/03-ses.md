@@ -647,7 +647,7 @@
 |---|---|
 | 1 | [`SES.C.RESUMING.bind_new`](#SES.C.RESUMING.bind_new) · [`SES.C.RESUMING.resume_2008`](#SES.C.RESUMING.resume_2008) |
 | 1-1 | [`SES.C.RESUMING.bind_new`](#SES.C.RESUMING.bind_new) · [`SES.C.RESUMING.resume_2008`](#SES.C.RESUMING.resume_2008) |
-| 2 | [`LINK.C.any.close_all`](09-link.md#LINK.C.any.close_all) · [`ROOM.C.LEAVING.down`](04-room.md#ROOM.C.LEAVING.down) · [`ROOM.C.JOINING.down_quit`](04-room.md#ROOM.C.JOINING.down_quit) · [`ROOM.C.any.down`](04-room.md#ROOM.C.any.down) · [`ROOM.C.any.close_all`](04-room.md#ROOM.C.any.close_all) · [`SES.C.RESUMING.bind_new`](#SES.C.RESUMING.bind_new) · [`SES.C.RESUMING.resume_2008`](#SES.C.RESUMING.resume_2008) |
+| 2 | [`LINK.C.any.close_all`](09-link.md#LINK.C.any.close_all) · [`LINK.C.NONE.renego_closed`](09-link.md#LINK.C.NONE.renego_closed) · [`ROOM.C.LEAVING.down`](04-room.md#ROOM.C.LEAVING.down) · [`ROOM.C.JOINING.down_quit`](04-room.md#ROOM.C.JOINING.down_quit) · [`ROOM.C.any.down`](04-room.md#ROOM.C.any.down) · [`ROOM.C.any.close_all`](04-room.md#ROOM.C.any.close_all) · [`SES.C.RESUMING.bind_new`](#SES.C.RESUMING.bind_new) · [`SES.C.RESUMING.resume_2008`](#SES.C.RESUMING.resume_2008) |
 | 3 | [`ROOM.C.NONE.rejoin`](04-room.md#ROOM.C.NONE.rejoin) · [`SES.C.CONNECTING.bind_ok_rebuild`](#SES.C.CONNECTING.bind_ok_rebuild) · [`SES.C.RESUMING.bind_new`](#SES.C.RESUMING.bind_new) · [`SES.C.RESUMING.resume_2008`](#SES.C.RESUMING.resume_2008) |
 | 4 | [`SES.C.CONNECTING.bind_ok_rebuild`](#SES.C.CONNECTING.bind_ok_rebuild) · [`SES.C.RESUMING.bind_new`](#SES.C.RESUMING.bind_new) · [`SES.C.RESUMING.resume_2008`](#SES.C.RESUMING.resume_2008) |
 

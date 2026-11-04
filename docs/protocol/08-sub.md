@@ -66,7 +66,7 @@
 3. ★**SDP 재료가 바뀌었으면**(줄이 늘었다 · 줄의 튜플이 바뀌었다) 그 서버의 구독 SDP 를 ★**표만으로 처음부터 다시 짓는다**(§9-4-7). 연달아 온 표는 마지막 것 하나로 지어도 된다.
    ★**실린 트랙만 바뀌었으면**(`track_id` · `room_id` — 빈 줄 · 다시 채움 · 재배정) 다시 짓지 않는다 — 화면만 다시 잇고 바로 `READY{arev}`. ★단 협상 중이면 지금 보내지 않는다 — 협상 끝의 `READY` 가 그때의 가장 새 차례를 싣는다(지금 보내면 아직 SDP 에 없는 줄까지 확인하게 된다).
    ★새 차례인데 내용이 그대로면 차례만 올리고 SDP 를 건드리지 않는다.
-4. 협상이 끝나면 `READY{arev}` — ★**적용된 SDP 와 줄이 같은 표 가운데 가장 새 것의 `arev`** 를 싣는다(§8-1-3). 실패했으면 보내지 않는다.
+4. 협상이 끝나면 `READY{arev}` — ★**적용된 SDP 와 줄이 같은 표 가운데 가장 새 것의 `arev`** 를 싣는다(§8-1-3). 실패했으면 보내지 않는다. ★「끝」은 협상 큐가 빈 끝이다 — 협상 중에 표가 또 와서 한 번 더 지으면 그 중간 끝에는 보내지 않는다(§9-2-1).
 
 → 구조 — [`LINK.op.MLINE_EVENT`](09-link.md#LINK.op.MLINE_EVENT) · [`SUB.op.READY`](#SUB.op.READY)
 
@@ -291,7 +291,7 @@
 | <a id="SUB.C.any.nego_ok_other"></a>`SUB.C.any.nego_ok_other` | 받는 효과 LINK sub.nego_ok · 나머지 | — | §7-1-2 — 이 방은 바뀌지 않았다 |
 | <a id="SUB.C.any.nego_fail_other"></a>`SUB.C.any.nego_fail_other` | 받는 효과 LINK sub.nego_fail · 나머지 | — | §7-1-2 |
 | <a id="SUB.C.any.ready_res_old"></a>`SUB.C.any.ready_res_old` | ready != 'SENT' | — | §7-1-2 §4-2-6 — 옛 READY 의 응답 — 그 뒤 더 새 READY 가 필요해졌다(WANT — 남의 트랙이 붙어 다시 협상한다 · RULE-TRK-TRACK-EVENT-PROC). 상태를 바꾸지 않는다 — 덮어쓰면 새 READY 를 빠뜨려 받는 영상이 검다(R-ROOM-JOIN-OK-SYMPTOM) · 방을 버린 뒤(NONE) 늦게 온 응답도 같다(SUB 모형이 드러냄) |
-| <a id="SUB.C.any.table_changed"></a>`SUB.C.any.table_changed` | 받는 효과 LINK sub.table_changed · 나머지 | ready ← 'WANT' · 효과 sdp.rebuild → LINK.C.any.renego_queued · LINK.C.any.renego | §8-1-2 — 재조립은 그 서버 전체(표가 연결 하나에 하나) · 연달아 온 표는 마지막 것 하나로 조립해도 된다(표 전체라서) |
+| <a id="SUB.C.any.table_changed"></a>`SUB.C.any.table_changed` | 받는 효과 LINK sub.table_changed · 나머지 | ready ← 'WANT' · 효과 sdp.rebuild → LINK.C.NONE.renego_closed · LINK.C.any.renego_queued · LINK.C.any.renego | §8-1-2 — 재조립은 그 서버 전체(표가 연결 하나에 하나) · 연달아 온 표는 마지막 것 하나로 조립해도 된다(표 전체라서) |
 | <a id="SUB.C.any.table_rebound"></a>`SUB.C.any.table_rebound` | 받는 효과 LINK sub.table_rebound · 나머지 | ready ← 'SENT' · 보낸다 READY.req | §8-1-2 §8-1-3 — 적용된 SDP 가 이 표의 줄을 다 갖는다 — 바로 READY{arev} · 서버는 그 뒤에 새 트랙을 그 줄로 보낸다(확인 전에는 그 줄로 아무것도 안 보낸다) |
 | <a id="SUB.C.any.layer"></a>`SUB.C.any.layer` | 나머지 | 보낸다 SUBSCRIBE_LAYER.req | §7-1-2 |
 | <a id="SUB.C.any.layer_res"></a>`SUB.C.any.layer_res` | 나머지 | — | §7-1-2 |

@@ -212,6 +212,24 @@ a=ssrc-group:FID 1476098668 1947666   ← RTX 짝
 - `proc=sfu` 와 `proc=hub` 가 ★**한 파일**에 섞여 찍힌다(개발 형상 `/tmp/oxlens/node-a/ox.log.<날짜>`). hub 의 `CP-OP-*` 줄은 「그 op 의 gRPC 응답이 돌아왔다」는 뜻이라 sfud 줄보다 늦다.
 - `READY` 는 「이 배정표(arev)로 협상을 끝냈다」는 확인이다. ★**서버는 확인된 줄로만 보낸다**([연:RULE-SUB-EGRESS-ACKED](../protocol/08-sub.md#RULE-SUB-EGRESS-ACKED)) — 그래서 `Active cause=ready` 가 READY 직후에 찍힌다.
 
+### 3-2b. 길이 둘일 때 — UDP 와 TCP(실측 `TOUR-01T` · 2026-11-04)
+
+
+`ROOM_JOIN` 응답의 `server_config.ice` 에는 `port 20000` 과 함께 ★`tcp_port 20000` 이 온다(위 표). 상용 웹 SDK 는 그래도 **UDP 한 줄**만 낸다 — TCP passive 줄은 안드로이드 축(UDP 가 막힌 망)의 폴백이고 웹에서는 QA 스위치로만 켠다([연:RULE-LINK-SDP-COMMON](../protocol/09-link.md#RULE-LINK-SDP-COMMON)). 그 스위치로 두 형상을 쟀다.
+
+| | A — 둘 다 낸다 | B — TCP 만 남긴다(UDP 후보를 걷음) |
+|---|---|---|
+| SDK 가 지은 서버 쪽 SDP 의 후보 | `a=candidate:1 1 udp 2113937151 <IP> 20000 typ host` · `a=candidate:2 1 tcp 2113937150 <IP> 20000 typ host tcptype passive` | `a=candidate:2 1 tcp … tcptype passive` 한 줄 |
+| 브라우저가 만든 쌍 | ★**UDP 하나뿐** — STUN 9 왕복 · nominated · 96KB · ★TCP 쌍은 0, 12초 뒤에도 0 | TCP 하나 — 브라우저가 active(포트 9)로 서버 passive 에 건다 · STUN 8 왕복 · nominated · 96KB |
+| ICE `checking` → `connected` | .925 → .928(3ms) | .247 → .248(1ms) |
+| 서버 `transport ready(dtls+srtp)` | .930 · conn 359 | .252 · conn 360 |
+| 서버 `peer state Alive`(지명 쌍) | .984 — 62ms | .308 — 182ms |
+| 미디어 | — | A 가 B 의 소리를 듣는다(.535) — 업링크가 TCP 다 |
+
+- ★**둘 다 주면 브라우저는 TCP 를 시도조차 않는다.** 쌍을 만들어 두고 버리는 것이 아니라 아예 만들지 않는다(3층 `ice_tcp` 시험 ICETCP-03 · 20260913 실측과 같다). 그래서 「둘 다 열어두고 서버가 고른다」는 브라우저에서 성립하지 않는다 — 서버는 ICE-lite 라 클라가 지명한 쌍을 따를 뿐이다([연:RULE-LINK-SDP-COMMON](../protocol/09-link.md#RULE-LINK-SDP-COMMON)).
+- **TCP 만 있으면 붙고 흐른다.** 서버 쪽은 UDP 와 같은 수신 스레드가 TCP 연결도 함께 기다리고, 바이트는 같고 RFC 4571 의 2바이트 길이 틀만 씌운다(서버 `link/tcp.rs`). 로그도 UDP 와 같은 줄이다 — `transport ready … conn 360` · TCP 만의 줄은 없다. 「연결 번호」가 주소 노릇을 한다.
+- 지명까지 TCP 가 3배 걸렸다(62 → 182ms) — 같은 기계 안이라 망 지연은 없고, TCP 연결 수립과 STUN 검사가 직렬인 몫이다.
+
 ### 3-3. 다른 사람이 들어온다 — `PARTICIPANT_EVENT`
 
 B 의 입장은 A 와 똑같은 길이다. 다른 것은 ★**A 에게 통지가 하나 간다**는 것뿐이다.

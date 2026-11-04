@@ -75,7 +75,7 @@ sequenceDiagram
 ```
 
 - **이음매(seam)** — 한 영역의 걸음이 다른 영역에 사건을 넘기는 것. 어느 영역의 어느 입구로 가는지는 생성 파일이 정한다(예: `sub_client.ts` 의 `SEAMS = { 'sdp.rebuild': { to: 'LINK', react: ['CRenego'] } }`). 그래서 「SUB 가 바뀌면 SDP 를 다시 짓는다」가 손 코드의 판단이 아니라 규격의 줄이다.
-- 같은 순간 방(ROOM)과 트랙(TRK)도 걸었다 — `TRACK_EVENT` → `ROOM.C.JOINED.delta_apply_track` → `TRK.C.any.track_event` → 줄이 서면 앱에 `track`(01 §3-5).
+- 같은 순간 방(ROOM)과 트랙(TRK)도 걸었다 — `TRACK_EVENT` → `ROOM.C.JOINED.delta_apply_track` → `TRK.C.any.track_event` → 줄이 서면 앱에 `track`(01 §3-5). ★발행자 본인이 받는 자기 트랙의 `TRACK_EVENT` 는 `TRK.C.any.mine_other`(내 것 — 목록만 · 줄 없음)로 간다(2026-11-04 회차 — SDK `a45a229`).
 
 ## 4. 영역마다 상태
 
@@ -87,7 +87,7 @@ sequenceDiagram
 | LINK | 복구 단계 `OK · WAIT · CHECK · RESTART · APPLY · REOPEN · REBUILD · NONE` · ICE · DC | `LINK.C.any.renego_queued`(01) · `LINK.C.any.table_carried_old`(05) |
 | SUB | 방마다 READY `NONE · WANT · SENT · OK` | 위 §3 |
 | PUB | 트랙마다 `IDLE · STAGED · REGISTERED · SENDING` · 반이중 | `PUB.C.STAGED.pub_ok`(01) · `PUB.C.REGISTERED.floor_open`(03) |
-| TRK | 트랙 층 · muted | `TRK.C.any.track_event`(01) |
+| TRK | 트랙 층 · muted | `TRK.C.any.track_event`(01) · `TRK.C.any.track_state`(11) · `TRK.C.any.mine_other`(발행자 본인) |
 | FLR | 방마다 `NOPERM · PREQ · PERM · PREL · QUEUED …` | `FLR.C.NOPERM.press` · `FLR.C.PREL.rx_ACK_release`(03) |
 
 ## 5. 손 코드가 맡는 것 — 생성 파일 밖
