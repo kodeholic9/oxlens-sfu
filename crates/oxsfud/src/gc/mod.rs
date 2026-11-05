@@ -116,7 +116,9 @@ pub fn reap(peer: &Arc<Peer>, why: Why) {
         crate::aux::forget(&peer.user);
         crate::rtcp::forget_user(&peer.user);
     }
-    s.tables.remove(peer.subscribe.id);
+    if let Some(t) = s.tables.remove(peer.subscribe.id) {
+        s.tables.keep(&peer.sid, t.arev());
+    }
     let m = crate::fwd::rt::media();
     for (i, tr) in peer.transports().into_iter().enumerate() {
         tr.closed.store(true, Ordering::Release);

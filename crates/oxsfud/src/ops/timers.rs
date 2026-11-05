@@ -103,6 +103,7 @@ fn home_lost() {
         {
             tracing::info!(kind = "diag", user = %p.user, "home {}/{} lost — reaping peer", h.node, h.inst);
             crate::gc::evict(&p, None, Why::HomeLost);
+            s.tables.forget(&p.sid);
         }
     }
 }

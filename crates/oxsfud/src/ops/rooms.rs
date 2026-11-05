@@ -89,6 +89,10 @@ fn new_peer(c: &Ctx) -> Result<Arc<Peer>, Failure> {
         PcMode::Two => (new_transport(s, &c.user, Role::Publish)?, new_transport(s, &c.user, Role::Subscribe)?),
     };
     let table = Table::new(subscribe.clone(), c.pc_mode, s.policy.media.slot_mid_reserve as usize);
+    let floor = s.tables.floor(&c.sid);
+    if floor > 0 {
+        table.carry(floor + 1);
+    }
     s.tables.insert(table);
     let p = Arc::new(Peer {
         user: c.user.clone(),
@@ -265,6 +269,7 @@ pub fn session_gone(env: &Envelope) -> Result<Value, Failure> {
         && (sid.is_empty() || p.sid == sid)
     {
         crate::gc::evict(&p, None, Why::SessionGone);
+        s.tables.forget(&p.sid);
     }
     Ok(json!({}))
 }

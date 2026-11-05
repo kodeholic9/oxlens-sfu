@@ -237,6 +237,14 @@ impl Table {
         self.st.lock().map(|s| s.arev).unwrap_or(0)
     }
 
+    pub fn carry(&self, arev: u64) {
+        if let Ok(mut s) = self.st.lock()
+            && s.arev < arev
+        {
+            s.arev = arev;
+        }
+    }
+
     pub fn down_ssrcs(&self) -> BTreeSet<u32> {
         self.st.lock().map(|s| s.ssrcs.clone()).unwrap_or_default()
     }
@@ -650,6 +658,7 @@ pub fn ext_table(m: &[ExtMap]) -> ExtTable {
 #[derive(Default)]
 pub struct Tables {
     pub map: Mutex<HashMap<u64, Arc<Table>>>,
+    pub floors: Mutex<HashMap<String, u64>>,
 }
 
 impl Tables {
@@ -666,6 +675,23 @@ impl Tables {
     pub fn remove(&self, conn: u64) -> Option<Arc<Table>> {
         self.map.lock().ok().and_then(|mut g| g.remove(&conn))
     }
+
+    pub fn keep(&self, sid: &str, arev: u64) {
+        if let Ok(mut g) = self.floors.lock() {
+            let v = g.get(sid).copied().unwrap_or(0).max(arev);
+            g.insert(sid.to_string(), v);
+        }
+    }
+
+    pub fn floor(&self, sid: &str) -> u64 {
+        self.floors.lock().ok().and_then(|g| g.get(sid).copied()).unwrap_or(0)
+    }
+
+    pub fn forget(&self, sid: &str) {
+        if let Ok(mut g) = self.floors.lock() {
+            g.remove(sid);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -675,6 +701,25 @@ mod tests {
 
     fn cand(id: &str, room: &str, kind: Kind, class: Class, rank: i64) -> Cand {
         Cand { track_id: id.into(), room: room.into(), kind, class, codec: if kind == Kind::Audio { "opus".into() } else { "H264".into() }, rank, paused: false }
+    }
+
+    #[test]
+    fn arev_carries_across_peers_of_a_session() {
+        let ts = Tables::default();
+        let a = Table::new(Transport::new(1, "u", Role::Both, 0), PcMode::Two, 40);
+        let c = vec![cand("ptt-a-audio", "a", Kind::Audio, Class::Slot, 0)];
+        a.sync(&c, 1);
+        a.sync(&[], 2);
+        let before = a.arev();
+        assert!(before > 0);
+        ts.keep("s1", before);
+        let b = Table::new(Transport::new(2, "u", Role::Both, 0), PcMode::Two, 40);
+        b.carry(ts.floor("s1") + 1);
+        assert_eq!(b.arev(), before + 1, "연:SUB.type.MlineTable arev continues per session across a new Peer · the new Peer's table is a change");
+        b.sync(&c, 3);
+        assert!(b.arev() > before, "연:SUB.type.MlineTable the next table of the new Peer is newer than any the session saw");
+        ts.forget("s1");
+        assert_eq!(ts.floor("s1"), 0);
     }
 
     #[test]
