@@ -1,6 +1,7 @@
 #!/bin/sh
 # author: kodeholic (powered by Claude)
-# spec: 마스터 §시험 체계 — 서버를 바꾼 push 는 그 빌드의 3층 통과 기록(oxlens-sdk-web/.archive/gate-live/latest.json)이 있어야 나간다
+# spec: 마스터 §시험 체계 — 서버를 바꾼 push 는 그 빌드의 3층 통과 기록(oxlens-sdk-web/.archive/gate-live/latest.json)을 본다
+# ★막지 않고 알린다(20261106 부장님 「좀 느슨하게 둬」) — wire 변경은 층별로 서버 · 봇이 먼저 나가고 SDK 가 뒤따르므로 막으면 서로 기다린다
 top=$(git rev-parse --show-toplevel)
 rec="$top/../oxlens-sdk-web/.archive/gate-live/latest.json"
 zero=0000000000000000000000000000000000000000
@@ -22,13 +23,13 @@ path, wants = sys.argv[1], sys.argv[2:]
 try:
     r = json.load(open(path))
 except Exception:
-    print(f"✗ push 거절 — 3층 기록이 없다: {path}\n  oxlens-sdk-web 에서 `OXE2E_HUB=… npm run gate:live` 를 이 빌드로 돌린다")
-    sys.exit(1)
+    print(f"⚠ 3층 기록이 없다(push 는 나간다): {path}\n  oxlens-sdk-web 에서 `OXE2E_HUB=… npm run gate:live` 를 이 빌드로 돌린다")
+    sys.exit(0)
 b = r.get("server_build") or ""
 for head in wants:
   if not r.get("passed") or not b.startswith(head) or "-dirty" in b:
-    print(f"✗ push 거절 — 이 빌드({head})의 3층 통과 기록이 아니다: passed={r.get('passed')} server_build={b!r} at={r.get('at')}\n"
-          f"  서버를 이 커밋으로 띄우고 oxlens-sdk-web 에서 `npm run gate:live` 를 다시 돌린다")
-    sys.exit(1)
+    print(f"⚠ 이 빌드({head})의 3층 통과 기록이 아니다(push 는 나간다): passed={r.get('passed')} server_build={b!r} at={r.get('at')}\n"
+          f"  서버를 이 커밋으로 띄우고 oxlens-sdk-web 에서 `npm run gate:live` 를 돌려 뒤따라 확인한다")
+    sys.exit(0)
 print(f"✓ 3층 통과 기록 확인 — server {b} · {r.get('at')}")
 PY
