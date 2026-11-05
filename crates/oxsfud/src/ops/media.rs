@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-PUB-ADD · 정:IMPL-PUB-REMOVE · 정:IMPL-PUB-TRACK-SET · 정:IMPL-SUB-PIPELINE · 정:IMPL-SUB-READY-GATE · 정:IMPL-PUB-RID-SPATIAL · 정:IMPL-AFF-PUB-MOVE · 정:IMPL-LINK-ICE-RESTART · 정:IMPL-ROOM-EMIT · 정:CAND-PUB-NOT-PUB-ROOM-ORDER · 연:RULE-AFF-PUB-ONLY · 연:RULE-AFF-TWO-ROOMS-ONE-REQ · 연:RULE-AFF-FAIL · 연:RULE-SUB-READY-WHAT · model: claude-opus-5-5
+// spec: v1.6 · 정:IMPL-PUB-ADD · 정:IMPL-PUB-REMOVE · 정:IMPL-PUB-TRACK-SET · 정:IMPL-SUB-PIPELINE · 정:IMPL-SUB-READY-GATE · 정:IMPL-PUB-RID-SPATIAL · 정:IMPL-AFF-PUB-MOVE · 정:IMPL-LINK-ICE-RESTART · 정:IMPL-ROOM-EMIT · 정:CAND-PUB-NOT-PUB-ROOM-ORDER · 연:RULE-AFF-PUB-ONLY · 연:RULE-AFF-TWO-ROOMS-ONE-REQ · 연:RULE-AFF-FAIL · 연:RULE-SUB-READY-WHAT · 연:RULE-ROOM-JOIN-ID · 연:RULE-TRN-IDEMPOTENT · 연:RULE-PUB-REMOVE-FORM · model: claude-opus-5-5
 //! 미디어 op 조율 — 발행(검사 차례 ①~⑦ · 논리 먼저 물리 나중) · 구독 배관(대상 산출 → 배정표 → 줄 붙이기/떼기 → `MLINE_EVENT`) · `READY` · `SUBSCRIBE_LAYER` · `TRACK_SET` · `ICE_RESTART` · `AFFILIATION` · `MESSAGE`.
 
 use std::collections::BTreeSet;
@@ -40,6 +40,32 @@ pub fn joined(c: &Ctx, room_id: &str) -> Result<(Arc<Peer>, Arc<Room>), Failure>
         return Err(Code::NotInRoom.failure());
     }
     Ok((peer, room))
+}
+
+pub fn joined_as(c: &Ctx, room_id: &str, join_id: &str) -> Result<(Arc<Peer>, Arc<Room>), Failure> {
+    let (peer, room) = joined(c, room_id)?;
+    if peer.join_id(room_id).as_deref() != Some(join_id) {
+        return Err(Code::NotInRoom.failure());
+    }
+    Ok((peer, room))
+}
+
+fn same_mid(user: &str, items: &[Value]) -> Vec<Option<Arc<PubStream>>> {
+    let streams = super::sfu().and_then(|s| s.pubs.get(user)).map(|c| c.streams()).unwrap_or_default();
+    items.iter().map(|v| item::<String>(v, "mid").and_then(|m| streams.iter().find(|st| st.mid == m).cloned())).collect()
+}
+
+fn add_again(user: &str, items: &[Value]) -> Option<PublishTracksRes> {
+    let found = same_mid(user, items);
+    let mut tracks = Vec::with_capacity(items.len());
+    for (v, st) in items.iter().zip(found) {
+        let st = st?;
+        if item::<Duplex>(v, "duplex").unwrap_or(Duplex::Full) != st.duplex() {
+            return None;
+        }
+        tracks.push(AddedTrack { mid: st.mid.clone(), track_id: st.track_id.clone() });
+    }
+    (!tracks.is_empty()).then_some(PublishTracksRes::Add { tracks })
 }
 
 fn voice_rank(s: &PubStream) -> i64 {
@@ -187,20 +213,26 @@ pub fn publish(c: &Ctx, body: &Value) -> Result<Value, Failure> {
         None | Some("add") => {}
         Some("remove") => {
             let room_id: String = oxsig::code::need(body, "room_id")?;
+            let join_id: String = oxsig::code::need(body, "join_id")?;
             let track_ids: Vec<String> = oxsig::code::need(body, "track_ids")?;
-            return unpublish(c, &room_id, &track_ids);
+            return unpublish(c, &room_id, &join_id, &track_ids);
         }
         Some(_) => return Err(Code::InvalidPayload.failure().with_message("action")),
     }
     let room_id: String = oxsig::code::need(body, "room_id")?;
+    let join_id: String = oxsig::code::need(body, "join_id")?;
     let items: Vec<Value> = oxsig::code::need(body, "tracks")?;
+    if let Some(r) = add_again(&c.user, &items) {
+        return ok(&r);
+    }
     let ext = |k: &str| -> Result<Option<u8>, Failure> { oxsig::code::field(body, k) };
     let (twcc_extmap_id, rid_extmap_id, repair_rid_extmap_id, mid_extmap_id, audio_level_extmap_id) =
         (ext("twcc_extmap_id")?, ext("rid_extmap_id")?, ext("repair_rid_extmap_id")?, ext("mid_extmap_id")?, ext("audio_level_extmap_id")?);
     {
         {
             let s = sfu()?;
-            let (peer, room) = joined(c, &room_id)?;
+            let (peer, room) = joined_as(c, &room_id, &join_id)?;
+            let again = same_mid(&c.user, &items);
             let perm = perm_of(c, &room);
             let denied: Vec<&str> = items
                 .iter()
@@ -221,8 +253,9 @@ pub fn publish(c: &Ctx, body: &Value) -> Result<Value, Failure> {
             if items.len() > PER_REQUEST {
                 return Err(Code::TrackLimit.failure().with_details(json!({ "limit": PER_REQUEST, "current": items.len() })));
             }
-            if ctx.active() + items.len() > PER_PERSON {
-                return Err(Code::TrackLimit.failure().with_details(json!({ "limit": PER_PERSON, "current": ctx.active() + items.len() })));
+            let fresh = again.iter().filter(|x| x.is_none()).count();
+            if ctx.active() + fresh > PER_PERSON {
+                return Err(Code::TrackLimit.failure().with_details(json!({ "limit": PER_PERSON, "current": ctx.active() + fresh })));
             }
             let mut tracks: Vec<PublishTrack> = Vec::with_capacity(items.len());
             for v in &items {
@@ -276,8 +309,13 @@ pub fn publish(c: &Ctx, body: &Value) -> Result<Value, Failure> {
             let mut added = Vec::new();
             let mut to_announce = Vec::new();
             let mut any_half = false;
-            for t in &tracks {
+            for (t, prev) in tracks.iter().zip(&again) {
                 let duplex = t.duplex.unwrap_or(Duplex::Full);
+                if let Some(st) = prev {
+                    set_duplex_of(c, &peer, &room, st, duplex)?;
+                    added.push(AddedTrack { mid: st.mid.clone(), track_id: st.track_id.clone() });
+                    continue;
+                }
                 let simulcast = t.simulcast.unwrap_or(false) && t.kind == Kind::Video && duplex == Duplex::Full;
                 let codec = match t.kind {
                     Kind::Video => t.codec.as_deref().and_then(crate::trk::canonical_video).map(|x| x.to_string()),
@@ -387,9 +425,19 @@ pub fn drop_stream(peer: &Peer, st: &Arc<PubStream>) {
     st.rows.store(Arc::new(Vec::new()));
 }
 
-fn unpublish(c: &Ctx, room_id: &str, ids: &[String]) -> Result<Value, Failure> {
+fn unpublish(c: &Ctx, room_id: &str, join_id: &str, ids: &[String]) -> Result<Value, Failure> {
     let s = sfu()?;
-    let (peer, _) = joined(c, room_id)?;
+    let peer = match joined_as(c, room_id, join_id) {
+        Ok((p, _)) => p,
+        Err(f) if f.code == Code::NotInRoom.num() || f.code == Code::RoomNotFound.num() => {
+            let away = s.pubs.get(&c.user).is_some_and(|ctx| !ids.is_empty() && ids.iter().all(|id| ctx.find(id).is_some_and(|st| st.room.load().is_empty())));
+            match s.peer(&c.user) {
+                Some(p) if away => p,
+                _ => return Err(f),
+            }
+        }
+        Err(f) => return Err(f),
+    };
     let ctx = s.pubs.get(&c.user).ok_or_else(|| Code::TrackNotFound.failure())?;
     let mut list = Vec::new();
     for id in ids {
@@ -422,7 +470,7 @@ fn unpublish(c: &Ctx, room_id: &str, ids: &[String]) -> Result<Value, Failure> {
 pub fn ready(c: &Ctx, body: &Value) -> Result<Value, Failure> {
     let req: ReadyReq = parse(body)?;
     let s = sfu()?;
-    let (peer, room) = joined(c, &req.room_id)?;
+    let (peer, room) = joined_as(c, &req.room_id, &req.join_id)?;
     if let Some(t) = s.table(&peer) {
         let (first, became) = t.ready(&req.room_id, req.arev, common::now_ms());
         for (tid, _) in became {
@@ -458,7 +506,7 @@ pub fn ready(c: &Ctx, body: &Value) -> Result<Value, Failure> {
 pub fn subscribe_layer(c: &Ctx, body: &Value) -> Result<Value, Failure> {
     let req: SubscribeLayerReq = parse(body)?;
     let s = sfu()?;
-    let (peer, _room) = joined(c, &req.room_id)?;
+    let (peer, _room) = joined_as(c, &req.room_id, &req.join_id)?;
     let Some(t) = s.table(&peer) else { return ok(&Empty {}) };
     let now = common::now_ms();
     let mut resync = false;
@@ -482,7 +530,7 @@ pub fn subscribe_layer(c: &Ctx, body: &Value) -> Result<Value, Failure> {
 pub fn track_set(c: &Ctx, body: &Value) -> Result<Value, Failure> {
     let req: TrackSetReq = parse(body)?;
     let s = sfu()?;
-    let (peer, room) = joined(c, &req.room_id)?;
+    let (peer, room) = joined_as(c, &req.room_id, &req.join_id)?;
     if req.muted.is_some() == req.duplex.is_some() {
         return Err(Code::FieldConflict.failure().with_message("muted xor duplex"));
     }
@@ -520,13 +568,18 @@ pub fn track_set(c: &Ctx, body: &Value) -> Result<Value, Failure> {
         return ok(&TrackSetRes { ssrc: st.ssrc, muted: Some(m), duplex: None, noop: None });
     }
     let d = req.duplex.unwrap_or(Duplex::Full);
+    let noop = set_duplex_of(c, &peer, &room, &st, d)?;
+    ok(&TrackSetRes { ssrc: st.ssrc, muted: None, duplex: Some(d), noop: noop.then_some(true) })
+}
+
+fn set_duplex_of(c: &Ctx, peer: &Peer, room: &Arc<Room>, st: &Arc<PubStream>, d: Duplex) -> Result<bool, Failure> {
     if st.duplex() == d {
-        return ok(&TrackSetRes { ssrc: st.ssrc, muted: None, duplex: Some(d), noop: Some(true) });
+        return Ok(true);
     }
     if st.simulcast {
         return Err(Code::TrackOpUnsupported.failure().with_message("simulcast duplex"));
     }
-    if d == Duplex::Full && crate::aff::pub_room(&peer).as_deref() != Some(req.room_id.as_str()) {
+    if d == Duplex::Full && crate::aff::pub_room(peer).as_deref() != Some(room.id.as_str()) {
         return Err(Code::NotPubRoom.failure());
     }
     if d == Duplex::Full {
@@ -535,15 +588,15 @@ pub fn track_set(c: &Ctx, body: &Value) -> Result<Value, Failure> {
     st.set_duplex(d);
     st.muted.store(false, Ordering::Release);
     st.listed.store(true, Ordering::Release);
-    track_event(&room, TrackAction::Add, vec![crate::trk::entry(&st)]);
-    reg_half(&peer, has_half(&c.user));
-    resync_room(&req.room_id);
+    track_event(room, TrackAction::Add, vec![crate::trk::entry(st)]);
+    reg_half(peer, has_half(&c.user));
+    resync_room(&room.id);
     if d == Duplex::Full && st.kind == Kind::Video {
         for t in st.physical() {
             crate::rtcp::pli_burst(&t);
         }
     }
-    ok(&TrackSetRes { ssrc: st.ssrc, muted: None, duplex: Some(d), noop: None })
+    Ok(false)
 }
 
 pub fn ice_restart(c: &Ctx, body: &Value) -> Result<Value, Failure> {
@@ -625,11 +678,26 @@ pub fn affiliation(c: &Ctx, body: &Value) -> Result<Value, Failure> {
     let peer = s.peer(&c.user).ok_or_else(|| Code::NotInRoom.failure())?;
     let token = c.claims.as_ref().and_then(|x| x.permission);
     let old = crate::aff::pub_room(&peer);
+    let entry = |room: &str, j: &Option<String>, k: &str| -> Result<(), Failure> {
+        let j = j.as_deref().ok_or_else(|| Code::MissingField.failure().with_message(k.to_string()))?;
+        if peer.join_id(room).as_deref() != Some(j) {
+            return Err(Code::NotInRoom.failure());
+        }
+        Ok(())
+    };
+    if let Some(sel) = req.pub_select.as_deref() {
+        entry(sel, &req.pub_select_join_id, "pub_select_join_id")?;
+    }
+    if let Some(de) = req.pub_deselect.as_deref() {
+        if req.pub_deselect_join_id.is_none() {
+            return Err(Code::MissingField.failure().with_message("pub_deselect_join_id"));
+        }
+        if peer.in_room(de) {
+            entry(de, &req.pub_deselect_join_id, "pub_deselect_join_id")?;
+        }
+    }
     if let Some(sel) = req.pub_select.as_deref() {
         if let Some(room) = s.rooms.get(sel) {
-            if !peer.in_room(sel) {
-                return Err(Code::NotInRoom.failure());
-            }
             if old.as_deref() == Some(sel) {
                 aff_line(&c.user, "AFF.S.same", old.as_deref(), old.as_deref(), "AFFILIATION");
             } else if let Err(f) = move_pub(&peer, Some(&room), token) {

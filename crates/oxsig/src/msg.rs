@@ -136,6 +136,7 @@ impl Duplex {
 pub struct Publication {
     pub track_id: String,
     pub room_id: String,
+    pub mid: String,
     pub kind: Kind,
     pub duplex: Duplex,
     pub codec: Option<String>,
@@ -388,7 +389,11 @@ pub struct AffiliationReq {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pub_select: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pub_select_join_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pub_deselect: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pub_deselect_join_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub change_id: Option<String>,
 }
@@ -512,6 +517,7 @@ pub enum PublishTracksReq {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         action: Option<TrackAction>,
         room_id: String,
+        join_id: String,
         tracks: Vec<PublishTrack>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         twcc_extmap_id: Option<u8>,
@@ -527,6 +533,7 @@ pub enum PublishTracksReq {
     Remove {
         action: RemoveAction,
         room_id: String,
+        join_id: String,
         track_ids: Vec<String>,
     },
 }
@@ -549,6 +556,7 @@ pub enum PublishTracksRes {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackSetReq {
     pub room_id: String,
+    pub join_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub track_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -585,6 +593,8 @@ pub struct JoinCodec {
 pub struct RoomJoinReq {
     pub room_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub join_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub select: Option<bool>,
@@ -597,6 +607,7 @@ pub struct RoomJoinReq {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoomJoinRes {
     pub room_id: String,
+    pub join_id: String,
     pub participants: Vec<MemberInfo>,
     pub me: MemberInfo,
     pub affiliation: Affiliation,
@@ -610,6 +621,8 @@ pub struct RoomJoinRes {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoomLeaveReq {
     pub room_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub join_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -721,6 +734,7 @@ pub struct LeaveBody {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReadyReq {
     pub room_id: String,
+    pub join_id: String,
     pub arev: u64,
 }
 
@@ -740,6 +754,7 @@ pub struct LayerTarget {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SubscribeLayerReq {
     pub room_id: String,
+    pub join_id: String,
     pub targets: Vec<LayerTarget>,
 }
 
@@ -776,12 +791,12 @@ mod tests {
     #[test]
     fn publish_tracks_req_both_shapes() {
         let add: PublishTracksReq = serde_json::from_str(
-            r#"{"room_id":"r","tracks":[{"kind":"audio","ssrc":1,"mid":"0","pt":111}]}"#,
+            r#"{"room_id":"r","join_id":"j","tracks":[{"kind":"audio","ssrc":1,"mid":"0","pt":111}]}"#,
         )
         .unwrap();
         assert!(matches!(add, PublishTracksReq::Add { .. }));
         let rm: PublishTracksReq =
-            serde_json::from_str(r#"{"action":"remove","room_id":"r","track_ids":["t"]}"#).unwrap();
+            serde_json::from_str(r#"{"action":"remove","room_id":"r","join_id":"j","track_ids":["t"]}"#).unwrap();
         assert!(matches!(rm, PublishTracksReq::Remove { .. }));
     }
 

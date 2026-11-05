@@ -1,8 +1,8 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-ROOM-JOIN · 정:IMPL-ROOM-LIFE · 정:IMPL-ROOM-SERVER-CONFIG · 정:IMPL-ROOM-RESYNC · 정:IMPL-ROOM-DERIVED · 정:IMPL-SES-RESUME · 정:IMPL-FLR-MEMBER-JOIN · 정:CAND-ROOM-JOIN-AGAIN-EDGE · 정:CAND-ROOM-TTL-PERMANENT-MARK · 연:RULE-ROOM-LEAVE-PROC · 연:RULE-ROOM-LEAVE-FAIL · 연:RULE-ROOM-SELECT · 연:RULE-ROOM-JOIN-NO-TYPE-CHECK · 연:RULE-ROOM-DETAIL-PROC · 연:RULE-ROOM-DETAIL-TWO-USES · 연:RULE-ROOM-DETAIL-FAIL · 연:RULE-ROOM-LIST-PROC · 연:RULE-ROOM-LIST-FORM · 연:RULE-ROOM-CREATE-FAIL · model: claude-opus-5-5
+// spec: v1.6 · 정:IMPL-ROOM-JOIN · 정:IMPL-ROOM-LIFE · 정:IMPL-ROOM-SERVER-CONFIG · 정:IMPL-ROOM-RESYNC · 정:IMPL-ROOM-DERIVED · 정:IMPL-SES-RESUME · 정:IMPL-FLR-MEMBER-JOIN · 정:CAND-ROOM-JOIN-AGAIN-EDGE · 정:CAND-ROOM-TTL-PERMANENT-MARK · 연:RULE-ROOM-LEAVE-PROC · 연:RULE-ROOM-LEAVE-FAIL · 연:RULE-ROOM-SELECT · 연:RULE-ROOM-JOIN-NO-TYPE-CHECK · 연:RULE-ROOM-DETAIL-PROC · 연:RULE-ROOM-DETAIL-TWO-USES · 연:RULE-ROOM-DETAIL-FAIL · 연:RULE-ROOM-LIST-PROC · 연:RULE-ROOM-LIST-FORM · 연:RULE-ROOM-CREATE-FAIL · 연:RULE-ROOM-JOIN-ID · 연:RULE-ROOM-JOIN-REPLACE · 연:RULE-ROOM-LEAVE-FORM · 연:RULE-TRN-IDEMPOTENT · model: claude-opus-5-5
 //! 방 op 조율 — 입장 차례 ②재입장 축출 ③정원 ④방 수 ⑤배정표(원자 — 모자라면 되돌림) ⑥명단 · `pub_room` · 통지 · 퇴장 · 재개 스냅샷 · 방 생성(멱등) · 상세 · 목록 · 세션 폐기.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -99,7 +99,7 @@ fn new_peer(c: &Ctx) -> Result<Arc<Peer>, Failure> {
         claims: c.claims.clone().unwrap_or_default(),
         publish,
         subscribe,
-        rooms: Mutex::new(BTreeSet::new()),
+        rooms: Mutex::new(BTreeMap::new()),
         created_at: common::now_ms(),
         ever_sent_join: AtomicBool::new(false),
     });
@@ -129,6 +129,9 @@ pub fn join(c: &Ctx, body: &Value) -> Result<Value, Failure> {
     }
     let mut rejoin = false;
     if let Some(old) = s.peer(&c.user) {
+        if old.in_room(&req.room_id) && old.sid == c.sid && req.join_id != old.join_id(&req.room_id) {
+            return join_same(s, &old, &room);
+        }
         if old.in_room(&req.room_id) {
             crate::gc::evict(&old, Some(&req.room_id), Why::Evict);
             rejoin = room.has(&c.user);
@@ -161,7 +164,7 @@ pub fn join(c: &Ctx, body: &Value) -> Result<Value, Failure> {
         table.mark_seeded();
     }
     if let Ok(mut g) = peer.rooms.lock() {
-        g.insert(req.room_id.clone());
+        g.insert(req.room_id.clone(), common::random_hex(8));
     }
     let out = super::media::resync_peer(&peer, false);
     if out.mid_limit {
@@ -216,13 +219,25 @@ pub fn join(c: &Ctx, body: &Value) -> Result<Value, Failure> {
         }
     }
     peer.ever_sent_join.store(true, Ordering::Release);
+    join_res(s, &peer, &room, &me)
+}
+
+fn join_same(s: &super::Sfu, peer: &Arc<Peer>, room: &Arc<Room>) -> Result<Value, Failure> {
+    let me = room.member(&peer.user).ok_or_else(|| Code::InternalError.failure())?;
+    join_res(s, peer, room, &me)
+}
+
+fn join_res(s: &super::Sfu, peer: &Arc<Peer>, room: &Arc<Room>, me: &Member) -> Result<Value, Failure> {
+    let table = s.table(peer).ok_or_else(|| Code::InternalError.failure())?;
+    let join_id = peer.join_id(&room.id).ok_or_else(|| Code::InternalError.failure())?;
     let res = RoomJoinRes {
         room_id: room.id.clone(),
+        join_id,
         participants: room.participants(),
         me: me.me(),
-        affiliation: crate::aff::affiliation(&peer),
-        server_config: server_config(s, &peer),
-        tracks: tracks_of(&room),
+        affiliation: crate::aff::affiliation(peer),
+        server_config: server_config(s, peer),
+        tracks: tracks_of(room),
         version: room.version(),
         media_codecs: room.media_codecs.clone(),
         mline_table: table.snapshot(&s.epoch),
@@ -232,7 +247,10 @@ pub fn join(c: &Ctx, body: &Value) -> Result<Value, Failure> {
 
 pub fn leave(c: &Ctx, body: &Value) -> Result<Value, Failure> {
     let req: RoomLeaveReq = parse(body)?;
-    let (peer, _room) = super::media::joined(c, &req.room_id)?;
+    let (peer, _room) = match req.join_id.as_deref() {
+        Some(j) => super::media::joined_as(c, &req.room_id, j)?,
+        None => super::media::joined(c, &req.room_id)?,
+    };
     if !crate::gc::leave(&peer, &req.room_id, Why::Leave, false) {
         return Err(Code::NotInRoom.failure());
     }
@@ -274,6 +292,7 @@ pub fn resume(env: &Envelope) -> Result<Value, Failure> {
         .map(|st| Publication {
             track_id: st.track_id.clone(),
             room_id: st.room.load().as_str().to_string(),
+            mid: st.mid.clone(),
             kind: st.kind,
             duplex: st.duplex(),
             codec: Some(st.codec_name().to_string()),

@@ -7,7 +7,7 @@ pub mod dtls;
 pub mod stun;
 pub mod tcp;
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -216,7 +216,7 @@ pub struct Peer {
     pub claims: Claims,
     pub publish: Arc<Transport>,
     pub subscribe: Arc<Transport>,
-    pub rooms: Mutex<BTreeSet<String>>,
+    pub rooms: Mutex<BTreeMap<String, String>>,
     pub created_at: u64,
     pub ever_sent_join: AtomicBool,
 }
@@ -231,11 +231,15 @@ impl Peer {
     }
 
     pub fn rooms(&self) -> Vec<String> {
-        self.rooms.lock().map(|r| r.iter().cloned().collect()).unwrap_or_default()
+        self.rooms.lock().map(|r| r.keys().cloned().collect()).unwrap_or_default()
     }
 
     pub fn in_room(&self, room: &str) -> bool {
-        self.rooms.lock().map(|r| r.contains(room)).unwrap_or(false)
+        self.rooms.lock().map(|r| r.contains_key(room)).unwrap_or(false)
+    }
+
+    pub fn join_id(&self, room: &str) -> Option<String> {
+        self.rooms.lock().ok().and_then(|r| r.get(room).cloned())
     }
 
     pub fn home(&self) -> Home {
