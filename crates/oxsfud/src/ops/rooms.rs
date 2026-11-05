@@ -201,7 +201,7 @@ pub fn join(c: &Ctx, body: &Value) -> Result<Value, Failure> {
     let half = super::media::has_half(&c.user);
     let u = c.user.clone();
     let fr = me.permission.floor_request;
-    super::floor::run(&room, |f, _| f.ws_join(&u, half, fr));
+    super::floor::run(&room, super::floor::Entry::of("ws_join", &u).with("half", half.to_string()).with("perm", fr.to_string()), |f, _| Some(f.ws_join(&u, half, fr)));
     let old_pub = crate::aff::pub_room(&peer);
     if select {
         match super::media::move_pub(&peer, Some(&room), claims.permission) {
@@ -219,7 +219,7 @@ pub fn join(c: &Ctx, body: &Value) -> Result<Value, Failure> {
         super::media::aff_line(&c.user, "AFF.S.join_listen", old_pub.as_deref(), old_pub.as_deref(), "ROOM_JOIN");
         if old_pub.as_deref() == Some(room.id.as_str()) {
             let u = c.user.clone();
-            super::floor::run(&room, |f, _| f.ws_pub_select(&u));
+            super::floor::run(&room, super::floor::Entry::of("ws_pub_select", &u), |f, _| Some(f.ws_pub_select(&u)));
         }
     }
     peer.ever_sent_join.store(true, Ordering::Release);

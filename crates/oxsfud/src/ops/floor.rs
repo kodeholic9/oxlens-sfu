@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.7 · 정:IMPL-FLR-LOCK · 정:IMPL-FLR-RTP-OBSERVE · 정:IMPL-FLR-MEDIA-BIND · 정:IMPL-FLR-FIRST-NOTICE · 정:IMPL-FLR-MEMBER-JOIN · 정:RULE-FLR-SNAPSHOT · 연:RULE-FLR-TIMERS · 연:TRN.frame.DC · 정:IMPL-FLR-POLICY · 정:CAND-FLR-RELEASE-SILENCE-SPEAKER · 정:CAND-FWD-PRIME-SOURCE · 정:CAND-FWD-PRIME-EPISODE · model: claude-opus-5-5
+// spec: v1.7 · 정:IMPL-FLR-LOCK · 정:IMPL-FLR-RTP-OBSERVE · 정:IMPL-FLR-MEDIA-BIND · 정:IMPL-FLR-FIRST-NOTICE · 정:IMPL-FLR-MEMBER-JOIN · 정:RULE-FLR-SNAPSHOT · 연:RULE-FLR-TIMERS · 연:TRN.frame.DC · 정:IMPL-FLR-POLICY · 정:CAND-FLR-RELEASE-SILENCE-SPEAKER · 정:CAND-FWD-PRIME-SOURCE · 정:CAND-FWD-PRIME-EPISODE · 운영:RULE-LOG-TRANSITION · model: claude-opus-5-5
 //! 발언권 집행 — 판정은 방 락 안(보낼 것 · 걸 타이머 · 효과에 `grant_no`) · 집행은 락 밖(MBCP 를 DC 로 · 타이머는 가장 이른 만료 시각에 깨어난다 · 슬롯 결합 · 예열 CN · 해제 무음 · PLI burst).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -101,9 +101,36 @@ struct Plan {
     from_idle: bool,
 }
 
-pub fn run<F>(room: &Arc<Room>, f: F) -> Step
+pub struct Entry<'a> {
+    pub name: &'static str,
+    pub user: &'a str,
+    pub ins: Vec<(&'static str, String)>,
+}
+
+impl<'a> Entry<'a> {
+    pub fn of(name: &'static str, user: &'a str) -> Self {
+        Entry { name, user, ins: Vec::new() }
+    }
+
+    pub fn with(mut self, k: &'static str, v: impl Into<String>) -> Self {
+        self.ins.push((k, v.into()));
+        self
+    }
+}
+
+fn trace(room: &str, e: &Entry, from: G, to: G, step: &Step) {
+    let spec = step.labels.first().copied();
+    let t = common::log::Transition { area: "FLR", key: room, spec, from: from.as_str(), to: spec.map(|_| to.as_str()), cause: e.name, inputs: &e.ins };
+    let mut l = t.line().key("room", room);
+    if !e.user.is_empty() {
+        l = l.key("user", e.user);
+    }
+    common::log::emit(l);
+}
+
+pub fn run<F>(room: &Arc<Room>, e: Entry, f: F) -> Step
 where
-    F: FnOnce(&mut Floor, u32) -> Step,
+    F: FnOnce(&mut Floor, u32) -> Option<Step>,
 {
     let Some(rf) = of(&room.id) else { return Step::default() };
     let plan = {
@@ -112,7 +139,9 @@ where
         let now = now_ms();
         let t2_left = ck.timers.get(&("T2", None)).map(|at| (at.saturating_sub(now) / 1000) as u32).unwrap_or((t2_ms() / 1000) as u32);
         let was_idle = fl.g == G::Idle;
-        let step = f(&mut fl, t2_left);
+        let from = fl.g;
+        let Some(step) = f(&mut fl, t2_left) else { return Step::default() };
+        trace(&room.id, &e, from, fl.g, &step);
         let mut effects = Vec::new();
         for fx in &step.fx {
             match fx {
@@ -235,7 +264,7 @@ pub fn dc_in(tr: &Arc<Transport>, buf: &[u8]) {
     }
     let Some(cm) = from_mbcp(&m) else { return };
     let user = tr.user.clone();
-    run(&room, |f, t2| f.server_rx(&user, &cm, t2));
+    run(&room, Entry::of("server_rx", &user), |f, t2| Some(f.server_rx(&user, &cm, t2)));
 }
 
 pub fn on_rtp(room_id: &str, user: &str, first: bool) {
@@ -253,7 +282,7 @@ pub fn on_rtp(room_id: &str, user: &str, first: bool) {
             ck.last_rtp_at = Some(now);
         }
     }
-    run(&room, |f, _| f.rtp(user));
+    run(&room, Entry::of("rtp", user), |f, _| Some(f.rtp(user)));
 }
 
 fn last_rtp_ms(room: &Room) -> Option<u64> {
@@ -304,13 +333,27 @@ fn fire_due(room: &Arc<Room>, rf: &Arc<RoomFloor>) {
     };
     for (name, user) in due {
         let u = user.clone().unwrap_or_default();
-        run(room, |f, _| {
+        run(room, Entry::of(timer_entry(name), &u), |f, _| {
             let armed = if user.is_some() { f.armed_participant(&u) } else { f.armed_server() };
             if !armed.contains(&name) {
-                return Step::default();
+                return None;
             }
-            fire(f, name, &u)
+            Some(fire(f, name, &u))
         });
+    }
+}
+
+fn timer_entry(name: &str) -> &'static str {
+    match name {
+        "T1" => "t1",
+        "T2" => "t2",
+        "T3" => "t3",
+        "T7" => "t7",
+        "T20" => "t20",
+        "T8" => "t8",
+        "T21" => "t21",
+        "T9" => "t9",
+        _ => "timer",
     }
 }
 

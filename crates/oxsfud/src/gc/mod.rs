@@ -39,7 +39,7 @@ pub fn leave(peer: &Arc<Peer>, room_id: &str, why: Why, keep_roster: bool) -> bo
         return false;
     };
     let user = peer.user.clone();
-    crate::ops::floor::run(&room, |f, _| f.ws_leave(&user));
+    crate::ops::floor::run(&room, crate::ops::floor::Entry::of("ws_leave", &user), |f, _| Some(f.ws_leave(&user)));
     if crate::aff::pub_room(peer).as_deref() == Some(room_id) {
         crate::aff::set_pub_room(peer, None);
         crate::ops::media::aff_line(&user, "AFF.S.left", Some(room_id), None, why.as_str());

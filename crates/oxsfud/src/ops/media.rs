@@ -384,7 +384,7 @@ pub fn reg_half(p: &Peer, half: bool) {
     let Some(s) = super::sfu() else { return };
     for rid in p.rooms() {
         if let Some(room) = s.rooms.get(&rid) {
-            super::floor::run(&room, |f, _| f.ws_reg_half(&p.user, half));
+            super::floor::run(&room, super::floor::Entry::of("ws_reg_half", &p.user), |f, _| Some(f.ws_reg_half(&p.user, half)));
         }
     }
 }
@@ -399,7 +399,7 @@ fn release_floor_if_speaker(user: &str, room_id: &str) {
     let holder = room.floor.lock().ok().and_then(|f| f.holder());
     if holder.as_deref() == Some(user) {
         let m = crate::flr::core::Msg::new(crate::flr::core::Mt::Release, None, 0, 0);
-        super::floor::run(&room, |f, t2| f.server_rx(user, &m, t2));
+        super::floor::run(&room, super::floor::Entry::of("server_rx", user), |f, t2| Some(f.server_rx(user, &m, t2)));
     }
 }
 
@@ -499,7 +499,7 @@ pub fn ready(c: &Ctx, body: &Value) -> Result<Value, Failure> {
         }
     }
     let user = c.user.clone();
-    super::floor::run(&room, |f, _| f.ready(&user));
+    super::floor::run(&room, super::floor::Entry::of("ready", &user), |f, _| Some(f.ready(&user)));
     ok(&Empty {})
 }
 
@@ -635,7 +635,7 @@ pub fn move_pub(peer: &Peer, to: Option<&Arc<Room>>, token: Option<Permission>) 
     }
     if let Some(or) = cur.as_deref().and_then(|old| s.rooms.get(old)) {
         let u = peer.user.clone();
-        super::floor::run(&or, |f, _| f.ws_pub_away(&u));
+        super::floor::run(&or, super::floor::Entry::of("ws_pub_away", &u), |f, _| Some(f.ws_pub_away(&u)));
     }
     crate::aff::set_pub_room(peer, to.map(|r| r.id.as_str()));
     let mut moved_from = Vec::new();
@@ -663,7 +663,7 @@ pub fn move_pub(peer: &Peer, to: Option<&Arc<Room>>, token: Option<Permission>) 
     }
     if let Some(r) = to {
         let u = peer.user.clone();
-        super::floor::run(r, |f, _| f.ws_pub_select(&u));
+        super::floor::run(r, super::floor::Entry::of("ws_pub_select", &u), |f, _| Some(f.ws_pub_select(&u)));
         if !moved_to.is_empty() {
             track_event(r, TrackAction::Add, moved_to);
             resync_room(&r.id);
