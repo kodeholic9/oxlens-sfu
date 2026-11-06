@@ -308,7 +308,6 @@ pub fn publish(c: &Ctx, body: &Value) -> Result<Value, Failure> {
             tr.ext_ids.store(Arc::new(ids));
             let mut added = Vec::new();
             let mut to_announce = Vec::new();
-            let mut any_half = false;
             for (t, prev) in tracks.iter().zip(&again) {
                 let duplex = t.duplex.unwrap_or(Duplex::Full);
                 if let Some(st) = prev {
@@ -360,31 +359,17 @@ pub fn publish(c: &Ctx, body: &Value) -> Result<Value, Failure> {
                     v.extend(t.rtx_ssrc);
                     tb.add_uplink(&v);
                 }
-                if duplex == Duplex::Half {
-                    any_half = true;
-                } else if !simulcast {
+                if duplex != Duplex::Half && !simulcast {
                     st.listed.store(true, Ordering::Release);
                     to_announce.push(st.clone());
                 }
                 added.push(AddedTrack { mid: t.mid.clone(), track_id: st.track_id.clone() });
-            }
-            if any_half {
-                reg_half(&peer, true);
             }
             if !to_announce.is_empty() {
                 track_event(&room, TrackAction::Add, to_announce.iter().map(|x| crate::trk::entry(x)).collect());
                 resync_room(&room_id);
             }
             ok(&PublishTracksRes::Add { tracks: added })
-        }
-    }
-}
-
-pub fn reg_half(p: &Peer, half: bool) {
-    let Some(s) = super::sfu() else { return };
-    for rid in p.rooms() {
-        if let Some(room) = s.rooms.get(&rid) {
-            super::floor::run(&room, super::floor::Entry::of("ws_reg_half", &p.user), |f, _| Some(f.ws_reg_half(&p.user, half)));
         }
     }
 }
@@ -399,7 +384,8 @@ fn release_floor_if_speaker(user: &str, room_id: &str) {
     let holder = room.floor.lock().ok().and_then(|f| f.holder());
     if holder.as_deref() == Some(user) {
         let m = crate::flr::core::Msg::new(crate::flr::core::Mt::Release, None, 0, 0);
-        super::floor::run(&room, super::floor::Entry::of("server_rx", user), |f, t2| Some(f.server_rx(user, &m, t2)));
+        let half = has_half(user);
+        super::floor::run(&room, super::floor::Entry::of("server_rx", user), |f, t2| Some(f.server_rx(user, &m, half, t2)));
     }
 }
 
@@ -454,9 +440,6 @@ fn unpublish(c: &Ctx, room_id: &str, join_id: &str, ids: &[String]) -> Result<Va
         if listed && !at.is_empty() {
             removed.entry(at).or_default().push(crate::trk::entry(st));
         }
-    }
-    if !has_half(&c.user) {
-        reg_half(&peer, false);
     }
     for (at, es) in removed {
         if let Some(r) = s.rooms.get(&at) {
@@ -589,7 +572,6 @@ fn set_duplex_of(c: &Ctx, peer: &Peer, room: &Arc<Room>, st: &Arc<PubStream>, d:
     st.muted.store(false, Ordering::Release);
     st.listed.store(true, Ordering::Release);
     track_event(room, TrackAction::Add, vec![crate::trk::entry(st)]);
-    reg_half(peer, has_half(&c.user));
     resync_room(&room.id);
     if d == Duplex::Full && st.kind == Kind::Video {
         for t in st.physical() {

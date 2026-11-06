@@ -264,7 +264,8 @@ pub fn dc_in(tr: &Arc<Transport>, buf: &[u8]) {
     }
     let Some(cm) = from_mbcp(&m) else { return };
     let user = tr.user.clone();
-    run(&room, Entry::of("server_rx", &user), |f, t2| Some(f.server_rx(&user, &cm, t2)));
+    let half = super::media::has_half(&user);
+    run(&room, Entry::of("server_rx", &user), |f, t2| Some(f.server_rx(&user, &cm, half, t2)));
 }
 
 pub fn on_rtp(room_id: &str, user: &str, first: bool) {

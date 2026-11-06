@@ -8,7 +8,7 @@ use oxsig::floor::timers;
 fn room(users: &[&str]) -> Floor {
     let mut f = Floor::new(10, 30);
     for u in users {
-        f.ws_join(u, true, true);
+        f.ws_join(u, true);
         f.ws_pub_select(u);
     }
     f
@@ -19,11 +19,11 @@ fn request(f: &mut Floor, u: &str) -> Step {
 }
 
 fn request_p(f: &mut Floor, u: &str, p: u32) -> Step {
-    f.server_rx(u, &Msg::new(Mt::Request, None, p, 0), 0)
+    f.server_rx(u, &Msg::new(Mt::Request, None, p, 0), true, 0)
 }
 
 fn release(f: &mut Floor, u: &str) -> Step {
-    f.server_rx(u, &Msg::new(Mt::Release, None, 0, 0), 0)
+    f.server_rx(u, &Msg::new(Mt::Release, None, 0, 0), true, 0)
 }
 
 fn taken_seq(s: &Step, to: &str) -> u32 {
@@ -41,7 +41,7 @@ fn late_ack_of_old_taken_stops_t21_of_new_taken() {
     assert_ne!(old, new);
     assert!(f.armed_participant("b").contains(&"T21"));
     let late = Msg { t: Mt::Ack, a: None, n: 2, d: 0, q: old };
-    f.server_rx("b", &late, 0);
+    f.server_rx("b", &late, true, 0);
     assert!(!f.armed_participant("b").contains(&"T21"), "RACE-FLR-LATE-ACK: an ACK carries no number, so the late one stops T21");
     assert_eq!(f.part_name("b"), "NP_TAKEN");
 }

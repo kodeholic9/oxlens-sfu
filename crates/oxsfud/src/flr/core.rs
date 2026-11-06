@@ -109,7 +109,6 @@ pub struct Waiter {
 pub struct Part {
     pub part: Option<P>,
     pub pub_room: bool,
-    pub half: bool,
     pub perm: bool,
     pub retry: bool,
     pub released: bool,
@@ -377,7 +376,7 @@ impl Floor {
         r.labels.push("FLR.S.G.any.rtp_discard");
     }
 
-    pub fn server_rx(&mut self, u: &str, m: &Msg, t2_left: u32) -> Step {
+    pub fn server_rx(&mut self, u: &str, m: &Msg, half: bool, t2_left: u32) -> Step {
         let mut r = Step::default();
         if m.t == Mt::Ack && self.part_of(u) != Some(P::NpTaken) {
             r.labels.push("FLR.S.gate.ack_drop");
@@ -393,7 +392,7 @@ impl Floor {
             return r;
         }
         let pp = self.parts.get(u).cloned().unwrap_or_default();
-        if m.t == Mt::Request && !pp.half {
+        if m.t == Mt::Request && !half {
             r.labels.push("FLR.S.gate.recv_only");
             self.send(&mut r, u, Mt::Deny, None, deny::RECV_ONLY as u32, 0);
             return r;
@@ -473,13 +472,6 @@ impl Floor {
         r
     }
 
-    pub fn ws_reg_half(&mut self, u: &str, half: bool) -> Step {
-        let mut r = Step::default();
-        r.labels.push("FLR.S.ws.reg_half");
-        self.p(u).half = half;
-        r
-    }
-
     pub fn ws_pub_away(&mut self, u: &str) -> Step {
         let mut r = Step::default();
         r.labels.push("FLR.S.ws.pub_away");
@@ -500,7 +492,7 @@ impl Floor {
         r
     }
 
-    pub fn ws_join(&mut self, u: &str, half: bool, perm: bool) -> Step {
+    pub fn ws_join(&mut self, u: &str, perm: bool) -> Step {
         let mut r = Step::default();
         if self.g == G::Prevoke && self.revoking.as_deref() == Some(u) {
             r.labels.push("FLR.S.ws.join_revoking");
@@ -515,7 +507,6 @@ impl Floor {
         p.part = Some(if taken { P::NpTaken } else { P::NpIdle });
         p.g_taken = taken;
         p.pub_room = false;
-        p.half = half;
         p.perm = perm;
         p.retry = false;
         p.released = false;
@@ -906,14 +897,14 @@ mod tests {
     #[test]
     fn grant_then_release() {
         let mut f = Floor::new(10, 30);
-        f.ws_join("a", true, true);
-        f.ws_join("b", true, true);
+        f.ws_join("a", true);
+        f.ws_join("b", true);
         f.ws_pub_select("a");
-        let r = f.server_rx("a", &Msg::new(Mt::Request, None, 5, 0), 0);
+        let r = f.server_rx("a", &Msg::new(Mt::Request, None, 5, 0), true, 0);
         assert!(r.out.iter().any(|o| o.to == "a" && o.m.t == Mt::Granted));
         assert!(r.out.iter().any(|o| o.to == "b" && o.m.t == Mt::Taken));
         assert_eq!(r.fx, vec![Fx::Bind("a".into())]);
-        let r = f.server_rx("a", &Msg::new(Mt::Release, None, 0, 0), 0);
+        let r = f.server_rx("a", &Msg::new(Mt::Release, None, 0, 0), true, 0);
         assert_eq!(f.g, G::Idle);
         assert_eq!(r.fx, vec![Fx::Release(Some("a".into()))]);
         assert!(r.out.iter().any(|o| o.to == "a" && o.m.t == Mt::Ack && o.m.n == RELEASE_TYPE));
@@ -923,15 +914,29 @@ mod tests {
     #[test]
     fn release_acked_in_every_state() {
         let mut f = Floor::new(10, 30);
-        f.ws_join("a", true, true);
-        f.ws_join("b", true, true);
+        f.ws_join("a", true);
+        f.ws_join("b", true);
         f.ws_pub_select("a");
         f.ws_pub_select("b");
         let acked = |r: &Step, u: &str| r.out.iter().any(|o| o.to == u && o.m.t == Mt::Ack && o.m.n == RELEASE_TYPE);
-        let r = f.server_rx("b", &Msg::new(Mt::Release, None, 0, 0), 0);
+        let r = f.server_rx("b", &Msg::new(Mt::Release, None, 0, 0), true, 0);
         assert!(acked(&r, "b"));
-        f.server_rx("a", &Msg::new(Mt::Request, None, 5, 0), 0);
-        let r = f.server_rx("b", &Msg::new(Mt::Release, None, 0, 0), 0);
+        f.server_rx("a", &Msg::new(Mt::Request, None, 5, 0), true, 0);
+        let r = f.server_rx("b", &Msg::new(Mt::Release, None, 0, 0), true, 0);
         assert!(acked(&r, "b"));
+    }
+
+    #[test]
+    fn half_is_read_at_request_time() {
+        let mut f = Floor::new(10, 30);
+        f.ws_join("a", true);
+        f.ws_join("b", true);
+        f.ws_pub_select("a");
+        let r = f.server_rx("a", &Msg::new(Mt::Request, None, 5, 0), false, 0);
+        assert_eq!(r.labels, vec!["FLR.S.gate.recv_only"]);
+        assert!(r.out.iter().any(|o| o.to == "a" && o.m.t == Mt::Deny && o.m.n == deny::RECV_ONLY as u32));
+        assert_eq!(f.g, G::Idle);
+        let r = f.server_rx("a", &Msg::new(Mt::Request, None, 5, 0), true, 0);
+        assert!(r.out.iter().any(|o| o.to == "a" && o.m.t == Mt::Granted));
     }
 }

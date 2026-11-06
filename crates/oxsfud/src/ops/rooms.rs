@@ -198,10 +198,9 @@ pub fn join(c: &Ctx, body: &Value) -> Result<Value, Failure> {
     };
     room.join(member, rejoin, claims.permission);
     let me = room.member(&c.user).ok_or_else(|| Code::InternalError.failure())?;
-    let half = super::media::has_half(&c.user);
     let u = c.user.clone();
     let fr = me.permission.floor_request;
-    super::floor::run(&room, super::floor::Entry::of("ws_join", &u).with("half", half.to_string()).with("perm", fr.to_string()), |f, _| Some(f.ws_join(&u, half, fr)));
+    super::floor::run(&room, super::floor::Entry::of("ws_join", &u).with("perm", fr.to_string()), |f, _| Some(f.ws_join(&u, fr)));
     let old_pub = crate::aff::pub_room(&peer);
     if select {
         match super::media::move_pub(&peer, Some(&room), claims.permission) {
