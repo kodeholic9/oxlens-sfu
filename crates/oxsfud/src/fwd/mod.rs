@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-FWD-STEPS · 정:RULE-FWD-BRANCH-AUTHORITY · 정:IMPL-FWD-ROOM · 정:RULE-FWD-MEDIA-WORKERS · 정:IMPL-FWD-SOURCE-SWITCH · 정:RULE-CONC-HOT-PATH · 정:RULE-OPS-TRANSIT · 정:RULE-FWD-SCOPE · 정:CAND-FWD-REWRITER-LOCK · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-FWD-STEPS · 정:RULE-FWD-BRANCH-AUTHORITY · 정:IMPL-FWD-ROOM · 정:RULE-FWD-MEDIA-WORKERS · 정:IMPL-FWD-SOURCE-SWITCH · 정:RULE-CONC-HOT-PATH · 정:RULE-OPS-TRANSIT · 정:RULE-FWD-SCOPE · 정:CAND-FWD-REWRITER-LOCK · 정:IMPL-SUB-TABLE · model: claude-opus-5-5
 //! 전달 — `on_rtp`(복호한 평문 RTP 하나: 발언권 관문 · 줄 고르기 · 목적지 워커 묶음) · 다운링크 몫(재기록 · PT · 확장 · TWCC · SRTP · 송신 · 체류).
 
 pub mod core;
@@ -436,16 +436,19 @@ pub fn on_rtp(w: &Arc<Worker>, tr: &Arc<Transport>, plain: Bytes, at_us: u64) {
     forward(w, tr, &track, &rtp, plain.clone(), at_us);
 }
 
+fn voice_onset(prev: u64, run: u64, last: u64, now_ms: u64) -> (u64, bool) {
+    let run = if prev == 0 || now_ms.saturating_sub(prev) > crate::sub::VOICE_GAP_MS { now_ms } else { run };
+    let due = now_ms.saturating_sub(run) >= crate::sub::VOICE_DELAY_MS && (last == 0 || now_ms.saturating_sub(last) >= crate::sub::VOICE_RETRY_MS);
+    (run, due)
+}
+
 fn voice(w: &Worker, track: &crate::r#pub::PubTrack, prev: u64, now_ms: u64) {
-    if prev == 0 || now_ms.saturating_sub(prev) > crate::sub::VOICE_GAP_MS {
-        track.voice_run_ms.store(now_ms, Ordering::Release);
+    let old = track.voice_run_ms.load(Ordering::Acquire);
+    let (run, due) = voice_onset(prev, old, track.voice_event_ms.load(Ordering::Acquire), now_ms);
+    if run != old {
+        track.voice_run_ms.store(run, Ordering::Release);
     }
-    if !track.stream.unplaced.load(Ordering::Acquire) {
-        return;
-    }
-    let run = track.voice_run_ms.load(Ordering::Acquire);
-    let last = track.voice_event_ms.load(Ordering::Acquire);
-    if now_ms.saturating_sub(run) < crate::sub::VOICE_DELAY_MS || (last != 0 && now_ms.saturating_sub(last) < crate::sub::VOICE_RETRY_MS) {
+    if !due || !track.stream.unplaced.load(Ordering::Acquire) {
         return;
     }
     track.voice_event_ms.store(now_ms, Ordering::Release);
@@ -645,5 +648,46 @@ pub fn send_down(w: &Worker, row: &DownRow, pkt: &Pkt) {
     conn.tx.bytes.fetch_add(enc.len() as u64, Ordering::Relaxed);
     if pkt.transit {
         w.transit.record(mono_us().saturating_sub(pkt.at_us));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::voice_onset;
+    use crate::sub::{VOICE_DELAY_MS, VOICE_GAP_MS, VOICE_RETRY_MS};
+
+    fn talk(from: u64, until: u64, step: u64, last: u64) -> Option<u64> {
+        let (mut prev, mut run) = (0, 0);
+        let mut t = from;
+        while t <= until {
+            let (r, due) = voice_onset(prev, run, last, t);
+            if due {
+                return Some(t);
+            }
+            (prev, run) = (t, r);
+            t += step;
+        }
+        None
+    }
+
+    #[test]
+    fn voice_fires_after_delay_of_steady_voice() {
+        assert_eq!(voice_onset(0, 0, 0, 1_000), (1_000, false));
+        assert_eq!(talk(1_000, 1_000 + VOICE_DELAY_MS - 20, 20, 0), None);
+        assert_eq!(talk(1_000, 2_000, 20, 0), Some(1_000 + VOICE_DELAY_MS));
+    }
+
+    #[test]
+    fn voice_gap_over_limit_restarts_run() {
+        assert_eq!(voice_onset(1_000 + VOICE_DELAY_MS - VOICE_GAP_MS, 1_000, 0, 1_000 + VOICE_DELAY_MS), (1_000, true));
+        let prev = 1_000 + VOICE_DELAY_MS - VOICE_GAP_MS - 1;
+        assert_eq!(voice_onset(prev, 1_000, 0, 1_000 + VOICE_DELAY_MS), (1_000 + VOICE_DELAY_MS, false));
+    }
+
+    #[test]
+    fn voice_retry_waits_r_after_last_event() {
+        let last = 1_200;
+        assert_eq!(voice_onset(last + VOICE_RETRY_MS - 40, 1_000, last, last + VOICE_RETRY_MS - 20), (1_000, false));
+        assert_eq!(voice_onset(last + VOICE_RETRY_MS - 20, 1_000, last, last + VOICE_RETRY_MS), (1_000, true));
     }
 }
