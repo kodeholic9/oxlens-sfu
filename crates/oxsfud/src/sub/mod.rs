@@ -21,6 +21,10 @@ pub const SUB_2PC: usize = 128;
 pub const FULL_AUDIO: usize = 25;
 pub const FULL_VIDEO: usize = 25;
 pub const T_GATE_MS: u64 = 5_000;
+pub const VOICE_DELAY_MS: u64 = 200;
+pub const VOICE_GAP_MS: u64 = 100;
+pub const VOICE_HOLD_MS: u64 = 1_000;
+pub const VOICE_RETRY_MS: u64 = VOICE_HOLD_MS;
 pub const SLOT_STREAM: &str = "ox-ptt";
 
 pub const URI_MID: &str = "urn:ietf:params:rtp-hdrext:sdes:mid";
@@ -142,6 +146,8 @@ pub struct SyncOut {
     pub changed: bool,
     pub mid_limit: bool,
     pub budget: Option<(usize, usize)>,
+    pub unplaced_add: Vec<String>,
+    pub unplaced_del: Vec<String>,
 }
 
 #[derive(Default)]
@@ -157,6 +163,7 @@ pub struct State {
     pub ready_at: HashMap<String, u64>,
     pub seeded: bool,
     pub prefs: HashMap<String, (u8, bool)>,
+    pub unplaced: BTreeSet<String>,
 }
 
 pub struct Table {
@@ -521,7 +528,27 @@ impl Table {
                 let tb = loaded_at.get(&kb).map(|t| (0u8, u64::MAX - t)).unwrap_or((1, s.waiting.get(&b.track_id).copied().unwrap_or(now)));
                 b.rank.cmp(&a.rank).then(ta.cmp(&tb))
             });
-            let target: Vec<&Cand> = desired.into_iter().take(cap).collect();
+            let target: Vec<&Cand> = if kind == Kind::Audio {
+                let held: Vec<&Cand> = desired
+                    .iter()
+                    .copied()
+                    .filter(|c| {
+                        c.rank > 0 && now.saturating_sub(c.rank as u64) < VOICE_HOLD_MS && loaded_at.contains_key(&(c.track_id.clone(), c.room.clone()))
+                    })
+                    .collect();
+                let mut t = held.clone();
+                for c in desired {
+                    if t.len() >= cap {
+                        break;
+                    }
+                    if !held.iter().any(|h| std::ptr::eq(*h, c)) {
+                        t.push(c);
+                    }
+                }
+                t
+            } else {
+                desired.into_iter().take(cap).collect()
+            };
             let tset: BTreeSet<(String, String)> = target.iter().map(|c| (c.track_id.clone(), c.room.clone())).collect();
             for i in 0..s.rows.len() {
                 let r = &s.rows[i];
@@ -568,6 +595,16 @@ impl Table {
         }
         let live: BTreeSet<String> = cands.iter().map(|c| c.track_id.clone()).collect();
         s.waiting.retain(|k, _| live.contains(k));
+        let placed: BTreeSet<(String, String)> =
+            s.rows.iter().filter(|r| r.class == Class::Full && r.kind == Kind::Audio).filter_map(|r| r.track.clone()).collect();
+        let unplaced: BTreeSet<String> = cands
+            .iter()
+            .filter(|c| c.class == Class::Full && c.kind == Kind::Audio && !c.paused && !placed.contains(&(c.track_id.clone(), c.room.clone())))
+            .map(|c| c.track_id.clone())
+            .collect();
+        out.unplaced_add = unplaced.difference(&s.unplaced).cloned().collect();
+        out.unplaced_del = s.unplaced.difference(&unplaced).cloned().collect();
+        s.unplaced = unplaced;
         if !ch.is_empty() || s.rows.len() != rows_before || tuned {
             s.arev = rev;
             out.changed = true;
@@ -873,6 +910,44 @@ mod tests {
         t.sync(&c, 30);
         let l = loaded(&t);
         assert!(l.contains(&"hi".to_string()) && !l.contains(&"old".to_string()), "정:IMPL-SUB-TABLE refill order = rank first · {l:?}");
+    }
+
+    fn aud(id: &str, rank: i64) -> Cand {
+        cand(id, "r", Kind::Audio, Class::Full, rank)
+    }
+
+    #[test]
+    fn audio_hold_keeps_recent_speaker() {
+        let tr = Transport::new(1, "u", Role::Both, 0, false);
+        let t = Table::new(tr, PcMode::Two, 40);
+        let mut c: Vec<Cand> = (0..FULL_AUDIO).map(|i| aud(&format!("a{i}"), 10_000 + i as i64)).collect();
+        t.sync(&c, 10_000);
+        c[0].rank = 10_500;
+        for x in c.iter_mut().skip(1) {
+            x.rank = 10_900;
+        }
+        c.push(aud("x", 10_950));
+        let o = t.sync(&c, 11_000);
+        let l = loaded(&t);
+        assert!(!l.contains(&"x".to_string()) && l.contains(&"a0".to_string()), "정:IMPL-SUB-TABLE audio 비우기 유지 H — a0 가 말한 지 500 ms · {l:?}");
+        assert_eq!(o.unplaced_add, vec!["x".to_string()], "정:IMPL-SUB-TABLE 줄 밖 표지 — x 가 줄 밖");
+        let o = t.sync(&c, 10_500 + VOICE_HOLD_MS);
+        let l = loaded(&t);
+        assert!(l.contains(&"x".to_string()) && !l.contains(&"a0".to_string()), "정:IMPL-SUB-TABLE H 를 넘은 a0 를 비우고 x 를 싣는다 · {l:?}");
+        assert_eq!(o.unplaced_del, vec!["x".to_string()]);
+        assert_eq!(o.unplaced_add, vec!["a0".to_string()]);
+    }
+
+    #[test]
+    fn audio_hold_does_not_touch_video() {
+        let tr = Transport::new(1, "u", Role::Both, 0, false);
+        let t = Table::new(tr, PcMode::Two, 40);
+        let mut c: Vec<Cand> = (0..FULL_VIDEO).map(|i| vid(&format!("v{i}"), "H264", 1)).collect();
+        t.sync(&c, 10_000);
+        c.push(vid("hot", "H264", 5));
+        let o = t.sync(&c, 10_001);
+        assert!(loaded(&t).contains(&"hot".to_string()));
+        assert!(o.unplaced_add.is_empty() && o.unplaced_del.is_empty(), "줄 밖 표지는 audio 만");
     }
 
     #[test]

@@ -429,8 +429,27 @@ pub fn on_rtp(w: &Arc<Worker>, tr: &Arc<Transport>, plain: Bytes, at_us: u64) {
         forward(w, tr, &track, &orig, fixed.clone(), at_us);
         return;
     }
-    track.on_ingress(&rtp, common::now_ms(), at_us, &ids);
+    let now_ms = common::now_ms();
+    if let Some(prev) = track.on_ingress(&rtp, now_ms, at_us, &ids) {
+        voice(w, &track, prev, now_ms);
+    }
     forward(w, tr, &track, &rtp, plain.clone(), at_us);
+}
+
+fn voice(w: &Worker, track: &crate::r#pub::PubTrack, prev: u64, now_ms: u64) {
+    if prev == 0 || now_ms.saturating_sub(prev) > crate::sub::VOICE_GAP_MS {
+        track.voice_run_ms.store(now_ms, Ordering::Release);
+    }
+    if !track.stream.unplaced.load(Ordering::Acquire) {
+        return;
+    }
+    let run = track.voice_run_ms.load(Ordering::Acquire);
+    let last = track.voice_event_ms.load(Ordering::Acquire);
+    if now_ms.saturating_sub(run) < crate::sub::VOICE_DELAY_MS || (last != 0 && now_ms.saturating_sub(last) < crate::sub::VOICE_RETRY_MS) {
+        return;
+    }
+    track.voice_event_ms.store(now_ms, Ordering::Release);
+    rt::voice_event(w.id, &track.stream);
 }
 
 pub fn on_pub_room(stream: &crate::r#pub::PubStream, pub_room: &str) -> bool {

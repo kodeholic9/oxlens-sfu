@@ -2,7 +2,7 @@
 // spec: v1.6 · 정:RULE-PUB-TWO-LAYERS · 정:RULE-PUB-STATE · 정:IMPL-PUB-ADD · 정:IMPL-PUB-ACCEPT · 정:IMPL-PUB-REMOVE · 정:IMPL-PUB-TRACK-SET · 정:RULE-RTCP-NACK-UP · 정:RULE-FWD-INGRESS-STATS · 정:RULE-PUB-SERVER-SCOPE · 정:CAND-PUB-RID-EXTRA · 정:CAND-PUB-INGRESS-STATS-OWNER · model: claude-opus-5-5
 //! 발행 — 논리 `PublisherStream`(track_id · 메타 · 구독 줄 목록) · 물리 `PublisherTrack`(업링크 SSRC · 캐시 1024 · NACK 결손 · PLI 스로틀 · 수신 통계) · 시뮬캐스트는 첫 RTP 에 rid 로 붙인다.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -77,6 +77,8 @@ pub struct PubStream {
     pub first_rtp_ms: AtomicU64,
     pub listed: AtomicBool,
     pub state: Mutex<PublishState>,
+    pub unplaced: AtomicBool,
+    pub unplaced_by: Mutex<BTreeSet<String>>,
 }
 
 static CSRC: AtomicU32 = AtomicU32::new(1);
@@ -114,6 +116,8 @@ impl PubStream {
             first_rtp_ms: AtomicU64::new(0),
             listed: AtomicBool::new(false),
             state: Mutex::new(PublishState::Created),
+            unplaced: AtomicBool::new(false),
+            unplaced_by: Mutex::new(BTreeSet::new()),
         })
     }
 
@@ -247,6 +251,8 @@ pub struct PubTrack {
     pub pli: Mutex<PliState>,
     pub last_rtp_ms: AtomicU64,
     pub last_voice_ms: AtomicU64,
+    pub voice_run_ms: AtomicU64,
+    pub voice_event_ms: AtomicU64,
     pub last_keyframe_ms: AtomicU64,
     pub blocked_last_us: AtomicU64,
     pub pt_checked: AtomicBool,
@@ -271,6 +277,8 @@ impl PubTrack {
             pli: Mutex::new(PliState::default()),
             last_rtp_ms: AtomicU64::new(0),
             last_voice_ms: AtomicU64::new(0),
+            voice_run_ms: AtomicU64::new(0),
+            voice_event_ms: AtomicU64::new(0),
             last_keyframe_ms: AtomicU64::new(0),
             blocked_last_us: AtomicU64::new(0),
             pt_checked: AtomicBool::new(false),
@@ -283,7 +291,7 @@ impl PubTrack {
         ssrc != self.ssrc
     }
 
-    pub fn on_ingress(&self, rtp: &Rtp<'_>, now_ms: u64, _at_us: u64, ids: &ExtIds) {
+    pub fn on_ingress(&self, rtp: &Rtp<'_>, now_ms: u64, _at_us: u64, ids: &ExtIds) -> Option<u64> {
         if let Ok(mut r) = self.recv.lock() {
             r.update(rtp.seq, rtp.ts, now_ms, rtp.raw.len());
         }
@@ -305,8 +313,9 @@ impl PubTrack {
             && let Some(v) = ext_get(rtp.ext, ids.audio_level).and_then(|v| v.first())
             && (v & 0x7f) < 50
         {
-            self.last_voice_ms.store(now_ms, Ordering::Release);
+            return Some(self.last_voice_ms.swap(now_ms, Ordering::AcqRel));
         }
+        None
     }
 
     pub fn on_repair(&self, rtp: &Rtp<'_>) {

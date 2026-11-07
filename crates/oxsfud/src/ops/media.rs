@@ -157,11 +157,34 @@ pub fn resync_peer(p: &Peer, notify: bool) -> SyncOut {
     let Some(t) = s.table(p) else { return SyncOut::default() };
     let out = t.sync(&cands_for(p), common::now_ms());
     apply_changes(&out.changes);
+    for (tid, on) in out.unplaced_add.iter().map(|t| (t, true)).chain(out.unplaced_del.iter().map(|t| (t, false))) {
+        if let Some(st) = s.stream(tid) {
+            mark_unplaced(&st, &p.user, on);
+        }
+    }
     if out.changed && notify {
         let body = MlineEventBody { table: t.snapshot(&s.epoch) };
         super::user_notice(&p.user, Op::MlineEvent, &body, None);
     }
     out
+}
+
+fn mark_unplaced(st: &PubStream, user: &str, on: bool) {
+    if let Ok(mut g) = st.unplaced_by.lock() {
+        if on {
+            g.insert(user.to_string());
+        } else {
+            g.remove(user);
+        }
+        st.unplaced.store(!g.is_empty(), Ordering::Release);
+    }
+}
+
+pub fn voice(st: &Arc<PubStream>) {
+    let room = st.room.load_full();
+    if !room.is_empty() && st.listed.load(Ordering::Acquire) {
+        resync_room(&room);
+    }
 }
 
 pub fn resync_room(room: &str) {

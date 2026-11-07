@@ -20,6 +20,7 @@ pub const WORKER_RING: usize = 1_024;
 pub const CTL_RING: usize = 4_096;
 pub const DEFAULT_QUEUE_PACKETS: usize = 6_000;
 pub const MAX_DATAGRAM: usize = 2_048;
+pub const VOICE_RING: usize = 256;
 
 static START: OnceLock<Instant> = OnceLock::new();
 static MEDIA: OnceLock<Arc<Media>> = OnceLock::new();
@@ -30,6 +31,13 @@ pub fn mono_us() -> u64 {
 
 pub fn media() -> Option<&'static Arc<Media>> {
     MEDIA.get()
+}
+
+pub fn voice_event(worker: usize, st: &Arc<crate::r#pub::PubStream>) {
+    let Some(w) = media().and_then(|m| m.workers.get(worker)) else { return };
+    if w.voice.try_send(st.clone()).is_err() {
+        crate::ops::drop_count("voice_event_drop");
+    }
 }
 
 pub enum Item {
@@ -89,6 +97,7 @@ pub struct Worker {
     pub transit: Transit,
     pub pubs: AtomicUsize,
     pub subs: AtomicUsize,
+    pub voice: tokio::sync::mpsc::Sender<Arc<crate::r#pub::PubStream>>,
 }
 
 impl Worker {
@@ -266,8 +275,11 @@ pub fn start(c: StartCfg) -> Result<Arc<Media>, String> {
     let recv = Arc::new(bind_udp(c.bind, per_worker_sock).map_err(|e| format!("udp {}: {e}", c.bind))?);
     let poll = Poll::new().map_err(|e| e.to_string())?;
     let waker = Waker::new(poll.registry(), Token(1)).map_err(|e| e.to_string())?;
+    let mut voice_rx = Vec::with_capacity(n);
     let workers: Vec<Arc<Worker>> = (0..n)
         .map(|i| {
+            let (voice, rx) = tokio::sync::mpsc::channel(VOICE_RING);
+            voice_rx.push(rx);
             Arc::new(Worker {
                 id: i,
                 inbox: (0..n + 2).map(|k| Arc::new(ArrayQueue::new(if k == 0 { RECV_RING } else if k == n + 1 { CTL_RING } else { WORKER_RING }))).collect(),
@@ -279,6 +291,7 @@ pub fn start(c: StartCfg) -> Result<Arc<Media>, String> {
                 transit: Transit::default(),
                 pubs: AtomicUsize::new(0),
                 subs: AtomicUsize::new(0),
+                voice,
             })
         })
         .collect();
@@ -293,6 +306,15 @@ pub fn start(c: StartCfg) -> Result<Arc<Media>, String> {
         tcp: Mutex::new(HashMap::new()),
     });
     MEDIA.set(m.clone()).map_err(|_| "media already started".to_string())?;
+    if let Ok(h) = tokio::runtime::Handle::try_current() {
+        for mut rx in voice_rx {
+            h.spawn(async move {
+                while let Some(st) = rx.recv().await {
+                    crate::ops::media::voice(&st);
+                }
+            });
+        }
+    }
     let tcp_listener = match c.tcp_port {
         Some(p) => {
             let a = SocketAddr::new(c.bind.ip(), p);
