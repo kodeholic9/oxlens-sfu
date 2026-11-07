@@ -62,10 +62,10 @@ pub fn server_config(s: &super::Sfu, p: &Peer) -> ServerConfig {
     }
 }
 
-fn new_transport(s: &super::Sfu, user: &str, role: Role) -> Result<Arc<Transport>, Failure> {
+fn new_transport(s: &super::Sfu, user: &str, role: Role, source_tag: bool) -> Result<Arc<Transport>, Failure> {
     let m = crate::fwd::rt::media().ok_or_else(|| Code::InternalError.failure())?;
     let w = m.pick_worker(role != Role::Subscribe);
-    let tr = Transport::new(s.next_id(), user, role, w);
+    let tr = Transport::new(s.next_id(), user, role, w, source_tag);
     m.register(tr.cred().ufrag.as_str(), &tr);
     if let Some(wk) = m.workers.get(w)
         && let Ok(mut g) = wk.transports.lock()
@@ -83,10 +83,10 @@ fn new_peer(c: &Ctx) -> Result<Arc<Peer>, Failure> {
     let s = sfu()?;
     let (publish, subscribe) = match c.pc_mode {
         PcMode::One => {
-            let t = new_transport(s, &c.user, Role::Both)?;
+            let t = new_transport(s, &c.user, Role::Both, c.source_tag)?;
             (t.clone(), t)
         }
-        PcMode::Two => (new_transport(s, &c.user, Role::Publish)?, new_transport(s, &c.user, Role::Subscribe)?),
+        PcMode::Two => (new_transport(s, &c.user, Role::Publish, c.source_tag)?, new_transport(s, &c.user, Role::Subscribe, c.source_tag)?),
     };
     let table = Table::new(subscribe.clone(), c.pc_mode, s.policy.media.slot_mid_reserve as usize);
     let floor = s.tables.floor(&c.sid);

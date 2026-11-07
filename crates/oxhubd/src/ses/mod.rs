@@ -43,6 +43,7 @@ pub struct Session {
     pub user_id: String,
     pub claims: Claims,
     pub pc_mode: PcMode,
+    pub source_tag: bool,
     pub created_at: u64,
     pub st: Mutex<SesState>,
 }
@@ -89,6 +90,8 @@ pub struct SessionData {
     pub user_id: String,
     pub claims: Claims,
     pub pc_mode: PcMode,
+    #[serde(default)]
+    pub source_tag: bool,
     pub servers: BTreeMap<String, BTreeSet<String>>,
     pub epochs: BTreeMap<String, String>,
     pub touched: BTreeSet<String>,
@@ -163,6 +166,7 @@ impl Ctx {
         e.session = Some(s.fp.clone());
         e.sid = Some(s.sid.clone());
         e.pc_mode = Some(s.pc_mode);
+        e.source_tag = Some(s.source_tag);
         e.home = Some(self.home.clone());
         e.claims = Some(s.claims.clone());
         e
@@ -269,6 +273,7 @@ pub async fn bind(ctx: &Arc<Ctx>, conn: &Conn, op: u16, pid: u32, flags: u8, bod
         user_id: id.user_id.clone(),
         claims: id.claims,
         pc_mode: req.pc_mode.unwrap_or(PcMode::Two),
+        source_tag: req.source_tag.unwrap_or(false),
         created_at: common::now_ms(),
         st: Mutex::new(SesState { bound: true, live: true, conn: Some(conn.clone()), ..Default::default() }),
     });
@@ -298,6 +303,7 @@ fn reply_bind(ctx: &Ctx, conn: &Conn, op: u16, pid: u32, flags: u8, s: &Session)
         session_id: s.sid.clone(),
         resume_window_ms: ctx.policy.hub.resume_window_ms as u64,
         pc_mode: s.pc_mode,
+        source_tag: s.source_tag,
     };
     common::log::emit(common::log::Line::ev("CP-OP-BIND").key("session", &s.fp).key("user", &s.user_id).msg("bound"));
     conn.reply_ok(op, pid, flags, serde_json::to_vec(&res).unwrap_or_default());
@@ -319,6 +325,7 @@ async fn resume_session(ctx: &Arc<Ctx>, sid: &str) -> Option<Arc<Session>> {
         user_id: d.user_id,
         claims: d.claims,
         pc_mode: d.pc_mode,
+        source_tag: d.source_tag,
         created_at: common::now_ms(),
         st: Mutex::new(SesState { servers: d.servers.clone(), epochs: d.epochs, touched: d.touched, ..Default::default() }),
     });
@@ -341,6 +348,7 @@ pub async fn hand_over(ctx: &Arc<Ctx>, sid: &str) -> Option<SessionData> {
         user_id: s.user_id.clone(),
         claims: s.claims.clone(),
         pc_mode: s.pc_mode,
+        source_tag: s.source_tag,
         servers: st.servers.clone(),
         epochs: st.epochs.clone(),
         touched: st.touched.clone(),

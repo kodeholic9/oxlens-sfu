@@ -54,8 +54,19 @@ fn fwd_rewrite_vectors() {
                 s["at_ms"].as_u64().unwrap_or(0),
                 cov,
             );
-            assert_eq!(m.seq as u64, s["out_seq"].as_u64().unwrap_or(0), "S-sym-IMPL-FWD-SOURCE-SWITCH-1 — out_seq {name} #{i}");
-            assert_eq!(m.ts as u64, s["out_ts"].as_u64().unwrap_or(0), "S-sym-IMPL-FWD-SOURCE-SWITCH-3 — out_ts {name} #{i}");
+            assert_eq!(m.map(|x| x.seq as u64), s["out_seq"].as_u64(), "S-sym-IMPL-FWD-SOURCE-SWITCH-1 · S-sym-IMPL-FWD-SOURCE-SWITCH-4①② — out_seq {name} #{i}");
+            assert_eq!(m.map(|x| x.ts as u64), s["out_ts"].as_u64(), "S-sym-IMPL-FWD-SOURCE-SWITCH-3 — out_ts {name} #{i}");
+        }
+        if let Some(n) = c.get("early_nack") {
+            let got = rw.unmap_nack(n["out_seq"].as_u64().unwrap_or(0) as u16).map(|x| x as u64);
+            assert_eq!(got, n["in_seq"].as_u64(), "S-sym-IMPL-FWD-SOURCE-SWITCH-5② — 창 안 경계 앞 NACK {name}");
+        }
+        if let Some(f) = c.get("flow") {
+            let g = |k: &str| f[k].as_u64().unwrap_or(0);
+            for i in 0..g("n") {
+                let m = rw.map(g("src"), (g("seq0") + i) as u16, (g("ts0") + g("ts_step") * i) as u32, g("at0") + g("at_step") * i, 1);
+                assert!(m.is_some(), "S-sym-IMPL-FWD-SOURCE-SWITCH-5① — 흐름은 버리지 않는다 {name} #{i}");
+            }
         }
         for n in c["nack"].as_array().unwrap_or(&vec![]) {
             let got = rw.unmap_nack(n["out_seq"].as_u64().unwrap_or(0) as u16).map(|x| x as u64);

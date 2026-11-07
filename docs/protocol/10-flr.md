@@ -71,6 +71,7 @@
 | `26` | `PREV` | user | 직전에 말한 사람 | DEV-FLR-TLV-EXT | `IDLE`? |  |
 | `27` | `REASON` | utf8 | 사유 설명 | DEV-FLR-TLV-EXT | `DENY`? · `REVOKE`? |  |
 | `29` | `ROOM` | utf8 | 방(room_id) | DEV-FLR-TLV-EXT | `REQUEST` · `GRANTED` · `TAKEN` · `DENY` · `RELEASE` · `IDLE` · `REVOKE` · `QPOS_REQ` · `QINFO` · `ACK` | UTF-8 255바이트 이하 |
+| `31` | `SOURCES` | u32list | 화자의 출처 번호 | DEV-FLR-TLV-EXT | `TAKEN`? | 화자 반이중 발행 트랙마다 출처 번호(CSRC) 하나 · 4바이트 큰 끝 · 길이 = 4 × 개수(RULE-FLR-SLOT-SOURCES) |
 
 ##### 메시지
 
@@ -78,7 +79,7 @@
 |---|---|---|---|---|---|---|---|---|
 | `0` | `00000` | `REQUEST` · `FLOOR_REQUEST` | Floor Request 8.2.4 | C→S | 못 쓴다 | — | priority(PRIORITY?) · room(ROOM — gate) | 0 — 말하게 해달라. 우선순위는 보통(0)과 다를 때만 싣는다(원문 6.2.4 · 8.2.3.2) |
 | `1` | `x0001` | `GRANTED` · `FLOOR_GRANTED` | Floor Granted 8.2.5 | S→C | 쓸 수 있다 | ★세운다 | priority(PRIORITY) · duration(DURATION) · room(ROOM — gate) | 1 — 말해라 |
-| `2` | `x0010` | `TAKEN` · `FLOOR_TAKEN` | Floor Taken 8.2.9 | S→C | 쓸 수 있다 | ★세운다 | speaker(SPEAKER) · seq(SEQ — seq) · room(ROOM — gate) | 2 — 누가 말하고 있다 |
+| `2` | `x0010` | `TAKEN` · `FLOOR_TAKEN` | Floor Taken 8.2.9 | S→C | 쓸 수 있다 | ★세운다 | speaker(SPEAKER) · sources(SOURCES?) · seq(SEQ — seq) · room(ROOM — gate) | 2 — 누가 말하고 있다 |
 | `3` | `x0011` | `DENY` · `FLOOR_DENY` | Floor Deny 8.2.6 | S→C | 쓸 수 있다 | ★세운다 | cause(CAUSE) · reason(REASON?) · room(ROOM — gate) | 3 — 안 된다 |
 | `4` | `x0100` | `RELEASE` · `FLOOR_RELEASE` | Floor Release 8.2.7 | C→S | 쓸 수 있다 | ★세운다 | room(ROOM — gate) | 4 — 다 말했다 |
 | `5` | `x0101` | `IDLE` · `FLOOR_IDLE` | Floor Idle 8.2.8 | S→C | 쓸 수 있다 | 안 세운다 | prev(PREV?) · seq(SEQ — seq) · room(ROOM — gate) | 5 — 아무도 안 말한다 |
@@ -168,7 +169,6 @@
 | `prev` | `none` | 직전 화자(TLV 0x1A) |
 | `members` | `Users` | 방 참가자 |
 | `pub` | `!EnAffil` (참가자마다) | 발행 방이 이 방인가(DEV-FLR-PUBROOM) |
-| `half` | `!EnAffil` (참가자마다) | 반이중 발행 트랙이 있나(DEV-FLR-RECVONLY-TRIGGER) |
 | `perm` | `true` (참가자마다) | 권한 비트(DEV-FLR-PERM-REVOKE) |
 | `retry` | `false` (참가자마다) | T9 도는 중(DEV-FLR-T9) |
 | `part` | `'NP_IDLE'` (참가자마다) | 참가자 상태(6.3.5) |
@@ -193,7 +193,6 @@
 | `prio` | `0` | 요청에 실은 우선순위 |
 | `grant` | `0` | 허가된 시간(초) |
 | `isPub` | `!EnAffil` | 이 방이 발행 방인가(전환 응답을 받았다) |
-| `hasHalf` | `!EnAffil` | 반이중 발행 트랙을 발행했나 |
 | `left` | `false` | 방을 나갔다 |
 | `shown` | `none` | 화자 표시 — 화면에 보이는 화자(내가 말하는 중이면 없음) |
 
@@ -236,12 +235,11 @@
 | 라벨 | 언제 | 하는 일 | 원문 · 근거 |
 |---|---|---|---|
 | <a id="FLR.C.any.press_drop"></a>`FLR.C.any.press_drop` | 나머지 | — | 6.2.4.4 6.2.4.5 6.2.4.6 6.2.4.9 DEV-FLR-PRESS-DROP — 요청 중 · 발언 중 · 반환 중 · 대기 중의 누름은 버린다 — 보내는 것도 바뀌는 것도 없다 |
-| <a id="FLR.C.any.reg_half"></a>`FLR.C.any.reg_half` | 받는 효과 PUB floor.reg_half · 나머지 | hasHalf ← true | DEV-FLR-RECVONLY-TRIGGER R-FLR-DENY-RECVONLY |
 | <a id="FLR.C.any.pub_select"></a>`FLR.C.any.pub_select` | 받는 효과 AFF floor.pub_select · 나머지 | isPub ← true | DEV-FLR-PUBROOM R-FLR-PUBROOM-ORDER |
 | <a id="FLR.C.any.pub_away"></a>`FLR.C.any.pub_away` | 받는 효과 AFF floor.pub_away · 나머지 | cs ← 'NOPERM'; want ← false; isPub ← false · 효과 mic.close → PUB.C.SENDING.floor_close · PUB.C.any.floor_close_other | DEV-FLR-PUB-AWAY |
 | <a id="FLR.C.any.leave"></a>`FLR.C.any.leave` | 받는 효과 ROOM floor.leave · 나머지 | cs ← 'NOPERM'; want ← false; isPub ← false; shown ← none; left ← true · 효과 mic.close → PUB.C.SENDING.floor_close · PUB.C.any.floor_close_other | DEV-FLR-PUB-AWAY — 발언권은 방에 든 동안만 있다(관계 FLR → ROOM) — 떠난 방의 화자 표시를 지운다 |
 | <a id="FLR.C.any.join"></a>`FLR.C.any.join` | 받는 효과 ROOM floor.join · 나머지 | sub ← 'WAIT'; want ← false; prio ← 0; grant ← 0; isPub ← false; shown ← none; left ← false | DEV-FLR-JOIN-FRESH R-FLR-JOIN-FRESH — 처음부터 든 사람과 같은 칸 — 요청 없음 · 발행 방 아님(전환 응답이 따로 온다) · 화자 표시는 READY 의 첫 알림이 채운다 · 상태는 떠날 때 이미 NOPERM 이다(CLeave) |
-| <a id="FLR.C.any.down"></a>`FLR.C.any.down` | 받는 효과 SES floor.down_all · LINK floor.down_server · 나머지 | cs ← 'NOPERM'; want ← false; isPub ← false; hasHalf ← false; shown ← none · 효과 app.speaker_none · 효과 mic.close → PUB.C.SENDING.floor_close · PUB.C.any.floor_close_other | DEV-FLR-DOWN-FRESH R-FLR-DOWN-FRESH — DC 가 없으니 통지가 오지 않는다 — 클라가 스스로 내린다(§3-2-3 1-1) |
+| <a id="FLR.C.any.down"></a>`FLR.C.any.down` | 받는 효과 SES floor.down_all · LINK floor.down_server · 나머지 | cs ← 'NOPERM'; want ← false; isPub ← false; shown ← none · 효과 app.speaker_none · 효과 mic.close → PUB.C.SENDING.floor_close · PUB.C.any.floor_close_other | DEV-FLR-DOWN-FRESH R-FLR-DOWN-FRESH — DC 가 없으니 통지가 오지 않는다 — 클라가 스스로 내린다(§3-2-3 1-1) |
 | <a id="FLR.C.any.dc_down"></a>`FLR.C.any.dc_down` | 받는 효과 LINK floor.dc_down · 나머지 | 효과 app.floor_unreliable | DEV-FLR-DC-DOWN R-FLR-DC-ONLY-DOWN |
 | <a id="FLR.C.any.dc_reopen"></a>`FLR.C.any.dc_reopen` | 받는 효과 LINK floor.dc_up · 나머지 | 효과 app.floor_reliable | DEV-FLR-DC-DOWN R-FLR-DC-ONLY-DOWN |
 
@@ -353,7 +351,7 @@
 | <a id="FLR.S.gate.ack_drop"></a>`FLR.S.gate.ack_drop` | m.t == 'ACK' && part[u] != 'NP_TAKEN' | — | x:6.3.5.3.5 DEV-FLR-ACK-DROP R-FLR-ACK-NO-REPLY |
 | <a id="FLR.S.gate.not_in_room"></a>`FLR.S.gate.not_in_room` | !(u in members) && m.t == 'REQUEST' | send u DENY Deny.OTHER_REASON | DEV-FLR-DENY-255 |
 | <a id="FLR.S.gate.not_in_room_drop"></a>`FLR.S.gate.not_in_room_drop` | !(u in members) | — | x:6.3.5.8.2 DEV-FLR-DENY-255 |
-| <a id="FLR.S.gate.recv_only"></a>`FLR.S.gate.recv_only` | m.t == 'REQUEST' && !half[u] | send u DENY Deny.RECV_ONLY | x:6.3.4.3.3 DEV-FLR-RECVONLY-TRIGGER R-FLR-DENY-RECVONLY |
+| <a id="FLR.S.gate.recv_only"></a>`FLR.S.gate.recv_only` | m.t == 'REQUEST' && !half | send u DENY Deny.RECV_ONLY | x:6.3.4.3.3 DEV-FLR-RECVONLY-TRIGGER R-FLR-DENY-RECVONLY |
 | <a id="FLR.S.gate.not_pubroom"></a>`FLR.S.gate.not_pubroom` | m.t == 'REQUEST' && !pub[u] | send u DENY Deny.NOT_PUBROOM | DEV-FLR-DENY-101 DEV-FLR-PUBROOM R-FLR-PUBROOM-ORDER |
 | <a id="FLR.S.gate.no_permission"></a>`FLR.S.gate.no_permission` | m.t == 'REQUEST' && !perm[u] | send u DENY Deny.NO_PERMISSION | DEV-FLR-DENY-102 DEV-FLR-PERM-REVOKE |
 
@@ -458,11 +456,10 @@
 | 라벨 | 언제 | 하는 일 | 원문 · 근거 |
 |---|---|---|---|
 | <a id="FLR.S.ws.pub_select"></a>`FLR.S.ws.pub_select` | 받는 효과 AFF floor.pub_select · 나머지 | pub[u] ← true | DEV-FLR-PUBROOM R-FLR-PUBROOM-ORDER |
-| <a id="FLR.S.ws.reg_half"></a>`FLR.S.ws.reg_half` | 나머지 | half[u] ← true | DEV-FLR-RECVONLY-TRIGGER R-FLR-DENY-RECVONLY |
 | <a id="FLR.S.ws.pub_away"></a>`FLR.S.ws.pub_away` | 받는 효과 AFF floor.pub_away · 나머지 | pub[u] ← false · call Away | DEV-FLR-PUB-AWAY |
 | <a id="FLR.S.ws.leave"></a>`FLR.S.ws.leave` | 받는 효과 ROOM floor.leave · 나머지 | pub[u] ← false · call Away · members ← without(members, u); retry[u] ← false; part[u] ← 'RELEASING' | x:6.3.5.8.2 DEV-FLR-PUB-AWAY |
-| <a id="FLR.S.ws.join_revoking"></a>`FLR.S.ws.join_revoking` | 받는 효과 ROOM floor.join · g == 'PREVOKE' && revoking == u | prev ← revoking · call IdleEnter · members ← adding(members, u); part[u] ← Holder() != none ? 'NP_TAKEN' : 'NP_IDLE'; gTaken[u] ← Holder() != none; pub[u] ← false; half[u] ← half; perm[u] ← perm; retry[u] ← false; released[u] ← false; rcause[u] ← 0 | 6.3.4.5.5 6.3.5.2.2 |
-| <a id="FLR.S.ws.join"></a>`FLR.S.ws.join` | 받는 효과 ROOM floor.join · 나머지 | members ← adding(members, u); part[u] ← Holder() != none ? 'NP_TAKEN' : 'NP_IDLE'; gTaken[u] ← Holder() != none; pub[u] ← false; half[u] ← half; perm[u] ← perm; retry[u] ← false; released[u] ← false; rcause[u] ← 0 | 6.3.5.2.2 |
+| <a id="FLR.S.ws.join_revoking"></a>`FLR.S.ws.join_revoking` | 받는 효과 ROOM floor.join · g == 'PREVOKE' && revoking == u | prev ← revoking · call IdleEnter · members ← adding(members, u); part[u] ← Holder() != none ? 'NP_TAKEN' : 'NP_IDLE'; gTaken[u] ← Holder() != none; pub[u] ← false; perm[u] ← perm; retry[u] ← false; released[u] ← false; rcause[u] ← 0 | 6.3.4.5.5 6.3.5.2.2 |
+| <a id="FLR.S.ws.join"></a>`FLR.S.ws.join` | 받는 효과 ROOM floor.join · 나머지 | members ← adding(members, u); part[u] ← Holder() != none ? 'NP_TAKEN' : 'NP_IDLE'; gTaken[u] ← Holder() != none; pub[u] ← false; perm[u] ← perm; retry[u] ← false; released[u] ← false; rcause[u] ← 0 | 6.3.5.2.2 |
 
 <a id="FLR.S.T9"></a>
 #### 10-2-14. 서버 · `T9`
@@ -1019,6 +1016,7 @@ TS 24.379(SIP 호 제어)·TS 23.379(참조 구조)는 ★**미채택**이라 �
 | `7` | 대기 인원 | — | ★**싣지 않는다** — 원문 Queue Size 는 Floor Granted 의 필드(8.2.5, 2 옥텟)이고 Floor Queue Position Info 에는 없다(8.2.12) |
 | ★`8` | ★**메시지 일련번호** | u16 BE | `IDLE` · `TAKEN` 에만 · 보낼 때마다 **1 증가**(재전송도 새로 보내는 것이다) · ★**클라는 보지 않는다**(원문 6.2.4 — §10-4-31) |
 | ★`0x1D` | ★★**방** (`room_id`) | 문자열 | ★ACK(대상 것 에코, §10-4-30) |
+| ★`0x1F` | ★**화자의 출처 번호** | u32 BE 여럿(길이 = 4 × 개수) | `TAKEN` 에만 · 있을 때만 — 화자 반이중 발행 트랙마다 출처 번호 하나(§10-4-35) |
 
 
 ★**성립 조건** — 우선순위(`0`)는 ★**요청이 실은 값이 전부**다. 이 규정은 상한을 씌우는 축이 없는 동안 참이다 — 상한 축(토큰 클레임·협상 값)을 다시 들이면 `GRANTED`·선점 판정이 먼저 깨진다.
@@ -1453,6 +1451,15 @@ WS 는 시그널링일 뿐이다 — 미디어가 살아 있으면 발언권도 
 ★**둘을 잇는 것이 이 절이다.** 슬롯 트랙(`type:"slot"`)에는 `user_id` 가 없으므로(§6-1-1) 이 연결이 없으면
 ★**소리는 나는데 이름이 안 뜬다.**
 
+<a id="RULE-FLR-SLOT-SOURCES"></a>**RULE-FLR-SLOT-SOURCES** · 규칙
+
+★★**`TAKEN` 은 화자의 출처 번호를 싣는다** — 화자의 반이중 발행 트랙(audio · video)마다 그 트랙의 출처 번호(§6-1-1 `csrc` 와 같은 값 공간 · §6-1-3)를 `0x1F` 에 담는다. 화자가 반이중 발행이 없으면(듣기만 하다 말하는 경우는 없다 — 발언은 발행이 있어야 한다) 싣지 않는다.
+- ★**왜 여기인가** — 반이중 발행은 트랙 목록에 실리지 않아(§6-2-2) 슬롯 패킷의 CSRC 를 트랙 항목으로 풀 수 없다. 화자 통지가 「누가 말하나」를 이미 나르므로 그 사람의 출처 번호를 함께 싣는다 — 받는 쪽은 패킷의 CSRC 가 이 값이면 그 화자다.
+- ★**패킷 경계는 CSRC 가 정한다** — 화자 통지는 미디어와 순서 약속이 없다. 받는 쪽은 통지로 「출처 번호 → 사용자」 대응만 배우고, 어느 패킷이 누구 것인지는 패킷의 CSRC 로 가른다(통지보다 패킷이 먼저 와도 대응을 배운 뒤 다시 붙일 수 있다 · 한 트랙의 출처 번호는 트랙이 사는 동안 같다).
+- 걷어내도 원문 그대로 돈다(§10-4-31 ④) — 모르는 TLV 는 남겨 두고 읽지 않는다.
+
+→ 구조 — [`FLR.wire`](#FLR.wire)
+
 <a id="RULE-FLR-ROOM-KEY"></a>**RULE-FLR-ROOM-KEY** · 규칙 — ★다방에서 방을 무엇으로 가르나 — `0x1D` 단일
 
 ★★**`0x1D`(방, `room_id` 문자열)가 유일한 방 키다.**
@@ -1521,7 +1528,7 @@ DC 는 ★**미디어 서버당 하나**(§2-1-3)이고 배정표도 ★**서버
 
 <a id="DEV-FLR-TLV-EXT"></a>**DEV-FLR-TLV-EXT** · 자체 확장
 
-TLV 0x1A 직전 화자 · 0x1B 사유 설명 · 0x1D 방 — 원문 미사용 번호(026~191). DC 하나에 방 여럿을 얹은 대체
+TLV 0x1A 직전 화자 · 0x1B 사유 설명 · 0x1D 방 · 0x1F 화자의 출처 번호 — 원문 미사용 번호(026~191). DC 하나에 방 여럿을 얹은 대체 · 0x1F 는 슬롯 패킷의 CSRC 를 화자로 잇는 재료(RULE-FLR-SLOT-SOURCES — 걷어내도 원문 그대로 돈다)
 
 *근거: R-FLR-ROOM-TLV*
 
@@ -1629,7 +1636,7 @@ DC 만 끊김 — 발언권 상태 유지 · 믿을 수 없음 표시 · 다시 
 
 <a id="DEV-FLR-RECVONLY-TRIGGER"></a>**DEV-FLR-RECVONLY-TRIGGER** · 자체 확장
 
-거절 사유 5 의 방아쇠 = 반이중 발행 트랙 없음(원문은 수신 전용 설정·effective priority) — 무시하지 않고 거절
+거절 사유 5 의 방아쇠 = 반이중 발행 트랙 없음(원문은 수신 전용 설정·effective priority) — 무시하지 않고 거절. ★발언권은 그 사실의 사본을 두지 않는다 — `REQUEST` 를 받는 그때 발행 쪽 사실(그 사람에게 반이중 발행 트랙이 있나)을 읽는다(`ServerRx` 의 읽는 것 `half` — 발행 · 지움 · 전환 때마다 사본을 맞추는 사건이 없다 · 20261106 「사본 없애」 — 서버 구현이 사본을 내렸다 올렸다 하며 원천과 갈린 것을 손 세계 트레이스 검증이 찾았다). 클라 발언권도 사본을 두지 않는다 — 발행 축이 발언권에 알리는 이음매가 없다(클라 판단 어디도 그 사실을 읽지 않는다 · 같은 날 결재로 클라 칸 · 이음매를 걷었다)
 
 *근거: R-FLR-DENY-RECVONLY*
 
@@ -1917,7 +1924,7 @@ DC 만 끊긴 사이 승계·선점·회수가 지나가면 다시 열린 뒤에
 
 <a id="DEV-FLR-DOWN-FRESH"></a>**DEV-FLR-DOWN-FRESH** · 자체 확장
 
-재구축(세션 전체 · 그 서버)으로 그 방 발언권을 내릴 때 클라의 그 방 발언권 상태를 처음 값으로 돌린다 — 상태 `has no permission` · 누름 의지 · 발행 방(`isPub`) · 반이중 발행(`hasHalf`) · 화자 표시(`shown` — 앱에도 화자 없음을 알린다)
+재구축(세션 전체 · 그 서버)으로 그 방 발언권을 내릴 때 클라의 그 방 발언권 상태를 처음 값으로 돌린다 — 상태 `has no permission` · 누름 의지 · 발행 방(`isPub`) · 화자 표시(`shown` — 앱에도 화자 없음을 알린다)
 
 *원문: §3-2-3 1-1 · RULE-LINK-RECOVERY-REBUILD — 발언권을 `has no permission` 으로 내린다는 것만 정한다 · 근거: R-FLR-DOWN-FRESH*
 
@@ -2269,7 +2276,7 @@ overriding without revoke(dual floor) 일 때만의 절 — override 선점 미�
 
 재구축 뒤의 발언권은 새 연결 위의 새 관계다. 발행 방 · 반이중 발행도 재구축이 다시 한다(RULE-LINK-RECOVERY-REBUILD — 다시 발행 · 다시 `pub_select`). 재구축 동안은 DC 가 없어 화자 통지가 오지 않으니 클라가 스스로 앱에 화자 없음을 알린다
 
-*없으면: 옛 `isPub` · `hasHalf` 로 누름 준비 단계를 건너뛰어 `DENY(101)` · `DENY(5)` 를 받는다 · 앱 화면에 재구축 앞의 화자가 남는다(다시 든 방의 첫 알림이 오기까지 · 다시 들지 못하면 계속)*
+*없으면: 옛 `isPub` 로 누름 준비 단계를 건너뛰어 `DENY(101)` 를 받는다 · 앱 화면에 재구축 앞의 화자가 남는다(다시 든 방의 첫 알림이 오기까지 · 다시 들지 못하면 계속)*
 
 <a id="R-FLR-JOIN-FRESH"></a>**R-FLR-JOIN-FRESH** · 근거
 

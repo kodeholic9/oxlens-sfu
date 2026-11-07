@@ -303,6 +303,7 @@ JOINED 동안 보관본의 seq 는 그 입장 뒤 가장 큰 값 아래로 내�
 | `select` | bool | — (기본 true) | 기본 `true` = **이 방에서 말한다**. `false` = 듣기만. ★**명단에 그대로 에코된다**(`MemberInfo.select`, §4-1-3) — 청취/참여 구분이 이 값 하나다 |
 | ★`extmap` | `{id, uri}[]` | ★`1pc` 필수 | ★**내 번호표 — 확장 ID 표.** 이 요청을 위해 새로 만든 연결의 브라우저 offer 가 선언한 확장 ID 전량(§9-2-1 2③). `2pc` 는 싣지 않는다(구독 연결에 내 발행 번호가 없다) — 실으면 `1002` |
 | ★`codecs` | `{kind, pt, name, fmtp?, rtx_pt?}[]` | ★`1pc` 필수 | ★**내 번호표 — PT 표.** 같은 offer 의 코덱 줄 전량(내 발행 m-line 의 PT 표 — `fmtp` 는 offer 것이고 PT 튜플 키의 구성 파라미터를 뽑는 재료다, §9-4-2 ①). 서버는 이 표를 피해 구독 PT 를 배정한다(§9-4-2 ④) |
+| ★`join_id` | str | ★그 방 입장을 새 연결로 갈아 끼울 때만(재구축 — §4-1-7) | ★**갈아 끼울 입장** — 그 방 지금 입장의 값. 같으면 옛 Peer 를 축출하고 새 Peer 로 · 다르면(다시 보낸 것) · 없으면 지금 정보로 응답(§4-1-7) |
 
 `codecs` 안:
 
@@ -319,6 +320,7 @@ JOINED 동안 보관본의 seq 는 그 입장 뒤 가장 큰 값 아래로 내�
 | 칸 | 형 | 필수 | 뜻 |
 |---|---|---|---|
 | `room_id` | str | ✔ |  |
+| ★`join_id` | str | ✔ | ★**입장 식별자**(§4-1-7) — 입장마다 새로 짓는 무작위 문자열 · 그 방의 상태를 바꾸는 요청이 싣는다 · 같은 세션의 입장을 다시 보내면 지금 값 |
 | `participants` | MemberInfo[] | ✔ |  |
 | ★`me` | MemberInfo | ✔ | ★**나** — 명단과 따로 싣는다(투명이든 아니든 늘 · 권한 포함 — ★내 권한의 출처는 이것이다 · DEV-ROOM-ME-APART) |
 | `affiliation` | Affiliation | ✔ | pub_room 없으면 null |
@@ -365,6 +367,7 @@ answer 조립뿐이다. 첫 협상 확정본(answer)의 번호는 그 offer 의 
 
 ```jsonc
 { "room_id": "…",
+  "join_id": "j-3f9a2c",                                // ★**입장 식별자**(§4-1-7) — 입장마다 새로 짓는 무작위 문자열 · 그 방의 상태를 바꾸는 요청이 싣는다 · 같은 세션의 입장을 다시 보내면 지금 값
   "participants": [ {"user_id":"u1","role":255,"select":false,"participant_type":0,"metadata":{"name":"…"}} ],
   "me": {"user_id":"u1","role":255,"select":false,"participant_type":0,"metadata":{"name":"…"}},   // ★**나** — 명단과 따로 싣는다(투명이든 아니든 늘 · 권한 포함 — ★내 권한의 출처는 이것이다 · DEV-ROOM-ME-APART)
   "affiliation": { "sub_rooms": [ "r1" ],               // 내가 듣는 방들 = ★그 서버에 입장한 방들 (입장이 곧 구독, §4-1)
@@ -398,10 +401,50 @@ answer 조립뿐이다. 첫 협상 확정본(answer)의 번호는 그 offer 의 
   DC 가 설 때까지 흐르는 동안 ★**이미 낡는다.** 발언권은 ★**DC 가 서면 서버가 보낸다**(§10-4-30).
   ★**권위는 DC 단일이다**(§10).
 - 클라 `ice` 의 네 자격은 ★**이 세션 것**이다. 재협상 때 **같은 값을 계속 쓴다**(§9-4-9) — ★`ICE_RESTART` 응답(§7-1-2)이 새 값을 주면 그때부터 그 값이다.
-- 서버 ★**이미 그 방에 있으면 그 서버의 옛 Peer 를 통째로 축출하고 새 Peer 로 들어온다**(실패로 오지 않는다). Peer 는 서버당 하나라(§9-1-1) ★**그 서버의 다른 방 멤버십·구독·발행·DC 도 함께 사라진다** — 응답 `affiliation.sub_rooms` 가 진실이다.
+- 서버 ★**이미 그 방에 있으면** 셋으로 가른다(실패로 오지 않는다 — §2-3-2):
+  ① ★**다른 세션의 Peer** 면 그 서버의 옛 Peer 를 통째로 축출하고 새 Peer 로 들어온다.
+  ② ★**같은 세션이고 요청이 그 방 지금 입장의 `join_id` 를 실었으면** 갈아 끼운다 — 옛 Peer 를 통째로 축출하고 새 Peer · 새 `join_id` 로 들어온다(§4-1-7 — 재구축의 입장).
+  ③ ★**같은 세션이고 그 밖이면**(`join_id` 가 없다 — 처음 입장을 다시 보낸 것 · 지금 값과 다르다 — 갈아 끼우기를 다시 보낸 것) ★**지금 정보로 응답한다** — 같은 `join_id` · 같은 연결 정보 · 지금 스냅샷 · 축출하지 않는다.
+  축출(①②)이면 Peer 는 서버당 하나라(§9-1-1) ★**그 서버의 다른 방 멤버십·구독·발행·DC 도 함께 사라진다** — 응답 `affiliation.sub_rooms` 가 진실이다.
 - 클라 응답의 `server_config.ice` 자격이 보관값과 다르면 그 서버 연결을 새로 세운다. ★**응답 `sub_rooms` 에 없는 그 서버의 방은 `NONE` 으로 내리고 다시 입장한다**(§9-2-1 이 이 경로를 쓴다).
   ★재구축 중이 아닌데 자격이 다르면 서버가 옛 Peer 를 축출한 것이다 — 그 서버의 발행 · DC · 배정표가 함께 사라졌다. 클라는 새 연결로 갈아 끼우며 ★**그 서버의 발행을 전부 다시 한다**(재구축의 다시 발행과 같다 — §9-2-1 2) · 배정표는 같은 응답이 싣는다(차례 `arev` 는 세션마다 이어진다). 방은 다시 들어가지 않는다 — 사라진 방만 위 줄대로 다시 들어간다(그 서버 방을 전부 다시 들어가면 그 입장이 또 옛 Peer 를 축출한다).
   - 없으면: 연결만 바꾸고 발행을 두면 앱은 마이크 · 카메라가 나간다고 아는데 서버엔 발행이 없다(새 연결에 그 트랙의 트랜시버도 없다) — 남들에게 그 사람이 보이지도 들리지도 않는다.
+
+<a id="RULE-ROOM-JOIN-ID"></a>**RULE-ROOM-JOIN-ID** · 규칙
+
+★**입장 식별자(`join_id`)** — 서버가 ★**입장마다 새로 짓는 무작위 문자열**이다(번호를 세지 않는다 — 서버가 다시 떠도 · 서버를 건너도 겹치지 않는다). 입장 응답이 준다.
+1. ★**그 방의 상태를 바꾸는 요청은 그 방 지금 입장의 `join_id` 를 싣는다** — `ROOM_LEAVE` · `PUBLISH_TRACKS`(add · remove) · `TRACK_SET` · `READY` · `SUBSCRIBE_LAYER` · `AFFILIATION`(방 칸마다 — `pub_select_join_id` · `pub_deselect_join_id`). ★**조회와 방과 무관한 요청은 싣지 않는다**(`MESSAGE` · `TASK` · `ICE_RESTART` · 세션 op · HTTP). ★발언권(데이터 채널)은 싣지 않는다 — 데이터 채널이 Peer 마다 서서 축출이면 함께 바뀐다(채널 자체가 입장 세대다).
+2. ★**서버는 실린 값이 그 사람 그 방 지금 입장의 값과 다르면 `3002` 으로 거절하고 아무것도 바꾸지 않는다** — 「그 입장에 없다」. 그 방에 없을 때와 같은 코드다(클라가 둘을 달리 다룰 까닭이 없다 — 낡은 입장의 요청에 대한 응답은 클라가 이미 자기 상태로 거른다). 빠지면 `1003`(`ROOM_LEAVE` 만 예외 — §4-1-8).
+3. ★**수명** — ★그 방 입장의 `join_id` 는 ★**입장 응답으로 생겨 퇴장하거나(떠남 · 강퇴 · 방 닫힘 · Peer 를 거둠) 다음 `join_id` 가 지어질 때까지 유효하다** — 시간으로 끝나지 않는다. 같은 세션 이어받기(`RESUME`)에서는 그대로다(Peer 가 그대로다). 다시 입장 · 갈아 끼우기(§4-1-7) · 다른 세션의 입장 · 서버 재기동이면 새 값이다. 같은 세션의 입장을 다시 보내면 지금 값이 돌아온다(§4-1-7 서버 ③).
+4. 클라는 그 방의 값을 입장 응답에서 받아 두고 그 방 요청마다 싣는다. ★방을 잃어도 남은 반이중을 지목하는 요청(§7-1-2)은 지목한 방(그 서버에서 들어가 있는 방)의 값을 싣는다.
+- 제목: 입장 식별자 — 옛 입장의 늦은 요청을 서버가 거른다
+- 출처: §4-1
+- 비고: 펜싱 토큰이다(ZooKeeper 세션 세대 · Kafka producer epoch) · LiveKit 은 입장마다 새 참가자 `sid` 를 준다(다시 들어오면 바뀐다). 막는 것: 앞선 입장(앞선 Peer) 때 보낸 요청이 떠남 · 축출 · 다시 입장 뒤 늦게 닿는 것 — 「그 방에 있나」로는 다시 들어온 뒤의 옛 요청을 못 거른다(A · D · F · H). 이름 — `token` 은 인증 토큰과 · `sid` 는 세션 식별자와 겹쳐 피했다
+
+<a id="RULE-ROOM-JOIN-REPLACE"></a>**RULE-ROOM-JOIN-REPLACE** · 규칙
+
+★**갈아 끼우는 입장** — 같은 세션이 그 방 입장을 ★**새 연결로 갈아 끼우려면**(그 서버 재구축 — §9-2-1) `ROOM_JOIN` 에 그 방 ★**지금 입장의 `join_id`** 를 싣는다. 서버(같은 세션 · 그 방에 있음):
+| 실린 `join_id` | 서버 |
+|---|---|
+| 지금 값과 같다 | 옛 Peer 를 통째로 축출하고 새 Peer · 새 자격 · 새 `join_id` 로 들어온다(명단 · `seq` 는 그대로 — §4-1-7) |
+| 지금 값과 다르다 | ★이미 갈아 끼웠다 — 다시 보낸 것이다 → 지금 정보로 응답(멱등 · §2-3-2) |
+| 없다 | 처음 입장을 다시 보낸 것이다 → 지금 정보로 응답 |
+그 방에 없으면(Peer 가 이미 사라졌다 · 축출로 그 방이 빠졌다) 실린 값과 상관없이 보통 입장이다. 그래서 재구축이 그 서버 방들을 차례로 다시 들어갈 때 ★첫 입장이 옛 Peer 를 축출하면 나머지 방은 새 Peer 에 없어 보통 입장이 된다 — 그 사이 그 방의 옛 `join_id` 를 실은 같은 세션의 요청은 거절된다(§4-1-7 2).
+- 제목: 갈아 끼우는 입장 — 재구축은 지금 입장의 `join_id` 를 싣는다
+- 출처: §4-1
+- 비고: 같은 세션의 입장이 두 번 오면 서버는 둘을 가를 재료가 없다(`pid` 를 기억하지 않는다 · 2pc 입장 본문에는 연결 정보가 없다) — 다시 보낸 입장을 축출로 받으면 그 서버의 다른 방 · 발행 · 발언권까지 날아가고, 갈아 끼우기를 지금 정보로 받으면 재구축이 닫은 연결의 옛 자격을 다시 받는다. 갈아 끼울 입장의 `join_id` 가 그 둘을 가른다(20261104 — 2-3 갈래 1). 선례 — RFC 3891 SIP `Replaces`(바꿀 대화를 지목하는 INVITE). ★다른 점: `Replaces` 는 지목한 대화가 없으면 481 로 거절하지만, 여기서는 지목한 입장이 이미 갈아 끼워졌으면(다시 보낸 것) 지금 정보로 답한다 — 다시 보낸 입장을 멱등으로 처리하려는 것이다
+
+<a id="PROP-ROOM-JOIN-ID-AGREE"></a>**PROP-ROOM-JOIN-ID-AGREE** · 성질
+
+통로가 조용하면 클라가 그 방 요청에 싣는 입장 식별자가 서버의 지금 입장이다 — 다시 입장 · 갈아 끼우기 · 버려진 입장 뒤에도.
+
+*식: RH6 · 깨지면: 들어가 있는 방의 요청이 전부 3002 로 거절된다(RULE-ROOM-JOIN-ID) · 또는 옛 입장의 값이 지금 입장을 바꾼다*
+
+<a id="PROP-ROOM-RESEND-IDEMPOTENT"></a>**PROP-ROOM-RESEND-IDEMPOTENT** · 성질
+
+처리됐는데 응답을 잃어 다시 보낸 입장 · 퇴장은 서버 상태를 한 번 온 것과 같게 둔다 — 같은 세션의 입장은 축출 없이 지금 정보로 답하고(갈아 끼우기를 다시 보낸 것도) · 이미 떠난 퇴장은 바꾸지 않는다.
+
+*식: RI1 · 깨지면: 다시 보낸 입장이 옛 Peer 를 축출해 그 서버의 다른 방 · 발행 · 발언권이 날아가거나 다시 보낸 퇴장이 다시 입장을 지운다(RULE-TRN-IDEMPOTENT · RULE-TRN-REQ-LIFE · RULE-ROOM-JOIN-REPLACE)*
 
 <a id="RULE-ROOM-JOIN-PC-MODE-CHECK"></a>**RULE-ROOM-JOIN-PC-MODE-CHECK** · 규칙
 
@@ -419,6 +462,7 @@ answer 조립뿐이다. 첫 협상 확정본(answer)의 번호는 그 offer 의 
 | 칸 | 형 | 필수 | 뜻 |
 |---|---|---|---|
 | `room_id` | str | ✔ |  |
+| ★`join_id` | str | 입장 응답을 받은 방이면 — 못 받은 채 닫는 퇴장만 비운다(§4-1-8) | ★그 방 지금 입장의 값(§4-1-7) · 비우면 지금 입장이 무엇이든 떠난다 |
 
 **응답**
 
@@ -427,11 +471,12 @@ answer 조립뿐이다. 첫 협상 확정본(answer)의 번호는 그 offer 의 
 | `room_id` | str | ✔ |  |
 | `affiliation` | Affiliation | ✔ |  |
 
-**실패** — `3002` 그 방에 없음
+**실패** — `3002` 그 방에 없음 · 실린 `join_id` 가 지금 입장이 아니다(§4-1-7)
 
 <a id="RULE-ROOM-LEAVE-FORM"></a>**RULE-ROOM-LEAVE-FORM** · 규칙
 
-**형식** — 요청 `{ room_id }` / 응답 `{ room_id, affiliation:{sub_rooms, pub_room} }`
+**형식** — 요청 `{ room_id, join_id? }` / 응답 `{ room_id, affiliation:{sub_rooms, pub_room} }`
+★`join_id`(§4-1-7)는 ★**입장 응답을 받은 방이면 싣는다.** ★입장 응답을 못 받은 채 닫는 퇴장만 비운다 — 입장 중 나가려던 방을 재구축이 내렸다(§4-2-2) · 입장 요청이 기한을 넘겨 버려졌다(§2-3-2). 그 입장의 값을 클라가 모르기 때문이다. 비운 퇴장은 ★지금 입장이 무엇이든 떠난다 — 그 퇴장은 클라가 그 방을 나가는 중으로 두고 응답을 기다리는 동안만 날아가고, 같은 방의 다음 입장은 같은 세션에서 그 뒤에 나가 차례가 지켜진다(소켓을 건너 뒤바뀌는 것은 받아들인 비용 — R-TRN-LATE-ACROSS-SOCKET).
 (★**`version` 은 없다** — 종결이라 재설정할 스냅샷이 없고, 소속은 방 공통 스냅샷 밖의 값이다, §5-1-1·§4-2-3)
 
 → 구조 — [`ROOM.op.ROOM_LEAVE`](#ROOM.op.ROOM_LEAVE)
@@ -828,6 +873,8 @@ answer 조립뿐이다. 첫 협상 확정본(answer)의 번호는 그 offer 의 
 | `retry` | `false` | 4009 를 받아 retry_after_ms 를 기다린다(§4-2-2 6) |
 | `quit` | `false` | 입장 요청이 나가 있는 동안 앱이 나가려 했다 — 응답을 기다렸다가 성공이면 ROOM_LEAVE 를 보낸다(DEV-ROOM-LEAVE-WHILE-JOINING) |
 | `rejoin` | `false` | 재구축이 다시 들어갈 방이다 — 내릴 때 들어가 있었거나 들어가려던 방(DEV-ROOM-REJOIN-LIST · 원칙 ①) |
+| `jid` | `0` | 마지막으로 안 그 방 입장의 join_id(§4-1-7 — 모형은 세대 수 · 0 = 모름) — 재구축의 다시 입장이 갈아 끼울 값으로 싣는다(§4-1-7) |
+| `jsure` | `false` | jid 가 서버의 지금 입장이다 — 입장 응답을 받았다 · 입장 요청을 보내면 거짓(그 요청이 값을 바꿨을 수 있다) · 퇴장이 그 값을 싣는다(거짓이면 비운다 — §4-1-8) |
 
 ##### 상태 — 서버
 
@@ -843,6 +890,8 @@ answer 조립뿐이다. 첫 협상 확정본(answer)의 번호는 그 offer 의 
 | `busy` | `false` | 과부하(4009) |
 | `cool` | `false` | 같은 방 sync_required 재통보 쿨다운 중(T-stall · §4-2-3) |
 | `sel` | `true` | ★그 사람의 select — 입장 요청값 그대로 명단에 에코된다(§4-1 · ROOM.type.MemberInfo). true = 이 방에서 말한다 → 입장이 곁들여 발행 방을 바꾼다(aff.join) |
+| `jid` | `0` | ★그 사람 그 방 지금 입장의 join_id(§4-1-7 — 모형은 세대 수 · 0 = 없음) |
+| `jgen` | `0` | 서버가 지은 마지막 join_id — 새 값은 이것 + 1(무작위 값의 모형 — 같나 다르나만 뜻이 있다) |
 
 ##### 전이 — 클라(동작 경우에서 짓는다)
 
@@ -886,6 +935,9 @@ answer 조립뿐이다. 첫 협상 확정본(answer)의 번호는 그 offer 의 
 | `LEAVING` | 재구축으로 방을 내린다 — 세션 전체면 전부 · 그 서버면 그 서버 방(§3-2-3 2 · RULE-LINK-RECOVERY-REBUILD) | `NONE` | `ROOM.C.LEAVING.down` |
 | `JOINING` | 재구축으로 방을 내린다 — 세션 전체면 전부 · 그 서버면 그 서버 방(§3-2-3 2 · RULE-LINK-RECOVERY-REBUILD) | `LEAVING` | `ROOM.C.JOINING.down_quit` |
 | 어느 상태 | 재구축으로 방을 내린다 — 세션 전체면 전부 · 그 서버면 그 서버 방(§3-2-3 2 · RULE-LINK-RECOVERY-REBUILD) | `NONE` | `ROOM.C.any.down` |
+| `JOINING` | 응답 없이 버려진 입장 · 퇴장 요청 — 상태를 맞추고 앱에 알린다(§2-3-2) | `NONE` | `ROOM.C.JOINING.expired_quit` |
+| `JOINING` | 응답 없이 버려진 입장 · 퇴장 요청 — 상태를 맞추고 앱에 알린다(§2-3-2) | `NONE` | `ROOM.C.JOINING.expired` |
+| `LEAVING` | 응답 없이 버려진 입장 · 퇴장 요청 — 상태를 맞추고 앱에 알린다(§2-3-2) | `NONE` | `ROOM.C.LEAVING.expired` |
 | 어느 상태 | 세션이 끝났다 — 방을 전부 내리고 다시 들어갈 방 표시를 지운다(DEV-SES-FRESH-REJOIN · 앱이 다시 들어간다) | `NONE` | `ROOM.C.any.close_all` |
 | `NONE` | 재구축 — 내렸던 방에 다시 들어간다(§3-2-3 3 · RULE-LINK-RECOVERY-REBUILD) | `JOINING` | `ROOM.C.NONE.rejoin` |
 | `JOINED` | RESUME 성공 — 응답 스냅샷으로 방 보관본을 다시 맞춘다(§3-2-3 1 · 2 ②) | `NONE` | `ROOM.C.JOINED.resume_gone` |
@@ -919,9 +971,9 @@ T-stall — 같은 방에 sync_required 를 보낸 뒤 다시 알릴 수 있을 
 
 | 라벨 | 언제 | 하는 일 | 원문 · 근거 |
 |---|---|---|---|
-| <a id="ROOM.C.NONE.join"></a>`ROOM.C.NONE.join` | 받는 상태 rs == 'NONE' · 나머지 | rs ← 'JOINING'; cseq ← 0; cepoch ← 0; rsync ← false; ahead ← 0; retry ← false; quit ← false · 보낸다 ROOM_JOIN.req | §4-2-1 1 §4-2-1 4 §4-2-1 5 |
-| <a id="ROOM.C.NONE.app_leave"></a>`ROOM.C.NONE.app_leave` | 받는 상태 rs == 'JOINED' \|\| (rs == 'JOINING' && !quit) \|\| (rs == 'NONE' && rejoin) · rs == 'NONE' | rs ← 'LEAVING'; rejoin ← false · 보낸다 ROOM_LEAVE.req · 효과 aff.leave → AFF.C.any.left · AFF.C.any.left_back · AFF.C.any.left_from · AFF.C.any.left_join · AFF.C.any.left_want · AFF.C.any.left_other | §9-2-1 §4-2-5 2 §4-2-3 1 DEV-ROOM-REJOIN-LIST — 재구축으로 내려 다시 들어가기를 기다리는 방에서 앱이 나간다 — 다시 들어갈 목록에서 뺀다 · ★서버엔 옛 Peer 의 회원이 남아 있을 수 있다(다시 입장이 축출할 몫이었다) — ROOM_LEAVE 로 닫는다(못 받았으면 3002 — 성공과 같이 · down_quit 과 같은 꼴) · 퇴장 응답이 link.room_left 를 내 그 서버 마지막 방이면 LINK 가 재구축을 멈추고 연결을 닫는다(RULE-LINK-RECOVERY-REBUILD — · 보낼 것 없이 끝내면 서버 명단에 유령이 남는다 — 검증 판 RH4 반례) |
-| <a id="ROOM.C.NONE.rejoin"></a>`ROOM.C.NONE.rejoin` | 받는 효과 SES rooms.rejoin · LINK rooms.rejoin_server · 받는 상태 rs == 'NONE' && rejoin · 나머지 | rs ← 'JOINING'; cseq ← 0; cepoch ← 0; rsync ← false; ahead ← 0; retry ← false; rejoin ← false · 보낸다 ROOM_JOIN.req | §3-2-3 3 §9-2-1 2 DEV-ROOM-REJOIN-LIST — 입장 순서대로 · 첫 ROOM_JOIN 은 0 ~ 분산 창으로 늦춘다(§3-2-3) — 모형에 시간 · 방 여럿이 없어 싣지 않는다. 다시 들어갈 방은 내릴 때 rejoin 칸에 남긴다(DEV-ROOM-REJOIN-LIST) |
+| <a id="ROOM.C.NONE.join"></a>`ROOM.C.NONE.join` | 받는 상태 rs == 'NONE' · 나머지 | rs ← 'JOINING'; cseq ← 0; cepoch ← 0; rsync ← false; ahead ← 0; retry ← false; quit ← false; jid ← rejoin ? jid : 0; jsure ← false · 보낸다 ROOM_JOIN.req {join_id: rejoin ? jid : 0} | §4-2-1 1 §4-2-1 4 §4-2-1 5 §4-1-7 — 앱의 새 입장은 join_id 를 비운다 — 같은 세션이 이미 그 방에 있으면(앞 입장을 다시 낸 것) 서버가 지금 정보로 답한다(RULE-TRN-IDEMPOTENT) · ★재구축이 다시 들어갈 방(rejoin)이면 마지막 값을 싣는다(갈아 끼우기 — 닫은 연결의 옛 자격을 다시 받지 않게) |
+| <a id="ROOM.C.NONE.app_leave"></a>`ROOM.C.NONE.app_leave` | 받는 상태 rs == 'JOINED' \|\| (rs == 'JOINING' && !quit) \|\| (rs == 'NONE' && rejoin) · rs == 'NONE' | rs ← 'LEAVING'; rejoin ← false · 보낸다 ROOM_LEAVE.req {join_id: jsure ? jid : 0} · 효과 aff.leave → AFF.C.any.left · AFF.C.any.left_back · AFF.C.any.left_from · AFF.C.any.left_join · AFF.C.any.left_want · AFF.C.any.left_other | §9-2-1 §4-2-5 2 §4-2-3 1 DEV-ROOM-REJOIN-LIST — 재구축으로 내려 다시 들어가기를 기다리는 방에서 앱이 나간다 — 다시 들어갈 목록에서 뺀다 · ★서버엔 옛 Peer 의 회원이 남아 있을 수 있다(다시 입장이 축출할 몫이었다) — ROOM_LEAVE 로 닫는다(못 받았으면 3002 — 성공과 같이 · down_quit 과 같은 꼴) · 퇴장 응답이 link.room_left 를 내 그 서버 마지막 방이면 LINK 가 재구축을 멈추고 연결을 닫는다(RULE-LINK-RECOVERY-REBUILD — · 보낼 것 없이 끝내면 서버 명단에 유령이 남는다 — 검증 판 RH4 반례) |
+| <a id="ROOM.C.NONE.rejoin"></a>`ROOM.C.NONE.rejoin` | 받는 효과 SES rooms.rejoin · LINK rooms.rejoin_server · 받는 상태 rs == 'NONE' && rejoin · 나머지 | rs ← 'JOINING'; cseq ← 0; cepoch ← 0; rsync ← false; ahead ← 0; retry ← false; rejoin ← false; jsure ← false · 보낸다 ROOM_JOIN.req {join_id: jid} | §3-2-3 3 §9-2-1 2 §4-1-7 DEV-ROOM-REJOIN-LIST — ★그 방 마지막으로 안 입장의 join_id 를 싣는다 — 갈아 끼우기(RULE-ROOM-JOIN-REPLACE · 서버가 그 값이 지금 값이면 옛 Peer 를 축출하고 새 연결 · 다르거나 그 방에 없으면 지금 정보 · 보통 입장) · 입장 순서대로 · 첫 ROOM_JOIN 은 0 ~ 분산 창으로 늦춘다(§3-2-3) — 모형에 시간 · 방 여럿이 없어 싣지 않는다. 다시 들어갈 방은 내릴 때 rejoin 칸에 남긴다(DEV-ROOM-REJOIN-LIST) |
 
 <a id="RULE-ROOM-JOIN-START"></a>**RULE-ROOM-JOIN-START** · 규칙 — 앱이 방에 들어가려 한다 (`NONE`)
 
@@ -943,17 +995,19 @@ T-stall — 같은 방에 sync_required 를 보낸 뒤 다시 알릴 수 있을 
 
 | 라벨 | 언제 | 하는 일 | 원문 · 근거 |
 |---|---|---|---|
-| <a id="ROOM.C.JOINING.join_ok_quit"></a>`ROOM.C.JOINING.join_ok_quit` | 받는 상태 rs == 'JOINING' · m.part == 'res' && quit | rs ← 'LEAVING'; quit ← false; sfu ← m.server_config.sfu_id · 보낸다 ROOM_LEAVE.req · 효과 aff.leave → AFF.C.any.left · AFF.C.any.left_back · AFF.C.any.left_from · AFF.C.any.left_join · AFF.C.any.left_want · AFF.C.any.left_other · 효과 room.sub_rooms | §4-2-3 1 DEV-ROOM-LEAVE-WHILE-JOINING — 기다리는 동안 앱이 나가려 했다 — 서버는 받아들였으니 연결을 세우지 않고 ROOM_LEAVE 로 나간다(응답 뒤 처리는 퇴장과 같다) · ★그 방이 어느 서버인지는 응답이 알려 준다(sfu) — 없으면 퇴장 응답의 link.room_left · 재구축 효과가 그 서버 연결에 닿지 않는다(검증 판 MS6 반례) · ★응답의 sub_rooms 는 그 서버의 진실이다 — 나가려던 입장이어도 같은 서버 방들에 알린다(이 입장이 옛 Peer 를 축출했으면 다른 방이 그것을 여기서만 안다 · 없으면 그 방이 서버 명단 밖에서 JOINED 로 남는다 — 검증 판 MS4 반례) |
-| <a id="ROOM.C.JOINING.join_fail_quit"></a>`ROOM.C.JOINING.join_fail_quit` | 받는 상태 rs == 'JOINING' · m.part != 'res' && quit && m.code >= 2000 | rs ← 'NONE'; quit ← false; retry ← false · 효과 aff.join_failed → AFF.C.any.join_failed_back · AFF.C.any.join_failed · AFF.C.any.join_failed_other · 효과 app.left · 효과 link.room_left → LINK.C.any.last_room_left · LINK.C.any.room_left | §4-2-2 1 DEV-ROOM-LEAVE-WHILE-JOINING — 기다리는 동안 앱이 나가려 했다 — 실패면 들어간 적이 없으니 보낼 것 없이 끝낸다(4009 도 되풀이하지 않는다) |
-| <a id="ROOM.C.JOINING.join_pc_mismatch"></a>`ROOM.C.JOINING.join_pc_mismatch` | 받는 상태 rs == 'JOINING' · m.part == 'res' && m.server_config.pc_mode != pcm | rs ← 'LEAVING'; sfu ← m.server_config.sfu_id · 보낸다 ROOM_LEAVE.req · 효과 aff.leave → AFF.C.any.left · AFF.C.any.left_back · AFF.C.any.left_from · AFF.C.any.left_join · AFF.C.any.left_want · AFF.C.any.left_other · 효과 app.join_failed · 효과 room.sub_rooms | §4-1 DEV-ROOM-PC-MISMATCH-UNDO — 응답의 server_config.pc_mode 가 세션 확정값과 다르다 — 규격 위반 · 연결을 세우지 않고 실패로 다룬다(RULE-ROOM-JOIN-PC-MODE-CHECK · 서버가 조용히 다른 모드로 돌리는 경로는 없다). ★서버는 이미 받아들였다 — ROOM_LEAVE 로 되돌린다(응답 뒤 처리는 퇴장과 같다 — 세우던 연결은 link.room_left 로 버린다) |
-| <a id="ROOM.C.JOINING.join_ok"></a>`ROOM.C.JOINING.join_ok` | 받는 상태 rs == 'JOINING' · m.part == 'res' | rs ← 'JOINED'; cseq ← m.version.seq; cepoch ← m.version.epoch; sfu ← m.server_config.sfu_id · 효과 trk.snapshot → TRK.C.any.snapshot · TRK.C.any.snapshot_same · 효과 link.server_ice → LINK.C.any.server_ice_same · LINK.C.REBUILD.server_ice_rebuild · LINK.C.NONE.server_ice_closed · LINK.C.any.peer_replaced · 효과 link.table → LINK.C.any.table_carried_same · LINK.C.any.table_carried · LINK.C.any.table_carried_rebound · LINK.C.any.table_carried_old · 효과 sdp.rebuild → LINK.C.NONE.renego_closed · LINK.C.any.renego_queued · LINK.C.any.renego · 효과 ready.tracks → SUB.C.any.ready_want · 효과 app.joined · 효과 room.sub_rooms · 효과 aff.implicit → AFF.C.any.implicit_back_held · AFF.C.any.implicit_back · AFF.C.any.implicit_back_busy · AFF.C.any.implicit_joined · AFF.C.any.implicit_join_unselected · AFF.C.any.implicit_busy · AFF.C.any.implicit_gone · AFF.C.any.implicit_pub · AFF.C.any.implicit_away · AFF.C.any.implicit_same · 효과 floor.join → FLR.C.any.join | §4-2-3 2 §4-2-2 1 §4-2-2 2 §4-2-2 3 §4-2-2 4 §4-2-2 5 §4-2-2 6 — ★스냅샷이다 — version 은 견주지 않고 재설정 |
+| <a id="ROOM.C.JOINING.join_ok_quit"></a>`ROOM.C.JOINING.join_ok_quit` | 받는 상태 rs == 'JOINING' · m.part == 'res' && quit | rs ← 'LEAVING'; quit ← false; sfu ← m.server_config.sfu_id; jid ← m.join_id; jsure ← true · 보낸다 ROOM_LEAVE.req {join_id: m.join_id} · 효과 aff.leave → AFF.C.any.left · AFF.C.any.left_back · AFF.C.any.left_from · AFF.C.any.left_join · AFF.C.any.left_want · AFF.C.any.left_other · 효과 room.sub_rooms | §4-2-3 1 DEV-ROOM-LEAVE-WHILE-JOINING — 기다리는 동안 앱이 나가려 했다 — 서버는 받아들였으니 연결을 세우지 않고 ROOM_LEAVE 로 나간다(응답 뒤 처리는 퇴장과 같다) · ★그 방이 어느 서버인지는 응답이 알려 준다(sfu) — 없으면 퇴장 응답의 link.room_left · 재구축 효과가 그 서버 연결에 닿지 않는다(검증 판 MS6 반례) · ★응답의 sub_rooms 는 그 서버의 진실이다 — 나가려던 입장이어도 같은 서버 방들에 알린다(이 입장이 옛 Peer 를 축출했으면 다른 방이 그것을 여기서만 안다 · 없으면 그 방이 서버 명단 밖에서 JOINED 로 남는다 — 검증 판 MS4 반례) |
+| <a id="ROOM.C.JOINING.join_fail_quit"></a>`ROOM.C.JOINING.join_fail_quit` | 받는 상태 rs == 'JOINING' · m.part != 'res' && quit && m.code >= 2000 | rs ← 'NONE'; quit ← false; retry ← false; jid ← 0 · 효과 aff.join_failed → AFF.C.any.join_failed_back · AFF.C.any.join_failed · AFF.C.any.join_failed_other · 효과 app.left · 효과 link.room_left → LINK.C.any.last_room_left · LINK.C.any.room_left | §4-2-2 1 DEV-ROOM-LEAVE-WHILE-JOINING — 기다리는 동안 앱이 나가려 했다 — 실패면 들어간 적이 없으니 보낼 것 없이 끝낸다(4009 도 되풀이하지 않는다) |
+| <a id="ROOM.C.JOINING.join_pc_mismatch"></a>`ROOM.C.JOINING.join_pc_mismatch` | 받는 상태 rs == 'JOINING' · m.part == 'res' && m.server_config.pc_mode != pcm | rs ← 'LEAVING'; sfu ← m.server_config.sfu_id; jid ← m.join_id; jsure ← true · 보낸다 ROOM_LEAVE.req {join_id: m.join_id} · 효과 aff.leave → AFF.C.any.left · AFF.C.any.left_back · AFF.C.any.left_from · AFF.C.any.left_join · AFF.C.any.left_want · AFF.C.any.left_other · 효과 app.join_failed · 효과 room.sub_rooms | §4-1 DEV-ROOM-PC-MISMATCH-UNDO — 응답의 server_config.pc_mode 가 세션 확정값과 다르다 — 규격 위반 · 연결을 세우지 않고 실패로 다룬다(RULE-ROOM-JOIN-PC-MODE-CHECK · 서버가 조용히 다른 모드로 돌리는 경로는 없다). ★서버는 이미 받아들였다 — ROOM_LEAVE 로 되돌린다(응답 뒤 처리는 퇴장과 같다 — 세우던 연결은 link.room_left 로 버린다) |
+| <a id="ROOM.C.JOINING.join_ok"></a>`ROOM.C.JOINING.join_ok` | 받는 상태 rs == 'JOINING' · m.part == 'res' | rs ← 'JOINED'; cseq ← m.version.seq; cepoch ← m.version.epoch; sfu ← m.server_config.sfu_id; jid ← m.join_id; jsure ← true · 효과 trk.snapshot → TRK.C.any.snapshot · TRK.C.any.snapshot_same · 효과 link.server_ice → LINK.C.any.server_ice_same · LINK.C.REBUILD.server_ice_rebuild · LINK.C.NONE.server_ice_closed · LINK.C.any.peer_replaced · 효과 link.table → LINK.C.any.table_carried_same · LINK.C.any.table_carried · LINK.C.any.table_carried_rebound · LINK.C.any.table_carried_old · 효과 sdp.rebuild → LINK.C.NONE.renego_closed · LINK.C.any.renego_queued · LINK.C.any.renego · 효과 ready.tracks → SUB.C.any.ready_want · 효과 app.joined · 효과 room.sub_rooms · 효과 aff.implicit → AFF.C.any.implicit_back_held · AFF.C.any.implicit_back · AFF.C.any.implicit_back_busy · AFF.C.any.implicit_joined · AFF.C.any.implicit_join_unselected · AFF.C.any.implicit_busy · AFF.C.any.implicit_gone · AFF.C.any.implicit_pub · AFF.C.any.implicit_away · AFF.C.any.implicit_same · 효과 floor.join → FLR.C.any.join | §4-2-3 2 §4-2-2 1 §4-2-2 2 §4-2-2 3 §4-2-2 4 §4-2-2 5 §4-2-2 6 — ★스냅샷이다 — version 은 견주지 않고 재설정 |
 | <a id="ROOM.C.JOINING.join_4009"></a>`ROOM.C.JOINING.join_4009` | 받는 상태 rs == 'JOINING' · m.code == 4009 | retry ← true | §4-2-2 6 R-ROOM-ON-JOIN-FAIL-WHY |
-| <a id="ROOM.C.JOINING.join_1xxx"></a>`ROOM.C.JOINING.join_1xxx` | 받는 상태 rs == 'JOINING' · m.code < 2000 | rs ← 'NONE' · 효과 aff.join_failed → AFF.C.any.join_failed_back · AFF.C.any.join_failed · AFF.C.any.join_failed_other · 효과 app.bug · 효과 link.room_left → LINK.C.any.last_room_left · LINK.C.any.room_left | §4-2-2 3 |
-| <a id="ROOM.C.JOINING.join_fail"></a>`ROOM.C.JOINING.join_fail` | 받는 상태 rs == 'JOINING' · 나머지 | rs ← 'NONE' · 효과 aff.join_failed → AFF.C.any.join_failed_back · AFF.C.any.join_failed · AFF.C.any.join_failed_other · 효과 app.join_failed · 효과 link.room_left → LINK.C.any.last_room_left · LINK.C.any.room_left | §4-2-2 1 §4-2-2 2 §4-2-2 4 §4-2-2 5 §9-2-1 R-ROOM-ON-JOIN-FAIL-WHY — ★그 서버 방 하나가 빠진 것으로 LINK 에 알린다 — 재구축의 다시 입장이 실패해 그 서버에 남은 방이 없으면 재구축을 멈추고 연결을 닫는다(RULE-LINK-RECOVERY-REBUILD · 없으면 LINK 가 REBUILD 에 남는다) |
-| <a id="ROOM.C.JOINING.retry_join"></a>`ROOM.C.JOINING.retry_join` | 받는 상태 rs == 'JOINING' && retry · 나머지 | retry ← false · 보낸다 ROOM_JOIN.req | §4-2-2 6 |
+| <a id="ROOM.C.JOINING.join_1xxx"></a>`ROOM.C.JOINING.join_1xxx` | 받는 상태 rs == 'JOINING' · m.code < 2000 | rs ← 'NONE'; jid ← 0 · 효과 aff.join_failed → AFF.C.any.join_failed_back · AFF.C.any.join_failed · AFF.C.any.join_failed_other · 효과 app.bug · 효과 link.room_left → LINK.C.any.last_room_left · LINK.C.any.room_left | §4-2-2 3 |
+| <a id="ROOM.C.JOINING.join_fail"></a>`ROOM.C.JOINING.join_fail` | 받는 상태 rs == 'JOINING' · 나머지 | rs ← 'NONE'; jid ← 0 · 효과 aff.join_failed → AFF.C.any.join_failed_back · AFF.C.any.join_failed · AFF.C.any.join_failed_other · 효과 app.join_failed · 효과 link.room_left → LINK.C.any.last_room_left · LINK.C.any.room_left | §4-2-2 1 §4-2-2 2 §4-2-2 4 §4-2-2 5 §9-2-1 R-ROOM-ON-JOIN-FAIL-WHY — ★그 서버 방 하나가 빠진 것으로 LINK 에 알린다 — 재구축의 다시 입장이 실패해 그 서버에 남은 방이 없으면 재구축을 멈추고 연결을 닫는다(RULE-LINK-RECOVERY-REBUILD · 없으면 LINK 가 REBUILD 에 남는다) |
+| <a id="ROOM.C.JOINING.retry_join"></a>`ROOM.C.JOINING.retry_join` | 받는 상태 rs == 'JOINING' && retry · 나머지 | retry ← false · 보낸다 ROOM_JOIN.req {join_id: jid} | §4-2-2 6 |
 | <a id="ROOM.C.JOINING.app_leave"></a>`ROOM.C.JOINING.app_leave` | 받는 상태 rs == 'JOINED' \|\| (rs == 'JOINING' && !quit) \|\| (rs == 'NONE' && rejoin) · rs == 'JOINING' && retry | rs ← 'NONE'; retry ← false · 효과 aff.join_failed → AFF.C.any.join_failed_back · AFF.C.any.join_failed · AFF.C.any.join_failed_other · 효과 app.left · 효과 link.room_left → LINK.C.any.last_room_left · LINK.C.any.room_left | §4-2-2 6 — 4009 대기 중에 앱이 그 방을 나가면 되풀이를 멈춘다(보낸 요청이 없다) |
 | <a id="ROOM.C.JOINING.app_leave_wait"></a>`ROOM.C.JOINING.app_leave_wait` | 받는 상태 rs == 'JOINED' \|\| (rs == 'JOINING' && !quit) \|\| (rs == 'NONE' && rejoin) · rs == 'JOINING' | quit ← true | §4-2-3 1 DEV-ROOM-LEAVE-WHILE-JOINING — 입장 요청이 나가 있다 — 지금 보내지 않고 응답을 기다린다(성공이면 ROOM_LEAVE · 실패면 끝) |
-| <a id="ROOM.C.JOINING.down_quit"></a>`ROOM.C.JOINING.down_quit` | 받는 효과 SES rooms.down_all · LINK store.drop_server · rs == 'JOINING' && quit | rs ← 'LEAVING'; quit ← false; cseq ← 0; cepoch ← 0; rsync ← false; ahead ← 0; retry ← false; rejoin ← false · 보낸다 ROOM_LEAVE.req · 효과 store.drop → TRK.C.any.store_drop · 효과 http.abandon · 효과 ws.abandon · 효과 aff.leave → AFF.C.any.left · AFF.C.any.left_back · AFF.C.any.left_from · AFF.C.any.left_join · AFF.C.any.left_want · AFF.C.any.left_other · 효과 sub.drop → SUB.C.any.drop | §3-2-3 2 §4-2-3 1 DEV-ROOM-LEAVE-WHILE-JOINING — 나가려고 입장 응답을 기다리던 방이 재구축으로 내려갔다 — 그 입장 요청은 버리지만(응답이 오지 않는다) 서버가 받았을 수 있으니 ROOM_LEAVE 로 닫는다 · 못 받았으면 3002(성공과 같이) · 다시 들어가지 않는다(없으면 서버에 유령 회원이 남는다) |
+| <a id="ROOM.C.JOINING.down_quit"></a>`ROOM.C.JOINING.down_quit` | 받는 효과 SES rooms.down_all · LINK store.drop_server · rs == 'JOINING' && quit | rs ← 'LEAVING'; quit ← false; cseq ← 0; cepoch ← 0; rsync ← false; ahead ← 0; retry ← false; rejoin ← false; jid ← 0; jsure ← false · 보낸다 ROOM_LEAVE.req {join_id: 0} · 효과 store.drop → TRK.C.any.store_drop · 효과 http.abandon · 효과 ws.abandon · 효과 aff.leave → AFF.C.any.left · AFF.C.any.left_back · AFF.C.any.left_from · AFF.C.any.left_join · AFF.C.any.left_want · AFF.C.any.left_other · 효과 sub.drop → SUB.C.any.drop | §3-2-3 2 §4-2-3 1 DEV-ROOM-LEAVE-WHILE-JOINING — 나가려고 입장 응답을 기다리던 방이 재구축으로 내려갔다 — 그 입장 요청은 버리지만(응답이 오지 않는다) 서버가 받았을 수 있으니 ROOM_LEAVE 로 닫는다 · 못 받았으면 3002(성공과 같이) · 다시 들어가지 않는다(없으면 서버에 유령 회원이 남는다) |
+| <a id="ROOM.C.JOINING.expired_quit"></a>`ROOM.C.JOINING.expired_quit` | 받는 상태 (rs == 'JOINING' && !retry) \|\| rs == 'LEAVING' · rs == 'JOINING' && quit | rs ← 'NONE'; quit ← false; jid ← 0; jsure ← false · 보낸다 ROOM_LEAVE.req {join_id: 0} · 효과 ws.abandon · 효과 aff.join_failed → AFF.C.any.join_failed_back · AFF.C.any.join_failed · AFF.C.any.join_failed_other · 효과 app.left · 효과 link.room_left → LINK.C.any.last_room_left · LINK.C.any.room_left | §2-3-2 §2-3-2 5 §4-1-8 — 나가려고 입장 응답을 기다리던 방 — 서버가 그 입장을 받았는지 모른다 · join_id 없이 ROOM_LEAVE 를 보내고(입장 응답을 못 받았다) 기다리지 않는다(같은 세션에서 다음 입장보다 먼저 처리된다 — 응답은 leave_res_stale) · 앱은 떠난 것으로 안다 |
+| <a id="ROOM.C.JOINING.expired"></a>`ROOM.C.JOINING.expired` | 받는 상태 (rs == 'JOINING' && !retry) \|\| rs == 'LEAVING' · rs == 'JOINING' | rs ← 'NONE'; jid ← 0; jsure ← false · 보낸다 ROOM_LEAVE.req {join_id: 0} · 효과 ws.abandon · 효과 aff.join_failed → AFF.C.any.join_failed_back · AFF.C.any.join_failed · AFF.C.any.join_failed_other · 효과 app.join_failed · 효과 link.room_left → LINK.C.any.last_room_left · LINK.C.any.room_left | §2-3-2 §2-3-2 5 §4-1-8 — ★입장 요청이 응답 없이 버려졌다(기한 초과 — RULE-TRN-REQ-LIFE 5 · 끊김은 버림이 아니다 — 같은 세션이면 다시 보낸다) — 방을 NONE 으로(입장 중에 남기면 다시 눌러도 새 입장이 안 나간다) · 서버가 받았을 수 있으니 join_id 없이 ROOM_LEAVE 로 닫고 기다리지 않는다 · 앱에 입장 실패(시간 초과 — 다시 시도할 수 있다) · 사용자가 다시 누르면 새 입장(같은 세션에서 그 퇴장 뒤에 처리된다) |
 
 <a id="RULE-ROOM-JOIN-OK"></a>**RULE-ROOM-JOIN-OK** · 규칙 — `ROOM_JOIN` 성공 응답을 받았다 (`JOINING`)
 
@@ -1000,7 +1054,7 @@ T-stall — 같은 방에 sync_required 를 보낸 뒤 다시 알릴 수 있을 
 
 | 라벨 | 언제 | 하는 일 | 원문 · 근거 |
 |---|---|---|---|
-| <a id="ROOM.C.JOINED.leave"></a>`ROOM.C.JOINED.leave` | 받는 상태 rs == 'JOINED' \|\| (rs == 'JOINING' && !quit) \|\| (rs == 'NONE' && rejoin) · 나머지 | rs ← 'LEAVING'; rsync ← false; ahead ← 0 · 보낸다 ROOM_LEAVE.req · 효과 http.abandon · 효과 floor.leave → FLR.C.any.leave · 효과 aff.leave → AFF.C.any.left · AFF.C.any.left_back · AFF.C.any.left_from · AFF.C.any.left_join · AFF.C.any.left_want · AFF.C.any.left_other · 효과 sub.drop → SUB.C.any.drop · 효과 pub.room_left → PUB.C.any.room_gone_pending · PUB.C.any.room_gone · PUB.C.STAGED.room_gone · PUB.C.any.room_gone_other | §4-2-3 1 §4-2-3 2 DEV-ROOM-RESYNC-ABANDON |
+| <a id="ROOM.C.JOINED.leave"></a>`ROOM.C.JOINED.leave` | 받는 상태 rs == 'JOINED' \|\| (rs == 'JOINING' && !quit) \|\| (rs == 'NONE' && rejoin) · 나머지 | rs ← 'LEAVING'; rsync ← false; ahead ← 0 · 보낸다 ROOM_LEAVE.req {join_id: jid} · 효과 http.abandon · 효과 floor.leave → FLR.C.any.leave · 효과 aff.leave → AFF.C.any.left · AFF.C.any.left_back · AFF.C.any.left_from · AFF.C.any.left_join · AFF.C.any.left_want · AFF.C.any.left_other · 효과 sub.drop → SUB.C.any.drop · 효과 pub.room_left → PUB.C.any.room_gone_pending · PUB.C.any.room_gone_kicked_pending · PUB.C.any.room_gone · PUB.C.STAGED.room_gone · PUB.C.any.room_gone_other | §4-2-3 1 §4-2-3 2 DEV-ROOM-RESYNC-ABANDON |
 | <a id="ROOM.C.JOINED.delta_bare"></a>`ROOM.C.JOINED.delta_bare` | bare | 효과 app.members | §4-2-3 §4-1-3 DEV-ROOM-HIDDEN-SELF-PSTATE — bare = version 없이 나에게만 온 델타(투명 참가자 본인의 권한 — RULE-ROOM-VERSION-NOT-CARRIED) — 견주지 않고 반영한다 · 보관 seq 는 그대로 |
 | <a id="ROOM.C.JOINED.delta_epoch"></a>`ROOM.C.JOINED.delta_epoch` | m.version.epoch != cepoch | 효과 link.epoch_changed → LINK.C.REBUILD.epoch_absorbed · LINK.C.any.epoch_rebuild | §4-2-3 1 R-ROOM-EPOCH-WHY — 규칙 1 — epoch 가 다르다 · 그 서버가 재기동됐다. 반영하지 않고 그 서버만 재구축한다(보관본은 재구축이 버린다 · RULE-SES-RES-RESUME-OK 4) |
 | <a id="ROOM.C.JOINED.delta_old"></a>`ROOM.C.JOINED.delta_old` | m.version.seq <= cseq | — | §4-2-3 §4-1-6 §4-2-3 3 — seq ≤ 보관값 — 낡은 것이라 버린다 |
@@ -1008,15 +1062,15 @@ T-stall — 같은 방에 sync_required 를 보낸 뒤 다시 알릴 수 있을 
 | <a id="ROOM.C.JOINED.delta_apply"></a>`ROOM.C.JOINED.delta_apply` | m.version.seq == cseq + 1 | cseq ← m.version.seq · 효과 app.members · 효과 trk.delta → TRK.C.any.mine_removed · TRK.C.any.mine_other · TRK.C.any.remove · TRK.C.any.track_event · TRK.C.any.track_state | §4-2-3 §4-1-6 §4-2-3 4 — seq = 보관값 + 1 — 반영하고 보관값을 갱신한다 |
 | <a id="ROOM.C.JOINED.delta_gap_inflight"></a>`ROOM.C.JOINED.delta_gap_inflight` | rsync | ahead ← m.version.seq > ahead ? m.version.seq : ahead | §4-2-3 §4-2-3 §4-2-3 5 DEV-ROOM-INFLIGHT-AHEAD — 건너뛰었는데 그 방 재동기가 진행 중이면 새로 던지지 않는다(§4-2-3) · 버린 seq 를 기억한다 |
 | <a id="ROOM.C.JOINED.delta_gap"></a>`ROOM.C.JOINED.delta_gap` | 나머지 | rsync ← true · 보낸다 GET_ROOM.req {tracks: 1} | §4-2-3 1 §4-2-3 2 §4-2-3 4 §4-2-3 5 R-ROOM-SEQ-GAP-WHY — 건너뛰었다 — GET /rooms/{room_id}?tracks=1 로 통짜로 다시 받는다 |
-| <a id="ROOM.C.JOINED.kicked"></a>`ROOM.C.JOINED.kicked` | m.type == 'affiliation' | rs ← 'NONE'; cseq ← 0; cepoch ← 0; rsync ← false; ahead ← 0 · 효과 sdp.rebuild → LINK.C.NONE.renego_closed · LINK.C.any.renego_queued · LINK.C.any.renego · 효과 store.drop → TRK.C.any.store_drop · 효과 http.abandon · 효과 floor.leave → FLR.C.any.leave · 효과 app.room_gone · 효과 aff.leave → AFF.C.any.left · AFF.C.any.left_back · AFF.C.any.left_from · AFF.C.any.left_join · AFF.C.any.left_want · AFF.C.any.left_other · 효과 sub.drop → SUB.C.any.drop · 효과 link.room_left → LINK.C.any.last_room_left · LINK.C.any.room_left · 효과 pub.room_gone → PUB.C.any.room_gone_pending · PUB.C.any.room_gone · PUB.C.STAGED.room_gone · PUB.C.any.room_gone_other | §4-2-3 DEV-ROOM-RESYNC-ABANDON — 종결 — cause kick · room_closed 면 그 방을 NONE 으로 |
+| <a id="ROOM.C.JOINED.kicked"></a>`ROOM.C.JOINED.kicked` | m.type == 'affiliation' | rs ← 'NONE'; cseq ← 0; cepoch ← 0; rsync ← false; ahead ← 0; jid ← 0; jsure ← false · 효과 sdp.rebuild → LINK.C.NONE.renego_closed · LINK.C.any.renego_queued · LINK.C.any.renego · 효과 store.drop → TRK.C.any.store_drop · 효과 http.abandon · 효과 floor.leave → FLR.C.any.leave · 효과 app.room_gone · 효과 aff.leave → AFF.C.any.left · AFF.C.any.left_back · AFF.C.any.left_from · AFF.C.any.left_join · AFF.C.any.left_want · AFF.C.any.left_other · 효과 sub.drop → SUB.C.any.drop · 효과 link.room_left → LINK.C.any.last_room_left · LINK.C.any.room_left · 효과 pub.room_gone → PUB.C.any.room_gone_pending · PUB.C.any.room_gone_kicked_pending · PUB.C.any.room_gone · PUB.C.STAGED.room_gone · PUB.C.any.room_gone_other | §4-2-3 DEV-ROOM-RESYNC-ABANDON — 종결 — cause kick · room_closed 면 그 방을 NONE 으로 |
 | <a id="ROOM.C.JOINED.sync_required_inflight"></a>`ROOM.C.JOINED.sync_required_inflight` | rsync | — | §4-2-3 §4-2-3 |
 | <a id="ROOM.C.JOINED.sync_required"></a>`ROOM.C.JOINED.sync_required` | 나머지 | rsync ← true · 보낸다 GET_ROOM.req {tracks: 1} | §4-2-3 |
 | <a id="ROOM.C.JOINED.snapshot_epoch"></a>`ROOM.C.JOINED.snapshot_epoch` | m.version.epoch != cepoch | rsync ← false; ahead ← 0 · 효과 link.epoch_changed → LINK.C.REBUILD.epoch_absorbed · LINK.C.any.epoch_rebuild | §4-2-3 1 §4-1-14 R-ROOM-EPOCH-WHY — 규칙 1 — 스냅샷이어도 epoch 가 다르면 재설정하지 않는다(다른 기동의 내용) · 이 재동기는 끝났다 · 그 서버만 재구축한다 |
 | <a id="ROOM.C.JOINED.snapshot_short"></a>`ROOM.C.JOINED.snapshot_short` | m.version.seq < ahead | cseq ← m.version.seq > cseq ? m.version.seq : cseq; ahead ← 0 · 보낸다 GET_ROOM.req {tracks: 1} | §4-2-3 3 §4-2-3 2 DEV-ROOM-INFLIGHT-AHEAD — 재동기 중에 버린 델타가 응답보다 새것이다 — 응답을 반영하고 한 번 더 받는다 |
 | <a id="ROOM.C.JOINED.snapshot_behind"></a>`ROOM.C.JOINED.snapshot_behind` | m.version.seq < cseq | rsync ← false; ahead ← 0 | §4-1-14 §4-2-3 2 DEV-ROOM-SNAPSHOT-BEHIND — HTTP 응답이 그 뒤의 WS 델타보다 늦게 닿았다 — 재설정하면 되감는다 |
 | <a id="ROOM.C.JOINED.snapshot"></a>`ROOM.C.JOINED.snapshot` | 나머지 | cseq ← m.version.seq; rsync ← false; ahead ← 0 · 효과 app.members · 효과 trk.snapshot → TRK.C.any.snapshot · TRK.C.any.snapshot_same · 효과 sdp.rebuild → LINK.C.NONE.renego_closed · LINK.C.any.renego_queued · LINK.C.any.renego · 효과 ready.tracks → SUB.C.any.ready_want | §4-2-3 3 §4-2-3 4 §4-2-3 2 R-ROOM-DETAIL-PROC-WHY R-ROOM-SEQ-GAP-WHY — 스냅샷이다 — 견주지 않고 보관값을 재설정한다 · 큰 점프를 갭으로 보지 않는다 |
-| <a id="ROOM.C.JOINED.not_in_sub_rooms"></a>`ROOM.C.JOINED.not_in_sub_rooms` | 받는 효과 ROOM room.sub_rooms · rs == 'JOINED' && !listed | rs ← 'JOINING'; cseq ← 0; cepoch ← 0; rsync ← false; ahead ← 0; retry ← false · 보낸다 ROOM_JOIN.req · 효과 store.drop → TRK.C.any.store_drop · 효과 http.abandon · 효과 floor.leave → FLR.C.any.leave · 효과 aff.down → AFF.C.any.down · AFF.C.any.down_join · AFF.C.any.down_want · AFF.C.any.down_other · 효과 sub.drop → SUB.C.any.drop · 효과 pub.room_gone → PUB.C.any.room_gone_pending · PUB.C.any.room_gone · PUB.C.STAGED.room_gone · PUB.C.any.room_gone_other | §4-1 — 들어가 있다고 아는데 그 서버의 sub_rooms 에 없다 — 서버가 옛 Peer 를 축출했다(다시 입장) · NONE 으로 내리고 다시 입장한다(RULE-ROOM-JOIN-PROC) |
-| <a id="ROOM.C.JOINED.resume_gone"></a>`ROOM.C.JOINED.resume_gone` | 받는 효과 SES rooms.snapshot · 받는 상태 rs == 'JOINED' · !present | rs ← 'NONE'; cseq ← 0; cepoch ← 0; rsync ← false; ahead ← 0; retry ← false · 효과 store.drop → TRK.C.any.store_drop · 효과 http.abandon · 효과 floor.leave → FLR.C.any.leave · 효과 app.room_gone · 효과 aff.leave → AFF.C.any.left · AFF.C.any.left_back · AFF.C.any.left_from · AFF.C.any.left_join · AFF.C.any.left_want · AFF.C.any.left_other · 효과 sub.drop → SUB.C.any.drop · 효과 link.room_left → LINK.C.any.last_room_left · LINK.C.any.room_left · 효과 pub.room_gone → PUB.C.any.room_gone_pending · PUB.C.any.room_gone · PUB.C.STAGED.room_gone · PUB.C.any.room_gone_other | §3-2-3 2 R-SES-RES-RESUME-OK-WHY — 스냅샷에 없는 방 — 끊긴 동안 강퇴 · 폭파 · 방 닫힘이 있었고 그 통지가 사라졌다. 재입장하지 않는다 |
+| <a id="ROOM.C.JOINED.not_in_sub_rooms"></a>`ROOM.C.JOINED.not_in_sub_rooms` | 받는 효과 ROOM room.sub_rooms · rs == 'JOINED' && !listed | rs ← 'JOINING'; cseq ← 0; cepoch ← 0; rsync ← false; ahead ← 0; retry ← false; jid ← 0; jsure ← false · 보낸다 ROOM_JOIN.req {join_id: 0} · 효과 store.drop → TRK.C.any.store_drop · 효과 http.abandon · 효과 floor.leave → FLR.C.any.leave · 효과 aff.down → AFF.C.any.down · AFF.C.any.down_join · AFF.C.any.down_want · AFF.C.any.down_other · 효과 sub.drop → SUB.C.any.drop · 효과 pub.room_gone → PUB.C.any.room_gone_pending · PUB.C.any.room_gone_kicked_pending · PUB.C.any.room_gone · PUB.C.STAGED.room_gone · PUB.C.any.room_gone_other | §4-1 — 들어가 있다고 아는데 그 서버의 sub_rooms 에 없다 — 서버가 옛 Peer 를 축출했다(다시 입장) · NONE 으로 내리고 다시 입장한다(RULE-ROOM-JOIN-PROC) |
+| <a id="ROOM.C.JOINED.resume_gone"></a>`ROOM.C.JOINED.resume_gone` | 받는 효과 SES rooms.snapshot · 받는 상태 rs == 'JOINED' · !present | rs ← 'NONE'; cseq ← 0; cepoch ← 0; rsync ← false; ahead ← 0; retry ← false; jid ← 0; jsure ← false · 효과 store.drop → TRK.C.any.store_drop · 효과 http.abandon · 효과 floor.leave → FLR.C.any.leave · 효과 app.room_gone · 효과 aff.leave → AFF.C.any.left · AFF.C.any.left_back · AFF.C.any.left_from · AFF.C.any.left_join · AFF.C.any.left_want · AFF.C.any.left_other · 효과 sub.drop → SUB.C.any.drop · 효과 link.room_left → LINK.C.any.last_room_left · LINK.C.any.room_left · 효과 pub.room_gone → PUB.C.any.room_gone_pending · PUB.C.any.room_gone_kicked_pending · PUB.C.any.room_gone · PUB.C.STAGED.room_gone · PUB.C.any.room_gone_other | §3-2-3 2 R-SES-RES-RESUME-OK-WHY — 스냅샷에 없는 방 — 끊긴 동안 강퇴 · 폭파 · 방 닫힘이 있었고 그 통지가 사라졌다. 재입장하지 않는다 |
 | <a id="ROOM.C.JOINED.resume_epoch"></a>`ROOM.C.JOINED.resume_epoch` | 받는 효과 SES rooms.snapshot · 받는 상태 rs == 'JOINED' · epoch != cepoch | 효과 link.epoch_changed → LINK.C.REBUILD.epoch_absorbed · LINK.C.any.epoch_rebuild | §3-2-3 2 §3-2-3 4 §4-2-3 1 R-ROOM-EPOCH-WHY — 규칙 1 — RESUME 스냅샷이어도 epoch 가 다르면 재설정하지 않는다(다른 기동의 내용) · 서버가 재기동돼 그 연결을 모른다 — 그 서버만 재구축한다(RULE-SES-RES-RESUME-OK 2 · 4 · 재동기의 snapshot_epoch 와 같다) |
 | <a id="ROOM.C.JOINED.resume_snapshot"></a>`ROOM.C.JOINED.resume_snapshot` | 받는 효과 SES rooms.snapshot · 받는 상태 rs == 'JOINED' · 나머지 | cseq ← seq · 효과 app.members · 효과 trk.snapshot → TRK.C.any.snapshot · TRK.C.any.snapshot_same · 효과 link.table → LINK.C.any.table_carried_same · LINK.C.any.table_carried · LINK.C.any.table_carried_rebound · LINK.C.any.table_carried_old | §3-2-3 1 §4-2-3 2 — 스냅샷이다 — 견주지 않고 재설정(epoch 가 같다) · 트랙 목록도 스냅샷으로(RULE-TRK-FOUR-PATHS) |
 
@@ -1222,16 +1276,17 @@ T-stall — 같은 방에 sync_required 를 보낸 뒤 다시 알릴 수 있을 
 | <a id="ROOM.C.any.snapshot_stale"></a>`ROOM.C.any.snapshot_stale` | rs != 'JOINED' \|\| !rsync | — | §4-1-14 — 그 재동기를 던진 입장이 아니다 — 원문이 정하지 않는다(무시) |
 | <a id="ROOM.C.any.sub_rooms_ok"></a>`ROOM.C.any.sub_rooms_ok` | 받는 효과 ROOM room.sub_rooms · 나머지 | — | §4-1 — 목록에 있다 · 아직 들어가 있지 않다(입장 중이면 제 응답이 따로 온다) — 할 일이 없다 |
 | <a id="ROOM.C.any.down"></a>`ROOM.C.any.down` | 받는 효과 SES rooms.down_all · LINK store.drop_server · 나머지 | rs ← 'NONE'; cseq ← 0; cepoch ← 0; rsync ← false; ahead ← 0; retry ← false; rejoin ← rs == 'JOINED' \|\| rs == 'JOINING' · 효과 store.drop → TRK.C.any.store_drop · 효과 http.abandon · 효과 ws.abandon · 효과 aff.down → AFF.C.any.down · AFF.C.any.down_join · AFF.C.any.down_want · AFF.C.any.down_other · 효과 sub.drop → SUB.C.any.drop | §3-2-3 2 §9-2-1 2 DEV-ROOM-RESYNC-ABANDON — 방 상태를 NONE 으로 · 보관본을 버린다 · 떠 있는 재동기는 버린다(방을 떠난 것과 같다) |
-| <a id="ROOM.C.any.close_all"></a>`ROOM.C.any.close_all` | 받는 효과 SES rooms.close_all · 나머지 | rs ← 'NONE'; cseq ← 0; cepoch ← 0; rsync ← false; ahead ← 0; retry ← false; rejoin ← false · 효과 store.drop → TRK.C.any.store_drop · 효과 http.abandon · 효과 ws.abandon · 효과 aff.leave → AFF.C.any.left · AFF.C.any.left_back · AFF.C.any.left_from · AFF.C.any.left_join · AFF.C.any.left_want · AFF.C.any.left_other · 효과 sub.drop → SUB.C.any.drop | §3-2-3 2 DEV-SES-FRESH-REJOIN DEV-ROOM-RESYNC-ABANDON — 방 상태를 NONE 으로 · 보관본을 버린다 · 떠 있는 재동기는 버린다 · 다시 들어갈 방으로 남기지 않는다 |
+| <a id="ROOM.C.any.close_all"></a>`ROOM.C.any.close_all` | 받는 효과 SES rooms.close_all · 나머지 | rs ← 'NONE'; cseq ← 0; cepoch ← 0; rsync ← false; ahead ← 0; retry ← false; rejoin ← false; jid ← 0; jsure ← false · 효과 store.drop → TRK.C.any.store_drop · 효과 http.abandon · 효과 ws.abandon · 효과 aff.leave → AFF.C.any.left · AFF.C.any.left_back · AFF.C.any.left_from · AFF.C.any.left_join · AFF.C.any.left_want · AFF.C.any.left_other · 효과 sub.drop → SUB.C.any.drop | §3-2-3 2 DEV-SES-FRESH-REJOIN DEV-ROOM-RESYNC-ABANDON — 방 상태를 NONE 으로 · 보관본을 버린다 · 떠 있는 재동기는 버린다 · 다시 들어갈 방으로 남기지 않는다 |
 
 <a id="ROOM.C.LEAVING"></a>
 #### 4-2-5. 클라 · `LEAVING`
 
 | 라벨 | 언제 | 하는 일 | 원문 · 근거 |
 |---|---|---|---|
-| <a id="ROOM.C.LEAVING.leave_ok"></a>`ROOM.C.LEAVING.leave_ok` | m.part == 'res' | rs ← 'NONE'; cseq ← 0; cepoch ← 0; rsync ← false · 효과 sdp.rebuild → LINK.C.NONE.renego_closed · LINK.C.any.renego_queued · LINK.C.any.renego · 효과 store.drop → TRK.C.any.store_drop · 효과 app.left · 효과 link.room_left → LINK.C.any.last_room_left · LINK.C.any.room_left | §4-2-5 1 §4-2-5 2 §4-2-5 3 |
-| <a id="ROOM.C.LEAVING.leave_fail"></a>`ROOM.C.LEAVING.leave_fail` | 나머지 | rs ← 'NONE'; cseq ← 0; cepoch ← 0; rsync ← false · 효과 sdp.rebuild → LINK.C.NONE.renego_closed · LINK.C.any.renego_queued · LINK.C.any.renego · 효과 store.drop → TRK.C.any.store_drop · 효과 app.left · 효과 link.room_left → LINK.C.any.last_room_left · LINK.C.any.room_left | §4-2-5 — 3001 · 3002 는 성공과 같이 · 그 밖도 NONE 으로 내린다 |
-| <a id="ROOM.C.LEAVING.down"></a>`ROOM.C.LEAVING.down` | 받는 효과 SES rooms.down_all · LINK store.drop_server · rs == 'LEAVING' | rs ← 'NONE'; cseq ← 0; cepoch ← 0; rsync ← false; ahead ← 0; retry ← false; rejoin ← false · 효과 store.drop → TRK.C.any.store_drop · 효과 http.abandon · 효과 ws.abandon · 효과 aff.leave → AFF.C.any.left · AFF.C.any.left_back · AFF.C.any.left_from · AFF.C.any.left_join · AFF.C.any.left_want · AFF.C.any.left_other · 효과 sub.drop → SUB.C.any.drop · 효과 app.left | §3-2-3 2 §4-2-5 — 나가던 방이 재구축으로 내려갔다 — 나가는 일은 끝난 것이다(보낸 ROOM_LEAVE 는 서버가 처리한다 — 버리는 것은 그 응답뿐) · ★앱의 퇴장을 끝낸다(app.left — 20261023: 이것이 없어 leave() 가 영영 안 끝났다) · 다시 들어가지 않는다 |
+| <a id="ROOM.C.LEAVING.leave_ok"></a>`ROOM.C.LEAVING.leave_ok` | m.part == 'res' | rs ← 'NONE'; cseq ← 0; cepoch ← 0; rsync ← false; jid ← 0; jsure ← false · 효과 sdp.rebuild → LINK.C.NONE.renego_closed · LINK.C.any.renego_queued · LINK.C.any.renego · 효과 store.drop → TRK.C.any.store_drop · 효과 app.left · 효과 link.room_left → LINK.C.any.last_room_left · LINK.C.any.room_left | §4-2-5 1 §4-2-5 2 §4-2-5 3 |
+| <a id="ROOM.C.LEAVING.leave_fail"></a>`ROOM.C.LEAVING.leave_fail` | 나머지 | rs ← 'NONE'; cseq ← 0; cepoch ← 0; rsync ← false; jid ← 0; jsure ← false · 효과 sdp.rebuild → LINK.C.NONE.renego_closed · LINK.C.any.renego_queued · LINK.C.any.renego · 효과 store.drop → TRK.C.any.store_drop · 효과 app.left · 효과 link.room_left → LINK.C.any.last_room_left · LINK.C.any.room_left | §4-2-5 — 3001 · 3002 는 성공과 같이 · 그 밖도 NONE 으로 내린다 |
+| <a id="ROOM.C.LEAVING.down"></a>`ROOM.C.LEAVING.down` | 받는 효과 SES rooms.down_all · LINK store.drop_server · rs == 'LEAVING' | rs ← 'NONE'; cseq ← 0; cepoch ← 0; rsync ← false; ahead ← 0; retry ← false; rejoin ← false; jid ← 0; jsure ← false · 효과 store.drop → TRK.C.any.store_drop · 효과 http.abandon · 효과 ws.abandon · 효과 aff.leave → AFF.C.any.left · AFF.C.any.left_back · AFF.C.any.left_from · AFF.C.any.left_join · AFF.C.any.left_want · AFF.C.any.left_other · 효과 sub.drop → SUB.C.any.drop · 효과 app.left | §3-2-3 2 §4-2-5 — 나가던 방이 재구축으로 내려갔다 — 나가는 일은 끝난 것이다(보낸 ROOM_LEAVE 는 서버가 처리한다 — 버리는 것은 그 응답뿐) · ★앱의 퇴장을 끝낸다(app.left — 20261023: 이것이 없어 leave() 가 영영 안 끝났다) · 다시 들어가지 않는다 |
+| <a id="ROOM.C.LEAVING.expired"></a>`ROOM.C.LEAVING.expired` | 받는 상태 (rs == 'JOINING' && !retry) \|\| rs == 'LEAVING' · 나머지 | rs ← 'NONE'; cseq ← 0; cepoch ← 0; rsync ← false; jid ← 0; jsure ← false · 보낸다 ROOM_LEAVE.req {join_id: jsure ? jid : 0} · 효과 ws.abandon · 효과 sdp.rebuild → LINK.C.NONE.renego_closed · LINK.C.any.renego_queued · LINK.C.any.renego · 효과 store.drop → TRK.C.any.store_drop · 효과 app.left · 효과 link.room_left → LINK.C.any.last_room_left · LINK.C.any.room_left | §2-3-2 §2-3-2 5 §2-3-2 — 퇴장 요청이 응답 없이 버려졌다 — 떠난 것으로 내리고(떠남과 같은 효과) 같은 값으로 ROOM_LEAVE 를 다시 보낸다(멱등 — 이미 처리됐으면 3002 · 응답은 leave_res_stale) |
 
 <a id="RULE-ROOM-LEAVE-RES"></a>**RULE-ROOM-LEAVE-RES** · 규칙 — `ROOM_LEAVE` 응답을 받았다 (`LEAVING`)
 
@@ -1269,32 +1324,34 @@ T-stall — 같은 방에 sync_required 를 보낸 뒤 다시 알릴 수 있을 
 | <a id="ROOM.S.join_3001"></a>`ROOM.S.join_3001` | m.t == 'ROOM_JOIN' && !open | 답한다 ROOM_JOIN.fail {code: 3001} | §4-1 |
 | <a id="ROOM.S.join_4009"></a>`ROOM.S.join_4009` | m.t == 'ROOM_JOIN' && busy && !member | 답한다 ROOM_JOIN.fail {code: 4009} | §11-2-3 |
 | <a id="ROOM.S.join_4001"></a>`ROOM.S.join_4001` | m.t == 'ROOM_JOIN' && full && !member && !hidden | 답한다 ROOM_JOIN.fail {code: 4001} | §4-1 §4-1-3 |
-| <a id="ROOM.S.join_again"></a>`ROOM.S.join_again` | m.t == 'ROOM_JOIN' && member | sel ← m.select · 답한다 ROOM_JOIN.res {version: {epoch: epoch, seq: seq}, server_config: {pc_mode: pcm, sfu_id: epoch}} | §4-1 |
-| <a id="ROOM.S.join_hidden"></a>`ROOM.S.join_hidden` | m.t == 'ROOM_JOIN' && hidden | member ← true; sel ← m.select · 답한다 ROOM_JOIN.res {version: {epoch: epoch, seq: seq}, server_config: {pc_mode: pcm, sfu_id: epoch}} | §4-1 §4-1-3 |
-| <a id="ROOM.S.join"></a>`ROOM.S.join` | m.t == 'ROOM_JOIN' | member ← true; seq ← seq + 1; sel ← m.select · 답한다 ROOM_JOIN.res {version: {epoch: epoch, seq: seq + 1}, server_config: {pc_mode: pcm, sfu_id: epoch}} | §4-1 §4-1-6 |
+| <a id="ROOM.S.join_again"></a>`ROOM.S.join_again` | m.t == 'ROOM_JOIN' && member && m.join_id != 0 && m.join_id == jid | sel ← m.select; jid ← jgen + 1; jgen ← jgen + 1 · 답한다 ROOM_JOIN.res {join_id: jgen + 1, version: {epoch: epoch, seq: seq}, server_config: {pc_mode: pcm, sfu_id: epoch}} | §4-1 §4-1-7 §4-1-7 |
+| <a id="ROOM.S.join_same"></a>`ROOM.S.join_same` | m.t == 'ROOM_JOIN' && member | 답한다 ROOM_JOIN.res {join_id: jid, version: {epoch: epoch, seq: seq}, server_config: {pc_mode: pcm, sfu_id: epoch}} | §4-1 §2-3-2 §4-1-7 |
+| <a id="ROOM.S.join_hidden"></a>`ROOM.S.join_hidden` | m.t == 'ROOM_JOIN' && hidden | member ← true; sel ← m.select; jid ← jgen + 1; jgen ← jgen + 1 · 답한다 ROOM_JOIN.res {join_id: jgen + 1, version: {epoch: epoch, seq: seq}, server_config: {pc_mode: pcm, sfu_id: epoch}} | §4-1 §4-1-3 §4-1-7 |
+| <a id="ROOM.S.join"></a>`ROOM.S.join` | m.t == 'ROOM_JOIN' | member ← true; seq ← seq + 1; sel ← m.select; jid ← jgen + 1; jgen ← jgen + 1 · 답한다 ROOM_JOIN.res {join_id: jgen + 1, version: {epoch: epoch, seq: seq + 1}, server_config: {pc_mode: pcm, sfu_id: epoch}} | §4-1 §4-1-6 §4-1-7 |
 | <a id="ROOM.S.leave_3002"></a>`ROOM.S.leave_3002` | m.t == 'ROOM_LEAVE' && !member | 답한다 ROOM_LEAVE.fail {code: 3002} | §4-1 |
-| <a id="ROOM.S.leave_hidden"></a>`ROOM.S.leave_hidden` | m.t == 'ROOM_LEAVE' && hidden | member ← false · 답한다 ROOM_LEAVE.res | §4-1 §4-1-3 |
-| <a id="ROOM.S.leave"></a>`ROOM.S.leave` | m.t == 'ROOM_LEAVE' | member ← false; seq ← seq + 1 · 답한다 ROOM_LEAVE.res | §4-1 §4-1-6 |
+| <a id="ROOM.S.leave_stale"></a>`ROOM.S.leave_stale` | m.t == 'ROOM_LEAVE' && m.join_id != 0 && m.join_id != jid | 답한다 ROOM_LEAVE.fail {code: 3002} | §4-1-7 §4-1-8 |
+| <a id="ROOM.S.leave_hidden"></a>`ROOM.S.leave_hidden` | m.t == 'ROOM_LEAVE' && hidden | member ← false; jid ← 0 · 답한다 ROOM_LEAVE.res | §4-1 §4-1-3 |
+| <a id="ROOM.S.leave"></a>`ROOM.S.leave` | m.t == 'ROOM_LEAVE' | member ← false; jid ← 0; seq ← seq + 1 · 답한다 ROOM_LEAVE.res | §4-1 §4-1-6 |
 | <a id="ROOM.S.rx_other"></a>`ROOM.S.rx_other` | 나머지 | — | §4-1 |
-| <a id="ROOM.S.session_gone_hidden"></a>`ROOM.S.session_gone_hidden` | 받는 효과 SES rooms.session_gone · member && hidden | member ← false | §3-1 §4-1-3 |
-| <a id="ROOM.S.session_gone"></a>`ROOM.S.session_gone` | 받는 효과 SES rooms.session_gone · member | member ← false; seq ← seq + 1 | §3-1 §4-1-6 |
+| <a id="ROOM.S.session_gone_hidden"></a>`ROOM.S.session_gone_hidden` | 받는 효과 SES rooms.session_gone · member && hidden | member ← false; jid ← 0 | §3-1 §4-1-3 |
+| <a id="ROOM.S.session_gone"></a>`ROOM.S.session_gone` | 받는 효과 SES rooms.session_gone · member | member ← false; jid ← 0; seq ← seq + 1 | §3-1 §4-1-6 |
 | <a id="ROOM.S.session_gone_other"></a>`ROOM.S.session_gone_other` | 받는 효과 SES rooms.session_gone · 나머지 | — | §3-1 |
 | <a id="ROOM.S.peer_evicted_self"></a>`ROOM.S.peer_evicted_self` | 받는 효과 ROOM room.peer_evicted · self | — | §4-1 |
-| <a id="ROOM.S.peer_evicted_hidden"></a>`ROOM.S.peer_evicted_hidden` | 받는 효과 ROOM room.peer_evicted · member && hidden | member ← false | §4-1 §4-1-3 |
-| <a id="ROOM.S.peer_evicted"></a>`ROOM.S.peer_evicted` | 받는 효과 ROOM room.peer_evicted · member | member ← false; seq ← seq + 1 | §4-1 §4-1-6 |
+| <a id="ROOM.S.peer_evicted_hidden"></a>`ROOM.S.peer_evicted_hidden` | 받는 효과 ROOM room.peer_evicted · member && hidden | member ← false; jid ← 0 | §4-1 §4-1-3 |
+| <a id="ROOM.S.peer_evicted"></a>`ROOM.S.peer_evicted` | 받는 효과 ROOM room.peer_evicted · member | member ← false; jid ← 0; seq ← seq + 1 | §4-1 §4-1-6 |
 | <a id="ROOM.S.peer_evicted_other"></a>`ROOM.S.peer_evicted_other` | 받는 효과 ROOM room.peer_evicted · 나머지 | — | §4-1 |
 | <a id="ROOM.S.change_notify"></a>`ROOM.S.change_notify` | member | seq ← seq + 1 · 답한다 PARTICIPANT_EVENT.body {version: {epoch: epoch, seq: seq + 1}} | §4-1-6 §4-2-6 |
 | <a id="ROOM.S.change"></a>`ROOM.S.change` | 나머지 | seq ← seq + 1 | §4-1-6 |
-| <a id="ROOM.S.kick_hidden"></a>`ROOM.S.kick_hidden` | hidden | member ← false · 답한다 ROOM_EVENT.body {type: 'affiliation', cause: 'kick'} | §4-2-6 §4-1-3 |
-| <a id="ROOM.S.kick"></a>`ROOM.S.kick` | 나머지 | member ← false; seq ← seq + 1 · 답한다 ROOM_EVENT.body {type: 'affiliation', cause: 'kick'} | §4-2-6 §4-1-6 |
-| <a id="ROOM.S.close_notify"></a>`ROOM.S.close_notify` | member | open ← false; member ← false · 답한다 ROOM_EVENT.body {type: 'affiliation', cause: 'room_closed'} | §4-2-6 |
+| <a id="ROOM.S.kick_hidden"></a>`ROOM.S.kick_hidden` | hidden | member ← false; jid ← 0 · 답한다 ROOM_EVENT.body {type: 'affiliation', cause: 'kick'} | §4-2-6 §4-1-3 |
+| <a id="ROOM.S.kick"></a>`ROOM.S.kick` | 나머지 | member ← false; jid ← 0; seq ← seq + 1 · 답한다 ROOM_EVENT.body {type: 'affiliation', cause: 'kick'} | §4-2-6 §4-1-6 |
+| <a id="ROOM.S.close_notify"></a>`ROOM.S.close_notify` | member | open ← false; member ← false; jid ← 0 · 답한다 ROOM_EVENT.body {type: 'affiliation', cause: 'room_closed'} | §4-2-6 |
 | <a id="ROOM.S.close"></a>`ROOM.S.close` | 나머지 | open ← false | §4-2-6 |
 | <a id="ROOM.S.reopen"></a>`ROOM.S.reopen` | 나머지 | open ← true; seq ← seq + 1 | §4-2-6 |
 | <a id="ROOM.S.sync_required"></a>`ROOM.S.sync_required` | 나머지 | cool ← true · 답한다 ROOM_EVENT.body {type: 'sync_required'} | §4-2-6 §4-2-3 |
 | <a id="ROOM.S.unbusy"></a>`ROOM.S.unbusy` | busy | busy ← false | §11-2-3 |
 | <a id="ROOM.S.busy"></a>`ROOM.S.busy` | 나머지 | busy ← true | §11-2-3 |
 | <a id="ROOM.S.full_flip"></a>`ROOM.S.full_flip` | 나머지 | full ← !full | §4-1 |
-| <a id="ROOM.S.restart"></a>`ROOM.S.restart` | 나머지 | epoch ← epoch + 1; seq ← 1; member ← false; open ← false; cool ← false; pubBit ← true; floorBit ← true | §4-2-3 1 |
+| <a id="ROOM.S.restart"></a>`ROOM.S.restart` | 나머지 | epoch ← epoch + 1; seq ← 1; member ← false; jid ← 0; open ← false; cool ← false; pubBit ← true; floorBit ← true | §4-2-3 1 |
 | <a id="ROOM.S.perm_absent"></a>`ROOM.S.perm_absent` | !member | — | §4-2-6 |
 | <a id="ROOM.S.perm_floor_down_hidden"></a>`ROOM.S.perm_floor_down_hidden` | hidden && bit == 'floor' && floorBit | floorBit ← false · 답한다 PARTICIPANT_STATE.body {type: 'permission'} | §4-2-6 §4-1-3 |
 | <a id="ROOM.S.perm_floor_up_hidden"></a>`ROOM.S.perm_floor_up_hidden` | hidden && bit == 'floor' | floorBit ← true · 답한다 PARTICIPANT_STATE.body {type: 'permission'} | §4-2-6 §4-1-3 |

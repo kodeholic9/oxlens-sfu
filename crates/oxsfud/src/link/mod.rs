@@ -71,6 +71,7 @@ pub struct Transport {
     pub user: String,
     pub role: Role,
     pub worker: usize,
+    pub source_tag: bool,
     pub creds: Mutex<Creds>,
     pub path: ArcSwapOption<PathKey>,
     pub pairs: Mutex<Vec<Pair>>,
@@ -105,7 +106,7 @@ pub struct ExtIds {
 }
 
 impl Transport {
-    pub fn new(id: u64, user: &str, role: Role, worker: usize) -> Arc<Transport> {
+    pub fn new(id: u64, user: &str, role: Role, worker: usize, source_tag: bool) -> Arc<Transport> {
         let (dtls_in, dtls_rx) = tokio::sync::mpsc::unbounded_channel();
         let (dc_out, dc_rx) = tokio::sync::mpsc::unbounded_channel();
         let (stop, _) = tokio::sync::watch::channel(false);
@@ -115,6 +116,7 @@ impl Transport {
             user: user.to_string(),
             role,
             worker,
+            source_tag,
             creds: Mutex::new(Creds::new()),
             path: ArcSwapOption::empty(),
             pairs: Mutex::new(Vec::new()),

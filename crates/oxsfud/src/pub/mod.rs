@@ -3,7 +3,7 @@
 //! 발행 — 논리 `PublisherStream`(track_id · 메타 · 구독 줄 목록) · 물리 `PublisherTrack`(업링크 SSRC · 캐시 1024 · NACK 결손 · PLI 스로틀 · 수신 통계) · 시뮬캐스트는 첫 RTP 에 rid 로 붙인다.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
@@ -68,6 +68,7 @@ pub struct PubStream {
     pub simulcast: bool,
     pub ssrc: u32,
     pub rtx_ssrc: Option<u32>,
+    pub csrc: u32,
     duplex: AtomicU8,
     pub muted: AtomicBool,
     pub room: ArcSwap<String>,
@@ -76,6 +77,17 @@ pub struct PubStream {
     pub first_rtp_ms: AtomicU64,
     pub listed: AtomicBool,
     pub state: Mutex<PublishState>,
+}
+
+static CSRC: AtomicU32 = AtomicU32::new(1);
+
+pub fn next_csrc() -> u32 {
+    loop {
+        let v = CSRC.fetch_add(1, Ordering::Relaxed) & 0x7fff_ffff;
+        if v != 0 {
+            return v;
+        }
+    }
 }
 
 impl PubStream {
@@ -93,6 +105,7 @@ impl PubStream {
             simulcast: i.simulcast,
             ssrc: i.ssrc,
             rtx_ssrc: i.rtx_ssrc,
+            csrc: next_csrc(),
             duplex: AtomicU8::new(if i.duplex == Duplex::Half { 1 } else { 0 }),
             muted: AtomicBool::new(false),
             room: ArcSwap::from_pointee(i.room),

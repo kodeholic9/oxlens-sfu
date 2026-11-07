@@ -55,6 +55,8 @@ pub struct Envelope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pc_mode: Option<PcMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_tag: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home: Option<Home>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claims: Option<Claims>,
@@ -78,6 +80,7 @@ impl Envelope {
             session: None,
             sid: None,
             pc_mode: None,
+            source_tag: None,
             home: None,
             claims: None,
             method: None,

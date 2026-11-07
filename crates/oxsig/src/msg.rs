@@ -300,6 +300,8 @@ pub struct TrackEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub csrc: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<Source>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active: Option<bool>,
@@ -702,6 +704,8 @@ pub struct BindReq {
     pub client_ver: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pc_mode: Option<PcMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_tag: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -712,6 +716,7 @@ pub struct BindRes {
     pub session_id: String,
     pub resume_window_ms: u64,
     pub pc_mode: PcMode,
+    pub source_tag: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

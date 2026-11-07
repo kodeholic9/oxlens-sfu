@@ -94,6 +94,8 @@
 |---|---|---|---|
 | `pub_select` | string? | — | 이 방으로 발행한다(= 이 방에서 말한다) |
 | `pub_deselect` | string? | — | 이 방으로 그만 발행한다 |
+| ★`pub_select_join_id` | str | `pub_select` 가 있으면 | ★`pub_select` 방 지금 입장의 값(§4-1-7) |
+| ★`pub_deselect_join_id` | str | `pub_deselect` 가 있으면 | ★`pub_deselect` 방 지금 입장의 값(§4-1-7) — 늦은 내림이 다시 입장 뒤의 발행 방을 비우지 않게 |
 | `change_id` | string? | — | 내가 붙인 번호. 응답에 되돌아온다 |
 
 **응답**
@@ -105,7 +107,7 @@
 | `cause` | "user" | ✔ |  |
 | `change_id` | str | — |  |
 
-**실패** — `2001` 아직 BIND 안 함 · `1003` `pub_select` · `pub_deselect` 가 둘 다 없음 — 물을 서버가 없다(RULE-AFF-RES-FORM) · `1006` `pub_select` 대상 방의 미디어 코덱 불일치(내 트랙 하나라도 — 전환 전체 실패) · `2006` `pub_select` 대상 방의 권한 비트가 내 발행 트랙 종류를 막는다(전환 전체 실패) · `5003` 내부 오류
+**실패** — `2001` 아직 BIND 안 함 · `3002` 고르거나 비울 방에 없음 · 실린 `join_id` 가 지금 입장이 아니다(§4-1-7) · `1003` 방 칸에 짝 `*_join_id` 가 없음 · `1003` `pub_select` · `pub_deselect` 가 둘 다 없음 — 물을 서버가 없다(RULE-AFF-RES-FORM) · `1006` `pub_select` 대상 방의 미디어 코덱 불일치(내 트랙 하나라도 — 전환 전체 실패) · `2006` `pub_select` 대상 방의 권한 비트가 내 발행 트랙 종류를 막는다(전환 전체 실패) · `5003` 내부 오류
 
 <a id="RULE-AFF-PUB-ONLY"></a>**RULE-AFF-PUB-ONLY** · 규칙
 

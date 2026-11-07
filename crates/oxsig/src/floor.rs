@@ -28,6 +28,7 @@ pub mod tlv {
     pub const PREV: u8 = 26;
     pub const REASON: u8 = 27;
     pub const ROOM: u8 = 29;
+    pub const SOURCES: u8 = 31;
 }
 
 pub mod deny {
@@ -176,6 +177,10 @@ impl Msg {
         self.get(tlv::ACKTYPE).and_then(|b| if b.len() == 2 { Some(b[0]) } else { None })
     }
 
+    pub fn sources(&self) -> Vec<u32> {
+        self.get(tlv::SOURCES).map(|b| b.chunks_exact(4).map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]])).collect()).unwrap_or_default()
+    }
+
     pub fn cause(&self) -> Option<u8> {
         self.get(tlv::CAUSE).and_then(|b| b.first().copied())
     }
@@ -214,8 +219,9 @@ pub fn granted(priority: u8, duration_s: u16, room: &str) -> Msg {
     Msg::new(GRANTED, true).push(tlv::PRIORITY, u8spare(priority)).push(tlv::DURATION, u16be(duration_s)).push(tlv::ROOM, utf8(room))
 }
 
-pub fn taken(speaker: &str, seq: u16, room: &str) -> Msg {
-    Msg::new(TAKEN, true).push(tlv::SPEAKER, utf8(speaker)).push(tlv::SEQ, u16be(seq)).push(tlv::ROOM, utf8(room))
+pub fn taken(speaker: &str, seq: u16, room: &str, sources: &[u32]) -> Msg {
+    let m = Msg::new(TAKEN, true).push(tlv::SPEAKER, utf8(speaker)).push(tlv::SEQ, u16be(seq)).push(tlv::ROOM, utf8(room));
+    if sources.is_empty() { m } else { m.push(tlv::SOURCES, sources.iter().flat_map(|x| x.to_be_bytes()).collect()) }
 }
 
 pub fn deny_msg(cause: u8, room: &str, reason: Option<&str>) -> Msg {
@@ -279,6 +285,16 @@ mod tests {
         assert!(decode(&[0x40, 0]).is_none());
         assert!(decode(&[7, 0]).is_none());
         assert!(encode(&Msg::new(REVOKE, true)).is_none());
+    }
+
+    #[test]
+    fn taken_carries_speaker_sources() {
+        let d = decode(&encode(&taken("u1", 7, "r1", &[0x0000_0003, 0x7fff_fffe])).unwrap()).unwrap();
+        assert_eq!(d.sources(), vec![3, 0x7fff_fffe]);
+        assert_eq!(d.get(tlv::SOURCES).map(|b| b.len()), Some(8));
+        let none = decode(&encode(&taken("u1", 7, "r1", &[])).unwrap()).unwrap();
+        assert!(none.get(tlv::SOURCES).is_none());
+        assert!(none.sources().is_empty());
     }
 
     #[test]

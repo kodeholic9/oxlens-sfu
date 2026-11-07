@@ -26,6 +26,7 @@
 | `codec` | string? | individual: video · slot: video 슬롯 | `"VP8"` / `"H264"` / `"VP9"` — ★서버가 실제로 지원하는 목록은 `1005` 의 `details.supported` 가 정본이다(1차 = VP8·H264). ★**이 값은 그 방의 미디어 코덱(방 속성 `media_codecs.video`, §4-1-1)이다** — 전이중 · 슬롯 모두 |
 | ★`fmtp` | string? | individual: 있으면 · slot: video 슬롯만 | ★**보기용** — 발행자가 `PUBLISH_TRACKS` 에 실은 `fmtp`(§7-1-2) 그대로. ★**SDP 재료가 아니다** — 구독 SDP 의 `a=fmtp` 는 배정표 줄의 고정 선언값이다(§8-1-1 · §4-1-1) |
 | `user_id` | str | individual: ✔ · slot: ★없다 | 보내는 사람. 슬롯은 ★**여러 사람이 돌려쓰는 한 m-line**이라 주인이 없다 — 화자는 발언권 통지로 안다(§10-4-35) |
+| ★`csrc` | u32 | individual: ✔ · slot: ★없다 | ★**출처 번호** — `source_tag` 를 켠 세션의 다운링크 패킷에 이 트랙의 미디어가 실릴 때 붙는 CSRC 값(§9-4-2 ⑤). ★**트랙이 사는 동안 그대로**(시뮬캐스트 레이어에도) · 최상위 비트 0 · 0 아님 · ★그 미디어 서버 안에서 트랙마다 다르다(§6-1-3). 방 전원에게 같은 값이다 — 다운링크 SSRC 와 달리 연결에 매이지 않는다. 슬롯은 주인이 없어 없다 — 슬롯으로 흐르는 패킷의 CSRC 는 그 화자의 발행 트랙(쉬는 `individual` 항목) 것이다 |
 | `source` | string? | individual: video · slot: ★없다 | ★**`"camera"` / `"screen"` 둘뿐이다**(닫힌 집합, §7-1-2) — ★**video 만**(audio 개인 트랙에는 없다). 발행자가 `PUBLISH_TRACKS` 에 신고한 값 그대로다 — 서버는 검증하지 않는다(§4-2-6) |
 | `active` | bool? | individual: ✔ · slot: ★없다 | ★`false` 면 지금은 안 온다 — 회의→무전 전환으로 ★**쉬는** individual 트랙이다(`TRACK_SET{duplex}` 가 적용되면 그 방 전원에게 `TRACK_EVENT{add}` 로 항목이 교체된다, §4-2-6). ★★**쉬는 트랙은 배정표에 줄이 없다** — full → half 순간 서버가 그 자리를 놓고(PROP-LINK-ROW-ONLY-RECEIVED) 그 줄은 빈 줄이 된다(§8-3-1). 서버가 그 줄을 같은 `kind` 의 다른 트랙에 주면 다음 표가 자리를 채운다. 복귀(`true`)는 `TRACK_EVENT{add}` 와 ★**그 트랙의 줄이 붙은 표**(`MLINE_EVENT`)로 온다. ★*"지워라"* 가 아니다 — m-line 을 두고 화면만 내린다 |
 | ★`muted` | bool? | individual: ✔ · slot: ★없다 | ★**그 트랙이 음소거인가** — `TRACK_STATE{muted}`(§4-2-6)와 같은 값이다. 슬롯은 주인이 없어 *"누구의 음소거인가"* 가 정의되지 않는다(반이중에는 mute 가 없다, §7-1-2). ★**스냅샷에 있어야 복구된다**(아래 ★) |
@@ -145,7 +146,15 @@
 
 <a id="RULE-TRK-TRACK-STATE-PROC"></a>**RULE-TRK-TRACK-STATE-PROC** · 규칙
 
-**절차** — ACK + `version` 견주기 + 위 표대로. ★**`track_id` 가 식별 키다.** ★`ssrc` 는 싣지 않는다 — 구독자가 받는 SSRC 는 연결마다 다른 다운링크 SSRC 라 방 전원에게 같은 값으로 줄 것이 없다(§9-4-2).
+**절차** — ACK + `version` 견주기 + 위 표대로. ★**`track_id` 가 식별 키다.** ★`ssrc` 는 싣지 않는다 — 구독자가 받는 SSRC 는 연결마다 다른 다운링크 SSRC 라 방 전원에게 같은 값으로 줄 것이 없다(§9-4-2). ★출처 번호(`csrc`)는 이 이유에 걸리지 않는다 — 연결이 아니라 발행 트랙에 매인 값이라 방 전원에게 같다(§6-1-3).
+
+<a id="RULE-TRK-CSRC"></a>**RULE-TRK-CSRC** · 규칙
+
+★★**출처 번호(`csrc`)는 발행 트랙의 값이다** — 트랙을 받는 미디어 서버가 그 트랙이 생길 때 내고 ★**트랙이 사는 동안 바꾸지 않는다**(시뮬캐스트 레이어에도 같다 — `track_id` 와 수명이 같다). ★최상위 비트 0 · 0 아님 · ★그 미디어 서버 안에서 트랙마다 다르다(한 연결이 그 서버의 여러 방을 받으므로 방이 아니라 서버 안에서 가른다). 받는 쪽은 패킷의 CSRC 를 그 연결이 붙은 서버의 방 트랙 목록(`csrc`)에서 찾아 `track_id` · `user_id` 를 안다.
+- ★**발언권 화자 통지와 맞대지 않는다** — 화자 통지는 미디어와 순서 약속이 없어(§10-4-35) 경계 패킷이 틀린다. 패킷마다 실린 CSRC 가 발행 신원의 정본이다
+- ★**CSRC 가 없는 패킷**(켠 연결에서) = 서버가 지은 패킷(예열 · 해제 침묵) — 어느 발행 트랙에도 넣지 않는다
+
+→ 구조 — [`TRK.type.TrackEntry`](#TRK.type.TrackEntry)
 
 <a id="RULE-TRK-TRACK-STATE-TO-ALL"></a>**RULE-TRK-TRACK-STATE-TO-ALL** · 규칙
 

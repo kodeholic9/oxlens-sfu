@@ -302,7 +302,7 @@ pub fn probe(w: &Worker, tr: &Arc<Transport>, now_us: u64) {
     payload.push(PAD_BYTES as u8);
     for _ in 0..n {
         let seq = row.rtx_seq.fetch_add(1, Ordering::AcqRel);
-        let b = crate::rtcp::Built { pt: rtx_pt, seq, ts, ssrc: rtx_ssrc, marker: false, payload: &payload, probe: true, padding: true };
+        let b = crate::rtcp::Built { pt: rtx_pt, seq, ts, ssrc: rtx_ssrc, csrc: None, marker: false, payload: &payload, probe: true, padding: true };
         crate::rtcp::send_built(w, m, row, b);
     }
     let _ = now_us;

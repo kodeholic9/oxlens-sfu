@@ -28,6 +28,7 @@
 | ★`session_id` | str | — | ★**재접속 이어받기용**(§3-2-3). 끊기기 전 세션의 것 — 아래 "인증 두 갈래" |
 | `client_ver` | int | — (기본 1) | 클라 프로토콜 세대. ★**이 규격서의 세대는 `1` 이다.** 안 보내면 `1` 로 본다 |
 | ★`pc_mode` | "1pc" / "2pc" | — (기본 "2pc") | `"1pc"` / `"2pc"`. ★**세션 단위**다 — 아래. 안 보내면 `"2pc"` |
+| ★`source_tag` | bool | — (기본 false) | ★**출처 표지 요청** — `true` 면 이 세션의 다운링크 패킷에 발행 트랙의 출처 번호가 CSRC 로 실린다(§3-1-1 · §9-4-2 ⑤). ★**세션 단위**다. 안 보내면 `false` |
 
 **응답**
 
@@ -39,6 +40,7 @@
 | `session_id` | str | ✔ | 재접속 BIND 에 실을 값 (§3-1 인증 두 갈래 · §3-2-3) |
 | `resume_window_ms` | u64 | ✔ | 이 시간 안에 돌아오면 이어받을 수 있다 |
 | `pc_mode` | "1pc" / "2pc" | ✔ | ★확정값 에코 — 아래 |
+| `source_tag` | bool | ✔ | ★확정값 에코(§3-1-1) |
 
 **실패** — `1003` `session_id` 갈래가 아닌데(없거나 무효) `token` 이 없다 · `1002` ★**모르는 `pc_mode` 포함** · `1004` `VERSION_MISMATCH`(`client_ver` 가 서버가 받을 수 없는 세대다) · `2002` · `2003` · `4003` ★**이 배포**의 동시 세션 수 상한(§11) · `1008` ★**이미 묶인 소켓**의 두 번째 `BIND` — 응답 뒤 `LEAVE` 1008 로 끊는다(§3-1-1). ★`2005` 는 ★**여기 없다** — 발급(HTTP §3-1-5) 때만 난다. ★**전부 연결이 안 선다.**
 
@@ -54,7 +56,8 @@
   "heartbeat_interval": 10000,   // ms — 이 주기로 0x0103 을 보낸다
   "session_id": "…",             // 재접속 BIND 에 실을 값 (§3-1 인증 두 갈래 · §3-2-3)
   "resume_window_ms": 60000,     // 이 시간 안에 돌아오면 이어받을 수 있다
-  "pc_mode": "1pc" }             // ★확정값 에코 — 아래
+  "pc_mode": "1pc",              // ★확정값 에코 — 아래
+  "source_tag": false }          // ★확정값 에코(§3-1-1)
 ```
 
 <a id="RULE-SES-BIND-PROC"></a>**RULE-SES-BIND-PROC** · 규칙
@@ -72,7 +75,7 @@
 
 ★**토큰은 접속 중에 만료되지 않는다.** 접속 시점에만 검사한다 — 무전은 종일 켜두는 물건이라
 백그라운드에서 갱신 왕복을 지킬 수 없다. ★**들여보낸 사람을 내보내려면 운영자가 연결을 끊는다**(`LEAVE` `2009 SESSION_REVOKED`, 아래) — ★토큰의 `permission`(§3-1-5)은 입장 초기값이라 접속 중 다시 읽지 않고, 비트 회수는 방 단위 갱신(§4-2-6 · §4-2-6 `PARTICIPANT_STATE`)으로 따로 간다.
-★**이것은 WS 세션 얘기다** — HTTP 는 매 요청 검사하므로 §2-3-3 의 세션 헤더가 따로 있다.
+★**이것은 WS 세션 얘기다** — HTTP 는 매 요청 검사하므로 §2-3-4 의 세션 헤더가 따로 있다.
 
 → 구조 — [`SES.C.any.token_expired`](#SES.C.any.token_expired)
 
@@ -82,7 +85,7 @@
 
 | 갈래 | 규칙 |
 |---|---|
-| ★**`session_id` 가 실려 있고 유효하다**(`resume_window_ms` 안·서버 생존) | ★**그 세션의 신원으로 인증한다. 토큰은 보지 않는다** — 종일 켜둔 클라의 재접속 시점 토큰은 거의 확실히 만료 상태이고, 그때마다 앱 백엔드 왕복을 요구하면 ★**60초 윈도우 안에 미디어 복구가 안 된다.** 근거는 §2-3-3 세션 헤더와 같다 — ★**새 비밀을 만들지 않는다.** `session_id` 는 이미 재접속의 자격증명이다 |
+| ★**`session_id` 가 실려 있고 유효하다**(`resume_window_ms` 안·서버 생존) | ★**그 세션의 신원으로 인증한다. 토큰은 보지 않는다** — 종일 켜둔 클라의 재접속 시점 토큰은 거의 확실히 만료 상태이고, 그때마다 앱 백엔드 왕복을 요구하면 ★**60초 윈도우 안에 미디어 복구가 안 된다.** 근거는 §2-3-4 세션 헤더와 같다 — ★**새 비밀을 만들지 않는다.** `session_id` 는 이미 재접속의 자격증명이다 |
 | `session_id` 가 없거나 무효다 | `token` 으로 인증한다(만료면 `2003`). ★**무효는 실패가 아니다** — 새 세션으로 붙는다 |
 
 → 구조 — [`SES.S.bind_resume`](#SES.S.bind_resume) · [`SES.S.bind_new`](#SES.S.bind_new) · [`SES.C.RESUMING.bind_same`](#SES.C.RESUMING.bind_same) · [`SES.C.RESUMING.bind_new`](#SES.C.RESUMING.bind_new)
@@ -116,6 +119,21 @@
 | ★**확인** | ★**응답이 확정값을 에코한다.** 그리고 각 미디어 서버가 적용한 값이 `server_config.pc_mode`(§9-1-1) 로 다시 온다 — ★**둘은 반드시 같다** |
 | 안 보내면 | `"2pc"` 로 본다 |
 | 모르는 값 | ★**거절한다**(`1002`). ★**조용히 기본값으로 넘어가지 않는다** — 오타가 `2pc` 로 등록되면 클라는 `1pc` 로 도는 줄 알고 ★**폴백이 일어난 것도 모른다** |
+
+<a id="RULE-SES-SOURCE-TAG-SESSION"></a>**RULE-SES-SOURCE-TAG-SESSION** · 규칙
+
+★★**`source_tag`(출처 표지 요청)는 세션 단위다** — `pc_mode` 와 같은 꼴이다(§3-1-1).
+
+| | |
+|---|---|
+| 무엇의 속성인가 | ★**받는 쪽 능력**이다 — 다운링크 패킷의 CSRC 를 읽어 발행 트랙을 가를 수 있느냐. 방도 서버도 아니고 ★**클라 자신**의 성질이다(녹음 · 녹화 · 에이전트처럼 패킷마다 발행 신원이 필요한 클라가 켠다) |
+| ★**왜 여기인가** | 붙기 전에 아는 값이고, 한 세션이 붙는 모든 미디어 서버에 같은 값이어야 한다. `ROOM_JOIN` 번호표는 `1pc` 전용 재료라(§9-4-2 ④) `2pc` 에 실을 곳이 없다 |
+| 그 뒤 | ★**세션 안에서 바뀌지 않는다.** 이어받은 세션은 확정값을 에코한다 — 바꾸려면 다시 붙는다 |
+| ★**확인** | 응답이 확정값을 에코한다. ★`server_config` 에는 되돌리지 않는다 — 갈려도 연결이 깨지지 않고(CSRC 는 RTP 고정 헤더의 일부라 켜지 않은 받는 쪽도 읽고 넘긴다 — RFC 3550 §5.1) 받는 쪽이 패킷의 CC 로 바로 본다 |
+| 안 보내면 | `false` 로 본다 — 다운링크는 지금 그대로(CC = 0) |
+| 서버가 누가 켰는지 보나 | ★**보지 않는다** — 선언만 본다. `participant_type` 등 다른 칸으로 켜고 끄지 않는다 |
+
+→ 구조 — [`SES.op.BIND`](#SES.op.BIND)
 
 <a id="RULE-SES-PC-MODE-DECIDE"></a>**RULE-SES-PC-MODE-DECIDE** · 규칙
 
@@ -178,7 +196,14 @@
                         "me": {"user_id":"u1","role":255,"select":false,"participant_type":0,"metadata":{"name":"…"}},   // ★**나** — 명단과 따로 싣는다(투명이든 아니든 늘 · 권한 포함 — ★내 권한의 출처는 이것이다 · DEV-ROOM-ME-APART)
                         "tracks": [ /* TrackEntry… §6-1-1 */ ],
                         "version": {"epoch":"sfu-7f3a…","seq":10245} } },   // ★그 세션이 아는 방 전부 · 방마다 version (§4-1-6)
-  "publications": [ {"track_id":"t-u1-mic","room_id":"r1","kind":"audio","duplex":"half","codec":null,"fmtp":"…","simulcast":false} ],   // ★발행 층 — 서버가 아는 내 발행 전량 (§6-1-1)
+  "publications": [ { "track_id": "t-u1-mic",
+                      "mid": "0",                       // ★발행 연결의 그 m-line MID — 서버 멱등의 키(발행 연결 + `mid` · RULE-TRN-IDEMPOTENT). 클라는 RESUME 대조에서 이것으로 대기 add 가 가져갈 발행을 고아와 가른다(DEV-PUB-RESUME-INFLIGHT)
+                      "room_id": "r1",
+                      "kind": "audio",
+                      "duplex": "half",
+                      "codec": null,
+                      "fmtp": "…",
+                      "simulcast": false } ],           // ★발행 층 — 서버가 아는 내 발행 전량 (§6-1-1)
   "mline_tables": [ { "sfu_id": "sfu-7f3a…",            // ★**어느 미디어 서버의 연결 표인가**(§9-1-1 — 재기동하면 바뀐다)
                       "arev": 3,                        // ★**표의 차례 번호** — 그 서버가 이 세션의 표를 바꿀 때마다 하나 오른다(재구축해도 이어진다 · 재기동하면 `sfu_id` 가 바뀐다). ★**같은 `sfu_id` 에서 보관값보다 큰 것만 받는다** — 표 전체라 낡은 것은 버리면 된다(사이를 메울 것이 없다)
                       "mlines": [ /* MlineEntry… §8-1-1 */ ] } ] }   // ★**표 전체** — 그 연결의 구독 m-line 전부(빈 줄 포함 · mid 순서는 받는 쪽이 수치로 세운다) · ★**서버마다 구독 m-line 배정표 전체**(§8-1-2) — 받는 법은 `MLINE_EVENT` 와 같다(§8-1-2)
@@ -200,7 +225,7 @@
 |---|---|
 | 클라 | `epoch` 가 다르면 그 방 보관본을 통째로 버린다(규칙 1 — 미디어 서버가 재기동됐다) |
 | 클라 | ★★**자기 미디어와 대조한다**(§3-2-3) — 미디어 연결이 전부 살아 있고, 들어가 있던 방이 스냅샷에 다 있고, 내 발행이 `publications[]` 에 다 있으면 ★**이어 쓴다**(남의 트랙이 달라졌으면 구독 SDP 만 다시 조립한다 · 그대로면 재협상도 `READY` 도 없다). ★**어긋난 것은 서버마다 가른다**(§3-2-3) — 스냅샷에 빠진 방은 ★**내리고 다시 들어가지 않는다**, 죽은 연결은 2단, 서버가 모르는 연결은 그 서버만 3단(남은 방만 다시 들어간다) |
-| 클라 | ★**보내다 만 프레임을 다시 보내지 않는다.** 큐를 비운다 |
+| 클라 | ★**기한 전 대기 요청을 처음 보낸 차례대로 원래 `pid` 로 다시 보낸다**(§2-3-2 3) — 대조는 대기 요청이 걸린 방 · 트랙을 판정하지 않고 그 응답을 기다린다 |
 
 → 구조 — [`SES.C.RESUMING.bind_same`](#SES.C.RESUMING.bind_same) · [`PROP-SES-RESUMING-BIND-THEN-RESUME`](#PROP-SES-RESUMING-BIND-THEN-RESUME) · [`PROP-SES-RESUME-NEEDS-CARRY`](#PROP-SES-RESUME-NEEDS-CARRY) · [`SES.C.any.drop`](#SES.C.any.drop) · [`SES.C.RESUMING.open_late`](#SES.C.RESUMING.open_late) · [`SES.op.RESUME`](#SES.op.RESUME) · [`SES.S.resume_ok`](#SES.S.resume_ok) · [`ROOM.type.RoomSnapshot`](04-room.md#ROOM.type.RoomSnapshot) · [`ROOM.C.JOINED.resume_snapshot`](04-room.md#ROOM.C.JOINED.resume_snapshot) · [`SES.C.RESUMING.resume_ok`](#SES.C.RESUMING.resume_ok) · [`SES.C.RESUMING.resume_ok_repair`](#SES.C.RESUMING.resume_ok_repair)
 
@@ -221,7 +246,7 @@
 <a id="RULE-SES-HEARTBEAT"></a>**RULE-SES-HEARTBEAT** · 규칙
 
 **절차**
-- ★**서버가 먼저 보낼 수도 있다.** 그때 클라는 ★**다른 통지와 똑같이 ACK 만** 한다(§2-3-5) — 자기 주기를 앞당기거나 미루지 않는다.
+- ★**서버가 먼저 보낼 수도 있다.** 그때 클라는 ★**다른 통지와 똑같이 ACK 만** 한다(§2-3-6) — 자기 주기를 앞당기거나 미루지 않는다.
 - ★**WS 점검에도 쓴다**(§9-2-1 4) — 주기와 상관없이 곧바로 보낸다. ★단 `BIND` 응답을 받은 소켓에만 — 그 전에는 다른 op 과 같이 끊긴다(§3-1-1).
 ★서버는 ★**읽는 즉시 답한다** — 방 요청의 처리를 기다리지 않는다.
 
@@ -350,7 +375,7 @@
 | `4008` | `HEARTBEAT_TIMEOUT` | 아무것도 안 보냈다(30초 · `BIND` 전 10초) | 백오프(§3-2-3) | ★★**유지**(§3-2-4) — WS 만 죽고 미디어는 살아 있을 수 있다. `RESUME` 이 이어받는다 |
 | `2009` | `SESSION_REVOKED` | ★운영자가 이 세션을 끊었다(C 평면 `cut`) | ★**백오프로 붙어도 된다** — 단 세션은 즉시 폐기라 `session_id` 를 싣지 말고 `BIND` 만(`RESUME` 은 `2008`). ★차단이 아니다 — 새 `BIND` 가 토큰을 다시 검사하고 자격이 남아 있으면 들어간다. 막는 자리는 토큰이다 | ★닫는다 — 서버가 Peer 를 이미 회수했다 |
 | `2010` | `DUPLICATE_SESSION` | 같은 신원이 다른 데서 들어왔다(§3-1 축출) | ★**붙지 마라** | ★닫는다 |
-| `5004` | `SERVER_SHUTDOWN` | 서버가 내려간다 | 백오프(§3-2-3) — 같은 `{base}` 로. LB·DNS 가 산 노드로 보낸다(§2-3-2) | ★닫는다 — 그 서버가 내려간다 |
+| `5004` | `SERVER_SHUTDOWN` | 서버가 내려간다 | 백오프(§3-2-3) — 같은 `{base}` 로. LB·DNS 가 산 노드로 보낸다(§2-3-3) | ★닫는다 — 그 서버가 내려간다 |
 | ★**모르는 `code`** | — | 서버가 사유를 늘렸다 | ★백오프 | ★**유지** — 그래야 서버가 사유를 늘려도 클라가 안 깨진다. 위험한 것은 `2010` 하나인데 그것은 아는 코드다 |
 
 번호 행은 오류 코드 표(§11)와 한 번호 공간이다 — 오류 코드 표에서 `leave` 표지를 단 행과 번호 · 이름이 같다(IR 이 대조한다)
@@ -556,9 +581,9 @@
 | <a id="SES.C.RESUMING.bind_2002"></a>`SES.C.RESUMING.bind_2002` | 받는 상태 cs == 'CONNECTING' \|\| cs == 'RESUMING' · m.code == 2002 | cs ← 'DISCONNECTED'; sock ← 'CLOSED'; wait ← 'NONE' · 효과 floor.down_all → FLR.C.any.down · 효과 rooms.close_all → ROOM.C.any.close_all · 효과 media.close_all → LINK.C.any.close_all · 효과 app.disconnected | §3-2-3 1 DEV-SES-ROOMS-ON-MEDIA-CLOSE R-SES-RES-BIND-RES-WHY |
 | <a id="SES.C.RESUMING.bind_fail"></a>`SES.C.RESUMING.bind_fail` | 받는 상태 cs == 'CONNECTING' \|\| cs == 'RESUMING' · m.part == 'fail' | sock ← 'CLOSED'; wait ← 'NONE' | §3-2-2 4 DEV-SES-RESUMING-BIND-FAIL |
 | <a id="SES.C.RESUMING.bind_same"></a>`SES.C.RESUMING.bind_same` | 받는 상태 cs == 'CONNECTING' \|\| cs == 'RESUMING' · sent != 0 && m.session_id == sent | sid ← m.session_id; hbMs ← m.heartbeat_interval; winMs ← m.resume_window_ms; pcm ← m.pc_mode; hb ← true; wait ← 'RESUME' · 보낸다 RESUME.req | §3-2-3 2 |
-| <a id="SES.C.RESUMING.bind_new"></a>`SES.C.RESUMING.bind_new` | 받는 상태 cs == 'CONNECTING' \|\| cs == 'RESUMING' · 나머지 | sid ← m.session_id; hbMs ← m.heartbeat_interval; winMs ← m.resume_window_ms; pcm ← m.pc_mode; hb ← true; wait ← 'NONE'; cs ← 'ACTIVE'; late ← false · 효과 floor.down_all → FLR.C.any.down · 효과 rooms.down_all → ROOM.C.LEAVING.down · ROOM.C.JOINING.down_quit · ROOM.C.any.down · 효과 media.close_all → LINK.C.any.close_all · 효과 rooms.rejoin → ROOM.C.NONE.rejoin · 효과 pub.reregister_all → PUB.C.any.reregister_moving · PUB.C.any.reregister · PUB.C.any.reregister_off · 효과 app.rebuilt | §3-2-3 3 §3-2-3 1 §3-2-3 1-1 §3-2-3 2 §3-2-3 3 §3-2-3 4 |
-| <a id="SES.C.RESUMING.resume_ok_repair"></a>`SES.C.RESUMING.resume_ok_repair` | 받는 상태 cs == 'RESUMING' · m.part == 'res' && dead | cs ← 'ACTIVE'; wait ← 'NONE'; late ← false · 효과 rooms.snapshot → ROOM.C.JOINED.resume_gone · ROOM.C.JOINED.resume_epoch · ROOM.C.JOINED.resume_snapshot · 효과 pub.resume_check → PUB.C.any.resume_unlisted · PUB.C.STAGED.resume_listed_unwanted · PUB.C.STAGED.resume_listed_half · PUB.C.STAGED.resume_listed · PUB.C.STAGED.resume_unlisted · PUB.C.STAGED.resume_unlisted_unwanted · PUB.C.any.resume_orphan · PUB.C.any.resume_listed · 효과 media.repair → LINK.C.any.repair_rebuild · LINK.C.any.repair_restart · LINK.C.any.repair_recheck · LINK.C.any.repair_ok · 효과 app.resumed | §3-2-3 1 §3-2-3 2 §3-2-3 4 §3-2-3 5 §3-2-3 6 R-SES-RESUME-PROC-WHY R-SES-RES-RESUME-OK-WHY |
-| <a id="SES.C.RESUMING.resume_ok"></a>`SES.C.RESUMING.resume_ok` | 받는 상태 cs == 'RESUMING' · m.part == 'res' | cs ← 'ACTIVE'; wait ← 'NONE'; late ← false · 효과 rooms.snapshot → ROOM.C.JOINED.resume_gone · ROOM.C.JOINED.resume_epoch · ROOM.C.JOINED.resume_snapshot · 효과 pub.resume_check → PUB.C.any.resume_unlisted · PUB.C.STAGED.resume_listed_unwanted · PUB.C.STAGED.resume_listed_half · PUB.C.STAGED.resume_listed · PUB.C.STAGED.resume_unlisted · PUB.C.STAGED.resume_unlisted_unwanted · PUB.C.any.resume_orphan · PUB.C.any.resume_listed · 효과 app.resumed | §3-2-3 1 §3-2-3 2 §3-2-3 3 §3-2-3 5 §3-2-3 6 R-SES-RESUME-PROC-WHY R-SES-RES-RESUME-OK-WHY |
+| <a id="SES.C.RESUMING.bind_new"></a>`SES.C.RESUMING.bind_new` | 받는 상태 cs == 'CONNECTING' \|\| cs == 'RESUMING' · 나머지 | sid ← m.session_id; hbMs ← m.heartbeat_interval; winMs ← m.resume_window_ms; pcm ← m.pc_mode; hb ← true; wait ← 'NONE'; cs ← 'ACTIVE'; late ← false · 효과 floor.down_all → FLR.C.any.down · 효과 rooms.down_all → ROOM.C.LEAVING.down · ROOM.C.JOINING.down_quit · ROOM.C.any.down · 효과 media.close_all → LINK.C.any.close_all · 효과 rooms.rejoin → ROOM.C.NONE.rejoin · 효과 pub.reregister_all → PUB.C.any.reregister_moving · PUB.C.any.reregister · PUB.C.any.reregister_off · 효과 app.rebuilt | §3-2-3 3 §3-2-3 1 §3-2-3 1-1 §3-2-3 2 §3-2-3 3 §3-2-3 4 — 새 세션이다 — 옛 세션의 대기 요청은 버린다(RULE-TRN-REQ-LIFE 4 — 재구축이 방 · 발행을 다시 세운다) |
+| <a id="SES.C.RESUMING.resume_ok_repair"></a>`SES.C.RESUMING.resume_ok_repair` | 받는 상태 cs == 'RESUMING' · m.part == 'res' && dead | cs ← 'ACTIVE'; wait ← 'NONE'; late ← false · 효과 rooms.snapshot → ROOM.C.JOINED.resume_gone · ROOM.C.JOINED.resume_epoch · ROOM.C.JOINED.resume_snapshot · 효과 pub.resume_check → PUB.C.any.resume_lost_drop · PUB.C.any.resume_lost_keep · PUB.C.any.resume_unlisted · PUB.C.any.resume_half · PUB.C.any.resume_full · PUB.C.STAGED.resume_pending · PUB.C.any.resume_orphan · PUB.C.any.resume_listed · 효과 media.repair → LINK.C.any.repair_rebuild · LINK.C.any.repair_restart · LINK.C.any.repair_recheck · LINK.C.any.repair_ok · 효과 app.resumed | §3-2-3 1 §3-2-3 2 §3-2-3 4 §3-2-3 5 §3-2-3 6 R-SES-RESUME-PROC-WHY R-SES-RES-RESUME-OK-WHY — ★대조 뒤 기한 전 대기 요청을 처음 보낸 차례대로 원래 pid 로 다시 보낸다(RULE-TRN-REQ-LIFE 3 — 운반 몫 · 서버는 멱등으로 받는다 RULE-TRN-IDEMPOTENT) |
+| <a id="SES.C.RESUMING.resume_ok"></a>`SES.C.RESUMING.resume_ok` | 받는 상태 cs == 'RESUMING' · m.part == 'res' | cs ← 'ACTIVE'; wait ← 'NONE'; late ← false · 효과 rooms.snapshot → ROOM.C.JOINED.resume_gone · ROOM.C.JOINED.resume_epoch · ROOM.C.JOINED.resume_snapshot · 효과 pub.resume_check → PUB.C.any.resume_lost_drop · PUB.C.any.resume_lost_keep · PUB.C.any.resume_unlisted · PUB.C.any.resume_half · PUB.C.any.resume_full · PUB.C.STAGED.resume_pending · PUB.C.any.resume_orphan · PUB.C.any.resume_listed · 효과 app.resumed | §3-2-3 1 §3-2-3 2 §3-2-3 3 §3-2-3 5 §3-2-3 6 R-SES-RESUME-PROC-WHY R-SES-RES-RESUME-OK-WHY — ★대조 뒤 기한 전 대기 요청을 처음 보낸 차례대로 원래 pid 로 다시 보낸다(RULE-TRN-REQ-LIFE 3 — 운반 몫 · 서버는 멱등으로 받는다 RULE-TRN-IDEMPOTENT) |
 | <a id="SES.C.RESUMING.resume_2008"></a>`SES.C.RESUMING.resume_2008` | 받는 상태 cs == 'RESUMING' · 나머지 | wait ← 'NONE'; cs ← 'ACTIVE'; late ← false · 효과 floor.down_all → FLR.C.any.down · 효과 rooms.down_all → ROOM.C.LEAVING.down · ROOM.C.JOINING.down_quit · ROOM.C.any.down · 효과 media.close_all → LINK.C.any.close_all · 효과 rooms.rejoin → ROOM.C.NONE.rejoin · 효과 pub.reregister_all → PUB.C.any.reregister_moving · PUB.C.any.reregister · PUB.C.any.reregister_off · 효과 app.rebuilt | §3-2-3 1 §3-2-3 1-1 §3-2-3 2 §3-2-3 3 §3-2-3 4 R-SES-RESUME-2008-DEFENSIVE |
 | <a id="SES.C.RESUMING.window_passed"></a>`SES.C.RESUMING.window_passed` | 받는 상태 cs == 'RESUMING' && !late · 나머지 | late ← true | §3-2-3 2 §3-2-3 R-SES-CLIENT-WATCHES-CLOCK-WHY |
 | <a id="SES.C.RESUMING.Backoff_exhaust"></a>`SES.C.RESUMING.Backoff_exhaust` | cs == 'RESUMING' | cs ← 'DISCONNECTED' · 효과 floor.down_all → FLR.C.any.down · 효과 rooms.close_all → ROOM.C.any.close_all · 효과 media.close_all → LINK.C.any.close_all · 효과 app.disconnected | §3-2-3 1 §3-2-3 2 §3-2-3 3 DEV-SES-ROOMS-ON-MEDIA-CLOSE R-SES-RES-EXHAUST-WHY |
@@ -616,7 +641,7 @@
 | 항목 | 경우 |
 |---|---|
 | 1 | [`ROOM.C.JOINED.resume_snapshot`](04-room.md#ROOM.C.JOINED.resume_snapshot) · [`SES.C.RESUMING.resume_ok_repair`](#SES.C.RESUMING.resume_ok_repair) · [`SES.C.RESUMING.resume_ok`](#SES.C.RESUMING.resume_ok) |
-| 2 | [`PUB.C.any.resume_unlisted`](07-pub.md#PUB.C.any.resume_unlisted) · [`PUB.C.STAGED.resume_listed_unwanted`](07-pub.md#PUB.C.STAGED.resume_listed_unwanted) · [`PUB.C.STAGED.resume_listed_half`](07-pub.md#PUB.C.STAGED.resume_listed_half) · [`PUB.C.STAGED.resume_listed`](07-pub.md#PUB.C.STAGED.resume_listed) · [`PUB.C.STAGED.resume_unlisted`](07-pub.md#PUB.C.STAGED.resume_unlisted) · [`PUB.C.STAGED.resume_unlisted_unwanted`](07-pub.md#PUB.C.STAGED.resume_unlisted_unwanted) · [`PUB.C.any.resume_orphan`](07-pub.md#PUB.C.any.resume_orphan) · [`ROOM.C.JOINED.resume_gone`](04-room.md#ROOM.C.JOINED.resume_gone) · [`ROOM.C.JOINED.resume_epoch`](04-room.md#ROOM.C.JOINED.resume_epoch) · [`SES.C.RESUMING.resume_ok_repair`](#SES.C.RESUMING.resume_ok_repair) · [`SES.C.RESUMING.resume_ok`](#SES.C.RESUMING.resume_ok) |
+| 2 | [`PUB.C.any.resume_lost_drop`](07-pub.md#PUB.C.any.resume_lost_drop) · [`PUB.C.any.resume_lost_keep`](07-pub.md#PUB.C.any.resume_lost_keep) · [`PUB.C.any.resume_unlisted`](07-pub.md#PUB.C.any.resume_unlisted) · [`PUB.C.any.resume_half`](07-pub.md#PUB.C.any.resume_half) · [`PUB.C.any.resume_full`](07-pub.md#PUB.C.any.resume_full) · [`PUB.C.STAGED.resume_pending`](07-pub.md#PUB.C.STAGED.resume_pending) · [`PUB.C.any.resume_orphan`](07-pub.md#PUB.C.any.resume_orphan) · [`ROOM.C.JOINED.resume_gone`](04-room.md#ROOM.C.JOINED.resume_gone) · [`ROOM.C.JOINED.resume_epoch`](04-room.md#ROOM.C.JOINED.resume_epoch) · [`SES.C.RESUMING.resume_ok_repair`](#SES.C.RESUMING.resume_ok_repair) · [`SES.C.RESUMING.resume_ok`](#SES.C.RESUMING.resume_ok) |
 | 3 | [`LINK.C.any.repair_ok`](09-link.md#LINK.C.any.repair_ok) · [`PUB.C.any.resume_listed`](07-pub.md#PUB.C.any.resume_listed) · [`SES.C.RESUMING.resume_ok`](#SES.C.RESUMING.resume_ok) · [`TRK.C.any.snapshot`](06-trk.md#TRK.C.any.snapshot) · [`TRK.C.any.snapshot_same`](06-trk.md#TRK.C.any.snapshot_same) |
 | 4 | [`LINK.C.any.repair_rebuild`](09-link.md#LINK.C.any.repair_rebuild) · [`LINK.C.any.repair_restart`](09-link.md#LINK.C.any.repair_restart) · [`LINK.C.any.repair_recheck`](09-link.md#LINK.C.any.repair_recheck) · [`LINK.C.any.epoch_rebuild`](09-link.md#LINK.C.any.epoch_rebuild) · [`LINK.C.any.publost_rebuild`](09-link.md#LINK.C.any.publost_rebuild) · [`PUB.C.any.resume_unlisted`](07-pub.md#PUB.C.any.resume_unlisted) · [`ROOM.C.JOINED.resume_epoch`](04-room.md#ROOM.C.JOINED.resume_epoch) · [`SES.C.RESUMING.resume_ok_repair`](#SES.C.RESUMING.resume_ok_repair) |
 | 5 | [`SES.C.RESUMING.resume_ok_repair`](#SES.C.RESUMING.resume_ok_repair) · [`SES.C.RESUMING.resume_ok`](#SES.C.RESUMING.resume_ok) |
@@ -746,7 +771,7 @@
 |---|---|---|---|
 | <a id="SES.C.any.drop_final"></a>`SES.C.any.drop_final` | c == 1008 \|\| c == 2001 \|\| c == 4006 \|\| c == 4007 \|\| c == 2010 | cs ← 'DISCONNECTED'; sock ← 'CLOSED'; wait ← 'NONE'; hb ← false · 효과 floor.down_all → FLR.C.any.down · 효과 rooms.close_all → ROOM.C.any.close_all · 효과 media.close_all → LINK.C.any.close_all · 효과 app.disconnected | §3-2-4 1 §3-2-4 2 DEV-SES-ROOMS-ON-MEDIA-CLOSE R-SES-ON-DROP-WHY |
 | <a id="SES.C.any.drop_reclaimed"></a>`SES.C.any.drop_reclaimed` | c == 2009 \|\| c == 5004 | cs ← 'CONNECTING'; sock ← 'CLOSED'; wait ← 'NONE'; hb ← false; sid ← 0; late ← false · 효과 floor.down_all → FLR.C.any.down · 효과 rooms.down_all → ROOM.C.LEAVING.down · ROOM.C.JOINING.down_quit · ROOM.C.any.down · 효과 media.close_all → LINK.C.any.close_all | §3-2-4 3 DEV-SES-ROOMS-ON-MEDIA-CLOSE R-SES-ON-DROP-WHY |
-| <a id="SES.C.any.drop_carry"></a>`SES.C.any.drop_carry` | carry | cs ← 'RESUMING'; sock ← 'CLOSED'; wait ← 'NONE'; hb ← false; late ← cs == 'ACTIVE' \|\| wait == 'RESUME' ? false : late | §3-2-4 4 §3-2-4 5 DEV-SES-LATE-CLOCK-LAST-BOUND R-SES-ON-DROP-WHY |
+| <a id="SES.C.any.drop_carry"></a>`SES.C.any.drop_carry` | carry | cs ← 'RESUMING'; sock ← 'CLOSED'; wait ← 'NONE'; hb ← false; late ← cs == 'ACTIVE' \|\| wait == 'RESUME' ? false : late | §3-2-4 4 §3-2-4 5 DEV-SES-LATE-CLOCK-LAST-BOUND R-SES-ON-DROP-WHY — ★대기 요청은 버리지 않는다 — 기한 시계는 끊긴 동안에도 간다(RULE-TRN-REQ-LIFE 2) |
 | <a id="SES.C.any.drop"></a>`SES.C.any.drop` | 나머지 | cs ← 'CONNECTING'; sock ← 'CLOSED'; wait ← 'NONE'; hb ← false | §3-2-4 4 R-SES-ON-DROP-WHY R-SES-SOCKET-CLOSE-NORMAL-WHY |
 | <a id="SES.C.any.disconnect"></a>`SES.C.any.disconnect` | 받는 상태 cs != 'DISCONNECTED' · 나머지 | cs ← 'DISCONNECTED'; sock ← 'CLOSED'; wait ← 'NONE'; hb ← false · 효과 floor.down_all → FLR.C.any.down · 효과 rooms.close_all → ROOM.C.any.close_all · 효과 media.close_all → LINK.C.any.close_all · 효과 app.disconnected | §3-1 R-SES-LEAVE-PROC-WHY |
 | <a id="SES.C.any.token_expired"></a>`SES.C.any.token_expired` | 나머지 | token ← 'EXPIRED' | §3-2-3 1 |
@@ -807,7 +832,7 @@
 <a id="RULE-SES-RES-BACKOFF-END"></a>**RULE-SES-RES-BACKOFF-END** · 규칙 — 백오프 대기가 끝났다
 
 1. 옛 소켓 핸들러를 떼고 새 소켓을 연다.
-2. ★**보내다 만 프레임을 다시 보내지 않는다.** 큐를 비운다.
+2. ★**기한 전 대기 요청은 버리지 않는다** — 같은 세션으로 이어 쓰면 `RESUME` 뒤 원래 `pid` 로 다시 보내고 · 새 세션이면 버린다(§2-3-2).
 
 항목 → 경우(경우가 든 원문 항목 좌표에서 짓는다 · 경우의 메모는 동작 표에)
 
@@ -821,7 +846,7 @@
 
 | 이름 | 값 | 시작 | 정상 정지 | 끝나면 |
 |---|---|---|---|---|
-| `T-req` | **30초** | 요청을 보냈다 | 응답을 받았다 | ★**끊는다.** 재전송하지 않는다 — ★소켓이 살아 있어도다(서버가 그 요청을 처리하지 못했다 — WS 생존 판단과 다른 고장, §9-2-1) |
+| `T-req` | **30초** | 요청을 ★처음 보냈다(다시 보내도 다시 재지 않는다 — 기한이다) | 응답을 받았다 | ★**그 요청을 버리고(§2-3-2) 끊는다.** 소켓이 살아 있는 동안 재전송하지 않는다 — ★소켓이 살아 있어도 끊는다(서버가 그 요청을 처리하지 못했다 — WS 생존 판단과 다른 고장, §9-2-1) |
 | `T-idle`(서버) | **30초** | 클라에서 뭔가 받았다 | 뭔가 더 받았다 | 서버가 끊는다 |
 | ★WS 점검 | 클라 구현 기본값 | ★WS 가 죽었을 수 있다는 증거가 왔다 — 연결 흔들림·망 전환, 또는 요청이 나가 있는데 이 시한 동안 아무것도 안 왔다(§9-2-1 4) — `HEARTBEAT` 를 곧바로 보낸다(윈도우 밖, §2-3-1) | ★**무엇이든** 받았다 | ★소켓을 `LEAVE` 없이 닫고 §3-2-4 4 |
 
@@ -1040,7 +1065,7 @@ SESSION_NOT_FOUND` 로 실패했을 때도 `ACTIVE` 로 간다**(§3-2-3) — �
 
 <a id="R-SES-NO-NEW-SECRET"></a>**R-SES-NO-NEW-SECRET** · 근거
 
-★**왜 창 밖 자격을 새로 만들지 않았나** — 장수명 재접속 토큰 같은 것을 두면 ★**새 비밀이 하나 더 생긴다**(§2-3-3
+★**왜 창 밖 자격을 새로 만들지 않았나** — 장수명 재접속 토큰 같은 것을 두면 ★**새 비밀이 하나 더 생긴다**(§2-3-4
 *"새 비밀을 만들지 않는다"*). 창 안 복구는 `session_id` 가 이미 덮고 있고, 창 밖은 ★**정상 인증으로 돌아가는 것이 맞다** —
 그 사이 사람의 자격이 바뀌었을 수 있고, 그것을 다시 보는 자리가 토큰이다.
 
@@ -1089,8 +1114,9 @@ state does not cause DTLS transports, SCTP associations or the data channels tha
   못 받는다** — 양쪽 계수기가 다 정상으로 보인다.
 - ★`snapshot` 을 안 쓰면 → 끊겨 있는 동안 들어온 사람이 **명단에 없고**, 그 사이 올라온 트랙이
   **영영 안 붙는다.** 통지는 이미 사라졌으므로 다시 오지 않는다.
-- 큐를 재전송하면 → 서버는 그것을 **새 요청**으로 본다. `PUBLISH_TRACKS` 가 중복 발행돼
-  상한을 소진해 `4002 TRACK_LIMIT` 이 난다.
+- 서버가 멱등이 아닌데 대기 요청을 다시 보내면 → 서버는 그것을 **새 요청**으로 본다. `PUBLISH_TRACKS` 가 중복 발행돼
+  상한을 소진해 `4002 TRACK_LIMIT` 이 난다 — 그래서 다시 보냄은 서버 멱등(§2-3-2)과 짝이다.
+- 대기 요청을 버리면(옛 규칙 — 큐를 비운다) → 응답 없이 사라진 요청을 낸 쪽이 그 상태에 머문다 — 입장 요청이면 그 방이 입장 중에 남아 다시 눌러도 새 입장이 안 나간다.
 
 #### 3-5-3. §3-1-3 `0x0103 HEARTBEAT` — 하트비트   **양방향** · 응답 있음
 
@@ -1118,7 +1144,7 @@ state does not cause DTLS transports, SCTP associations or the data channels tha
 <a id="REJ-SES-NO-WHERE-AXIS"></a>**REJ-SES-NO-WHERE-AXIS** · 기각
 
 ★**"어디에 붙나" 축은 두지 않는다** — 재접속 시각(`reconnect_after_ms`)은 §11-2-2 이 이미 기각한 형태이고(서버가 그 시각을 아는
-경우가 없다), 다른 접속점(`endpoint`)은 §2-3-2 을 깬다(앱이 `{base}` 를 준다). 사유 코드만이다.
+경우가 없다), 다른 접속점(`endpoint`)은 §2-3-3 을 깬다(앱이 `{base}` 를 준다). 사유 코드만이다.
 
 <a id="R-SES-LEAVE-IMMEDIATE-RECLAIM"></a>**R-SES-LEAVE-IMMEDIATE-RECLAIM** · 근거
 

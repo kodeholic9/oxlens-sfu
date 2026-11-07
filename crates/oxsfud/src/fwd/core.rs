@@ -6,6 +6,12 @@ pub fn serial_after(a: u16, b: u16) -> bool {
     (a.wrapping_sub(b) as i16) > 0
 }
 
+pub fn serial_before(a: u16, b: u16) -> bool {
+    a != b && !serial_after(a, b)
+}
+
+pub const BOUNDARY_WINDOW: u16 = 16384;
+
 pub fn opus_toc_samples(payload: &[u8]) -> u32 {
     let Some(&toc) = payload.first() else { return 1 };
     let config = toc >> 3;
@@ -62,7 +68,7 @@ impl Rewriter {
         Rewriter { clock, ..Default::default() }
     }
 
-    pub fn map(&mut self, src: u64, seq: u16, ts: u32, at_ms: u64, covers: u32) -> Mapped {
+    pub fn map(&mut self, src: u64, seq: u16, ts: u32, at_ms: u64, covers: u32) -> Option<Mapped> {
         let mut switched = false;
         if self.src != Some(src) {
             switched = self.src.is_some() || self.last.is_some();
@@ -87,6 +93,11 @@ impl Rewriter {
         }
         let out_seq = seq.wrapping_add(self.seq_off);
         let out_ts = ts.wrapping_add(self.ts_off);
+        if let Some(b) = self.boundary
+            && serial_before(out_seq, b)
+        {
+            return None;
+        }
         let advance = match self.last {
             None => true,
             Some(l) => switched || serial_after(out_seq, l.seq),
@@ -94,13 +105,19 @@ impl Rewriter {
         if advance {
             self.last = Some(Last { seq: out_seq, ts: out_ts, at_ms, covers });
         }
+        if let (Some(b), Some(l)) = (self.boundary, self.last)
+            && l.seq.wrapping_sub(b) >= BOUNDARY_WINDOW
+        {
+            self.boundary = None;
+        }
         self.last_out_at = at_ms;
-        Mapped { seq: out_seq, ts: out_ts, switched }
+        Some(Mapped { seq: out_seq, ts: out_ts, switched })
     }
 
     pub fn unmap_nack(&self, out_seq: u16) -> Option<u16> {
+        self.src?;
         if let Some(b) = self.boundary
-            && serial_after(b, out_seq)
+            && serial_before(out_seq, b)
         {
             return None;
         }

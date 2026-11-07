@@ -185,7 +185,8 @@ fn rearm(fl: &Floor, ck: &mut Clock, now: u64) {
 fn execute(room: &Arc<Room>, p: &Plan) {
     let reason = if p.step.labels.contains(&"FLR.S.gate.not_in_room") { Some("not_in_room") } else { None };
     for o in &p.step.out {
-        if let Some(m) = to_mbcp(&o.m, &room.id, reason) {
+        let sources = if o.m.t == Mt::Taken { o.m.a.as_deref().map(|u| slot_sources(room, u)).unwrap_or_default() } else { Vec::new() };
+        if let Some(m) = to_mbcp(&o.m, &room.id, reason, &sources) {
             send(&o.to, &m);
         }
     }
@@ -203,10 +204,10 @@ fn execute(room: &Arc<Room>, p: &Plan) {
     }
 }
 
-pub fn to_mbcp(m: &Msg, room: &str, reason: Option<&str>) -> Option<mbcp::Msg> {
+pub fn to_mbcp(m: &Msg, room: &str, reason: Option<&str>, sources: &[u32]) -> Option<mbcp::Msg> {
     Some(match m.t {
         Mt::Granted => mbcp::granted(m.n as u8, m.d as u16, room),
-        Mt::Taken => mbcp::taken(m.a.as_deref().unwrap_or(""), m.q as u16, room),
+        Mt::Taken => mbcp::taken(m.a.as_deref().unwrap_or(""), m.q as u16, room, sources),
         Mt::Idle => mbcp::idle(m.q as u16, room, m.a.as_deref()),
         Mt::Deny => mbcp::deny_msg(m.n as u8, room, reason),
         Mt::Revoke => mbcp::revoke_msg(m.n as u8, room, None),
@@ -403,6 +404,11 @@ fn push_frames(fan: &SlotFan, skip: Option<&str>, key: u64) {
 
 fn room_audio_opus(room: &Room) -> bool {
     room.media_codecs.audio.as_deref().map(|a| a.eq_ignore_ascii_case("opus")).unwrap_or(true)
+}
+
+fn slot_sources(room: &Room, user: &str) -> Vec<u32> {
+    let Some(ctx) = super::sfu().and_then(|s| s.pubs.get(user)) else { return Vec::new() };
+    ctx.streams().into_iter().filter(|st| st.is_half() && st.room.load().as_str() == room.id).map(|st| st.csrc).collect()
 }
 
 fn slot_video(room: &Room, user: &str) -> (Vec<Arc<crate::r#pub::PubStream>>, bool) {

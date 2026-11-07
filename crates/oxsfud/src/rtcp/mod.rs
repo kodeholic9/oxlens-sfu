@@ -640,7 +640,8 @@ pub fn send_rtx(w: &Worker, row: &DownRow, seqs: &[u16]) {
         let mut payload = Vec::with_capacity(orig.len() - rtp.hlen + 2);
         payload.extend_from_slice(&out_seq.to_be_bytes());
         payload.extend_from_slice(&orig[rtp.hlen..]);
-        let b = Built { pt: rtx_pt, seq: rseq, ts: rtp.ts.wrapping_add(ts_off), ssrc: rtx_ssrc, marker: rtp.marker, payload: &payload, probe: false, padding: false };
+        let csrc = row.conn.source_tag.then_some(track.stream.csrc);
+        let b = Built { pt: rtx_pt, seq: rseq, ts: rtp.ts.wrapping_add(ts_off), ssrc: rtx_ssrc, csrc, marker: rtp.marker, payload: &payload, probe: false, padding: false };
         if send_built(w, m, row, b) {
             row.conn.tx.retransmitted.fetch_add(1, Ordering::Relaxed);
         }
@@ -652,6 +653,7 @@ pub struct Built<'a> {
     pub seq: u16,
     pub ts: u32,
     pub ssrc: u32,
+    pub csrc: Option<u32>,
     pub marker: bool,
     pub payload: &'a [u8],
     pub probe: bool,
@@ -659,7 +661,7 @@ pub struct Built<'a> {
 }
 
 pub fn send_built(w: &Worker, m: &crate::fwd::rt::Media, row: &DownRow, b: Built<'_>) -> bool {
-    let Built { pt, seq, ts, ssrc, marker, payload, probe, padding } = b;
+    let Built { pt, seq, ts, ssrc, csrc, marker, payload, probe, padding } = b;
     let conn = &row.conn;
     if conn.closed.load(Ordering::Acquire) || !conn.ready.load(Ordering::Acquire) {
         return false;
@@ -667,11 +669,14 @@ pub fn send_built(w: &Worker, m: &crate::fwd::rt::Media, row: &DownRow, b: Built
     let Some(path) = conn.send_ok(common::now_ms(), |id| m.tcp_open(id)) else { return false };
     let twcc = conn.twcc_seq.fetch_add(1, Ordering::AcqRel);
     let mut out = Vec::with_capacity(payload.len() + 40);
-    out.push(if padding { 0xa0 } else { 0x80 });
+    out.push((if padding { 0xa0 } else { 0x80 }) | u8::from(csrc.is_some()));
     out.push(if marker { 0x80 | (pt & 0x7f) } else { pt & 0x7f });
     out.extend_from_slice(&seq.to_be_bytes());
     out.extend_from_slice(&ts.to_be_bytes());
     out.extend_from_slice(&ssrc.to_be_bytes());
+    if let Some(c) = csrc {
+        out.extend_from_slice(&c.to_be_bytes());
+    }
     let table = row.ext.load();
     let inp = ExtInput { mid: row.mid.as_bytes(), audio_level: None, t_us: mono_us(), twcc_seq: Some(twcc) };
     if ext_build(&table, &inp, &mut out) > 0 {

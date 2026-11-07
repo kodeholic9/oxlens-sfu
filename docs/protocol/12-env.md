@@ -168,7 +168,7 @@
 | 미디어 서버 | FLR | 무관 | ROOM 이 floor.leave 로 알린다(① · CAND-FLR-ROOM-GONE) |  |
 | 클라 | SES | 무관 | 세션은 그대로다 |  |
 | 클라 | LINK | 무관 | 방이 link.room_left 로 알린다 — 그 서버의 마지막 방이면 연결을 닫는다(RULE-ROOM-LEAVE-RES 2 · RULE-SES-RES-RESUME-OK 4) |  |
-| 클라 | ROOM | 입구 | `CRoomEvent` — ROOM_EVENT{affiliation, kick} — ROOM.C.JOINED.kicked | ROOM: `ROOM.C.any.room_event_not_joined` · `ROOM.C.JOINED.kicked` · `ROOM.C.JOINED.sync_required_inflight` · `ROOM.C.JOINED.sync_required` / LINK: `LINK.C.NONE.renego_closed` · `LINK.C.any.renego_queued` · `LINK.C.any.renego` · `LINK.C.any.last_room_left` · `LINK.C.any.room_left` / TRK: `TRK.C.any.store_drop` / FLR: `FLR.C.any.leave` / AFF: `AFF.C.any.left` · `AFF.C.any.left_back` · `AFF.C.any.left_from` · `AFF.C.any.left_join` · `AFF.C.any.left_want` · `AFF.C.any.left_other` / SUB: `SUB.C.any.drop` / PUB: `PUB.C.any.room_gone_pending` · `PUB.C.any.room_gone` · `PUB.C.STAGED.room_gone` · `PUB.C.any.room_gone_other` · `PUB.C.SENDING.floor_close` · `PUB.C.any.floor_close_other` · `PUB.C.STAGED.drop_server` · `PUB.C.any.drop_server` |
+| 클라 | ROOM | 입구 | `CRoomEvent` — ROOM_EVENT{affiliation, kick} — ROOM.C.JOINED.kicked | ROOM: `ROOM.C.any.room_event_not_joined` · `ROOM.C.JOINED.kicked` · `ROOM.C.JOINED.sync_required_inflight` · `ROOM.C.JOINED.sync_required` / LINK: `LINK.C.NONE.renego_closed` · `LINK.C.any.renego_queued` · `LINK.C.any.renego` · `LINK.C.any.last_room_left` · `LINK.C.any.room_left` / TRK: `TRK.C.any.store_drop` / FLR: `FLR.C.any.leave` / AFF: `AFF.C.any.left` · `AFF.C.any.left_back` · `AFF.C.any.left_from` · `AFF.C.any.left_join` · `AFF.C.any.left_want` · `AFF.C.any.left_other` / SUB: `SUB.C.any.drop` / PUB: `PUB.C.any.room_gone_pending` · `PUB.C.any.room_gone_kicked_pending` · `PUB.C.any.room_gone` · `PUB.C.STAGED.room_gone` · `PUB.C.any.room_gone_other` · `PUB.C.SENDING.floor_close` · `PUB.C.any.floor_close_other` · `PUB.C.STAGED.drop_server` · `PUB.C.any.drop_server` |
 | 클라 | AFF | 무관 | 방을 내릴 때 ROOM 이 aff.leave 로 알린다(①) |  |
 | 클라 | PUB | 무관 | ROOM 이 pub.room_gone 으로 — 그 방의 전이중 발행을 IDLE 로(서버가 정리했다 · 원칙 ③) · 마지막 방이면 LINK 가 pub.drop_server 로 |  |
 | 클라 | SUB | 무관 | 방을 내릴 때 ROOM 이 str.drop 으로 · 다시 입장 응답이 ready.tracks 로 알린다(①) |  |
@@ -191,7 +191,7 @@
 | 미디어 서버 | FLR | 무관 | ROOM 이 floor.leave 로 알린다(① · CAND-FLR-ROOM-GONE) |  |
 | 클라 | SES | 무관 | 세션은 그대로다 |  |
 | 클라 | LINK | 무관 | 방이 link.room_left 로 알린다 — 그 서버의 마지막 방이면 연결을 닫는다(RULE-ROOM-LEAVE-RES 2 · RULE-SES-RES-RESUME-OK 4) |  |
-| 클라 | ROOM | 입구 | `CRoomEvent` — ROOM_EVENT{affiliation, room_closed} — ROOM.C.JOINED.kicked | ROOM: `ROOM.C.any.room_event_not_joined` · `ROOM.C.JOINED.kicked` · `ROOM.C.JOINED.sync_required_inflight` · `ROOM.C.JOINED.sync_required` / LINK: `LINK.C.NONE.renego_closed` · `LINK.C.any.renego_queued` · `LINK.C.any.renego` · `LINK.C.any.last_room_left` · `LINK.C.any.room_left` / TRK: `TRK.C.any.store_drop` / FLR: `FLR.C.any.leave` / AFF: `AFF.C.any.left` · `AFF.C.any.left_back` · `AFF.C.any.left_from` · `AFF.C.any.left_join` · `AFF.C.any.left_want` · `AFF.C.any.left_other` / SUB: `SUB.C.any.drop` / PUB: `PUB.C.any.room_gone_pending` · `PUB.C.any.room_gone` · `PUB.C.STAGED.room_gone` · `PUB.C.any.room_gone_other` · `PUB.C.SENDING.floor_close` · `PUB.C.any.floor_close_other` · `PUB.C.STAGED.drop_server` · `PUB.C.any.drop_server` |
+| 클라 | ROOM | 입구 | `CRoomEvent` — ROOM_EVENT{affiliation, room_closed} — ROOM.C.JOINED.kicked | ROOM: `ROOM.C.any.room_event_not_joined` · `ROOM.C.JOINED.kicked` · `ROOM.C.JOINED.sync_required_inflight` · `ROOM.C.JOINED.sync_required` / LINK: `LINK.C.NONE.renego_closed` · `LINK.C.any.renego_queued` · `LINK.C.any.renego` · `LINK.C.any.last_room_left` · `LINK.C.any.room_left` / TRK: `TRK.C.any.store_drop` / FLR: `FLR.C.any.leave` / AFF: `AFF.C.any.left` · `AFF.C.any.left_back` · `AFF.C.any.left_from` · `AFF.C.any.left_join` · `AFF.C.any.left_want` · `AFF.C.any.left_other` / SUB: `SUB.C.any.drop` / PUB: `PUB.C.any.room_gone_pending` · `PUB.C.any.room_gone_kicked_pending` · `PUB.C.any.room_gone` · `PUB.C.STAGED.room_gone` · `PUB.C.any.room_gone_other` · `PUB.C.SENDING.floor_close` · `PUB.C.any.floor_close_other` · `PUB.C.STAGED.drop_server` · `PUB.C.any.drop_server` |
 | 클라 | AFF | 무관 | 방을 내릴 때 ROOM 이 aff.leave 로 알린다(①) |  |
 | 클라 | PUB | 무관 | ROOM 이 pub.room_gone 으로 — 그 방의 전이중 발행을 IDLE 로(서버가 정리했다 · 원칙 ③) · 마지막 방이면 LINK 가 pub.drop_server 로 |  |
 | 클라 | SUB | 무관 | 방을 내릴 때 ROOM 이 str.drop 으로 · 다시 입장 응답이 ready.tracks 로 알린다(①) |  |
@@ -218,53 +218,58 @@
 
 종류 — 환경
 
+<a id="ENV.event.EV-REQ-EXPIRED"></a>
+#### 12-1-14. `EV-REQ-EXPIRED` — 보낸 요청이 기한(T-req)을 넘겼다 — 응답 없이 버린다(RULE-TRN-REQ-LIFE 5 · RULE-TRN-REQ-ABANDON)
+
+종류 — 환경
+
 <a id="ENV.event.EV-LOAD"></a>
-#### 12-1-14. `EV-LOAD` — 정원 · 과부하 · 상한 · 서버 사정이 바뀌었다
+#### 12-1-15. `EV-LOAD` — 정원 · 과부하 · 상한 · 서버 사정이 바뀌었다
 
 종류 — 환경
 
 <a id="ENV.event.EV-FILL-RANK"></a>
-#### 12-1-15. `EV-FILL-RANK` — 받을 트랙의 순위가 바뀌었다(video = 클라 우선순위 · paused · audio = 음량)
+#### 12-1-16. `EV-FILL-RANK` — 받을 트랙의 순위가 바뀌었다(video = 클라 우선순위 · paused · audio = 음량)
 
 종류 — 환경
 
 <a id="ENV.event.EV-OTHERS"></a>
-#### 12-1-16. `EV-OTHERS` — 다른 사람이 그 방 공통 스냅샷을 바꿨다
+#### 12-1-17. `EV-OTHERS` — 다른 사람이 그 방 공통 스냅샷을 바꿨다
 
 종류 — 환경
 
 <a id="ENV.event.EV-PERM"></a>
-#### 12-1-17. `EV-PERM` — 결정자가 그 방에서 그 사람의 권한 비트를 바꿨다(서버 밖의 결정자 — RULE-ROOM-PERMISSION-AXIS)
+#### 12-1-18. `EV-PERM` — 결정자가 그 방에서 그 사람의 권한 비트를 바꿨다(서버 밖의 결정자 — RULE-ROOM-PERMISSION-AXIS)
 
 종류 — 환경
 
 <a id="ENV.event.EV-R-SOCK"></a>
-#### 12-1-18. `EV-R-SOCK` — 소켓 열기의 결과
+#### 12-1-19. `EV-R-SOCK` — 소켓 열기의 결과
 
 종류 — 우리 동작의 결과
 
 <a id="ENV.event.EV-R-NEGO"></a>
-#### 12-1-19. `EV-R-NEGO` — 협상(offer/answer)의 결과
+#### 12-1-20. `EV-R-NEGO` — 협상(offer/answer)의 결과
 
 종류 — 우리 동작의 결과
 
 <a id="ENV.event.EV-R-ATTACH"></a>
-#### 12-1-20. `EV-R-ATTACH` — 트랙 붙이기의 결과
+#### 12-1-21. `EV-R-ATTACH` — 트랙 붙이기의 결과
 
 종류 — 우리 동작의 결과
 
 <a id="ENV.event.EV-R-APPLY"></a>
-#### 12-1-21. `EV-R-APPLY` — 새 자격 적용(재협상)의 결과
+#### 12-1-22. `EV-R-APPLY` — 새 자격 적용(재협상)의 결과
 
 종류 — 우리 동작의 결과
 
 <a id="ENV.event.EV-R-REOPEN"></a>
-#### 12-1-22. `EV-R-REOPEN` — DC 다시 열기의 결과
+#### 12-1-23. `EV-R-REOPEN` — DC 다시 열기의 결과
 
 종류 — 우리 동작의 결과
 
 <a id="ENV.event.EV-R-CHECK"></a>
-#### 12-1-23. `EV-R-CHECK` — 새 자격의 첫 검증된 검사
+#### 12-1-24. `EV-R-CHECK` — 새 자격의 첫 검증된 검사
 
 종류 — 우리 동작의 결과
 

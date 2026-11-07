@@ -575,6 +575,10 @@ pub fn send_down(w: &Worker, row: &DownRow, pkt: &Pkt) {
         }
         Err(_) => return,
     };
+    let Some(mapped) = mapped else {
+        crate::ops::drop_count("pre_boundary");
+        return;
+    };
     if mapped.switched || row.src_track.load().is_none() {
         if row.kind == Kind::Video {
             row.rtx_gate_until_new.store(false, Ordering::Release);
@@ -587,11 +591,15 @@ pub fn send_down(w: &Worker, row: &DownRow, pkt: &Pkt) {
     let table = row.ext.load();
     let mut out = Vec::with_capacity(pkt.data.len() + 32);
     let b0 = pkt.data[0] & 0x20;
-    out.push(0x80 | b0);
+    let csrc = if conn.source_tag { pkt.track.as_ref().map(|t| t.stream.csrc) } else { None };
+    out.push(0x80 | b0 | u8::from(csrc.is_some()));
     out.push(core::pt_byte1(pkt.data[1], row.pt.load(Ordering::Relaxed)));
     out.extend_from_slice(&mapped.seq.to_be_bytes());
     out.extend_from_slice(&mapped.ts.to_be_bytes());
     out.extend_from_slice(&row.ssrc.to_be_bytes());
+    if let Some(c) = csrc {
+        out.extend_from_slice(&c.to_be_bytes());
+    }
     let inp = ExtInput { mid: row.mid.as_bytes(), audio_level: pkt.audio_level, t_us: mono_us(), twcc_seq: Some(twcc) };
     let n = crate::sub::ext::build(&table, &inp, &mut out);
     if n > 0 {

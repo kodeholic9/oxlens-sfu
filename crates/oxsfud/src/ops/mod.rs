@@ -47,6 +47,7 @@ pub const DROP_NAMES: &[&str] = &[
     "ready_gate",
     "row_gate",
     "await_keyframe",
+    "pre_boundary",
     "rtcp_unresolved",
     "pli_throttled",
     "nack_audio",

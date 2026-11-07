@@ -75,7 +75,7 @@ impl ORw {
     fn new(clock: u32) -> ORw {
         ORw { clock, ..ORw::default() }
     }
-    fn map(&mut self, src: u64, seq: u16, ts: u32, at: u64, cov: u32) -> (u16, u32, bool) {
+    fn map(&mut self, src: u64, seq: u16, ts: u32, at: u64, cov: u32) -> Option<(u16, u32, bool)> {
         let mut sw = false;
         match self.src {
             None => {
@@ -96,12 +96,23 @@ impl ORw {
         }
         let os = seq.wrapping_add(self.so);
         let ot = ts.wrapping_add(self.to);
+        if let Some(b) = self.boundary
+            && o_after(b, os)
+        {
+            return None;
+        }
         if sw || self.last.is_none_or(|l| o_after(os, l.seq)) {
             self.last = Some(OLast { seq: os, ts: ot, at, cov });
         }
-        (os, ot, sw)
+        if let (Some(b), Some(l)) = (self.boundary, self.last)
+            && l.seq.wrapping_sub(b) >= 1 << 14
+        {
+            self.boundary = None;
+        }
+        Some((os, ot, sw))
     }
     fn nack(&self, out: u16) -> Option<u16> {
+        self.src?;
         if let Some(b) = self.boundary
             && o_after(b, out)
         {
@@ -156,15 +167,25 @@ fn oracle_matches_vectors() {
             let p = hex(st["payload"].as_str().expect("payload"));
             let cov = if clock == 48_000 { o_toc(&p) } else { 1 };
             assert_eq!(cov as u64, st["covers"].as_u64().expect("covers"), "S-sym-IMPL-FWD-SOURCE-SWITCH-3 oracle covers · {name}");
-            let (os, ot, _) = o.map(
+            let got = o.map(
                 st["src"].as_u64().expect("src"),
                 st["seq"].as_u64().expect("seq") as u16,
                 st["ts"].as_u64().expect("ts") as u32,
                 st["at_ms"].as_u64().expect("at"),
                 cov,
             );
-            assert_eq!(os as u64, st["out_seq"].as_u64().expect("out_seq"), "S-sym-IMPL-FWD-SOURCE-SWITCH-1 oracle out_seq · {name}");
-            assert_eq!(ot as u64, st["out_ts"].as_u64().expect("out_ts"), "S-sym-IMPL-FWD-SOURCE-SWITCH-3 oracle out_ts · {name}");
+            assert_eq!(got.map(|x| x.0 as u64), st["out_seq"].as_u64(), "S-sym-IMPL-FWD-SOURCE-SWITCH-1 · S-sym-IMPL-FWD-SOURCE-SWITCH-4①② oracle out_seq · {name}");
+            assert_eq!(got.map(|x| x.1 as u64), st["out_ts"].as_u64(), "S-sym-IMPL-FWD-SOURCE-SWITCH-3 oracle out_ts · {name}");
+        }
+        if let Some(n) = case.get("early_nack") {
+            let out = n["out_seq"].as_u64().expect("out") as u16;
+            assert_eq!(o.nack(out), n["in_seq"].as_u64().map(|x| x as u16), "S-sym-IMPL-FWD-SOURCE-SWITCH-5② oracle NACK before boundary inside window · {name}");
+        }
+        if let Some(f) = case.get("flow") {
+            let g = |k: &str| f[k].as_u64().expect("flow");
+            for i in 0..g("n") {
+                assert!(o.map(g("src"), (g("seq0") + i) as u16, (g("ts0") + g("ts_step") * i) as u32, g("at0") + g("at_step") * i, 1).is_some(), "S-sym-IMPL-FWD-SOURCE-SWITCH-5① oracle flow never dropped · {name}");
+            }
         }
         for n in case["nack"].as_array().expect("nack") {
             let out = n["out_seq"].as_u64().expect("out") as u16;
@@ -207,8 +228,18 @@ fn product_matches_vectors() {
                 st["at_ms"].as_u64().expect("at"),
                 cov,
             );
-            assert_eq!(m.seq as u64, st["out_seq"].as_u64().expect("out_seq"), "S-sym-IMPL-FWD-SOURCE-SWITCH-1 out_seq · {name}");
-            assert_eq!(m.ts as u64, st["out_ts"].as_u64().expect("out_ts"), "S-sym-IMPL-FWD-SOURCE-SWITCH-3 out_ts · {name}");
+            assert_eq!(m.map(|x| x.seq as u64), st["out_seq"].as_u64(), "S-sym-IMPL-FWD-SOURCE-SWITCH-1 · S-sym-IMPL-FWD-SOURCE-SWITCH-4①② out_seq · {name}");
+            assert_eq!(m.map(|x| x.ts as u64), st["out_ts"].as_u64(), "S-sym-IMPL-FWD-SOURCE-SWITCH-3 out_ts · {name}");
+        }
+        if let Some(n) = case.get("early_nack") {
+            let out = n["out_seq"].as_u64().expect("out") as u16;
+            assert_eq!(rw.unmap_nack(out), n["in_seq"].as_u64().map(|x| x as u16), "S-sym-IMPL-FWD-SOURCE-SWITCH-5② NACK before boundary inside window · {name}");
+        }
+        if let Some(f) = case.get("flow") {
+            let g = |k: &str| f[k].as_u64().expect("flow");
+            for i in 0..g("n") {
+                assert!(rw.map(g("src"), (g("seq0") + i) as u16, (g("ts0") + g("ts_step") * i) as u32, g("at0") + g("at_step") * i, 1).is_some(), "S-sym-IMPL-FWD-SOURCE-SWITCH-5① flow is never dropped · {name}");
+            }
         }
         for n in case["nack"].as_array().expect("nack") {
             let out = n["out_seq"].as_u64().expect("out") as u16;
@@ -251,8 +282,8 @@ fn toc_samples_match_rfc6716_table() {
 fn switch_after_prime_frame_does_not_overlap() {
     for gap_ms in 0u64..20 {
         let mut rw = Rewriter::new(48_000);
-        let prime = rw.map(1, 500, 10_000, 1_000, covers(true, &[0xf8, 0xff, 0xfe]));
-        let voice = rw.map(2, 7_000, 3_000_000, 1_000 + gap_ms, covers(true, &[0x78, 0x01]));
+        let prime = rw.map(1, 500, 10_000, 1_000, covers(true, &[0xf8, 0xff, 0xfe])).expect("first");
+        let voice = rw.map(2, 7_000, 3_000_000, 1_000 + gap_ms, covers(true, &[0x78, 0x01])).expect("switch");
         let d = voice.ts.wrapping_sub(prime.ts);
         assert!(voice.switched, "S-sym-IMPL-FWD-SOURCE-SWITCH-3 second source is a switch");
         assert!(d >= 960, "S-sym-IMPL-FWD-SOURCE-SWITCH-3 first voice ts must start after the 20ms CN frame ends · gap {gap_ms}ms · diff {d}");
@@ -261,8 +292,8 @@ fn switch_after_prime_frame_does_not_overlap() {
         assert_eq!(voice.seq, prime.seq.wrapping_add(1), "S-sym-IMPL-FWD-SOURCE-SWITCH-2 seq contiguous at switch");
     }
     let mut rw = Rewriter::new(48_000);
-    let a = rw.map(1, 1, 0, 0, covers(true, &[(2 << 3), 0]));
-    let b = rw.map(9, 1, 0, 10, covers(true, &[0xf8]));
+    let a = rw.map(1, 1, 0, 0, covers(true, &[(2 << 3), 0])).expect("a");
+    let b = rw.map(9, 1, 0, 10, covers(true, &[0xf8])).expect("b");
     assert_eq!(b.ts.wrapping_sub(a.ts), 1920, "S-sym-IMPL-FWD-SOURCE-SWITCH-3 SILK 40ms frame then switch 10ms later: tick 1920");
 }
 
@@ -275,7 +306,7 @@ fn many_switches_keep_egress_contiguous_and_forward() {
     for i in 0..3_000u64 {
         let src = ((i / 3) % 3) as usize;
         let (s, t) = bases[src];
-        let m = rw.map(src as u64 + 1, s, t, at, 960);
+        let m = rw.map(src as u64 + 1, s, t, at, 960).expect("in order");
         bases[src] = (s.wrapping_add(1), t.wrapping_add(960));
         if let Some(p) = prev {
             assert_eq!(m.seq, p.seq.wrapping_add(1), "S-sym-IMPL-FWD-SOURCE-SWITCH-1 egress seq never regresses across switches · i {i}");
@@ -306,8 +337,8 @@ fn random_streams_match_oracle() {
             if rng.below(8) == 0 {
                 if let Some((s, t, p)) = held.take() {
                     let cov = covers(opus, &p);
-                    let m = rw.map(cur as u64 + 100, s, t, at, cov);
-                    let (os, ot, _) = o.map(cur as u64 + 100, s, t, at, cov);
+                    let m = rw.map(cur as u64 + 100, s, t, at, cov).expect("late after boundary");
+                    let (os, ot, _) = o.map(cur as u64 + 100, s, t, at, cov).expect("oracle late after boundary");
                     assert_eq!((m.seq, m.ts), (os, ot), "S-sym-IMPL-FWD-SOURCE-SWITCH-1 late packet vs oracle · round {round} step {step}");
                     run_emitted.push((m.seq, s));
                 }
@@ -329,8 +360,8 @@ fn random_streams_match_oracle() {
             }
             assert_eq!(covers(opus, &p), if opus { o_toc(&p) } else { 1 }, "S-sym-IMPL-FWD-SOURCE-SWITCH-3 covers vs oracle · {p:?}");
             let cov = covers(opus, &p);
-            let m = rw.map(cur as u64 + 100, s, t, at, cov);
-            let (os, ot, sw) = o.map(cur as u64 + 100, s, t, at, cov);
+            let m = rw.map(cur as u64 + 100, s, t, at, cov).expect("in order");
+            let (os, ot, sw) = o.map(cur as u64 + 100, s, t, at, cov).expect("oracle in order");
             assert_eq!(m.seq, os, "S-sym-IMPL-FWD-SOURCE-SWITCH-1 out seq vs oracle · round {round} step {step}");
             assert_eq!(m.ts, ot, "S-sym-IMPL-FWD-SOURCE-SWITCH-3 out ts vs oracle · round {round} step {step} · switched {sw}");
             assert_eq!(m.switched, sw, "S-sym-IMPL-FWD-SOURCE-SWITCH-2 switched flag vs oracle · round {round} step {step}");
@@ -340,8 +371,8 @@ fn random_streams_match_oracle() {
             run_emitted.push((m.seq, s));
             if let Some((s2, t2, p2)) = held.take() {
                 let cov2 = covers(opus, &p2);
-                let m2 = rw.map(cur as u64 + 100, s2, t2, at, cov2);
-                let (os2, ot2, _) = o.map(cur as u64 + 100, s2, t2, at, cov2);
+                let m2 = rw.map(cur as u64 + 100, s2, t2, at, cov2).expect("reordered after boundary");
+                let (os2, ot2, _) = o.map(cur as u64 + 100, s2, t2, at, cov2).expect("oracle reordered after boundary");
                 assert_eq!((m2.seq, m2.ts), (os2, ot2), "S-sym-IMPL-FWD-SOURCE-SWITCH-2 reordered packet vs oracle · round {round} step {step}");
                 run_emitted.push((m2.seq, s2));
             }
@@ -367,8 +398,8 @@ fn random_streams_match_oracle() {
 fn rewriter_reads_time_only_from_argument() {
     let run = |shift: u64| {
         let mut rw = Rewriter::new(48_000);
-        let a = rw.map(1, 10, 1_000, 5_000, 960);
-        let b = rw.map(2, 70, 99_000, 5_100 + shift, 960);
+        let a = rw.map(1, 10, 1_000, 5_000, 960).expect("a");
+        let b = rw.map(2, 70, 99_000, 5_100 + shift, 960).expect("b");
         (a, b)
     };
     let first = run(0);
