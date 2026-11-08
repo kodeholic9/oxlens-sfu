@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::line::{Head, Kind, Line};
 use crate::policy::LoggingLevel;
@@ -43,6 +43,8 @@ pub struct Sender {
     level_until_ms: AtomicU64,
     inproc: Arc<Mutex<Option<SyncSender<String>>>>,
     inproc_running: Arc<AtomicBool>,
+    queued: AtomicU64,
+    done: Arc<AtomicU64>,
 }
 
 pub struct SenderConfig {
@@ -63,6 +65,7 @@ impl Sender {
         let counters = Arc::new(Counters::default());
         let inproc: Arc<Mutex<Option<SyncSender<String>>>> = Arc::new(Mutex::new(None));
         let inproc_running = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicU64::new(0));
         let s = Arc::new(Sender {
             tx,
             head: Head { node: cfg.node.clone(), proc_name: cfg.proc_name },
@@ -75,6 +78,8 @@ impl Sender {
             level_until_ms: AtomicU64::new(0),
             inproc: inproc.clone(),
             inproc_running: inproc_running.clone(),
+            queued: AtomicU64::new(0),
+            done: done.clone(),
         });
         let spool_path = cfg
             .log_dir
@@ -99,6 +104,7 @@ impl Sender {
             started: s.started,
             line_max: cfg.line_max,
             sock: None,
+            done,
         };
         let _ = std::thread::Builder::new().name("log-sender".into()).spawn(move || worker.run());
         s
@@ -118,11 +124,25 @@ impl Sender {
 
     pub fn push(&self, s: String) {
         match self.tx.try_send(s) {
-            Ok(()) => {}
+            Ok(()) => {
+                self.queued.fetch_add(1, Ordering::AcqRel);
+            }
             Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
                 self.counters.queue_full.fetch_add(1, Ordering::Relaxed);
             }
         }
+    }
+
+    pub fn drain(&self, within: Duration) -> bool {
+        let want = self.queued.load(Ordering::Acquire);
+        let until = Instant::now() + within;
+        while self.done.load(Ordering::Acquire) < want {
+            if Instant::now() >= until {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        true
     }
 
     pub fn attach_inproc(&self, tx: SyncSender<String>) {
@@ -197,12 +217,14 @@ struct Worker {
     started: Instant,
     line_max: usize,
     sock: Option<UnixDatagram>,
+    done: Arc<AtomicU64>,
 }
 
 impl Worker {
     fn run(mut self) {
         while let Ok(line) = self.rx.recv() {
             self.deliver(line);
+            self.done.fetch_add(1, Ordering::AcqRel);
         }
     }
 
@@ -324,5 +346,35 @@ impl Worker {
             self.counters.spool_full.fetch_add(1, Ordering::Relaxed);
             self.outage_dropped += 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drain_waits_until_queued_lines_reach_the_spool() {
+        let dir = std::env::temp_dir().join(format!("oxlog-drain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let s = Sender::start(SenderConfig {
+            node: "n".into(),
+            proc_name: "sfu",
+            epoch: Some("e".into()),
+            sink: Sink::Socket(dir.join("absent.sock")),
+            log_dir: Some(dir.clone()),
+            line_max: 1024,
+            queue_max: 64,
+            spool_max: 1 << 20,
+            level: LoggingLevel::Info,
+        });
+        for i in 0..20 {
+            s.emit(Line::new(Kind::Diag).msg(format!("last words {i}")));
+        }
+        assert!(s.drain(Duration::from_secs(2)), "정:RULE-BUS-FATE the line before exit is delivered within the deadline");
+        let spool = std::fs::read_to_string(dir.join("n.sfu.spool.log")).unwrap_or_default();
+        assert!(spool.contains("last words 19"), "the last queued line is in the spool when drain returns: {spool}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

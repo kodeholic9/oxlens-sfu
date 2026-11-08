@@ -58,6 +58,10 @@ pub fn emit(line: Line) {
     }
 }
 
+pub fn drain(within: std::time::Duration) -> bool {
+    GLOBAL.get().map(|s| s.drain(within)).unwrap_or(true)
+}
+
 pub fn fingerprint(session_id: &str) -> String {
     use sha2::{Digest, Sha256};
     let d = Sha256::digest(session_id.as_bytes());

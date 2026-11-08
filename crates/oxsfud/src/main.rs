@@ -12,6 +12,7 @@ use oxsfud::ops::{self, Sfu};
 
 const BEAT_MS: u64 = 500;
 const HANG_MS: u64 = 10_000;
+const EXIT_DRAIN_MS: u64 = 500;
 
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -53,6 +54,8 @@ fn parent_watch() {
                 }
             }
             eprintln!("oxsfud: parent channel closed — exiting");
+            tracing::warn!(kind = "diag", spec = "SV-RULE-BUS-FATE", "in.why" = "parent_closed", "sfud exiting: parent channel closed");
+            common::log::drain(Duration::from_millis(EXIT_DRAIN_MS));
             std::process::exit(0);
         })
         .ok();
@@ -65,8 +68,18 @@ fn self_watch(beat: Arc<AtomicU64>) {
             loop {
                 std::thread::sleep(Duration::from_millis(BEAT_MS));
                 let last = beat.load(Ordering::Acquire);
-                if last != 0 && common::now_ms().saturating_sub(last) > HANG_MS {
+                let stalled = common::now_ms().saturating_sub(last);
+                if last != 0 && stalled > HANG_MS {
                     eprintln!("oxsfud: control runtime stalled > {HANG_MS}ms — exiting");
+                    tracing::error!(
+                        kind = "diag",
+                        spec = "SV-RULE-BUS-FATE",
+                        "in.why" = "hang",
+                        "in.stalled_ms" = stalled,
+                        "in.hang_ms" = HANG_MS,
+                        "sfud exiting: control runtime stalled"
+                    );
+                    common::log::drain(Duration::from_millis(EXIT_DRAIN_MS));
                     std::process::exit(70);
                 }
             }

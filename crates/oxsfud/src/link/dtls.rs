@@ -94,7 +94,7 @@ pub async fn run(tr: Arc<Transport>, cert: dtls::crypto::Certificate, local: Soc
         r = hs => match r {
             Ok(Ok(c)) => Arc::new(c),
             Ok(Err(e)) => {
-                tracing::info!(kind = "diag", session = %tr.session, user = %tr.user, "dtls handshake failed: {e}");
+                tracing::info!(kind = "diag", spec = "SV-RULE-LINK-TRANSPORT", session = %tr.session, user = %tr.user, "dtls handshake failed: {e}");
                 return;
             }
             Err(_) => {
