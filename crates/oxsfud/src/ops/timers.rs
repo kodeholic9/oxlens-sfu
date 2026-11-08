@@ -252,22 +252,6 @@ fn sync_required(room: &Room, user: &str, now: u64, track: &str, start: u64, win
 
 fn stat() {
     let Some(s) = super::sfu() else { return };
-    let drops: u64 = s.drops.iter().map(|d| d.load(Ordering::Relaxed)).sum();
-    let (mut count, mut sum) = (0u64, 0u64);
-    if let Some(m) = crate::fwd::rt::media() {
-        for w in &m.workers {
-            count += w.transit.count.load(Ordering::Relaxed);
-            sum += w.transit.sum_us.load(Ordering::Relaxed);
-        }
-    }
-    let l = common::log::Line::new(common::log::Kind::Stat)
-        .rec("peers", s.peers().len())
-        .rec("rooms", s.rooms.all().len())
-        .rec("drops", drops)
-        .rec("transit_count", count)
-        .rec("transit_sum_us", sum)
-        .msg("sfud");
-    common::log::emit(l);
     let streams: Vec<_> = s.tracks.lock().map(|g| g.values().cloned().collect()).unwrap_or_default();
     for st in streams {
         let room = st.room.load_full();
