@@ -229,7 +229,7 @@ fn old_ufrag_kept_until_new_one_checked() {
 
 #[test]
 fn expired_udp_pair_is_not_used() {
-    let tr: Arc<Transport> = Transport::new(1, "u1", Role::Both, 0, false);
+    let tr: Arc<Transport> = Transport::new(1, "u1", "", Role::Both, 0, false);
     let addr: SocketAddr = "198.51.100.7:40000".parse().expect("addr");
     let key = PathKey::Udp(addr);
     tr.touch_pair(key, 1_000);
@@ -245,7 +245,7 @@ fn expired_udp_pair_is_not_used() {
 
 #[test]
 fn control_sends_obey_pair_expiry() {
-    let tr: Arc<Transport> = Transport::new(3, "u3", Role::Both, 0, false);
+    let tr: Arc<Transport> = Transport::new(3, "u3", "", Role::Both, 0, false);
     let key = PathKey::Udp("198.51.100.8:40000".parse().expect("addr"));
     let never_tcp = |_: u64| false;
     tr.touch_pair(key, 1_000);
@@ -258,7 +258,7 @@ fn control_sends_obey_pair_expiry() {
 
 #[test]
 fn tcp_pair_lives_while_connected() {
-    let tr: Arc<Transport> = Transport::new(2, "u2", Role::Both, 0, false);
+    let tr: Arc<Transport> = Transport::new(2, "u2", "", Role::Both, 0, false);
     let key = PathKey::Tcp(77);
     tr.touch_pair(key, 0);
     tr.path.store(Some(Arc::new(key)));

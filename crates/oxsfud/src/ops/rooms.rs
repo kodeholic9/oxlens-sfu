@@ -62,10 +62,10 @@ pub fn server_config(s: &super::Sfu, p: &Peer) -> ServerConfig {
     }
 }
 
-fn new_transport(s: &super::Sfu, user: &str, role: Role, source_tag: bool) -> Result<Arc<Transport>, Failure> {
+fn new_transport(s: &super::Sfu, c: &Ctx, role: Role) -> Result<Arc<Transport>, Failure> {
     let m = crate::fwd::rt::media().ok_or_else(|| Code::InternalError.failure())?;
     let w = m.pick_worker(role != Role::Subscribe);
-    let tr = Transport::new(s.next_id(), user, role, w, source_tag);
+    let tr = Transport::new(s.next_id(), &c.user, &c.session, role, w, c.source_tag);
     m.register(tr.cred().ufrag.as_str(), &tr);
     if let Some(wk) = m.workers.get(w)
         && let Ok(mut g) = wk.transports.lock()
@@ -83,10 +83,10 @@ fn new_peer(c: &Ctx) -> Result<Arc<Peer>, Failure> {
     let s = sfu()?;
     let (publish, subscribe) = match c.pc_mode {
         PcMode::One => {
-            let t = new_transport(s, &c.user, Role::Both, c.source_tag)?;
+            let t = new_transport(s, c, Role::Both)?;
             (t.clone(), t)
         }
-        PcMode::Two => (new_transport(s, &c.user, Role::Publish, c.source_tag)?, new_transport(s, &c.user, Role::Subscribe, c.source_tag)?),
+        PcMode::Two => (new_transport(s, c, Role::Publish)?, new_transport(s, c, Role::Subscribe)?),
     };
     let table = Table::new(subscribe.clone(), c.pc_mode, s.policy.media.slot_mid_reserve as usize);
     let floor = s.tables.floor(&c.sid);
@@ -110,7 +110,7 @@ fn new_peer(c: &Ctx) -> Result<Arc<Peer>, Failure> {
     if let Ok(mut g) = s.peers.lock() {
         g.insert(c.user.clone(), p.clone());
     }
-    super::transition("LINK", "PeerState", "SV-STATE-PEER-STATE", "-", "Alive", "peer_created", &[("user", &c.user)]);
+    super::transition("LINK", "PeerState", "SV-STATE-PEER-STATE", "-", "Alive", "peer_created", &[("session", &c.session), ("user", &c.user)]);
     Ok(p)
 }
 
@@ -162,7 +162,7 @@ pub fn join(c: &Ctx, body: &Value) -> Result<Value, Failure> {
         let codecs = req.codecs.clone().unwrap_or_default();
         let extmap = req.extmap.clone().unwrap_or_default();
         if !table.seed(&codecs, &extmap) {
-            tracing::info!(kind = "diag", user = %c.user, "1pc join number tags ignored (table exists)");
+            tracing::info!(kind = "diag", session = %c.session, user = %c.user, "1pc join number tags ignored (table exists)");
         }
     } else {
         table.mark_seeded();
@@ -211,7 +211,7 @@ pub fn join(c: &Ctx, body: &Value) -> Result<Value, Failure> {
             Err(f) => {
                 let label = if f.code == Code::NotAuthorized.num() { "AFF.S.reject_perm" } else { "AFF.S.reject" };
                 super::media::aff_line(&c.user, label, old_pub.as_deref(), old_pub.as_deref(), "ROOM_JOIN");
-                tracing::info!(kind = "diag", user = %c.user, room = %room.id, "implicit pub_select refused ({})", f.name);
+                tracing::info!(kind = "diag", session = %c.session, user = %c.user, room = %room.id, "implicit pub_select refused ({})", f.name);
             }
         }
     } else {

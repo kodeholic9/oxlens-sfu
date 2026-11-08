@@ -80,6 +80,8 @@ pub struct Logging {
     pub queue_max_lines: u32,
     pub spool_max_bytes: u64,
     pub socket_rcvbuf_bytes: u32,
+    pub history_max_lines: u32,
+    pub history_window_secs: u32,
     pub stat_interval_ms: u32,
 }
 impl Default for Logging {
@@ -92,6 +94,8 @@ impl Default for Logging {
             queue_max_lines: 8_192,
             spool_max_bytes: 67_108_864,
             socket_rcvbuf_bytes: 4_194_304,
+            history_max_lines: 5_000,
+            history_window_secs: 3_600,
             stat_interval_ms: 5_000,
         }
     }
@@ -263,6 +267,12 @@ impl Policy {
         if self.logging.socket_rcvbuf_bytes < 65536 {
             return bad(format!("logging.socket_rcvbuf_bytes {} 는 65536 미만", self.logging.socket_rcvbuf_bytes));
         }
+        if self.logging.history_max_lines < 100 {
+            return bad(format!("logging.history_max_lines {} 는 100 미만", self.logging.history_max_lines));
+        }
+        if self.logging.history_window_secs < 60 {
+            return bad(format!("logging.history_window_secs {} 는 60 미만", self.logging.history_window_secs));
+        }
         if !(200..=60000).contains(&self.logging.stat_interval_ms) {
             return bad(format!("logging.stat_interval_ms {} 는 200~60000 밖", self.logging.stat_interval_ms));
         }
@@ -356,6 +366,8 @@ impl Policy {
             ("logging.queue_max_lines".into(), l.queue_max_lines.to_string()),
             ("logging.spool_max_bytes".into(), l.spool_max_bytes.to_string()),
             ("logging.socket_rcvbuf_bytes".into(), l.socket_rcvbuf_bytes.to_string()),
+            ("logging.history_max_lines".into(), l.history_max_lines.to_string()),
+            ("logging.history_window_secs".into(), l.history_window_secs.to_string()),
             ("logging.stat_interval_ms".into(), l.stat_interval_ms.to_string()),
         ]
     }

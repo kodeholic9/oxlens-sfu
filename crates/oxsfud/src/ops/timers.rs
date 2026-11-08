@@ -101,7 +101,7 @@ fn home_lost() {
         if let Some((false, at)) = b.home_alive(&h.node, &h.inst)
             && now.saturating_sub(at) >= s.node_grace_ms
         {
-            tracing::info!(kind = "diag", user = %p.user, "home {}/{} lost — reaping peer", h.node, h.inst);
+            tracing::info!(kind = "diag", session = %p.session, user = %p.user, "home {}/{} lost — reaping peer", h.node, h.inst);
             crate::gc::evict(&p, None, Why::HomeLost);
             s.tables.forget(&p.sid);
         }
@@ -114,7 +114,7 @@ fn gates() {
     let tables: Vec<Arc<crate::sub::Table>> = s.tables.map.lock().map(|g| g.values().cloned().collect()).unwrap_or_default();
     for t in tables {
         for room in t.gate_timeouts(now) {
-            tracing::warn!(kind = "diag", user = %t.conn.user, room = %room, "READY gate released by timeout — READY 미수신 의심 (no keyframe request on this path)");
+            tracing::warn!(kind = "diag", session = %t.conn.session, user = %t.conn.user, room = %room, "READY gate released by timeout — READY 미수신 의심 (no keyframe request on this path)");
         }
     }
 }
@@ -226,7 +226,7 @@ fn sync_required(room: &Room, user: &str, now: u64) {
     if !fire {
         return;
     }
-    tracing::info!(kind = "diag", room = %room.id, user = %user, "stall detected — sync_required");
+    tracing::info!(kind = "diag", session = %super::session_of(user), room = %room.id, user = %user, "stall detected — sync_required");
     let body = RoomEventBody::SyncRequired { room_id: room.id.clone(), reason: "stall".into() };
     super::user_notice(user, Op::RoomEvent, &body, Some(&room.id));
 }
@@ -249,4 +249,42 @@ fn stat() {
         .rec("transit_sum_us", sum)
         .msg("sfud");
     common::log::emit(l);
+    let streams: Vec<_> = s.tracks.lock().map(|g| g.values().cloned().collect()).unwrap_or_default();
+    for st in streams {
+        let room = st.room.load_full();
+        for t in st.physical() {
+            let Ok((packets, bytes, lost, jitter)) = t.recv.lock().map(|r| (r.packets, r.bytes, r.lost(), r.jitter_secs())) else { continue };
+            let nack = t.nack.lock().map(|n| n.pkts).unwrap_or(0);
+            let pli = t.pli.lock().map(|p| p.sent).unwrap_or(0);
+            let mut l = common::log::Line::new(common::log::Kind::Stat)
+                .key("session", &st.session)
+                .key("room", room.as_str())
+                .key("user", &st.user)
+                .key("track", &st.track_id)
+                .key("ssrc", t.ssrc)
+                .rec("packets_received", packets)
+                .rec("packets_lost", lost)
+                .rec("jitter", format!("{jitter:.6}"))
+                .rec("bytes_received", bytes)
+                .rec("nack_count", nack)
+                .rec("pli_count", pli);
+            if let Some(r) = t.rid {
+                l = l.rec("rid", crate::sim::layer_name(r));
+            }
+            common::log::emit(l);
+        }
+    }
+    for p in s.peers() {
+        let tx = &p.subscribe.tx;
+        common::log::emit(
+            common::log::Line::new(common::log::Kind::Stat)
+                .key("session", &p.session)
+                .key("user", &p.user)
+                .rec("packets_sent", tx.packets.load(Ordering::Relaxed))
+                .rec("bytes_sent", tx.bytes.load(Ordering::Relaxed))
+                .rec("retransmitted_packets_sent", tx.retransmitted.load(Ordering::Relaxed))
+                .rec("nack_count", tx.nack_in.load(Ordering::Relaxed))
+                .rec("pli_count", tx.pli_in.load(Ordering::Relaxed)),
+        );
+    }
 }

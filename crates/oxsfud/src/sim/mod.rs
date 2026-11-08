@@ -267,7 +267,7 @@ pub fn tick(tr: &Arc<Transport>, now: u64) {
     let level = s.level;
     drop(s);
     if let Some(l) = changed {
-        tracing::info!(kind = "diag", user = %tr.user, "auto layer → {} (loss {:.3} nack/s {:.1} drops {} v2 {})", layer_name(l), loss, nack_rate, drops, v2);
+        tracing::info!(kind = "diag", session = %tr.session, user = %tr.user, "auto layer → {} (loss {:.3} nack/s {:.1} drops {} v2 {})", layer_name(l), loss, nack_rate, drops, v2);
     }
     for (r, t) in rows {
         r.auto_cap.store(level, Ordering::Release);

@@ -743,14 +743,14 @@ mod tests {
     #[test]
     fn arev_carries_across_peers_of_a_session() {
         let ts = Tables::default();
-        let a = Table::new(Transport::new(1, "u", Role::Both, 0, false), PcMode::Two, 40);
+        let a = Table::new(Transport::new(1, "u", "", Role::Both, 0, false), PcMode::Two, 40);
         let c = vec![cand("ptt-a-audio", "a", Kind::Audio, Class::Slot, 0)];
         a.sync(&c, 1);
         a.sync(&[], 2);
         let before = a.arev();
         assert!(before > 0);
         ts.keep("s1", before);
-        let b = Table::new(Transport::new(2, "u", Role::Both, 0, false), PcMode::Two, 40);
+        let b = Table::new(Transport::new(2, "u", "", Role::Both, 0, false), PcMode::Two, 40);
         b.carry(ts.floor("s1") + 1);
         assert_eq!(b.arev(), before + 1, "연:SUB.type.MlineTable arev continues per session across a new Peer · the new Peer's table is a change");
         b.sync(&c, 3);
@@ -761,7 +761,7 @@ mod tests {
 
     #[test]
     fn slot_rows_and_reuse() {
-        let tr = Transport::new(1, "u", Role::Both, 0, false);
+        let tr = Transport::new(1, "u", "", Role::Both, 0, false);
         let t = Table::new(tr, PcMode::Two, 40);
         let c = vec![cand("ptt-a-audio", "a", Kind::Audio, Class::Slot, 0), cand("ptt-a-video", "a", Kind::Video, Class::Slot, 0)];
         let o = t.sync(&c, 1);
@@ -780,7 +780,7 @@ mod tests {
 
     #[test]
     fn slot_budget_mid_limit() {
-        let tr = Transport::new(1, "u", Role::Both, 0, false);
+        let tr = Transport::new(1, "u", "", Role::Both, 0, false);
         let t = Table::new(tr, PcMode::One, 2);
         assert!(!t.sync(&[cand("ptt-a-audio", "a", Kind::Audio, Class::Slot, 0), cand("ptt-a-video", "a", Kind::Video, Class::Slot, 0)], 1).mid_limit);
         let more = vec![
@@ -794,7 +794,7 @@ mod tests {
 
     #[test]
     fn slot_budget_is_all_or_nothing() {
-        let tr = Transport::new(1, "u", Role::Both, 0, false);
+        let tr = Transport::new(1, "u", "", Role::Both, 0, false);
         let t = Table::new(tr, PcMode::Two, 3);
         let a = vec![cand("ptt-a-audio", "a", Kind::Audio, Class::Slot, 0), cand("ptt-a-video", "a", Kind::Video, Class::Slot, 0)];
         assert!(!t.sync(&a, 1).mid_limit);
@@ -820,7 +820,7 @@ mod tests {
 
     #[test]
     fn rehome_waits_for_ack() {
-        let tr = Transport::new(1, "u", Role::Both, 0, false);
+        let tr = Transport::new(1, "u", "", Role::Both, 0, false);
         let t = Table::new(tr, PcMode::Two, 40);
         t.sync(&[cand("a", "r1", Kind::Audio, Class::Full, 0)], 1);
         t.ready("r1", t.snapshot("e").arev, 2);
@@ -836,7 +836,7 @@ mod tests {
 
     #[test]
     fn ready_gate_opens_at_timeout() {
-        let tr = Transport::new(1, "u", Role::Both, 0, false);
+        let tr = Transport::new(1, "u", "", Role::Both, 0, false);
         let t = Table::new(tr, PcMode::Two, 40);
         t.sync(&[vid("v", "H264", 0)], 1_000);
         let g = t.rows()[0].gate.load_full().expect("video row has a gate");
@@ -849,7 +849,7 @@ mod tests {
 
     #[test]
     fn other_tuple_takes_the_oldest_empty_row() {
-        let tr = Transport::new(1, "u", Role::Both, 0, false);
+        let tr = Transport::new(1, "u", "", Role::Both, 0, false);
         let t = Table::new(tr, PcMode::Two, 40);
         let h: Vec<Cand> = (0..FULL_VIDEO).map(|i| vid(&format!("h{i}"), "H264", 0)).collect();
         for i in 0..h.len() {
@@ -867,7 +867,7 @@ mod tests {
 
     #[test]
     fn victim_tie_is_least_recently_loaded() {
-        let tr = Transport::new(1, "u", Role::Both, 0, false);
+        let tr = Transport::new(1, "u", "", Role::Both, 0, false);
         let t = Table::new(tr, PcMode::Two, 40);
         let mut c: Vec<Cand> = Vec::new();
         for i in 0..FULL_VIDEO {
@@ -882,7 +882,7 @@ mod tests {
     }
 
     fn full_then_waiters(waiters: &[(&str, i64, u64)]) -> (Table, Vec<Cand>) {
-        let tr = Transport::new(1, "u", Role::Both, 0, false);
+        let tr = Transport::new(1, "u", "", Role::Both, 0, false);
         let t = Arc::try_unwrap(Table::new(tr, PcMode::Two, 40)).ok().expect("one owner");
         let mut c: Vec<Cand> = (0..FULL_VIDEO).map(|i| vid(&format!("v{i}"), "H264", 1)).collect();
         t.sync(&c, 1);
@@ -918,7 +918,7 @@ mod tests {
 
     #[test]
     fn audio_hold_keeps_recent_speaker() {
-        let tr = Transport::new(1, "u", Role::Both, 0, false);
+        let tr = Transport::new(1, "u", "", Role::Both, 0, false);
         let t = Table::new(tr, PcMode::Two, 40);
         let mut c: Vec<Cand> = (0..FULL_AUDIO).map(|i| aud(&format!("a{i}"), 10_000 + i as i64)).collect();
         t.sync(&c, 10_000);
@@ -940,7 +940,7 @@ mod tests {
 
     #[test]
     fn audio_hold_does_not_touch_video() {
-        let tr = Transport::new(1, "u", Role::Both, 0, false);
+        let tr = Transport::new(1, "u", "", Role::Both, 0, false);
         let t = Table::new(tr, PcMode::Two, 40);
         let mut c: Vec<Cand> = (0..FULL_VIDEO).map(|i| vid(&format!("v{i}"), "H264", 1)).collect();
         t.sync(&c, 10_000);
@@ -952,7 +952,7 @@ mod tests {
 
     #[test]
     fn full_cap_reassigns_by_rank() {
-        let tr = Transport::new(1, "u", Role::Both, 0, false);
+        let tr = Transport::new(1, "u", "", Role::Both, 0, false);
         let t = Table::new(tr, PcMode::Two, 40);
         let mut c: Vec<Cand> = (0..FULL_VIDEO).map(|i| cand(&format!("v{i}"), "r", Kind::Video, Class::Full, 0)).collect();
         t.sync(&c, 1);

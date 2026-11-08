@@ -69,6 +69,7 @@ pub struct TxStats {
 pub struct Transport {
     pub id: u64,
     pub user: String,
+    pub session: String,
     pub role: Role,
     pub worker: usize,
     pub source_tag: bool,
@@ -106,7 +107,7 @@ pub struct ExtIds {
 }
 
 impl Transport {
-    pub fn new(id: u64, user: &str, role: Role, worker: usize, source_tag: bool) -> Arc<Transport> {
+    pub fn new(id: u64, user: &str, session: &str, role: Role, worker: usize, source_tag: bool) -> Arc<Transport> {
         let (dtls_in, dtls_rx) = tokio::sync::mpsc::unbounded_channel();
         let (dc_out, dc_rx) = tokio::sync::mpsc::unbounded_channel();
         let (stop, _) = tokio::sync::watch::channel(false);
@@ -114,6 +115,7 @@ impl Transport {
         Arc::new(Transport {
             id,
             user: user.to_string(),
+            session: session.to_string(),
             role,
             worker,
             source_tag,

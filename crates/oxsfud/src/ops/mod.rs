@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-DOC-OWNERSHIP · 정:RULE-OPS-DROPS · 정:RULE-OPS-OBSERVE · 정:RULE-CONC-HOT-PATH · 정:IMPL-ERR-ISSUERS · 정:CAND-OPS-SERVER-TRANSITION-SPEC · 정:CAND-DOC-ORCHESTRATION-ASPECT · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-DOC-OWNERSHIP · 정:RULE-OPS-DROPS · 정:RULE-OPS-OBSERVE · 정:RULE-CONC-HOT-PATH · 정:IMPL-ERR-ISSUERS · 정:CAND-OPS-SERVER-TRANSITION-SPEC · 정:CAND-DOC-ORCHESTRATION-ASPECT · 운영:RULE-LOG-TRANSITION · 운영:RULE-LOG-KEYS · model: claude-opus-5-5
 //! 가로지르는 것 — 프로세스 상태 하나(Peer · 방 · 발행 · 배정표) · 버림 계수(닫힌 목록) · 코드별 계수 · 영역 사이 조율(입장 · 발행 · 구독 · 발언권 집행 · 운영).
 
 pub mod admin;
@@ -195,7 +195,12 @@ pub fn user_notice<T: serde::Serialize>(user: &str, op: Op, body: &T, room: Opti
         room_id: room.map(|r| r.to_string()),
         sfu_id: SFU.get().map(|s| s.epoch.clone()),
     };
+    common::log::emit(crate::bus::notice_line(&n).key("session", session_of(user)).key("user", user));
     crate::bus::user_notice(user, n);
+}
+
+pub fn session_of(user: &str) -> String {
+    sfu().and_then(|s| s.peer(user)).map(|p| p.session.clone()).unwrap_or_default()
 }
 
 pub fn transition(area: &str, key: &str, spec: &str, from: &str, to: &str, cause: &str, keys: &[(&str, &str)]) {
@@ -204,11 +209,16 @@ pub fn transition(area: &str, key: &str, spec: &str, from: &str, to: &str, cause
     for (k, v) in keys {
         l = l.key(k, v);
     }
+    if !keys.iter().any(|(k, _)| *k == "session")
+        && let Some((_, u)) = keys.iter().find(|(k, _)| *k == "user")
+    {
+        l = l.key("session", session_of(u));
+    }
     common::log::emit(l);
 }
 
 pub fn transport_ready(tr: &Arc<Transport>) {
-    tracing::info!(kind = "diag", user = %tr.user, "transport ready (dtls+srtp) conn {}", tr.id);
+    tracing::info!(kind = "diag", session = %tr.session, user = %tr.user, "transport ready (dtls+srtp) conn {}", tr.id);
 }
 
 pub fn dc_opened(tr: &Arc<Transport>) {
@@ -221,15 +231,12 @@ pub fn dc_in(tr: &Arc<Transport>, buf: &[u8]) {
 }
 
 pub fn ufrag_promoted(tr: &Arc<Transport>, ufrag: &str) {
-    transition("LINK", "PeerState", "SV-STATE-PEER-STATE", tr.peer_state().as_str(), "Alive", "ice_restart_checked", &[("user", &tr.user)]);
-    tracing::info!(kind = "diag", user = %tr.user, "ufrag promoted {ufrag}");
+    tracing::info!(kind = "diag", session = %tr.session, user = %tr.user, "ufrag promoted {ufrag}");
 }
 
-pub fn peer_state_changed(tr: &Arc<Transport>, to: PeerState, path_changed: bool) {
-    let dwell = common::now_ms().saturating_sub(tr.state_since.load(Ordering::Acquire));
-    let cause = if path_changed { "nominated_new_pair" } else { "nominated" };
-    transition("LINK", "PeerState", "SV-STATE-PEER-STATE", "Suspect", to.as_str(), cause, &[("user", &tr.user)]);
-    tracing::info!(kind = "diag", user = %tr.user, "peer state {} after {dwell}ms (conn {})", to.as_str(), tr.id);
+pub fn peer_state_changed(tr: &Arc<Transport>, from: PeerState, to: PeerState, cause: &str, dwell_ms: u64) {
+    transition("LINK", "PeerState", "SV-STATE-PEER-STATE", from.as_str(), to.as_str(), cause, &[("session", &tr.session), ("user", &tr.user)]);
+    tracing::info!(kind = "diag", session = %tr.session, user = %tr.user, "peer state {} after {dwell_ms}ms (conn {})", to.as_str(), tr.id);
 }
 
 pub fn floor_blocked_rtp(room: &Arc<String>, tr: &Arc<Transport>) {

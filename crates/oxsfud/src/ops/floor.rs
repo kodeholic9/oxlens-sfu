@@ -123,7 +123,7 @@ fn trace(room: &str, e: &Entry, from: G, to: G, step: &Step) {
     let t = common::log::Transition { area: "FLR", key: room, spec, from: from.as_str(), to: spec.map(|_| to.as_str()), cause: e.name, inputs: &e.ins };
     let mut l = t.line().key("room", room);
     if !e.user.is_empty() {
-        l = l.key("user", e.user);
+        l = l.key("session", super::session_of(e.user)).key("user", e.user);
     }
     common::log::emit(l);
 }
@@ -434,7 +434,7 @@ fn pli_while_bound(fan: &Arc<SlotFan>, t: &Arc<crate::r#pub::PubTrack>) {
 fn bind_media(room: &Arc<Room>, user: &str, from_idle: bool) {
     let (videos, video_ok) = slot_video(room, user);
     if !video_ok {
-        tracing::warn!(kind = "diag", room = %room.id, user = %user, "slot video codec differs from room — video not bound");
+        tracing::warn!(kind = "diag", session = %super::session_of(user), room = %room.id, user = %user, "slot video codec differs from room — video not bound");
     }
     for k in [Kind::Audio, Kind::Video] {
         let fan = room.slot(k);

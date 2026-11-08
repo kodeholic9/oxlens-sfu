@@ -38,8 +38,10 @@ impl Collect {
             "spec" => self.line.spec = Some(v),
             "rec" => self.line.raw = Some(v),
             n if key_index(n).is_some() => {
-                let i = key_index(n).unwrap_or(0);
-                self.line.keys[i] = Some(v);
+                if !v.is_empty() {
+                    let i = key_index(n).unwrap_or(0);
+                    self.line.keys[i] = Some(v);
+                }
             }
             n => self.line.recs.push((n.to_string(), v)),
         }

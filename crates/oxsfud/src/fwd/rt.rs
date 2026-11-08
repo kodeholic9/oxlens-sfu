@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-FWD-MEDIA-WORKERS · 정:RULE-OPS-TRANSIT · 정:RULE-LINK-TRANSPORT · 정:RULE-LINK-PAIR-LIVENESS · 정:RULE-OPS-DROPS · 정:CAND-LINK-UDP-BUFFER · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-FWD-MEDIA-WORKERS · 정:RULE-OPS-TRANSIT · 정:RULE-LINK-TRANSPORT · 정:RULE-LINK-PAIR-LIVENESS · 정:RULE-OPS-DROPS · 정:CAND-LINK-UDP-BUFFER · 정:IMPL-LINK-PEER-STATE · 운영:RULE-LOG-TRANSITION · model: claude-opus-5-5
 //! 수신 스레드 1 · 미디어 워커 N — 주소 색인은 수신 스레드 단독 · STUN 은 수신 스레드가 곧바로 · 워커 큐는 패킷 수 한도 · 잠듦 표시가 있을 때만 깨운다 · 워커가 끝나면 프로세스를 내린다.
 
 use std::collections::HashMap;
@@ -525,6 +525,7 @@ fn datagram(m: &Media, st: &mut RecvState, data: &[u8], key: PathKey, at_us: u64
             tr.touch_pair(key, now);
             st.by_addr.insert(key, tr.clone());
             let promoted = tr.creds.lock().ok().map(|mut c| c.checked(&parsed.local_ufrag));
+            let fresh = matches!(promoted, Some(crate::link::creds::Checked::Promoted { .. }));
             if let Some(crate::link::creds::Checked::Promoted { retired }) = promoted {
                 st.by_ufrag.remove(&retired);
                 crate::ops::ufrag_promoted(&tr, &parsed.local_ufrag);
@@ -532,8 +533,17 @@ fn datagram(m: &Media, st: &mut RecvState, data: &[u8], key: PathKey, at_us: u64
             if parsed.use_candidate {
                 let changed = tr.path.load_full().map(|p| *p != key).unwrap_or(true);
                 tr.path.store(Some(Arc::new(key)));
-                if tr.set_state(PeerState::Alive, now) == Some(PeerState::Suspect) || changed {
-                    crate::ops::peer_state_changed(&tr, PeerState::Alive, changed);
+                let dwell = now.saturating_sub(tr.state_since.load(Ordering::Acquire));
+                let was = tr.set_state(PeerState::Alive, now);
+                if fresh || changed || was.is_some() {
+                    let cause = if fresh {
+                        "ice_restart_checked"
+                    } else if changed {
+                        "nominated_new_pair"
+                    } else {
+                        "nominated"
+                    };
+                    crate::ops::peer_state_changed(&tr, was.unwrap_or(PeerState::Alive), PeerState::Alive, cause, dwell);
                 }
             }
             let from = match key {

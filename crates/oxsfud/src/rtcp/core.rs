@@ -108,6 +108,18 @@ impl RecvStats {
         self.cycles + self.max_seq as u32
     }
 
+    pub fn lost(&self) -> i64 {
+        if !self.started || self.probation > 0 {
+            return 0;
+        }
+        let expected = self.extended_max().wrapping_sub(self.base_seq).wrapping_add(1);
+        expected as i64 - self.received as i64
+    }
+
+    pub fn jitter_secs(&self) -> f64 {
+        if self.clock == 0 { 0.0 } else { self.jitter / self.clock as f64 }
+    }
+
     pub fn report(&mut self) -> Option<Report> {
         if !self.started || self.probation > 0 {
             return None;
@@ -251,5 +263,19 @@ mod tests {
         let f = t.build().unwrap();
         assert_eq!((f.base_seq, f.status_count, f.reference_time), (10, 3, 15));
         assert_eq!(f.deltas_250us, vec![160, 80, 80]);
+    }
+
+    #[test]
+    fn recv_lost_and_jitter_read_without_moving_report() {
+        let mut r = RecvStats::new(48_000);
+        assert_eq!(r.lost(), 0);
+        for (i, seq) in [100u16, 101, 102, 105, 106].into_iter().enumerate() {
+            r.update(seq, seq as u32 * 960, 1_000 + i as u64 * 20, 100);
+        }
+        assert_eq!(r.lost(), 2);
+        assert_eq!(r.lost(), 2);
+        assert_eq!((r.packets, r.bytes), (5, 500));
+        assert!(r.jitter_secs() >= 0.0);
+        assert_eq!(r.report().map(|x| x.lost), Some(2));
     }
 }

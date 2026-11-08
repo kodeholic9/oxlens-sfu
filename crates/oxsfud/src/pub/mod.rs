@@ -41,6 +41,7 @@ impl PublishState {
 pub struct StreamInit {
     pub track_id: String,
     pub user: String,
+    pub session: String,
     pub kind: Kind,
     pub mid: String,
     pub pt: u8,
@@ -58,6 +59,7 @@ pub struct StreamInit {
 pub struct PubStream {
     pub track_id: String,
     pub user: String,
+    pub session: String,
     pub kind: Kind,
     pub mid: String,
     pub pt: u8,
@@ -97,6 +99,7 @@ impl PubStream {
         Arc::new(PubStream {
             track_id: i.track_id,
             user: i.user,
+            session: i.session,
             kind: i.kind,
             mid: i.mid,
             pt: i.pt,
@@ -186,6 +189,7 @@ pub struct NackUp {
     pub missing: BTreeMap<i64, (u64, Option<u64>)>,
     base: i64,
     pub sent: u64,
+    pub pkts: u64,
 }
 
 impl NackUp {
@@ -228,6 +232,7 @@ impl NackUp {
             true
         });
         self.sent += out.len() as u64;
+        self.pkts += u64::from(!out.is_empty());
         (out, gave_up)
     }
 }
@@ -307,7 +312,7 @@ impl PubTrack {
         self.last_rtp_ms.store(now_ms, Ordering::Release);
         let _ = self.stream.first_rtp_ms.compare_exchange(0, now_ms, Ordering::AcqRel, Ordering::Acquire);
         if !self.pt_checked.swap(true, Ordering::AcqRel) && rtp.pt != self.stream.pt {
-            tracing::warn!(kind = "diag", user = %self.stream.user, track = %self.stream.track_id, "[PT:MISMATCH] declared {} first rtp {}", self.stream.pt, rtp.pt);
+            tracing::warn!(kind = "diag", session = %self.stream.session, user = %self.stream.user, track = %self.stream.track_id, "[PT:MISMATCH] declared {} first rtp {}", self.stream.pt, rtp.pt);
         }
         if self.stream.kind == Kind::Audio
             && let Some(v) = ext_get(rtp.ext, ids.audio_level).and_then(|v| v.first())
@@ -482,6 +487,17 @@ mod tests {
         let (s, g) = n.due(1_001);
         assert!(s.is_empty());
         assert!(g);
+    }
+
+    #[test]
+    fn nack_packets_count_once_per_batch() {
+        let mut n = NackUp::default();
+        n.on_packet(10, 0);
+        n.on_packet(14, 0);
+        n.due(0);
+        n.due(50);
+        n.due(200);
+        assert_eq!((n.sent, n.pkts), (6, 2));
     }
 
     #[test]

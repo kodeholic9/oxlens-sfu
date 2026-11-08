@@ -94,18 +94,18 @@ pub async fn run(tr: Arc<Transport>, cert: dtls::crypto::Certificate, local: Soc
         r = hs => match r {
             Ok(Ok(c)) => Arc::new(c),
             Ok(Err(e)) => {
-                tracing::info!(kind = "diag", user = %tr.user, "dtls handshake failed: {e}");
+                tracing::info!(kind = "diag", session = %tr.session, user = %tr.user, "dtls handshake failed: {e}");
                 return;
             }
             Err(_) => {
-                tracing::info!(kind = "diag", user = %tr.user, "dtls handshake timeout");
+                tracing::info!(kind = "diag", session = %tr.session, user = %tr.user, "dtls handshake timeout");
                 return;
             }
         },
         _ = stop.changed() => return,
     };
     if let Err(e) = srtp_keys(&tr, &conn).await {
-        tracing::warn!(kind = "diag", user = %tr.user, "srtp keys: {e}");
+        tracing::warn!(kind = "diag", session = %tr.session, user = %tr.user, "srtp keys: {e}");
         return;
     }
     tr.ready.store(true, Ordering::Release);
@@ -195,7 +195,7 @@ impl Sctp {
                                 tr.dc_open.store(true, Ordering::Release);
                                 crate::ops::dc_opened(tr);
                             } else {
-                                tracing::info!(kind = "diag", user = %tr.user, "dc label refused {label:?}");
+                                tracing::info!(kind = "diag", session = %tr.session, user = %tr.user, "dc label refused {label:?}");
                             }
                         }
                     }

@@ -346,6 +346,7 @@ pub fn publish(c: &Ctx, body: &Value) -> Result<Value, Failure> {
                 let st = PubStream::new(StreamInit {
                     track_id: new_track_id(),
                     user: c.user.clone(),
+                    session: c.session.clone(),
                     kind: t.kind,
                     mid: t.mid.clone(),
                     pt: t.pt,
@@ -624,7 +625,7 @@ pub fn ice_restart(c: &Ctx, body: &Value) -> Result<Value, Failure> {
     }
     let publish = creds.first().cloned().ok_or_else(|| Code::InternalError.failure())?;
     let subscribe = creds.get(1).cloned();
-    tracing::info!(kind = "diag", user = %c.user, "ice restart issued {}", publish.ufrag);
+    tracing::info!(kind = "diag", session = %c.session, user = %c.user, "ice restart issued {}", publish.ufrag);
     ok(&IceRestartRes { publish, subscribe })
 }
 

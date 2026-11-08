@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · 정:RULE-BUS-PRESENCE · 정:RULE-BUS-EVENTS · 정:IMPL-BUS-HOME-LOST · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · 정:RULE-BUS-PRESENCE · 정:RULE-BUS-EVENTS · 정:IMPL-BUS-HOME-LOST · 운영:LOG.log.LINE · 운영:RULE-LOG-KIND · model: claude-opus-5-5
 //! sfud 의 버스 — oxmesh client(로컬 hub 에만 · 202610/20261031e) · `room` 토큰 선언 · `ev` put 은 낸 차례 그대로 한 줄로(데이터 레인 — 차면 버리고 센다) · `node` 토큰 history 구독(홈 잃음).
 
 use std::collections::{HashMap, HashSet};
@@ -183,7 +183,25 @@ impl Bus {
     }
 }
 
+pub fn notice_line(n: &Notice) -> common::log::Line {
+    let Some(op) = oxsig::Op::from_u16(n.op) else {
+        return common::log::Line::new(common::log::Kind::Diag).rec("op", n.op).msg("notice of unknown op");
+    };
+    let mut l = common::log::Line::ev(&format!("CP-OP-{}", op.name().replace('_', "-")));
+    if let Some(r) = &n.room_id {
+        l = l.key("room", r);
+    }
+    if let Some(seq) = n.body.get("version").and_then(|v| v.get("seq")).and_then(|v| v.as_u64()) {
+        l = l.key("seq", seq);
+    }
+    if let Some(arev) = n.body.get("table").and_then(|t| t.get("arev")).and_then(|v| v.as_u64()) {
+        l = l.key("arev", arev);
+    }
+    l
+}
+
 pub fn room_notice(room: &str, n: Notice) {
+    common::log::emit(notice_line(&n).key("room", room));
     if let Some(b) = get() {
         b.room_notice(room, n);
     }
@@ -192,5 +210,23 @@ pub fn room_notice(room: &str, n: Notice) {
 pub fn user_notice(user: &str, n: Notice) {
     if let Some(b) = get() {
         b.user_notice(user, n);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn n(op: oxsig::Op, body: serde_json::Value) -> Notice {
+        Notice { op: op.as_u16(), body, exclude: Vec::new(), room_id: Some("r1".into()), sfu_id: None }
+    }
+
+    #[test]
+    fn notice_line_carries_room_seq_arev_not_body() {
+        let head = common::log::line::Head { node: "n1".into(), proc_name: "sfu" };
+        let p = notice_line(&n(oxsig::Op::ParticipantEvent, serde_json::json!({"version": {"epoch": "e", "seq": 7}, "user_id": "secret"})));
+        assert_eq!(p.render(&head, "T", 1, 1024), "ts=T mono=1 node=n1 proc=sfu kind=ev spec=CP-OP-PARTICIPANT-EVENT room=r1 seq=7");
+        let m = notice_line(&n(oxsig::Op::MlineEvent, serde_json::json!({"table": {"arev": 3, "mlines": []}})));
+        assert_eq!(m.render(&head, "T", 1, 1024), "ts=T mono=1 node=n1 proc=sfu kind=ev spec=CP-OP-MLINE-EVENT room=r1 arev=3");
     }
 }

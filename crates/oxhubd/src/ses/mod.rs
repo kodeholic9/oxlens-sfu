@@ -481,9 +481,14 @@ pub fn valid_room_id(r: &str) -> bool {
     crate::room::valid_room_id(r)
 }
 
-async fn set_rooms(ctx: &Ctx, s: &Session, node: &str, rooms: &[String]) {
+async fn set_rooms(ctx: &Ctx, s: &Session, node: &str, rooms: &[String], cause: &str) {
     let new: BTreeSet<String> = rooms.iter().cloned().collect();
+    let from = s.state_name(ctx.full_flag());
     let old = s.st.lock().map(|mut st| st.servers.insert(node.to_string(), new.clone()).unwrap_or_default()).unwrap_or_default();
+    let to = s.state_name(ctx.full_flag());
+    if from != to {
+        transition(s, Some("SV.rooms"), &from, Some(&to), cause, &[]);
+    }
     for r in new.difference(&old) {
         ctx.bus.interest_room(r, 1).await;
     }
@@ -520,14 +525,14 @@ pub async fn handle_request(ctx: &Arc<Ctx>, s: &Arc<Session>, conn: &Conn, r: Re
             return;
         }
     };
+    let arev = body.get("arev").and_then(|v| v.as_u64());
     match route(ctx, s, r.op, body).await {
         Ok(v) => {
-            common::log::emit(
-                common::log::Line::ev(&format!("CP-OP-{}", r.op.name().replace('_', "-")))
-                    .key("session", &s.fp)
-                    .key("user", &s.user_id)
-                    .msg("ok"),
-            );
+            let mut l = common::log::Line::ev(&format!("CP-OP-{}", r.op.name().replace('_', "-"))).key("session", &s.fp).key("user", &s.user_id);
+            if let Some(a) = arev {
+                l = l.key("arev", a);
+            }
+            common::log::emit(l.msg("ok"));
             let bytes = if v.is_null() { Vec::new() } else { serde_json::to_vec(&v).unwrap_or_default() };
             conn.reply_ok(r.op_num, r.pid, r.flags, bytes);
         }
@@ -590,7 +595,7 @@ async fn route(ctx: &Arc<Ctx>, s: &Arc<Session>, op: Op, body: serde_json::Value
             let loc = ctx.bus.room_route(&room).ok_or_else(|| Code::RoomNotFound.failure())?;
             let v = call_node(ctx, s, &loc.node, op, body).await?;
             if let Ok(a) = serde_json::from_value::<AffiliationRes>(v.clone()) {
-                set_rooms(ctx, s, &loc.node, &a.sub_rooms).await;
+                set_rooms(ctx, s, &loc.node, &a.sub_rooms, "AFFILIATION").await;
             }
             Ok(v)
         }
@@ -616,7 +621,7 @@ async fn route(ctx: &Arc<Ctx>, s: &Arc<Session>, op: Op, body: serde_json::Value
                 if let Ok(mut st) = s.st.lock() {
                     st.epochs.insert(loc.node.clone(), j.server_config.sfu_id.clone());
                 }
-                set_rooms(ctx, s, &loc.node, &j.affiliation.sub_rooms).await;
+                set_rooms(ctx, s, &loc.node, &j.affiliation.sub_rooms, "ROOM_JOIN").await;
             }
             ctx.bus.interest_room(&room, -1).await;
             r
@@ -629,7 +634,7 @@ async fn route(ctx: &Arc<Ctx>, s: &Arc<Session>, op: Op, body: serde_json::Value
             let loc = ctx.bus.room_route(&room).ok_or_else(|| Code::RoomNotFound.failure())?;
             let v = call_node(ctx, s, &loc.node, op, body).await?;
             if let Ok(l) = serde_json::from_value::<RoomLeaveRes>(v.clone()) {
-                set_rooms(ctx, s, &loc.node, &l.affiliation.sub_rooms).await;
+                set_rooms(ctx, s, &loc.node, &l.affiliation.sub_rooms, "ROOM_LEAVE").await;
             }
             Ok(v)
         }
@@ -672,7 +677,7 @@ async fn resume(ctx: &Arc<Ctx>, s: &Arc<Session>) -> Result<serde_json::Value, F
             Reply::Ok { body } => {
                 let p: ResumePart = serde_json::from_value(body).map_err(|_| Code::SfuError.failure())?;
                 let rooms: Vec<String> = p.snapshot.keys().cloned().collect();
-                set_rooms(ctx, s, &n, &rooms).await;
+                set_rooms(ctx, s, &n, &rooms, "RESUME").await;
                 out.snapshot.extend(p.snapshot);
                 out.publications.extend(p.publications);
                 if let Some(t) = p.mline_table {
@@ -711,7 +716,7 @@ async fn apply_affiliation(ctx: &Ctx, s: &Session, sfu: Option<&str>, room: Opti
         room.and_then(|r| s.rooms().into_iter().find(|(_, rr)| rr == r).map(|(n, _)| n))
     });
     if let Some(n) = node {
-        set_rooms(ctx, s, &n, &a.sub_rooms).await;
+        set_rooms(ctx, s, &n, &a.sub_rooms, "ROOM_EVENT").await;
     }
 }
 

@@ -57,8 +57,11 @@ impl Line {
     }
 
     pub fn key(mut self, name: &str, v: impl ToString) -> Line {
-        if let Some(i) = key_index(name) {
-            self.keys[i] = Some(v.to_string());
+        let v = v.to_string();
+        if let Some(i) = key_index(name)
+            && !v.is_empty()
+        {
+            self.keys[i] = Some(v);
         }
         self
     }
@@ -77,6 +80,7 @@ impl Line {
     pub fn set_key_if_absent(&mut self, name: &str, v: &str) {
         if let Some(i) = key_index(name)
             && self.keys[i].is_none()
+            && !v.is_empty()
         {
             self.keys[i] = Some(v.to_string());
         }
@@ -198,6 +202,14 @@ mod tests {
         let l = Line::ev("CP-OP-BIND").key("user", "u1").key("session", "abcd1234").rec("from", "-").msg("bound ok");
         let s = l.render(&head(), "T", 5, 1024);
         assert_eq!(s, "ts=T mono=5 node=n1 proc=sfu kind=ev spec=CP-OP-BIND session=abcd1234 user=u1 from=- msg=\"bound ok\"");
+    }
+
+    #[test]
+    fn empty_key_value_is_absent() {
+        let mut l = Line::ev("CP-OP-BIND").key("session", "").key("user", "u1");
+        l.set_key_if_absent("room", "");
+        let s = l.render(&head(), "T", 5, 1024);
+        assert_eq!(s, "ts=T mono=5 node=n1 proc=sfu kind=ev spec=CP-OP-BIND user=u1");
     }
 
     #[test]
