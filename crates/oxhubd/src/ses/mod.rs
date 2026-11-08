@@ -734,8 +734,13 @@ fn push_notice(ctx: &Ctx, s: &Session, n: &Notice) {
 
 pub async fn room_dropped(ctx: &Ctx, room: &str) {
     for s in ctx.sessions() {
+        let from = s.state_name(ctx.full_flag());
         let had = s.st.lock().map(|mut st| st.servers.values_mut().fold(false, |acc, rs| rs.remove(room) || acc)).unwrap_or(false);
         if had {
+            let to = s.state_name(ctx.full_flag());
+            if from != to {
+                transition(&s, Some("SV.rooms"), &from, Some(&to), "room_dropped", &[]);
+            }
             ctx.bus.interest_room(room, -1).await;
         }
     }
