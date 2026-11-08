@@ -31,6 +31,7 @@ pub struct Hub {
     pub sender: Arc<Sender>,
     pub namespace: String,
     pub shutdown: mpsc::UnboundedSender<String>,
+    pub log_files: Option<std::path::PathBuf>,
 }
 
 impl Hub {
@@ -90,6 +91,10 @@ async fn answer(hub: &Arc<Hub>, q: oxmesh::Query) {
             serde_json::to_vec(&admin::probe_local(hub, &user).await).unwrap_or_default()
         }
         "bus" => serde_json::to_vec(&admin::bus_view(hub).await).unwrap_or_default(),
+        "history" => match serde_json::from_slice::<logger::Ask>(&payload) {
+            Ok(ask) => serde_json::to_vec(&admin::history_local(hub, ask).await).unwrap_or_default(),
+            Err(_) => serde_json::to_vec(&serde_json::json!({ "node": hub.node, "error": Code::InvalidPayload.num() })).unwrap_or_default(),
+        },
         _ => Reply::fail(Code::UnknownOp).encode(),
     };
     Bus::reply_query(&q, &key, out).await;

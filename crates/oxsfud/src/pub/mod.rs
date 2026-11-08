@@ -310,7 +310,9 @@ impl PubTrack {
         }
         self.bytes_win.fetch_add(rtp.raw.len() as u64, Ordering::Relaxed);
         self.last_rtp_ms.store(now_ms, Ordering::Release);
-        let _ = self.stream.first_rtp_ms.compare_exchange(0, now_ms, Ordering::AcqRel, Ordering::Acquire);
+        if self.stream.first_rtp_ms.compare_exchange(0, now_ms, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+            crate::ops::first_rtp(&self.stream);
+        }
         if !self.pt_checked.swap(true, Ordering::AcqRel) && rtp.pt != self.stream.pt {
             tracing::warn!(kind = "diag", session = %self.stream.session, user = %self.stream.user, track = %self.stream.track_id, "[PT:MISMATCH] declared {} first rtp {}", self.stream.pt, rtp.pt);
         }

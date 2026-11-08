@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 운영:RULE-TOOL-ONE · 운영:RULE-TOOL-CONTRACT · 운영:RULE-RISK-CONFIRM · 운영:RULE-CTL-SUPERVISOR · 운영:RULE-CTL-CUT · 운영:RULE-CTL-ROOM · 운영:RULE-CTL-LOG-LEVEL · 운영:RULE-READ-BUS-ALL · 운영:RULE-READ-USER-MEDIA · 정:CAND-OPS-ADMIN-OUTPUT · model: claude-opus-5-5
+// spec: v1.6 · 운영:RULE-TOOL-ONE · 운영:RULE-TOOL-CONTRACT · 운영:RULE-READ-HISTORY · 운영:RULE-RISK-CONFIRM · 운영:RULE-CTL-SUPERVISOR · 운영:RULE-CTL-CUT · 운영:RULE-CTL-ROOM · 운영:RULE-CTL-LOG-LEVEL · 운영:RULE-READ-BUS-ALL · 운영:RULE-READ-USER-MEDIA · 정:CAND-OPS-ADMIN-OUTPUT · model: claude-opus-5-5
 //! oxadmin — 운영 도구 하나 · 사람이 읽는 표가 기본(`--json` 은 raw) · 붙은 hub 를 매번 stderr 첫 줄에 · 되돌릴 수 없는 것은 도구가 먼저 읽은 판 값을 되싣는다 · `user` 는 두 번 읽어 Δ.
 
 mod http;
@@ -13,7 +13,8 @@ use http::Hub;
 const USAGE: &str = "oxadmin [--hub <host:port|url>] [--json] [--api-key K --api-secret S] <명령>
   sfus | sfu <id> | rooms | room <id> | users | user <id> [--interval-ms <ms>] | snapshot | drops
   bus [--all] | unit list | unit show <id> | load <id> | stop <id> | kill <id> | shutdown
-  probe <user> | user-cut <user> | reap <room> <user> | destroy <room> | log-level <level> [--ttl <secs>]";
+  probe <user> | user-cut <user> | reap <room> <user> | destroy <room> | log-level <level> [--ttl <secs>]
+  history <user> [--session <지문>] [--room <R>] [--since <ms>] [--until <ms>] [--diag] [--stat] | history --room <R> …";
 
 struct Opts {
     hub: Option<String>,
@@ -23,11 +24,12 @@ struct Opts {
     interval_ms: u64,
     all: bool,
     ttl: Option<u64>,
+    pick: Vec<(&'static str, String)>,
     rest: Vec<String>,
 }
 
 fn opts(argv: Vec<String>) -> Result<Opts, String> {
-    let mut o = Opts { hub: None, json: false, api_key: None, api_secret: None, interval_ms: 1_000, all: false, ttl: None, rest: Vec::new() };
+    let mut o = Opts { hub: None, json: false, api_key: None, api_secret: None, interval_ms: 1_000, all: false, ttl: None, pick: Vec::new(), rest: Vec::new() };
     let mut it = argv.into_iter();
     while let Some(a) = it.next() {
         let mut val = |n: &str| it.next().ok_or_else(|| format!("{n} 에 값이 없다"));
@@ -39,6 +41,12 @@ fn opts(argv: Vec<String>) -> Result<Opts, String> {
             "--interval-ms" => o.interval_ms = val("--interval-ms")?.parse().map_err(|_| "--interval-ms 는 수".to_string())?,
             "--all" => o.all = true,
             "--ttl" => o.ttl = Some(val("--ttl")?.parse().map_err(|_| "--ttl 은 수".to_string())?),
+            "--session" => o.pick.push(("session", val("--session")?)),
+            "--room" => o.pick.push(("room", val("--room")?)),
+            "--since" => o.pick.push(("since", val("--since")?)),
+            "--until" => o.pick.push(("until", val("--until")?)),
+            "--diag" => o.pick.push(("diag", "1".into())),
+            "--stat" => o.pick.push(("stat", "1".into())),
             "-h" | "--help" => return Err(USAGE.to_string()),
             x if x.starts_with("--") => return Err(format!("모르는 인자 {x}\n{USAGE}")),
             _ => o.rest.push(a),
@@ -187,6 +195,7 @@ fn run(c: &Ctx, o: &Opts) -> Result<(), String> {
             }
         }
         "user" => user(c, need(r, 1, "user id")?, o.interval_ms)?,
+        "history" => history(c, r.get(1).map(|s| s.as_str()), &o.pick)?,
         "snapshot" => {
             let v = c.get("/admin/snapshot")?;
             if !c.raw(&v) {
@@ -364,6 +373,105 @@ fn user(c: &Ctx, u: &str, interval_ms: u64) -> Result<(), String> {
             .collect();
         table(&rows, &["sfu_id", "mid", "kind", "track_id", "room_id", "src", "switches", "flow", "last_seq", "Δseq", "last_at", "Δat"]);
     }
+    Ok(())
+}
+
+const HISTORY_KEYS: &[&str] = &["user", "session", "room", "track", "ssrc", "seq", "floor_sequence", "mbcp_seq", "arev"];
+const HISTORY_HEAD: &[&str] = &["ts", "mono", "node", "proc", "kind", "spec", "epoch", "unit", "area", "key", "from", "to", "cause", "msg"];
+
+type Fields = Vec<(String, String)>;
+
+fn ts_us(f: &Fields) -> i64 {
+    f.iter().find(|(k, _)| k == "ts").and_then(|(_, v)| chrono::DateTime::parse_from_rfc3339(v).ok()).map(|t| t.timestamp_micros()).unwrap_or(0)
+}
+
+fn field<'a>(f: &'a Fields, k: &str) -> &'a str {
+    f.iter().find(|(x, _)| x == k).map(|(_, v)| v.as_str()).unwrap_or("")
+}
+
+fn jsonl(node: &str, f: &Fields) -> Value {
+    let mut m = serde_json::Map::new();
+    m.insert("node".into(), json!(node));
+    for (k, v) in f {
+        m.insert(k.clone(), json!(v));
+    }
+    Value::Object(m)
+}
+
+fn history(c: &Ctx, user: Option<&str>, pick: &[(&str, String)]) -> Result<(), String> {
+    let mut q: Vec<String> = user.map(|u| format!("user={}", enc(u))).into_iter().collect();
+    q.extend(pick.iter().map(|(k, v)| format!("{k}={}", enc(v))));
+    let v = c.get(&format!("/admin/history?{}", q.join("&")))?;
+    let mut notes: Vec<Value> = Vec::new();
+    let mut boots: Vec<(String, Fields)> = Vec::new();
+    let mut rows: Vec<(i64, String, Fields)> = Vec::new();
+    for n in arr(&v, "nodes") {
+        let node = cell(&n["node"]);
+        if let Some(e) = n.get("error") {
+            notes.push(json!({ "node": node, "error": e }));
+            continue;
+        }
+        if n.get("truncated").and_then(|t| t.as_bool()) == Some(true) {
+            notes.push(json!({ "node": node, "truncated": true }));
+        }
+        for b in arr(n, "boots") {
+            boots.push((node.clone(), common::log::line::fields(b.as_str().unwrap_or(""))));
+        }
+        for l in arr(n, "lines") {
+            let f = common::log::line::fields(l.as_str().unwrap_or(""));
+            rows.push((ts_us(&f), node.clone(), f));
+        }
+    }
+    rows.sort_by_key(|r| r.0);
+    if c.json {
+        for x in &notes {
+            println!("{x}");
+        }
+        for (node, f) in boots.iter().map(|(n, f)| (n, f)).chain(rows.iter().map(|(_, n, f)| (n, f))) {
+            println!("{}", jsonl(node, f));
+        }
+        return Ok(());
+    }
+    println!("asked {}", cell(v.get("asked").unwrap_or(&Value::Null)));
+    for x in &notes {
+        match x.get("error") {
+            Some(e) => println!("★node {} 못 닿음 — error {}", cell(&x["node"]), cell(e)),
+            None => println!("★node {} 잘림 — 앞(오래된 쪽)을 잘랐다(정책 logging.history_max_lines)", cell(&x["node"])),
+        }
+    }
+    let boot_rows: Vec<Value> = boots
+        .iter()
+        .map(|(n, f)| json!({ "node": n, "proc": field(f, "proc"), "epoch": field(f, "epoch"), "build": field(f, "build"), "ts": field(f, "ts") }))
+        .collect();
+    println!("\n기동");
+    table(&boot_rows, &["node", "proc", "epoch", "build", "ts"]);
+    let t0 = rows.first().map(|r| r.0).unwrap_or(0);
+    let lines: Vec<Value> = rows
+        .iter()
+        .map(|(t, n, f)| {
+            let step = if field(f, "area").is_empty() {
+                String::new()
+            } else {
+                format!("{} {} {}→{}", field(f, "area"), field(f, "key"), field(f, "from"), field(f, "to"))
+            };
+            let keys: Vec<String> = HISTORY_KEYS.iter().filter(|k| !field(f, k).is_empty()).map(|k| format!("{k}={}", field(f, k))).collect();
+            let rest: Vec<String> =
+                f.iter().filter(|(k, _)| !HISTORY_HEAD.contains(&k.as_str()) && !HISTORY_KEYS.contains(&k.as_str())).map(|(k, v)| format!("{k}={v}")).collect();
+            let msg = [field(f, "msg").to_string(), rest.join(" ")].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ");
+            json!({
+                "+ms": format!("{:.1}", (*t - t0) as f64 / 1000.0),
+                "node/proc": format!("{n}/{}", field(f, "proc")),
+                "kind": field(f, "kind"),
+                "spec": field(f, "spec"),
+                "step": step,
+                "cause": field(f, "cause"),
+                "keys": keys.join(" "),
+                "msg": msg,
+            })
+        })
+        .collect();
+    println!("\n사건 {}", lines.len());
+    table(&lines, &["+ms", "node/proc", "kind", "spec", "step", "cause", "keys", "msg"]);
     Ok(())
 }
 

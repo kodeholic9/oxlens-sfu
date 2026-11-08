@@ -397,4 +397,12 @@ mod tests {
         let p = Policy::parse("[media]\nauto_layer = \"v2\"\n").unwrap();
         assert_eq!(p.media.auto_layer, MediaAutolayer::V2);
     }
+
+    #[test]
+    fn history_keys_have_floors() {
+        assert!(Policy::parse("[logging]\nhistory_max_lines = 99\n").is_err(), "PL-KEY-LOGGING-HISTORY-MAX-LINES 99 는 기동 실패");
+        assert!(Policy::parse("[logging]\nhistory_max_lines = 100\n").is_ok(), "PL-KEY-LOGGING-HISTORY-MAX-LINES 100 은 산다");
+        assert!(Policy::parse("[logging]\nhistory_window_secs = 59\n").is_err(), "PL-KEY-LOGGING-HISTORY-WINDOW-SECS 59 는 기동 실패");
+        assert!(Policy::parse("[logging]\nhistory_window_secs = 60\n").is_ok(), "PL-KEY-LOGGING-HISTORY-WINDOW-SECS 60 은 산다");
+    }
 }

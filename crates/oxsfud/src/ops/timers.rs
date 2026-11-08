@@ -77,8 +77,9 @@ fn liveness() {
             if tr.path_alive(now, |id| m.tcp_open(id)) {
                 continue;
             }
+            let dwell = now.saturating_sub(tr.state_since.load(std::sync::atomic::Ordering::Acquire));
             if tr.set_state(PeerState::Suspect, now) == Some(PeerState::Alive) {
-                super::transition("LINK", "PeerState", "SV-STATE-PEER-STATE", "Alive", "Suspect", "pair_expired", &[("user", &p.user)]);
+                super::peer_state_changed(&tr, PeerState::Alive, PeerState::Suspect, "pair_expired", dwell);
                 let body = LinkEventBody { type_: LinkEventType::Suspect, sfu_id: s.epoch.clone(), ufrag: tr.ufrag() };
                 super::user_notice(&p.user, Op::LinkEvent, &body, None);
             }

@@ -209,6 +209,11 @@ pub fn announce_add(st: &Arc<PubStream>) {
     let rid = st.room.load_full();
     let Some(room) = s.rooms.get(&rid) else { return };
     track_event(&room, TrackAction::Add, vec![crate::trk::entry(st)]);
+    activate(st);
+    resync_room(&rid);
+}
+
+pub fn activate(st: &Arc<PubStream>) {
     if let Ok(mut g) = st.state.lock()
         && *g != PublishState::Active
     {
@@ -216,7 +221,6 @@ pub fn announce_add(st: &Arc<PubStream>) {
         let _old = std::mem::replace(&mut *g, PublishState::Active);
         super::transition("PUB", &st.track_id, "SV-STATE-PUBLISH-STATE", from, "Active", "first_rtp", &[("user", &st.user)]);
     }
-    resync_room(&rid);
 }
 
 fn new_track_id() -> String {

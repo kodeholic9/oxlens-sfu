@@ -110,7 +110,9 @@ fn new_peer(c: &Ctx) -> Result<Arc<Peer>, Failure> {
     if let Ok(mut g) = s.peers.lock() {
         g.insert(c.user.clone(), p.clone());
     }
-    super::transition("LINK", "PeerState", "SV-STATE-PEER-STATE", "-", "Alive", "peer_created", &[("session", &c.session), ("user", &c.user)]);
+    for tr in p.transports() {
+        super::transition("LINK", tr.role.name(), "SV-STATE-PEER-STATE", "-", "Alive", "peer_created", &[("session", &c.session), ("user", &c.user)]);
+    }
     Ok(p)
 }
 

@@ -416,6 +416,10 @@ impl Bus {
         self.view.lock().map(|v| v.live_nodes()).unwrap_or_default()
     }
 
+    pub fn known_nodes(&self) -> Vec<(String, bool)> {
+        self.view.lock().map(|v| v.known_nodes()).unwrap_or_default()
+    }
+
     pub async fn peers(&self) -> Vec<(String, String, Vec<String>)> {
         let Ok(info) = self.session.info().await else { return Vec::new() };
         info.sessions

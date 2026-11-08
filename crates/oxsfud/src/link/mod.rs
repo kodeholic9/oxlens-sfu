@@ -51,6 +51,15 @@ pub enum Role {
     Both,
 }
 
+impl Role {
+    pub fn name(self) -> &'static str {
+        match self {
+            Role::Publish | Role::Both => "publish",
+            Role::Subscribe => "subscribe",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Pair {
     pub key: PathKey,

@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 운영:RULE-READ-SFUS · 운영:RULE-READ-ROOMS · 운영:RULE-READ-USERS · 운영:RULE-READ-SNAPSHOT · 운영:RULE-READ-DROPS · 운영:RULE-READ-TRANSIT · 운영:RULE-READ-ROOM-DETAIL · 운영:RULE-READ-NODE-ROOMS · 운영:RULE-READ-BUS · 운영:RULE-READ-BUS-ALL · 운영:RULE-READ-USER-MEDIA · 운영:RULE-READ-USER-PROBE · 운영:RULE-CTL-SUPERVISOR · 운영:RULE-CTL-CUT · 운영:RULE-CTL-ROOM · 운영:RULE-CTL-LOG-LEVEL · 운영:RULE-FMT-NO-INVENT · 정:IMPL-OPS-CUT · 정:IMPL-OPS-DESTROY-REAP · model: claude-opus-5-5
-//! `/admin` — 읽기(유닛 · 방 · 세션 · 버림 · 체류 · 버스) · 제어(supervisor · 절단 · 퇴장 · 폭파 · 수준). 정본은 sfud 를 경유해 가져온다 · 못 닿은 곳은 `error`.
+// spec: v1.6 · 운영:RULE-READ-SFUS · 운영:RULE-READ-ROOMS · 운영:RULE-READ-USERS · 운영:RULE-READ-SNAPSHOT · 운영:RULE-READ-DROPS · 운영:RULE-READ-TRANSIT · 운영:RULE-READ-ROOM-DETAIL · 운영:RULE-READ-NODE-ROOMS · 운영:RULE-READ-BUS · 운영:RULE-READ-BUS-ALL · 운영:RULE-READ-HISTORY · 운영:RULE-READ-USER-MEDIA · 운영:RULE-READ-USER-PROBE · 운영:RULE-CTL-SUPERVISOR · 운영:RULE-CTL-CUT · 운영:RULE-CTL-ROOM · 운영:RULE-CTL-LOG-LEVEL · 운영:RULE-FMT-NO-INVENT · 정:IMPL-OPS-CUT · 정:IMPL-OPS-DESTROY-REAP · model: claude-opus-5-5
+//! `/admin` — 읽기(유닛 · 방 · 세션 · 버림 · 체류 · 버스 · 사건 이력) · 제어(supervisor · 절단 · 퇴장 · 폭파 · 수준). 정본은 sfud 를 경유해 가져온다 · 못 닿은 곳은 `error`.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -230,6 +230,76 @@ pub async fn bus_all(hub: &Hub) -> Value {
     json!({ "asked": hub.node, "nodes": rows })
 }
 
+pub async fn history_local(hub: &Hub, ask: super::logger::Ask) -> Value {
+    let Some(dir) = hub.log_files.clone() else {
+        return json!({ "node": hub.node, "error": Code::SfuUnavailable.num() });
+    };
+    match tokio::task::spawn_blocking(move || super::logger::read(&dir, &ask)).await {
+        Ok(f) => json!({ "node": hub.node, "lines": f.lines, "boots": f.boots, "truncated": f.truncated }),
+        Err(_) => json!({ "node": hub.node, "error": Code::InternalError.num() }),
+    }
+}
+
+pub fn history_ask(q: &std::collections::HashMap<String, String>, logging: &common::policy::Logging, now: u64) -> Result<super::logger::Ask, Failure> {
+    let bad = || Code::InvalidPayload.failure();
+    let num = |k: &str| -> Result<Option<u64>, Failure> {
+        match q.get(k) {
+            None => Ok(None),
+            Some(v) => v.parse().map(Some).map_err(|_| bad()),
+        }
+    };
+    let flag = |k: &str| -> Result<bool, Failure> {
+        match q.get(k).map(|s| s.as_str()) {
+            None => Ok(false),
+            Some("1") => Ok(true),
+            Some(_) => Err(bad()),
+        }
+    };
+    let text = |k: &str| q.get(k).filter(|s| !s.is_empty()).cloned();
+    let (user, room) = (text("user"), text("room"));
+    if user.is_none() && room.is_none() {
+        return Err(bad());
+    }
+    let until = num("until")?.unwrap_or(now);
+    let since = num("since")?.unwrap_or(until.saturating_sub(logging.history_window_secs as u64 * 1000));
+    if since > until {
+        return Err(bad());
+    }
+    Ok(super::logger::Ask {
+        user,
+        room,
+        session: text("session"),
+        since,
+        until,
+        diag: flag("diag")?,
+        stat: flag("stat")?,
+        max: logging.history_max_lines as usize,
+    })
+}
+
+pub async fn history(hub: &Hub, ask: super::logger::Ask) -> Value {
+    let body = serde_json::to_vec(&ask).unwrap_or_default();
+    let mut rows = Vec::new();
+    for (n, live) in hub.bus.known_nodes() {
+        if n == hub.node {
+            rows.push(history_local(hub, ask.clone()).await);
+            continue;
+        }
+        if !live {
+            rows.push(json!({ "node": n, "error": Code::SfuUnavailable.num() }));
+            continue;
+        }
+        match hub.bus.query(&n, "history", body.clone()).await {
+            Ok(b) => match serde_json::from_slice::<Value>(&b) {
+                Ok(v) => rows.push(v),
+                Err(_) => rows.push(json!({ "node": n, "error": Code::SfuError.num() })),
+            },
+            Err(c) => rows.push(json!({ "node": n, "error": c.num() })),
+        }
+    }
+    json!({ "asked": hub.node, "nodes": rows })
+}
+
 pub async fn user_media(hub: &Hub, user: &str) -> AdminResult {
     let s = hub.ses.session_of_user(user).ok_or_else(|| Code::SessionNotFound.failure())?;
     let mut links = Vec::new();
@@ -386,4 +456,31 @@ pub async fn log_level(hub: &Hub, body: &Value) -> AdminResult {
         }
     }
     Ok(json!({ "from": from.as_str(), "to": lvl.as_str(), "until": until, "units": units }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn q(kv: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+        kv.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn history_ask_needs_user_or_room_and_well_formed_values() {
+        let lg = common::policy::Logging::default();
+        let now = 10_000_000;
+        assert_eq!(history_ask(&q(&[]), &lg, now).unwrap_err().code, 1002);
+        assert_eq!(history_ask(&q(&[("session", "abcd1234")]), &lg, now).unwrap_err().code, 1002);
+        assert_eq!(history_ask(&q(&[("user", "u"), ("since", "x")]), &lg, now).unwrap_err().code, 1002);
+        assert_eq!(history_ask(&q(&[("user", "u"), ("diag", "yes")]), &lg, now).unwrap_err().code, 1002);
+        assert_eq!(history_ask(&q(&[("user", "u"), ("since", "9"), ("until", "8")]), &lg, now).unwrap_err().code, 1002);
+        let a = history_ask(&q(&[("room", "r"), ("stat", "1")]), &lg, now).unwrap();
+        assert_eq!((a.until, a.since), (now, now - lg.history_window_secs as u64 * 1000), "PL-KEY-LOGGING-HISTORY-WINDOW-SECS since 없으면 지금 − 값");
+        assert_eq!(
+            (a.max, a.stat, a.diag, a.user, a.room.as_deref()),
+            (lg.history_max_lines as usize, true, false, None, Some("r")),
+            "PL-KEY-LOGGING-HISTORY-MAX-LINES 상한 = 정책값"
+        );
+    }
 }

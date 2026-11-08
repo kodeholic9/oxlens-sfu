@@ -235,7 +235,7 @@ pub fn ufrag_promoted(tr: &Arc<Transport>, ufrag: &str) {
 }
 
 pub fn peer_state_changed(tr: &Arc<Transport>, from: PeerState, to: PeerState, cause: &str, dwell_ms: u64) {
-    transition("LINK", "PeerState", "SV-STATE-PEER-STATE", from.as_str(), to.as_str(), cause, &[("session", &tr.session), ("user", &tr.user)]);
+    transition("LINK", tr.role.name(), "SV-STATE-PEER-STATE", from.as_str(), to.as_str(), cause, &[("session", &tr.session), ("user", &tr.user)]);
     tracing::info!(kind = "diag", session = %tr.session, user = %tr.user, "peer state {} after {dwell_ms}ms (conn {})", to.as_str(), tr.id);
 }
 
@@ -247,6 +247,11 @@ pub fn floor_blocked_rtp(room: &Arc<String>, tr: &Arc<Transport>) {
 pub fn floor_rtp(room: &Arc<String>, tr: &Arc<Transport>, first: bool) {
     let (room, tr) = (room.clone(), tr.clone());
     spawn(async move { floor::on_rtp(&room, &tr.user, first) });
+}
+
+pub fn first_rtp(stream: &Arc<PubStream>) {
+    let s = stream.clone();
+    spawn(async move { media::activate(&s) });
 }
 
 pub fn simulcast_first_rtp(stream: &Arc<PubStream>) {

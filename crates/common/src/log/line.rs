@@ -168,6 +168,58 @@ pub fn quote(v: &str) -> String {
     s
 }
 
+pub fn fields(line: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut it = line.chars().peekable();
+    loop {
+        while it.peek() == Some(&' ') {
+            it.next();
+        }
+        let mut k = String::new();
+        while let Some(&c) = it.peek() {
+            if c == '=' || c == ' ' {
+                break;
+            }
+            k.push(c);
+            it.next();
+        }
+        if k.is_empty() && it.peek().is_none() {
+            return out;
+        }
+        let mut v = String::new();
+        if it.peek() == Some(&'=') {
+            it.next();
+            if it.peek() == Some(&'"') {
+                it.next();
+                while let Some(c) = it.next() {
+                    match c {
+                        '"' => break,
+                        '\\' => match it.next() {
+                            Some('n') => v.push('\n'),
+                            Some('r') => v.push('\r'),
+                            Some('t') => v.push('\t'),
+                            Some(x) => v.push(x),
+                            None => break,
+                        },
+                        c => v.push(c),
+                    }
+                }
+            } else {
+                while let Some(&c) = it.peek() {
+                    if c == ' ' {
+                        break;
+                    }
+                    v.push(c);
+                    it.next();
+                }
+            }
+        }
+        if !k.is_empty() {
+            out.push((k, v));
+        }
+    }
+}
+
 pub fn push_kv(out: &mut String, k: &str, v: &str) {
     if !out.is_empty() {
         out.push(' ');
@@ -210,6 +262,18 @@ mod tests {
         l.set_key_if_absent("room", "");
         let s = l.render(&head(), "T", 5, 1024);
         assert_eq!(s, "ts=T mono=5 node=n1 proc=sfu kind=ev spec=CP-OP-BIND user=u1");
+    }
+
+    #[test]
+    fn fields_reads_back_what_render_wrote() {
+        let l = Line::ev("CP-OP-BIND").key("user", "u1").rec("from", "-").msg("say \"user=u2\" a\\b\nx");
+        let s = l.render(&head(), "T", 5, 1024);
+        let f = fields(&s);
+        let get = |k: &str| f.iter().find(|(x, _)| x == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("user"), Some("u1"));
+        assert_eq!(get("msg"), Some("say \"user=u2\" a\\b\nx"));
+        assert_eq!(f.iter().filter(|(k, _)| k == "user").count(), 1);
+        assert_eq!(fields("a=1  b=\"\" c"), vec![("a".into(), "1".into()), ("b".into(), String::new()), ("c".into(), String::new())]);
     }
 
     #[test]

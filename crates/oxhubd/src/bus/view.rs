@@ -227,6 +227,15 @@ impl View {
         v.sort();
         v
     }
+
+    pub fn known_nodes(&self) -> Vec<(String, bool)> {
+        let mut v: Vec<(String, bool)> = self.nodes.iter().map(|(k, n)| (k.clone(), n.live || k == &self.self_node)).collect();
+        if !v.iter().any(|(k, _)| k == &self.self_node) {
+            v.push((self.self_node.clone(), true));
+        }
+        v.sort();
+        v
+    }
 }
 
 #[cfg(test)]

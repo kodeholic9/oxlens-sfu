@@ -62,6 +62,7 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .route("/admin/drops", get(a_drops))
         .route("/admin/transit", get(a_transit))
         .route("/admin/bus", get(a_bus))
+        .route("/admin/history", get(a_history))
         .route("/admin/rooms/:room/snapshot", get(a_room_snapshot))
         .route("/admin/sfus/:id/rooms", get(a_sfu_rooms))
         .route("/admin/users/:user/media", get(a_user_media))
@@ -281,6 +282,13 @@ async fn a_bus(State(hub): St, ConnectInfo(p): Peer, Query(q): Query<std::collec
         return ok(admin::bus_all(&hub).await);
     }
     ok(admin::bus_view(&hub).await)
+}
+async fn a_history(State(hub): St, ConnectInfo(p): Peer, Query(q): Query<std::collections::HashMap<String, String>>, h: HeaderMap) -> Response {
+    guard!(hub, p, h);
+    match admin::history_ask(&q, &hub.policy.logging, common::now_ms()) {
+        Ok(ask) => ok(admin::history(&hub, ask).await),
+        Err(f) => fail(f),
+    }
 }
 async fn a_room_snapshot(State(hub): St, ConnectInfo(p): Peer, Path(room): Path<String>, h: HeaderMap) -> Response {
     guard!(hub, p, h);

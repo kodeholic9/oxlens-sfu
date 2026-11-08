@@ -78,24 +78,28 @@ async fn run(cfg: HubCfg) -> i32 {
         },
         fatal_tx.clone(),
     );
-    match (&cfg.log_socket, &cfg.log_dir) {
+    let log_files = match (&cfg.log_socket, &cfg.log_dir) {
         (Some(sock), dir) => {
             sup.mark_state(Role::Log, UnitState::Starting, "start");
-            let lc = ops::logger::LoggerCfg {
-                socket: sock.clone(),
-                dir: dir.clone().unwrap_or_else(|| std::path::PathBuf::from(".")),
-                policy: cfg.policy.logging.clone(),
-            };
+            let dir = dir.clone().unwrap_or_else(|| std::path::PathBuf::from("."));
+            let lc = ops::logger::LoggerCfg { socket: sock.clone(), dir: dir.clone(), policy: cfg.policy.logging.clone() };
             match ops::logger::start(lc, &sender) {
-                Ok(()) => sup.mark_state(Role::Log, UnitState::Running, "bound"),
+                Ok(()) => {
+                    sup.mark_state(Role::Log, UnitState::Running, "bound");
+                    Some(dir)
+                }
                 Err(e) => {
                     tracing::warn!(kind = "diag", "logger: {e}");
                     sup.mark_state(Role::Log, UnitState::Down, "bind failed");
+                    None
                 }
             }
         }
-        (None, _) => sup.mark_state(Role::Log, UnitState::Disabled, "no log_socket"),
-    }
+        (None, _) => {
+            sup.mark_state(Role::Log, UnitState::Disabled, "no log_socket");
+            None
+        }
+    };
     sup.mark_state(Role::Bus, UnitState::Starting, "start");
     let z = &cfg.system.bus;
     let mut tries = 0u32;
@@ -133,6 +137,7 @@ async fn run(cfg: HubCfg) -> i32 {
         sender: sender.clone(),
         namespace: z.namespace.clone(),
         shutdown: shut_tx,
+        log_files,
     });
     tokio::spawn(ops::dispatch(hub.clone(), bus_rx));
     tokio::spawn(ops::sweeper(hub.clone()));
