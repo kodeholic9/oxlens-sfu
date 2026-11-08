@@ -163,8 +163,9 @@ pub fn join(c: &Ctx, body: &Value) -> Result<Value, Failure> {
     if peer.pc_mode == PcMode::One {
         let codecs = req.codecs.clone().unwrap_or_default();
         let extmap = req.extmap.clone().unwrap_or_default();
-        if !table.seed(&codecs, &extmap) {
-            tracing::info!(kind = "diag", session = %c.session, user = %c.user, "1pc join number tags ignored (table exists)");
+        let differs = table.seed(&codecs, &extmap);
+        if !differs.is_empty() {
+            tracing::info!(kind = "diag", spec = "SV-IMPL-SUB-SUBSCRIBER-TABLE", session = %c.session, user = %c.user, "in.differs" = %differs.join(","), "1pc join number tags differ from the table, ignored");
         }
     } else {
         table.mark_seeded();

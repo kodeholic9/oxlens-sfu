@@ -174,7 +174,7 @@ async fn run(cfg: SfuCfg) -> i32 {
             })
             .await
     });
-    tracing::info!(kind = "diag", "sfud ready grpc {} udp {}:{} workers {}", grpc, cfg.ip, cfg.udp_port, cfg.workers);
+    tracing::info!(kind = "diag", spec = "SV-RULE-OPS-SURFACE", "sfud ready grpc {} udp {}:{} workers {}", grpc, cfg.ip, cfg.udp_port, cfg.workers);
     let why = tokio::select! {
         _ = term.recv() => "SIGTERM",
         _ = tokio::signal::ctrl_c() => "SIGINT",
@@ -186,7 +186,7 @@ async fn run(cfg: SfuCfg) -> i32 {
             "grpc ended"
         }
     };
-    tracing::info!(kind = "diag", "sfud stopping ({why})");
+    tracing::info!(kind = "diag", spec = "SV-RULE-BUS-FATE", "in.why" = why, "sfud stopping ({why})");
     let _ = stop_tx.send(());
     bus.close().await;
     0

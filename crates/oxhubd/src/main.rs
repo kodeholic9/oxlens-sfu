@@ -89,7 +89,7 @@ async fn run(cfg: HubCfg) -> i32 {
                     Some(dir)
                 }
                 Err(e) => {
-                    tracing::warn!(kind = "diag", "logger: {e}");
+                    tracing::warn!(kind = "diag", spec = "SV-RULE-OPS-LOGGER", "logger: {e}");
                     sup.mark_state(Role::Log, UnitState::Down, "bind failed");
                     None
                 }
@@ -109,7 +109,14 @@ async fn run(cfg: HubCfg) -> i32 {
             Ok(b) => break b,
             Err(e) => {
                 tries += 1;
-                tracing::warn!(kind = "diag", unit = "bus", "bus open failed: {e}");
+                tracing::warn!(
+                    kind = "diag",
+                    spec = "SV-IMPL-BUS-FAULTS",
+                    unit = "bus",
+                    "in.tries" = tries,
+                    "in.intensity_max" = cfg.system.supervisor.intensity_max,
+                    "bus open failed: {e}"
+                );
                 sup.mark_state(Role::Bus, UnitState::Down, "open failed");
                 if tries > cfg.system.supervisor.intensity_max {
                     sup.mark_state(Role::Bus, UnitState::Blocked, "intensity");

@@ -199,10 +199,34 @@ impl Table {
         if self.pc_mode == PcMode::One { SUB_1PC } else { SUB_2PC }
     }
 
-    pub fn seed(&self, codecs: &[JoinCodec], extmap: &[ExtMap]) -> bool {
-        let Ok(mut s) = self.st.lock() else { return false };
+    pub fn seed(&self, codecs: &[JoinCodec], extmap: &[ExtMap]) -> Vec<String> {
+        let Ok(mut s) = self.st.lock() else { return Vec::new() };
         if s.seeded {
-            return false;
+            let mut differs: Vec<String> = codecs
+                .iter()
+                .filter_map(|c| {
+                    let t = join_tuple(c)?;
+                    match s.pts.get(&t) {
+                        Some(&(pt, rtx)) if pt == c.pt && rtx == c.rtx_pt => None,
+                        Some(&(pt, _)) => Some(format!("{}:{pt}>{}", t.0, c.pt)),
+                        None => Some(format!("{}:new>{}", t.0, c.pt)),
+                    }
+                })
+                .collect();
+            let (cur, want) = (**self.ext.load(), ext_table(extmap));
+            for (uri, have, got) in [
+                (URI_MID, cur.mid, want.mid),
+                (URI_AUDIO_LEVEL, cur.audio_level, want.audio_level),
+                (URI_ABS_SEND_TIME, cur.abs_send_time, want.abs_send_time),
+                (URI_TWCC, cur.twcc, want.twcc),
+            ] {
+                if let Some(g) = got
+                    && have != Some(g)
+                {
+                    differs.push(format!("{uri}:{}>{g}", have.map(|h| h.to_string()).unwrap_or_else(|| "-".into())));
+                }
+            }
+            return differs;
         }
         s.seeded = true;
         for c in codecs {
@@ -223,7 +247,7 @@ impl Table {
             }
             self.ext.store(Arc::new(ext_table(&merged)));
         }
-        true
+        Vec::new()
     }
 
     pub fn mark_seeded(&self) {
@@ -757,6 +781,21 @@ mod tests {
         assert!(b.arev() > before, "연:SUB.type.MlineTable the next table of the new Peer is newer than any the session saw");
         ts.forget("s1");
         assert_eq!(ts.floor("s1"), 0);
+    }
+
+    #[test]
+    fn later_join_tags_are_ignored_and_only_a_difference_is_reported() {
+        let t = Table::new(Transport::new(1, "u", "", Role::Both, 0, false), PcMode::One, 40);
+        let opus = |pt| JoinCodec { kind: Kind::Audio, pt, name: "opus".into(), fmtp: None, rtx_pt: None };
+        let h264 =
+            JoinCodec { kind: Kind::Video, pt: 102, name: "H264".into(), fmtp: Some("packetization-mode=1;profile-level-id=42e01f".into()), rtx_pt: Some(103) };
+        let mid = |id| vec![ExtMap { id, uri: URI_MID.into() }];
+        assert!(t.seed(&[opus(111), h264.clone()], &mid(1)).is_empty(), "first join seeds the table");
+        assert!(t.seed(&[opus(111), h264.clone()], &mid(1)).is_empty(), "정:IMPL-SUB-SUBSCRIBER-TABLE same tags on a later join are not an exception");
+        let d = t.seed(&[opus(109), h264], &mid(3));
+        assert_eq!(d.len(), 2, "{d:?}");
+        assert!(d[0].ends_with(":111>109") && d[1].ends_with(":1>3"), "정:IMPL-SUB-SUBSCRIBER-TABLE a later join that differs is ignored and reported {d:?}");
+        assert_eq!(t.ext.load().mid, Some(1), "ignored — the seeded table stays");
     }
 
     #[test]

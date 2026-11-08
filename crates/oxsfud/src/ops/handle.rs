@@ -47,7 +47,7 @@ impl Handle for Svc {
     async fn hello(&self, req: tonic::Request<HelloReq>) -> Result<tonic::Response<HelloRes>, tonic::Status> {
         let r = req.into_inner();
         let s = super::sfu().ok_or_else(|| tonic::Status::unavailable("starting"))?;
-        tracing::info!(kind = "diag", "hello from hub {} ({})", r.node, r.hub_inst);
+        tracing::info!(kind = "diag", spec = "SV-RULE-OPS-SURFACE", "hello from hub {} ({})", r.node, r.hub_inst);
         Ok(tonic::Response::new(HelloRes { epoch: s.epoch.clone(), build: s.build.clone() }))
     }
 
