@@ -35,7 +35,7 @@ impl Why {
 pub fn leave(peer: &Arc<Peer>, room_id: &str, why: Why, keep_roster: bool) -> bool {
     let Some(s) = crate::ops::sfu() else { return false };
     let Some(room) = s.rooms.get(room_id) else {
-        tracing::warn!(kind = "diag", session = %peer.session, room = %room_id, user = %peer.user, "gc: room not found ({})", why.as_str());
+        tracing::warn!(kind = "diag", spec = "SV-RULE-GC-EDGES", session = %peer.session, room = %room_id, user = %peer.user, "gc: room not found ({})", why.as_str());
         return false;
     };
     let user = peer.user.clone();
@@ -50,7 +50,7 @@ pub fn leave(peer: &Arc<Peer>, room_id: &str, why: Why, keep_roster: bool) -> bo
         match room.remove(&user) {
             Some(m) => m.hidden,
             None => {
-                tracing::warn!(kind = "diag", session = %peer.session, room = %room_id, user = %user, "gc: not in roster ({})", why.as_str());
+                tracing::warn!(kind = "diag", spec = "SV-RULE-GC-EDGES", session = %peer.session, room = %room_id, user = %user, "gc: not in roster ({})", why.as_str());
                 return false;
             }
         }
@@ -90,7 +90,7 @@ pub fn leave(peer: &Arc<Peer>, room_id: &str, why: Why, keep_roster: bool) -> bo
     if !keep_roster && !hidden && why != Why::Destroy {
         room.announce_left(&user);
     }
-    tracing::info!(kind = "diag", session = %peer.session, room = %room_id, user = %user, "gc: left via {} (state {})", why.as_str(), peer.publish.peer_state().as_str());
+    tracing::info!(kind = "diag", spec = "SV-RULE-GC-EDGES", session = %peer.session, room = %room_id, user = %user, "gc: left via {} (state {})", why.as_str(), peer.publish.peer_state().as_str());
     true
 }
 
@@ -127,8 +127,16 @@ pub fn reap(peer: &Arc<Peer>, why: Why) {
             m.unregister(&tr);
             m.release_worker(tr.worker, i == 0);
         }
+        crate::ops::transition(
+            "LINK",
+            tr.role.name(),
+            "SV-STATE-PEER-STATE",
+            tr.peer_state().as_str(),
+            "-",
+            why.as_str(),
+            &[("session", &peer.session), ("user", &peer.user)],
+        );
     }
-    tracing::info!(kind = "diag", session = %peer.session, user = %peer.user, "gc: peer reaped via {}", why.as_str());
 }
 
 pub fn evict(old: &Arc<Peer>, keep: Option<&str>, why: Why) {

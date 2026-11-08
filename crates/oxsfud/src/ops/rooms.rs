@@ -213,7 +213,7 @@ pub fn join(c: &Ctx, body: &Value) -> Result<Value, Failure> {
             Err(f) => {
                 let label = if f.code == Code::NotAuthorized.num() { "AFF.S.reject_perm" } else { "AFF.S.reject" };
                 super::media::aff_line(&c.user, label, old_pub.as_deref(), old_pub.as_deref(), "ROOM_JOIN");
-                tracing::info!(kind = "diag", session = %c.session, user = %c.user, room = %room.id, "implicit pub_select refused ({})", f.name);
+                tracing::info!(kind = "diag", spec = "SV-IMPL-AFF-PUB-MOVE", session = %c.session, user = %c.user, room = %room.id, "implicit pub_select refused ({})", f.name);
             }
         }
     } else {
@@ -339,7 +339,7 @@ pub async fn create(env: &Envelope) -> Result<Value, Failure> {
     if let Some(b) = crate::bus::get() {
         b.declare_room(&room.id).await;
     }
-    tracing::info!(kind = "diag", room = %room.id, "room created (unused {} departure {})", room.unused_ttl, room.departure_ttl);
+    tracing::info!(kind = "diag", spec = "SV-IMPL-ROOM-LIFE", room = %room.id, "in.unused_ttl" = room.unused_ttl, "in.departure_ttl" = room.departure_ttl, "room created");
     ok(&CreateRoomRes { room_id: room.id.clone(), name: room.name.clone(), capacity: room.capacity, created_at: room.created_at, media_codecs: room.media_codecs.clone() })
 }
 
@@ -373,7 +373,7 @@ pub fn list() -> Result<Value, Failure> {
     ok(&ListRoomsRes { rooms, total })
 }
 
-pub async fn destroy_room(room: &Arc<Room>) {
+pub async fn destroy_room(room: &Arc<Room>, spec: &str, why: &str) {
     let Some(s) = super::sfu() else { return };
     room.close();
     s.rooms.remove(&room.id);
@@ -385,5 +385,5 @@ pub async fn destroy_room(room: &Arc<Room>) {
     if let Some(b) = crate::bus::get() {
         b.undeclare_room(&room.id);
     }
-    tracing::info!(kind = "diag", room = %room.id, "room removed");
+    tracing::info!(kind = "diag", spec = spec, room = %room.id, "room removed ({why})");
 }

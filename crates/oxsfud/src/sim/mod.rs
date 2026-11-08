@@ -267,7 +267,21 @@ pub fn tick(tr: &Arc<Transport>, now: u64) {
     let level = s.level;
     drop(s);
     if let Some(l) = changed {
-        tracing::info!(kind = "diag", session = %tr.session, user = %tr.user, "auto layer → {} (loss {:.3} nack/s {:.1} drops {} v2 {})", layer_name(l), loss, nack_rate, drops, v2);
+        tracing::info!(
+            kind = "diag",
+            spec = "SV-RULE-SIM-TICK",
+            session = %tr.session,
+            user = %tr.user,
+            "in.to" = layer_name(l),
+            "in.loss" = format!("{loss:.3}"),
+            "in.nack_rate" = format!("{nack_rate:.1}"),
+            "in.drops" = drops,
+            "in.v2" = v2,
+            "in.estimate" = format!("{est:.0}"),
+            "in.demand" = format!("{demand_h:.0}"),
+            "auto layer → {}",
+            layer_name(l)
+        );
     }
     for (r, t) in rows {
         r.auto_cap.store(level, Ordering::Release);

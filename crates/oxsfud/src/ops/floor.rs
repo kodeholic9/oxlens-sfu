@@ -434,7 +434,7 @@ fn pli_while_bound(fan: &Arc<SlotFan>, t: &Arc<crate::r#pub::PubTrack>) {
 fn bind_media(room: &Arc<Room>, user: &str, from_idle: bool) {
     let (videos, video_ok) = slot_video(room, user);
     if !video_ok {
-        tracing::warn!(kind = "diag", session = %super::session_of(user), room = %room.id, user = %user, "slot video codec differs from room — video not bound");
+        tracing::warn!(kind = "diag", spec = "SV-IMPL-FLR-MEDIA-BIND", session = %super::session_of(user), room = %room.id, user = %user, "slot video codec differs from room — video not bound");
     }
     for k in [Kind::Audio, Kind::Video] {
         let fan = room.slot(k);

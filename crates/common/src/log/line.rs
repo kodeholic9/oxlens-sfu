@@ -93,7 +93,7 @@ impl Line {
         push_kv(&mut out, "node", &head.node);
         push_kv(&mut out, "proc", head.proc_name);
         push_kv(&mut out, "kind", self.kind.as_str());
-        if self.kind == Kind::Ev
+        if self.kind != Kind::Stat
             && let Some(s) = &self.spec
         {
             push_kv(&mut out, "spec", s);
@@ -277,12 +277,15 @@ mod tests {
     }
 
     #[test]
-    fn diag_has_no_spec_and_truncates_msg() {
+    fn diag_keeps_spec_stat_drops_it_and_msg_truncates() {
         let mut l = Line::new(Kind::Diag).msg("x".repeat(500));
-        l.spec = Some("ignored".into());
+        l.spec = Some("SV-RULE-SIM-TICK".into());
         let s = l.render(&head(), "T", 1, 256);
         assert!(s.len() <= 256);
         assert!(s.contains("truncated=1"));
-        assert!(!s.contains("spec="));
+        assert!(s.starts_with("ts=T mono=1 node=n1 proc=sfu kind=diag spec=SV-RULE-SIM-TICK "), "O-sym-RULE-LOG-SPEC-2① 진단 줄의 근거");
+        let mut st = Line::new(Kind::Stat).rec("peers", 1);
+        st.spec = Some("X".into());
+        assert!(!st.render(&head(), "T", 1, 256).contains("spec="));
     }
 }

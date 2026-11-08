@@ -60,7 +60,7 @@ async fn sweep() {
     let now = common::now_ms();
     for r in s.rooms.all() {
         if r.registered() == 0 && r.ttl_due(now) {
-            super::rooms::destroy_room(&r).await;
+            super::rooms::destroy_room(&r, "SV-IMPL-ROOM-LIFE", "ttl").await;
         }
     }
 }
@@ -102,7 +102,7 @@ fn home_lost() {
         if let Some((false, at)) = b.home_alive(&h.node, &h.inst)
             && now.saturating_sub(at) >= s.node_grace_ms
         {
-            tracing::info!(kind = "diag", session = %p.session, user = %p.user, "home {}/{} lost — reaping peer", h.node, h.inst);
+            tracing::info!(kind = "diag", spec = "SV-IMPL-BUS-HOME-LOST", session = %p.session, user = %p.user, "home {}/{} lost — reaping peer", h.node, h.inst);
             crate::gc::evict(&p, None, Why::HomeLost);
             s.tables.forget(&p.sid);
         }
@@ -114,8 +114,16 @@ fn gates() {
     let now = common::now_ms();
     let tables: Vec<Arc<crate::sub::Table>> = s.tables.map.lock().map(|g| g.values().cloned().collect()).unwrap_or_default();
     for t in tables {
-        for room in t.gate_timeouts(now) {
-            tracing::warn!(kind = "diag", session = %t.conn.session, user = %t.conn.user, room = %room, "READY gate released by timeout — READY 미수신 의심 (no keyframe request on this path)");
+        for (room, held) in t.gate_timeouts(now) {
+            tracing::warn!(
+                kind = "diag",
+                spec = "CP-TIMER-T-GATE",
+                session = %t.conn.session,
+                user = %t.conn.user,
+                room = %room,
+                "in.held_ms" = held,
+                "READY gate released by timeout — READY 미수신 의심 (no keyframe request on this path)"
+            );
         }
     }
 }
@@ -162,7 +170,7 @@ fn stall(win: &mut HashMap<usize, (u64, u64)>) {
                     lr > 0 && mono_to_wall(lr) > ws
                 };
                 if sent == s0 && speaker_spoke {
-                    sync_required(&room, &u, now);
+                    sync_required(&room, &u, now, &tid, start, ws);
                 }
                 win.insert(key, (sent, now));
             }
@@ -211,7 +219,7 @@ fn eligible_from(room: &Room, tid: &str, row: &crate::fwd::DownRow, user: &str, 
     Some(ready)
 }
 
-fn sync_required(room: &Room, user: &str, now: u64) {
+fn sync_required(room: &Room, user: &str, now: u64, track: &str, start: u64, window_from: u64) {
     let fire = match room.stall_cool.lock() {
         Ok(mut g) => {
             let last = g.get(user).copied().unwrap_or(0);
@@ -227,7 +235,17 @@ fn sync_required(room: &Room, user: &str, now: u64) {
     if !fire {
         return;
     }
-    tracing::info!(kind = "diag", session = %super::session_of(user), room = %room.id, user = %user, "stall detected — sync_required");
+    tracing::info!(
+        kind = "diag",
+        spec = "SV-IMPL-ROOM-STALL",
+        session = %super::session_of(user),
+        room = %room.id,
+        user = %user,
+        track = %track,
+        "in.start" = start,
+        "in.window_ms" = now.saturating_sub(window_from),
+        "stall detected — sync_required"
+    );
     let body = RoomEventBody::SyncRequired { room_id: room.id.clone(), reason: "stall".into() };
     super::user_notice(user, Op::RoomEvent, &body, Some(&room.id));
 }

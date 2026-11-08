@@ -105,7 +105,7 @@ pub async fn list(bus: &Bus) -> Result<ListRoomsRes, Failure> {
                 }
             }
             Err(f) => {
-                tracing::warn!(kind = "diag", node = %node, code = f.code, "room list — node did not answer");
+                tracing::warn!(kind = "diag", spec = "SV-RULE-BUS-REQUEST", node = %node, code = f.code, "room list — node did not answer");
             }
         }
     }

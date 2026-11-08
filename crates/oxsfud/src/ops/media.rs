@@ -629,7 +629,7 @@ pub fn ice_restart(c: &Ctx, body: &Value) -> Result<Value, Failure> {
     }
     let publish = creds.first().cloned().ok_or_else(|| Code::InternalError.failure())?;
     let subscribe = creds.get(1).cloned();
-    tracing::info!(kind = "diag", session = %c.session, user = %c.user, "ice restart issued {}", publish.ufrag);
+    tracing::info!(kind = "diag", spec = "SV-IMPL-LINK-ICE-RESTART", session = %c.session, user = %c.user, "ice restart issued {}", publish.ufrag);
     ok(&IceRestartRes { publish, subscribe })
 }
 

@@ -191,7 +191,7 @@ impl Ask {
     fn picks(&self, f: &[(String, String)]) -> bool {
         let kind_ok = match get(f, "kind") {
             Some("ev") => true,
-            Some("diag") => self.diag,
+            Some("diag") => self.diag || get(f, "spec").is_some(),
             Some("stat") => self.stat,
             _ => false,
         };
@@ -357,19 +357,21 @@ mod tests {
             at(2)
         );
         let diag = format!("ts={} mono=4 node=a proc=sfu kind=diag session=s1 user=u1 epoch=e1 msg=\"transport ready\"", at(3));
+        let labeled = format!("ts={} mono=4 node=a proc=sfu kind=diag spec=SV-RULE-SIM-TICK session=s1 user=u1 epoch=e1 in.to=l msg=\"auto layer\"", at(4));
         let quoted = format!("ts={} mono=5 node=a proc=sfu kind=ev spec=CP-OP-X epoch=e1 msg=\"user=u1 inside\"", at(4));
         let hub_ev = format!("ts={} mono=6 node=a proc=hub kind=ev spec=SES.S.bind_new session=s1 user=u1 area=SES key=s1 from=- to=live cause=BIND", at(5));
         let other = format!("ts={} mono=7 node=a proc=sfu kind=ev spec=CP-OP-X user=u2 epoch=e1", at(6));
-        put(&d, "ox.log.2026-11-08", &[hub_boot.clone(), sfu_boot.clone(), ev.clone(), diag.clone(), quoted, hub_ev.clone(), other]);
+        put(&d, "ox.log.2026-11-08", &[hub_boot.clone(), sfu_boot.clone(), ev.clone(), diag.clone(), labeled.clone(), quoted, hub_ev.clone(), other]);
         let f = read(&d, &ask("u1"));
-        assert_eq!(f.lines, vec![ev.clone(), hub_ev.clone()], "O-sym-RULE-READ-HISTORY-1 파일 줄 그대로 · 토큰 일치(msg 안 user= 는 아니다)");
+        assert_eq!(f.lines, vec![ev.clone(), labeled.clone(), hub_ev.clone()], "O-sym-RULE-READ-HISTORY-1 파일 줄 그대로 · 토큰 일치(msg 안 user= 는 아니다)");
+        assert!(!f.lines.contains(&diag), "O-sym-RULE-LOG-SPEC-2④ 기본 조회 — 근거 달린 진단 줄만");
         assert_eq!(f.boots, vec![sfu_boot.clone(), hub_boot.clone()]);
         assert!(!f.truncated);
         let f = read(&d, &Ask { diag: true, ..ask("u1") });
-        assert_eq!(f.lines, vec![ev.clone(), diag, hub_ev.clone()]);
+        assert_eq!(f.lines, vec![ev.clone(), diag, labeled.clone(), hub_ev.clone()]);
         let f = read(&d, &Ask { since: ms(&at(3)), ..ask("u1") });
-        assert_eq!(f.lines, vec![hub_ev]);
-        assert_eq!(f.boots, vec![hub_boot]);
+        assert_eq!(f.lines, vec![labeled, hub_ev]);
+        assert_eq!(f.boots, vec![sfu_boot, hub_boot]);
         let f = read(&d, &Ask { session: Some("s2".into()), ..ask("u1") });
         assert!(f.lines.is_empty() && f.boots.is_empty());
     }

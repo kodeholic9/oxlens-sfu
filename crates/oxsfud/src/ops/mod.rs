@@ -218,7 +218,7 @@ pub fn transition(area: &str, key: &str, spec: &str, from: &str, to: &str, cause
 }
 
 pub fn transport_ready(tr: &Arc<Transport>) {
-    tracing::info!(kind = "diag", session = %tr.session, user = %tr.user, "transport ready (dtls+srtp) conn {}", tr.id);
+    tracing::info!(kind = "diag", spec = "SV-RULE-LINK-TRANSPORT", session = %tr.session, user = %tr.user, "transport ready (dtls+srtp) {}", tr.role.name());
 }
 
 pub fn dc_opened(tr: &Arc<Transport>) {
@@ -231,12 +231,12 @@ pub fn dc_in(tr: &Arc<Transport>, buf: &[u8]) {
 }
 
 pub fn ufrag_promoted(tr: &Arc<Transport>, ufrag: &str) {
-    tracing::info!(kind = "diag", session = %tr.session, user = %tr.user, "ufrag promoted {ufrag}");
+    tracing::info!(kind = "diag", spec = "SV-IMPL-LINK-ICE-RESTART", session = %tr.session, user = %tr.user, "ufrag promoted {ufrag}");
 }
 
 pub fn peer_state_changed(tr: &Arc<Transport>, from: PeerState, to: PeerState, cause: &str, dwell_ms: u64) {
     transition("LINK", tr.role.name(), "SV-STATE-PEER-STATE", from.as_str(), to.as_str(), cause, &[("session", &tr.session), ("user", &tr.user)]);
-    tracing::info!(kind = "diag", session = %tr.session, user = %tr.user, "peer state {} after {dwell_ms}ms (conn {})", to.as_str(), tr.id);
+    tracing::info!(kind = "diag", spec = "SV-IMPL-LINK-PEER-STATE", session = %tr.session, user = %tr.user, "in.dwell_ms" = dwell_ms, "peer state {} after {dwell_ms}ms ({})", to.as_str(), tr.role.name());
 }
 
 pub fn floor_blocked_rtp(room: &Arc<String>, tr: &Arc<Transport>) {

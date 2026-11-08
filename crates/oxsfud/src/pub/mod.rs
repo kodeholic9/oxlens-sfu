@@ -314,7 +314,18 @@ impl PubTrack {
             crate::ops::first_rtp(&self.stream);
         }
         if !self.pt_checked.swap(true, Ordering::AcqRel) && rtp.pt != self.stream.pt {
-            tracing::warn!(kind = "diag", session = %self.stream.session, user = %self.stream.user, track = %self.stream.track_id, "[PT:MISMATCH] declared {} first rtp {}", self.stream.pt, rtp.pt);
+            tracing::warn!(
+                kind = "diag",
+                spec = "SV-IMPL-PUB-ACCEPT",
+                session = %self.stream.session,
+                user = %self.stream.user,
+                track = %self.stream.track_id,
+                "in.declared" = self.stream.pt,
+                "in.first" = rtp.pt,
+                "[PT:MISMATCH] declared {} first rtp {}",
+                self.stream.pt,
+                rtp.pt
+            );
         }
         if self.stream.kind == Kind::Audio
             && let Some(v) = ext_get(rtp.ext, ids.audio_level).and_then(|v| v.first())

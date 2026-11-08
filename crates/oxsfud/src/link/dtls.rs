@@ -98,7 +98,7 @@ pub async fn run(tr: Arc<Transport>, cert: dtls::crypto::Certificate, local: Soc
                 return;
             }
             Err(_) => {
-                tracing::info!(kind = "diag", session = %tr.session, user = %tr.user, "dtls handshake timeout");
+                tracing::info!(kind = "diag", spec = "SV-RULE-LINK-TRANSPORT", session = %tr.session, user = %tr.user, "in.timeout_secs" = super::DTLS_HANDSHAKE_SECS, "dtls handshake timeout");
                 return;
             }
         },
@@ -195,7 +195,7 @@ impl Sctp {
                                 tr.dc_open.store(true, Ordering::Release);
                                 crate::ops::dc_opened(tr);
                             } else {
-                                tracing::info!(kind = "diag", session = %tr.session, user = %tr.user, "dc label refused {label:?}");
+                                tracing::info!(kind = "diag", spec = "SV-RULE-LINK-TRANSPORT", session = %tr.session, user = %tr.user, "dc label refused {label:?}");
                             }
                         }
                     }

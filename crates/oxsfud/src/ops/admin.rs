@@ -164,7 +164,7 @@ fn destroy(rid: &str, body: &Value) -> Result<Value, Failure> {
         }
     }
     let r = room.clone();
-    super::spawn(async move { super::rooms::destroy_room(&r).await });
+    super::spawn(async move { super::rooms::destroy_room(&r, "OP-PATH-ADMIN-ROOMS-ROOM-ID-DESTROY", "destroy").await });
     Ok(json!({ "room_id": rid, "destroyed": true, "notified": notified }))
 }
 

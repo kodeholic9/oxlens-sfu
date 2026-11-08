@@ -135,7 +135,7 @@ impl Bus {
                 self.declare_room(r).await;
             }
         }
-        tracing::info!(kind = "diag", "local hub token back — room tokens redeclared ({})", rooms.len());
+        tracing::info!(kind = "diag", spec = "SV-RULE-BUS-PRESENCE", "local hub token back — room tokens redeclared ({})", rooms.len());
     }
 
     pub fn undeclare_room(&self, room: &str) {

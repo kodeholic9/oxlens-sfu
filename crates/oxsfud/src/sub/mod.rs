@@ -643,7 +643,7 @@ impl Table {
         self.st.lock().ok().and_then(|s| s.ready_at.get(room).copied())
     }
 
-    pub fn gate_timeouts(&self, now: u64) -> Vec<String> {
+    pub fn gate_timeouts(&self, now: u64) -> Vec<(String, u64)> {
         let Ok(mut s) = self.st.lock() else { return Vec::new() };
         let mut out = Vec::new();
         for (room, (g, since, latched)) in s.gates.iter_mut() {
@@ -651,7 +651,7 @@ impl Table {
                 g.store(true, Ordering::Release);
                 if !*latched {
                     let _ = std::mem::replace(latched, true);
-                    out.push(room.clone());
+                    out.push((room.clone(), now.saturating_sub(*since)));
                 }
             }
         }
@@ -842,7 +842,7 @@ mod tests {
         let g = t.rows()[0].gate.load_full().expect("video row has a gate");
         assert!(!g.load(Ordering::Acquire));
         assert!(t.gate_timeouts(1_000 + T_GATE_MS - 1).is_empty(), "정:IMPL-SUB-READY-GATE not before T-gate");
-        assert_eq!(t.gate_timeouts(1_000 + T_GATE_MS), vec!["r".to_string()], "정:IMPL-SUB-READY-GATE released at T-gate");
+        assert_eq!(t.gate_timeouts(1_000 + T_GATE_MS), vec![("r".to_string(), T_GATE_MS)], "정:IMPL-SUB-READY-GATE released at T-gate");
         assert!(g.load(Ordering::Acquire), "정:IMPL-SUB-READY-GATE gate open without READY");
         assert!(t.gate_timeouts(1_000 + 2 * T_GATE_MS).is_empty(), "정:IMPL-SUB-READY-GATE observed once");
     }
