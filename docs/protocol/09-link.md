@@ -237,7 +237,7 @@
 
 <a id="RULE-LINK-MLINE-EVENT-FORM"></a>**RULE-LINK-MLINE-EVENT-FORM** · 규칙
 
-★**`_EVENT` 인 이유** — 받은 클라가 구독 SDP 를 다시 짓는다. 구조를 고친다(각 장의 구조 이름 규율). ★**연결 하나의 것**이라 `room_id` 가 없다 — 방이 여럿이어도 표는 연결마다 하나다(§9-1-5 와 같은 축). ★그래서 표의 상태와 판단도 연결 개체(LINK — 서버마다)가 갖는다 — 방마다인 트랙 목록(TRK)은 트랙이 받는 트랙이 되거나 그칠 때 연결 표에 알릴 뿐이다.
+★**`_EVENT` 인 이유** — 받은 클라가 배정표를 갈아 끼운다(다시 짓나는 §8-1-2). 구조를 고친다(각 장의 구조 이름 규율). ★**연결 하나의 것**이라 `room_id` 가 없다 — 방이 여럿이어도 표는 연결마다 하나다(§9-1-5 와 같은 축). ★그래서 표의 상태와 판단도 연결 개체(LINK — 서버마다)가 갖는다 — 방마다인 트랙 목록(TRK)은 트랙이 받는 트랙이 되거나 그칠 때 연결 표에 알릴 뿐이다.
 ★**1단이다**(§2-3-1). 다만 차례가 상태를 정하지 않는다 — 새것은 `arev` 가 가른다(§8-1-2).
 
 → 구조 — [`LINK.op.MLINE_EVENT`](#LINK.op.MLINE_EVENT)
@@ -453,7 +453,7 @@
 | <a id="LINK.C.any.peer_replaced"></a>`LINK.C.any.peer_replaced` | 받는 효과 ROOM link.server_ice · 나머지 | ls ← 'OK'; ice ← 'OK'; assoc ← true; dc ← true; gen ← g; pgen ← 0; req ← 0; sync ← true; cause ← 'NONE'; nego ← false; dirty ← false; everUp ← true · 효과 floor.dc_down → FLR.C.any.dc_down · 효과 floor.down_server → FLR.C.any.down · 효과 pub.reregister_server → PUB.C.any.reregister_moving · PUB.C.any.reregister · PUB.C.any.reregister_off · 효과 app.link_ok · 효과 floor.dc_up → FLR.C.any.dc_reopen | §4-1-7 §9-2-1 2 — ★서버가 다시 입장으로 옛 Peer 를 축출하고 새 Peer 를 세웠다(ROOM.S.join_again) — 그 서버의 발행 · DC · 배정표가 옛 Peer 와 함께 사라졌다. 새 연결로 갈아 끼우고 재구축이 끝난 것과 같이 선다(LINK.C.REBUILD.rebuilt) · 그 서버 발행은 전부 다시 한다(pub.reregister_server) · 배정표는 같은 응답의 link.table 이 뒤따른다(차례 arev 는 세션마다 이어진다 — RULE-SUB-TABLE-PROC · 재구축 끝과 같다). ★방은 다시 들어가지 않는다 — 들어간 방은 이 응답이고, 사라진 방은 응답 sub_rooms 가 알린다(ROOM.C.JOINED.not_in_sub_rooms). 재구축처럼 그 서버 방을 다시 들어가면 그 입장이 또 옛 Peer 를 축출한다(E · LiveKit full restart 선례 — 참가자 교체 뒤 발행 전부 다시) |
 | <a id="LINK.C.any.close_all"></a>`LINK.C.any.close_all` | 받는 효과 SES media.close_all · 나머지 | ls ← 'NONE'; dc ← false; sync ← false; nego ← false; dirty ← false; pgen ← 0; req ← 0 · 효과 pub.drop_server → PUB.C.STAGED.drop_server · PUB.C.any.drop_server · 효과 conn.close | §3-2-3 2 §3-2-4 2 — 연결이 닫히면 서버가 Peer 와 함께 발행 트랙을 푼다 — 발행 상태를 IDLE 로(RULE-ROOM-LEAVE-RES 2) |
 | <a id="LINK.C.any.last_room_left"></a>`LINK.C.any.last_room_left` | 받는 효과 ROOM link.room_left · last | ls ← 'NONE'; dc ← false; sync ← false; nego ← false; dirty ← false; pgen ← 0; req ← 0 · 효과 pub.drop_server → PUB.C.STAGED.drop_server · PUB.C.any.drop_server · 효과 conn.close | §4-2-5 2 — 서버의 세션 창을 기다리지 않는다 · 클라는 PUBLISH_TRACKS{remove} 를 보내지 않고 그 서버 발행을 IDLE 로 내린다 |
-| <a id="LINK.C.any.room_left"></a>`LINK.C.any.room_left` | 받는 효과 ROOM link.room_left · 나머지 | — | §4-2-5 1 — 남은 방이 있다 — 구독 SDP 를 다시 조립한다(ROOM 이 sdp.rebuild 로 따로 알린다) |
+| <a id="LINK.C.any.room_left"></a>`LINK.C.any.room_left` | 받는 효과 ROOM link.room_left · 나머지 | — | §4-2-5 1 — 남은 방이 있다 — 구독 SDP 는 다시 짓지 않는다(서버가 그 방 줄을 비운 표를 MLINE_EVENT 로 준다 · RULE-SUB-TABLE-PROC 5) |
 | <a id="LINK.C.any.repair_rebuild"></a>`LINK.C.any.repair_rebuild` | 받는 효과 SES media.repair · !assoc | ls ← 'REBUILD'; cause ← 'ASSOC'; dc ← false; sync ← false; pgen ← 0; req ← 0 · 효과 floor.dc_down → FLR.C.any.dc_down · 효과 floor.down_server → FLR.C.any.down · 효과 store.drop_server → ROOM.C.LEAVING.down · ROOM.C.JOINING.down_quit · ROOM.C.any.down · 효과 conn.close · 효과 rooms.rejoin_server → ROOM.C.NONE.rejoin · 효과 pub.reregister_server → PUB.C.any.reregister_moving · PUB.C.any.reregister · PUB.C.any.reregister_off · 효과 app.link_rebuilding | §3-2-3 4 §9-2-1 2 — DTLS · SCTP 가 닫혔다 — 치료 불가 확정 ②와 같다(RULE-LINK-RECOVERY-REBUILD) |
 | <a id="LINK.C.any.repair_restart"></a>`LINK.C.any.repair_restart` | 받는 효과 SES media.repair · ice != 'OK' | ls ← 'RESTART'; rid ← rid + 1; req ← rid + 1 · 보낸다 ICE_RESTART.req · 효과 app.link_reviving | §3-2-3 4 §9-2-1 1 — ICE 층이면 재시작 — WS 는 방금 RESUME 으로 산 것이 확인됐다(점검을 건너뛴다) |
 | <a id="LINK.C.any.repair_recheck"></a>`LINK.C.any.repair_recheck` | 받는 효과 SES media.repair · ls == 'CHECK' \|\| ls == 'RESTART' | ls ← 'RESTART'; rid ← rid + 1; req ← rid + 1 · 보낸다 ICE_RESTART.req · 효과 app.link_reviving | §3-2-3 4 §9-2-1 4 — WS 점검(HEARTBEAT) · ICE_RESTART 가 끊긴 옛 소켓에 실려 그 응답이 오지 않는다 — RESUME 으로 WS 가 산 것이 확인됐으니 점검을 건너뛰고 재시작을 다시 보낸다(새 요청 번호 · 옛 응답은 LINK.C.any.restart_res_other 가 버린다) |
@@ -669,9 +669,7 @@ WS 는 살아 있다는 전제다 — WS 가 죽었으면 세션 층(§3-2-4 · 
 | 언제 | 어느 연결 |
 |---|---|
 | 내가 트랙을 더하거나 뺐다 | 발행 |
-| ★`TRACK_EVENT` 를 받았다 | 구독 |
-| `ROOM_JOIN` 응답의 `tracks[]` 를 처음 받았다 | 구독 |
-| 방을 나가서 받을 것이 줄었다 | 구독 |
+| ★배정표의 SDP 재료가 바뀌었다 · `ROOM_JOIN` 성공 응답 · HTTP 재동기 응답 — ★**언제인지는 §8-1-2 3 · 5 가 정본이다**(다시 적지 않는다) | 구독 |
 | ★`ICE_RESTART` 응답을 받았다(§7-1-2) | ★**그 서버의 연결 전부**(`2pc` 면 둘 — 응답이 두 벌이다) |
 
 ★★**SDP 갱신은 연결마다 큐로 하나씩 한다 — 두 모드 공통이다.** 한 연결 위에서 협상 둘을 동시에
