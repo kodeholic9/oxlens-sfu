@@ -118,10 +118,15 @@ pub fn reap(peer: &Arc<Peer>, why: Why) {
     }
     if let Some(t) = s.tables.remove(peer.subscribe.id) {
         s.tables.keep(&peer.sid, t.arev());
+        for (tid, st) in t.states() {
+            crate::ops::transition("SUB", &tid, "SV-STATE-SUBSCRIBE-STATE", st.name(), "-", why.as_str(), &[("session", &peer.session), ("user", &peer.user)]);
+        }
     }
     let m = crate::fwd::rt::media();
     for (i, tr) in peer.transports().into_iter().enumerate() {
-        tr.closed.store(true, Ordering::Release);
+        if tr.closed.swap(true, Ordering::AcqRel) {
+            continue;
+        }
         let _ = tr.stop.send(true);
         if let Some(m) = m {
             m.unregister(&tr);

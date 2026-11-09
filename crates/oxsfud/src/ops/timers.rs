@@ -161,7 +161,7 @@ fn stall(win: &mut HashMap<usize, (u64, u64)>) {
                     win.insert(key, (sent, now));
                     continue;
                 }
-                if now.saturating_sub(ws) < STALL_MS {
+                if now.saturating_sub(ws) < STALL_MS / 2 {
                     continue;
                 }
                 let slot = row.slot;

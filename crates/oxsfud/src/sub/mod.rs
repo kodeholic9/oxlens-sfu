@@ -53,6 +53,15 @@ pub enum SubState {
     Active,
 }
 
+impl SubState {
+    pub fn name(self) -> &'static str {
+        match self {
+            SubState::Created => "Created",
+            SubState::Active => "Active",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Tuple(pub String);
 
@@ -137,6 +146,7 @@ pub struct Change {
     pub down: Arc<DownRow>,
     pub class: Class,
     pub old: Option<(String, String)>,
+    pub was: SubState,
     pub new: Option<(String, String)>,
 }
 
@@ -320,8 +330,8 @@ impl Table {
 
     fn fresh_ssrc(s: &mut State) -> u32 {
         loop {
-            let v = rand_u32();
-            if v > 1 && !s.ssrcs.contains(&v) && !s.uplink.contains(&v) {
+            let v = rand_u32() | 0x8000_0000;
+            if !s.ssrcs.contains(&v) && !s.uplink.contains(&v) {
                 s.ssrcs.insert(v);
                 return v;
             }
@@ -410,6 +420,7 @@ impl Table {
         let gate = if c.class == Class::Full && c.kind == Kind::Video { Some(Self::gate(s, &c.room, now)) } else { None };
         let r = &mut s.rows[i];
         let old = r.track.replace((c.track_id.clone(), c.room.clone()));
+        let was = r.state;
         r.since = rev;
         r.loaded_at = now;
         r.state = SubState::Created;
@@ -418,31 +429,33 @@ impl Table {
         r.down.src.store(Some(Arc::new((c.track_id.clone(), c.room.clone()))));
         r.down.gate.store(gate);
         r.down.loaded_at.store(now, Ordering::Release);
-        out.push(Change { down: r.down.clone(), class: r.class, old, new: Some((c.track_id.clone(), c.room.clone())) });
+        out.push(Change { down: r.down.clone(), class: r.class, old, was, new: Some((c.track_id.clone(), c.room.clone())) });
     }
 
     fn rehome(s: &mut State, i: usize, c: &Cand, rev: u64, now: u64, out: &mut Vec<Change>) {
         let gate = if c.kind == Kind::Video { Some(Self::gate(s, &c.room, now)) } else { None };
         let r = &mut s.rows[i];
         let old = r.track.replace((c.track_id.clone(), c.room.clone()));
+        let was = r.state;
         r.since = rev;
         r.down.since.store(rev, Ordering::Release);
         r.down.room.store(Some(Arc::new(c.room.clone())));
         r.down.src.store(Some(Arc::new((c.track_id.clone(), c.room.clone()))));
         r.down.gate.store(gate);
-        out.push(Change { down: r.down.clone(), class: r.class, old, new: Some((c.track_id.clone(), c.room.clone())) });
+        out.push(Change { down: r.down.clone(), class: r.class, old, was, new: Some((c.track_id.clone(), c.room.clone())) });
     }
 
     fn unload(s: &mut State, i: usize, rev: u64, out: &mut Vec<Change>) {
         let r = &mut s.rows[i];
         let Some(old) = r.track.take() else { return };
+        let was = r.state;
         r.since = rev;
         r.state = SubState::Created;
         r.down.since.store(rev, Ordering::Release);
         r.down.src.store(None);
         r.down.room.store(None);
         r.down.gate.store(None);
-        out.push(Change { down: r.down.clone(), class: r.class, old: Some(old), new: None });
+        out.push(Change { down: r.down.clone(), class: r.class, old: Some(old), was, new: None });
     }
 
     fn fresh_slot_rows(s: &State, cands: &[Cand], want_slot: &BTreeSet<(String, Kind)>) -> usize {
@@ -635,6 +648,13 @@ impl Table {
         }
         out.changes = ch;
         out
+    }
+
+    pub fn states(&self) -> Vec<(String, SubState)> {
+        self.st
+            .lock()
+            .map(|s| s.rows.iter().filter_map(|r| r.track.as_ref().map(|t| (t.0.clone(), r.state))).collect())
+            .unwrap_or_default()
     }
 
     pub fn ready(&self, room: &str, arev: u64, now: u64) -> (bool, Vec<(String, String)>) {

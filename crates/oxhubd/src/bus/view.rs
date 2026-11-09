@@ -178,13 +178,7 @@ impl View {
         let held = std::mem::take(&mut self.held);
         let mut dropped = Vec::new();
         for room in held {
-            let alive = self
-                .routing
-                .get(&room)
-                .map(|l| self.nodes.get(&l.node).map(|n| n.live).unwrap_or(l.node == self.self_node))
-                .unwrap_or(false);
-            if !alive {
-                self.routing.remove(&room);
+            if self.routing.remove(&room).is_some() {
                 dropped.push(room);
             }
         }
@@ -330,6 +324,26 @@ mod tests {
         assert!(v.settle(5_500).dropped_rooms.is_empty());
         assert_eq!(v.settle(6_100).dropped_rooms, vec!["rb".to_string()]);
         assert!(v.room_node("rb").is_none());
+    }
+
+    #[test]
+    fn held_room_of_returned_owner_drops_unless_redeclared() {
+        let mut v = View::new("c", "ci", 30_000);
+        v.on_token(np("a"), 0);
+        v.on_token(np("b"), 0);
+        v.on_token(rp("rb", "b"), 0);
+        v.on_token(rp("rb2", "b"), 0);
+        v.on_token(rd("rb", "b"), 10);
+        v.on_token(rd("rb2", "b"), 10);
+        v.on_token(nd("a"), 20);
+        v.on_token(nd("b"), 25);
+        assert!(v.settle(2_000).isolated_now);
+        v.on_token(np("a"), 5_000);
+        v.on_token(np("b"), 5_000);
+        v.on_token(rp("rb2", "b"), 5_000);
+        assert_eq!(v.settle(6_100).dropped_rooms, vec!["rb".to_string()]);
+        assert!(v.room_node("rb").is_none());
+        assert!(v.room_node("rb2").is_some());
     }
 
     #[test]

@@ -389,9 +389,7 @@ pub async fn dispose(ctx: &Arc<Ctx>, s: &Arc<Session>, label: &str, cause: &str)
         st.conn = None;
         st.servers.clear();
     }
-    if label != "SES.S.bind_new" {
-        transition(s, Some(label), &from, Some("-"), cause, &[]);
-    }
+    transition(s, Some(label), &from, Some("-"), cause, &[]);
     let env = ctx.envelope(s, CallKind::SessionGone);
     for n in nodes {
         let bus = ctx.bus.clone();

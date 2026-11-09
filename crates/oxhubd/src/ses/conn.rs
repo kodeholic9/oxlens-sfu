@@ -263,12 +263,12 @@ pub async fn serve(ws: WebSocket, ctx: Arc<Ctx>) {
     }
     drop(req_tx);
     let _ = processor.await;
+    let _ = conn.tx.send(Out::Close);
+    let _ = writer.await;
     let code = leave_code.lock().ok().and_then(|g| *g);
     if let Some(s) = session {
         super::socket_dropped(&ctx, &s, conn.id, code).await;
     }
-    let _ = conn.tx.send(Out::Close);
-    let _ = writer.await;
 }
 
 async fn send_leave(

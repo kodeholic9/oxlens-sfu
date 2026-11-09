@@ -13,12 +13,10 @@ use serde_json::{Value, json};
 use super::handle::Ctx;
 use crate::fwd::LAYER_PAUSE;
 use crate::link::{Cred, Peer};
-use crate::r#pub::{PubStream, PubTrack, PublishState, StreamInit, index_add, index_remove};
+use crate::r#pub::{PER_PERSON, PER_REQUEST, PubStream, PubTrack, PublishState, StreamInit, index_add, index_remove};
 use crate::room::{Room, notice};
 use crate::sub::{Cand, Change, Class, SyncOut};
 
-pub const PER_REQUEST: usize = 8;
-pub const PER_PERSON: usize = 16;
 
 fn sfu() -> Result<&'static Arc<super::Sfu>, Failure> {
     super::sfu().ok_or_else(|| Code::InternalError.failure())
@@ -122,6 +120,12 @@ pub fn apply_changes(changes: &[Change]) {
         }
         c.down.src_track.store(None);
         c.down.layer.store(LAYER_PAUSE, Ordering::Release);
+        if c.new.is_some()
+            && c.new != c.old
+            && let Ok(mut rw) = c.down.rw.lock()
+        {
+            rw.src = None;
+        }
         if let Some((tid, rid)) = &c.new {
             match c.class {
                 Class::Full => {
@@ -157,6 +161,17 @@ pub fn resync_peer(p: &Peer, notify: bool) -> SyncOut {
     let Some(t) = s.table(p) else { return SyncOut::default() };
     let out = t.sync(&cands_for(p), common::now_ms());
     apply_changes(&out.changes);
+    for c in &out.changes {
+        if c.old.as_ref().map(|o| &o.0) == c.new.as_ref().map(|n| &n.0) {
+            continue;
+        }
+        if let Some((tid, _)) = &c.old {
+            super::transition("SUB", tid, "SV-STATE-SUBSCRIBE-STATE", c.was.name(), "-", "unload", &[("session", &p.session), ("user", &p.user)]);
+        }
+        if let Some((tid, _)) = &c.new {
+            super::transition("SUB", tid, "SV-STATE-SUBSCRIBE-STATE", "-", "Created", "load", &[("session", &p.session), ("user", &p.user)]);
+        }
+    }
     for (tid, on) in out.unplaced_add.iter().map(|t| (t, true)).chain(out.unplaced_del.iter().map(|t| (t, false))) {
         if let Some(st) = s.stream(tid) {
             mark_unplaced(&st, &p.user, on);
@@ -522,18 +537,20 @@ pub fn subscribe_layer(c: &Ctx, body: &Value) -> Result<Value, Failure> {
     let now = common::now_ms();
     let mut resync = false;
     for x in &req.targets {
-        let Some(st) = s.stream(&x.track_id) else { continue };
-        if t.set_pref(&x.track_id, x.priority, x.paused) {
+        if s.stream(&x.track_id).is_some() && t.set_pref(&x.track_id, x.priority, x.paused) {
             resync = true;
         }
+    }
+    if resync {
+        resync_peer(&peer, true);
+    }
+    for x in &req.targets {
+        let Some(st) = s.stream(&x.track_id) else { continue };
         if !st.simulcast {
             continue;
         }
         let (Some(row), Some(any)) = (t.row_of_track(&x.track_id), st.physical().into_iter().next()) else { continue };
         crate::sim::subscribe_layer(&row, &any, x.spatial, x.paused, x.priority, now);
-    }
-    if resync {
-        resync_peer(&peer, true);
     }
     ok(&Empty {})
 }

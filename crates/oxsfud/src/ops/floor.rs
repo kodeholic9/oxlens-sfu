@@ -31,6 +31,7 @@ type Key = (&'static str, Option<String>);
 #[derive(Default)]
 pub struct Clock {
     pub timers: BTreeMap<Key, u64>,
+    pub events: u64,
     pub grant_no: u64,
     pub granted_at: u64,
     pub first_rtp_at: Option<u64>,
@@ -118,10 +119,13 @@ impl<'a> Entry<'a> {
     }
 }
 
-fn trace(room: &str, e: &Entry, from: G, to: G, step: &Step) {
+fn trace(room: &str, e: &Entry, from: G, to: G, step: &Step, n: u64) {
     let spec = step.labels.first().copied();
     let t = common::log::Transition { area: "FLR", key: room, spec, from: from.as_str(), to: spec.map(|_| to.as_str()), cause: e.name, inputs: &e.ins };
-    let mut l = t.line().key("room", room);
+    let mut l = t.line().key("room", room).key("floor_sequence", n.to_string());
+    if let Some(o) = step.out.iter().find(|o| matches!(o.m.t, crate::flr::core::Mt::Idle | crate::flr::core::Mt::Taken)) {
+        l = l.key("mbcp_seq", o.m.n.to_string());
+    }
     if !e.user.is_empty() {
         l = l.key("session", super::session_of(e.user)).key("user", e.user);
     }
@@ -141,7 +145,8 @@ where
         let was_idle = fl.g == G::Idle;
         let from = fl.g;
         let Some(step) = f(&mut fl, t2_left) else { return Step::default() };
-        trace(&room.id, &e, from, fl.g, &step);
+        ck.events += 1;
+        trace(&room.id, &e, from, fl.g, &step, ck.events);
         let mut effects = Vec::new();
         for fx in &step.fx {
             match fx {
