@@ -1,7 +1,7 @@
 # 10. 끊김과 복구 — 끊긴 층만 고친다
 
 > author: kodeholic (powered by Claude) · created: 2026-11-09.
-> ★**대조한 커밋** — 서버 `oxlens-sfu` `c3642e8` · SDK `oxlens-sdk-web` `9f40557`(+탐침) · 2층 `oxlens-labs` `fc584ff` · oxpeer `93df1c6`
+> ★**대조한 커밋** — 서버 `oxlens-sfu` `1ef7265` · SDK `oxlens-sdk-web` `de8c4a9`(+탐침) · 2층 `oxlens-labs` `a68d2de` · oxpeer `740f172`
 > ★**실측 회차** — 3층 탐침 `TOUR-10` 한 회차 · 2층 시나리오 `peer_recorder_*` · `peer_agent_*` · `adv_idle_survives` 한 회차씩. 값은 돌릴 때마다 바뀌고 차례 · 모양은 같다.
 
 ## 1. 30초 요약
@@ -11,48 +11,49 @@ flowchart TD
   Q["무엇이 끊겼나"] --> W["WS 만<br/>① 3층 · ⑤ 서버사이드 SDK"]
   Q --> F["프로세스가 얼었다 — WS 와 ICE 둘 다<br/>② 재개 창 안"]
   Q --> G["세션이 사라졌다<br/>③ 재개 창 밖 · ④ 운영 절단"]
-  Q --> U["미디어 서버 유닛이 죽었다<br/>⑥ 그 서버의 방 · 연결"]
-  W --> R1["같은 session_id 로 BIND + RESUME<br/>미디어는 건드리지 않는다"]
-  F --> R2["RESUME + ICE_RESTART + READY<br/>DTLS · 구독 · 발행은 그대로"]
-  G --> R3["새 세션 → ROOM_JOIN 부터 재구축<br/>첫 ROOM_JOIN 을 흩어 늦춘다"]
-  U --> R4["그 서버만 재구축<br/>방이 없으면 3001 · 그 연결을 닫는다 · 세션은 산다"]
+  Q --> U["SFU 유닛이 죽었다<br/>⑥ 그 서버의 방 · 트랜스포트"]
+  W --> R1["세션 재개 — 같은 session_id 로 BIND + RESUME<br/>미디어는 건드리지 않는다"]
+  F --> R2["세션 재개 + ICE restart + READY<br/>DTLS · 구독 · 발행은 그대로"]
+  G --> R3["재연결 rebuild — 새 세션 · 새 PeerConnection<br/>ROOM_JOIN 부터 · 첫 ROOM_JOIN 을 흩어 늦춘다"]
+  U --> R4["그 서버만 재연결<br/>방이 없으면 3001 · 그 PeerConnection 을 닫는다 · 세션은 산다"]
 ```
 
-- **끊김은 층으로 가른다** — 신호(WS) · 미디어 연결(ICE) · 세션 · 서버 상태. 가장 아래에서 고장 난 층만 고친다([연:RULE-LINK-RECOVERY-TIERS](../protocol/09-link.md#RULE-LINK-RECOVERY-TIERS)). 층이 위로 갈수록 값이 커진다.
-- **실측 값** — WS 만 끊기면 왕복 한 번(10ms) · 35초 얼었다 깨면 250ms · 창 밖이면 새 세션과 재구축(0.4~3초, 대부분 일부러 흩어 늦춘 시간) · 유닛이 죽으면 그 서버의 방을 잃는다(`3001`).
-- **무발화는 끊김이 아니다** — 35초 동안 한 패킷도 안 보낸 구독자가 회수되지 않았다(⑦). 생존은 미디어가 아니라 STUN · 하트비트가 붙든다.
+- **끊김은 층으로 가른다.** 신호(WS) · 미디어(ICE) · 세션 · 서버 상태의 넷이다. 가장 아래에서 고장 난 층만 고친다([연:RULE-LINK-RECOVERY-TIERS](../protocol/09-link.md#RULE-LINK-RECOVERY-TIERS)). 위 층으로 갈수록 값이 커진다.
+- **복구 단계는 셋이다.** 세션 재개(`RESUME`) · ICE restart · 재연결(rebuild — 새 PeerConnection)이다.
+- **실측 값** — WS 만 끊기면 왕복 한 번이다(끊김 → 재개 완료 9~10ms). 35초 얼었다 깨면 250ms 다. 재개 창 밖이면 새 세션과 재연결이다(0.1~0.9초, 대부분 일부러 흩어 늦춘 시간). 유닛이 죽으면 그 서버의 방을 잃는다(`3001`).
+- **무발화는 끊김이 아니다.** 35초 동안 한 패킷도 안 보낸 구독자가 정리(reclaim)되지 않았다(⑦). 생존은 미디어가 아니라 STUN · 하트비트가 붙든다.
 
 ## 2. 등장인물 · 값
 
 | 이름 | 실제 값 | 무엇 |
 |---|---|---|
-| A · B(3층) | `tourcut_A` · `tourcut_B` · 방 `qa_tourcut_p0` · node-a · `1pc` | A 의 신호만 시험 중계를 지나 3.0초 끊긴다 · B 는 마이크를 켜고 A 가 듣는다 · 미디어(UDP)는 중계를 안 지난다 |
-| 녹음기 | `oxpeer~peer_recorder_*` · 투명(hidden) · `2pc` | 서버사이드 SDK([16 장](16_OXPEER.md)) — 얼리고 · 끊고 · 유닛을 내리는 대상. 앞뒤로 봇이 말해 끊김이 녹음에 남는지 본다 |
+| A · B(3층) | `tourcut_A` · `tourcut_B` · 방 `qa_tourcut_p0` · node-a · `1pc` | A 의 신호만 시험 중계를 지나 3.0초 끊긴다. B 는 마이크를 켜고 A 가 듣는다. 미디어(UDP)는 중계를 안 지난다 |
+| 녹음기 | `oxpeer~peer_recorder_*` · 투명(hidden) · `2pc` | 서버사이드 SDK([16 장](16_OXPEER.md)). 얼리고 · 끊고 · 유닛을 내리는 대상이다. 앞뒤로 봇이 말해 끊김이 녹음에 남는지 본다 |
 | 에이전트 | `agent~peer_agent_*` · 표지 음성을 발행 | 발행자 쪽 복구 — 발행이 이어지나 · 다시 발행하나 |
 | 봇 | `botA` · `botB`(발화) · `botC`(청취) | 2층 하네스 `oxe2epy` 의 헤드리스 봇 |
 
 | 값 | 얼마 | 어디서 |
 |---|---|---|
 | 하트비트 주기 | 10,000ms | `BIND` 응답 `heartbeat_interval`(실측) |
-| 하트비트 시한(hub) | 30,000ms — 넘으면 `LEAVE 4008` | 이 회차로 재지 않은 설정값 — `common/src/policy.rs` 기본값. 실측 drop 은 마지막 수신 30.0초 뒤(§3-3) |
-| 재개 창 | 60,000ms | `BIND` 응답 `resume_window_ms`(실측). 실측 `SES.S.TWindow` 는 drop 뒤 60.01~61.01초(이 회차 서버 로그의 `drop` → `TWindow` 485 쌍) — hub 청소가 1초 주기다 |
+| 하트비트 시한(hub) | 30,000ms — 넘으면 `LEAVE 4008` | 이 회차로 재지 않은 설정값 — `common/src/policy.rs` 기본값. 실측 끊김은 마지막 수신 30.0초 뒤(§3-3) |
+| 재개 창 | 60,000ms | `BIND` 응답 `resume_window_ms`(실측). 실측 `SES.S.TWindow` 는 끊김 뒤 60.01~61.00초(이 회차 서버 로그 조각의 `drop` → `TWindow` 479 쌍). hub 청소가 1초 주기라서다 |
 | 재접속 사다리 | 0 · 300 · 1200 · 2700 · 4800 · 7000×5ms · 셋째 시도부터 지터 0~1000ms | [연:RULE-SES-BACKOFF-LADDER](../protocol/03-ses.md#RULE-SES-BACKOFF-LADDER) · [연:R-SES-TBIND-ADDS](../protocol/03-ses.md#R-SES-TBIND-ADDS) |
 | 사다리 처음으로 | 붙은 뒤 10,000ms 안정 | [연:RULE-SES-BACKOFF-LADDER](../protocol/03-ses.md#RULE-SES-BACKOFF-LADDER)(`T-stable`) |
 | UDP 쌍 만료(서버) | 30,000ms → `Suspect` + `LINK_EVENT` | `oxsfud/src/link/mod.rs` `UDP_PAIR_EXPIRE_MS` |
-| 흔들림 기다림 · WS 점검 · 재시작 시한 | 2,000 · 2,000 · 5,000ms | SDK 기본값(`wobblyGraceMs` · `wsProbeTimeoutMs` · `iceRestartTimeoutMs`) — oxpeer 도 같은 원천에서 생성 |
-| 재구축 첫 `ROOM_JOIN` 분산 | 0~5,000ms 균등 | [연:RULE-SES-REBUILD-JITTER](../protocol/03-ses.md#RULE-SES-REBUILD-JITTER) · 기본값 `massJitterMs` |
+| ICE 흔들림 기다림 · WS 점검 · ICE restart 시한 | 2,000 · 2,000 · 5,000ms | SDK 기본값(`wobblyGraceMs` · `wsProbeTimeoutMs` · `iceRestartTimeoutMs`) — oxpeer 도 같은 원천에서 생성 |
+| 재연결 첫 `ROOM_JOIN` 분산 | 0~5,000ms 균등 | [연:RULE-SES-REBUILD-JITTER](../protocol/03-ses.md#RULE-SES-REBUILD-JITTER) · 기본값 `massJitterMs` |
 
 **끊김 사다리 — 이 장의 일곱 칸(실측)**
 
 | 칸 | 일으킨 것 | 끊긴 것 | 누가 먼저 아나 | 잇는 길 | 걸린 시간 |
 |---|---|---|---|---|---|
-| ① | TCP 중계가 A 의 신호를 3.0초 막음(3층) | WS | 양쪽 1ms 안(TCP 닫힘) | `BIND`(session_id) + `RESUME` | 끊김 → `ACTIVE` 5.56초(망 없음 3.01 + 사다리 대기 2.54) |
-| ② | 녹음기 프로세스 35초 얼림 | WS + ICE | hub(30초 하트비트) · sfud(30초 쌍 만료) | `RESUME` → `ICE_RESTART` → `READY` | 깨어남 → 재시작 끝 250ms |
-| ③ | 95초 얼림 | 세션 | hub — 재개 창 만료(`TWindow`) | 새 `BIND` → 재구축 | 깨어남 → 연결 수립 428ms(분산 409ms 포함) |
-| ④ | 운영 절단 `/admin/users/{user}/cut` | 세션 | 서버(운영자) → `LEAVE 2009` | 새 `BIND` → 재구축 → 에이전트는 다시 발행 | 녹음기 2.99초 · 에이전트 0.78초(대부분 분산) |
-| ⑤ | WS 만(녹음기 · 에이전트) | WS | 양쪽 | `BIND` + `RESUME`(첫 칸) | drop → `resume_ok` 10ms · 12ms |
-| ⑥ | 방을 든 미디어 유닛을 내림 | 그 서버의 방 · Peer | hub(방 토큰 1.0초) · SDK(ICE) | `ICE_RESTART` → `3010` → 재구축 → `3001` → 그 연결 닫음 | 유닛 정지 → `3001` 12.2초 · 세션은 산다 |
-| ⑦ | 35초 무발화(발행 0) | 없음 | — | STUN consent · `HEARTBEAT` | 회수 0 · 받은 패킷 1600 |
+| ① | TCP 중계가 A 의 신호를 3.0초 막음(3층) | WS | hub · SDK 둘 다 1ms 차로 안다(TCP 닫힘 — 끊은 시각부터 3ms 안) | `BIND`(session_id) + `RESUME` | 끊김 → `ACTIVE` 4.49초(망 없음 3.01 + 사다리 대기 1.47) |
+| ② | 녹음기 프로세스 35초 얼림 | WS + ICE | hub(30초 하트비트) · SFU(30초 쌍 만료) | `RESUME` → `ICE_RESTART` → `READY` | 깨어남 → ICE restart 끝 250ms |
+| ③ | 95초 얼림 | 세션 | hub — 재개 창 만료(`TWindow`) | 새 `BIND` → 재연결 | 깨어남 → 트랜스포트 수립 약 0.8초(분산 780ms 포함) |
+| ④ | 운영 절단 `/admin/users/{user}/cut` | 세션 | 서버(운영자) → `LEAVE 2009` | 새 `BIND` → 재연결 → 에이전트는 다시 발행 | 녹음기 84ms · 에이전트 0.84초(대부분 분산) |
+| ⑤ | WS 만(녹음기 · 에이전트) | WS | 양쪽 | `BIND` + `RESUME`(첫 칸) | 끊김 → `resume_ok` 10ms · 9ms |
+| ⑥ | 방을 든 SFU 유닛을 내림 | 그 서버의 방 · Peer | hub(방 토큰 1.05초) · SDK(ICE) | `ICE_RESTART` → `3010` → 재연결 → `3001` → 그 PeerConnection 닫음 | 유닛 정지 → `3001` 10.8초 · 세션은 산다 |
+| ⑦ | 35초 무발화(발행 0) | 없음 | — | STUN consent · `HEARTBEAT` | 정리 0 · 받은 패킷 1603 |
 
 ## 3. 정상 길 — 사다리 일곱 칸
 
@@ -64,193 +65,231 @@ sequenceDiagram
   participant A as A SDK
   participant R as 시험 중계
   participant H as oxhubd
-  participant S as oxsfud
-  Note over A,S: 58.825 중계가 A 의 TCP 를 끊고 3초 받지 않는다
+  participant S as SFU oxsfud
+  Note over A,S: 15.918 중계가 A 의 TCP 를 끊고 3초 받지 않는다
   R--xA: 소켓 닫힘
-  Note over H: 58.827 SES.S.drop live+bound+rooms → live+rooms
-  Note over A: 58.828 SES ACTIVE → RESUMING drop_carry
-  A->>R: 58.829 시도 1 바로 → 거절
-  A->>R: 59.145 시도 2 +312ms → 거절
-  A->>R: 00.749 시도 3 +1601ms → 거절
-  Note over R: 01.833 중계가 다시 받는다
-  A->>R: 04.376 시도 4 +3623ms → 열림
-  A->>H: 04.381 BIND token · session_id
+  Note over H: 15.920 SES.S.drop live+bound+rooms → live+rooms
+  Note over A: 15.921 SES ACTIVE → RESUMING drop_carry
+  A->>R: 15.922 시도 1 바로 → 거절
+  A->>R: 16.236 시도 2 → 거절
+  A->>R: 17.450 시도 3 → 거절
+  Note over R: 18.928 중계가 다시 받는다
+  A->>R: 20.394 시도 4 → 열림
+  A->>H: 20.400 BIND token · session_id
   Note over H: SES.S.bind_resume → +resumed
-  H-->>A: 04.383 BIND ok 같은 session_id
-  A->>H: 04.383 RESUME
+  H-->>A: 20.402 BIND ok 같은 session_id
+  A->>H: 20.402 RESUME
   H->>S: 그 세션이 닿은 서버마다 Resume
-  H-->>A: 04.391 RESUME ok snapshot · publications · mline_tables
-  Note over A: 04.389 RESUMING → ACTIVE · arev 2 그대로 → 재협상 없음
-  Note over S,A: 끊긴 5.6초 내내 B 의 RTP 는 UDP 로 A 에게 갔다
+  H-->>A: 20.409 RESUME ok snapshot · publications · mline_tables
+  Note over A: 20.408 RESUMING → ACTIVE · arev 2 그대로 → 재협상 없음
+  Note over S,A: 끊긴 4.5초 내내 B 의 RTP 는 UDP 로 A 에게 갔다
 ```
 
 ```
-58.827 SRV   proc=hub spec=SES.S.drop session=2fd1fc9a user=tourcut_A from=live+bound+rooms to=live+rooms cause=drop in.c=0
-58.828 SDK A SES session ACTIVE → RESUMING | ws.close | SES.C.any.drop_carry
-04.381 SRV   proc=hub spec=SES.S.bind_resume session=2fd1fc9a from=live+rooms to=live+bound+rooms+resumed cause=BIND
-04.388 SRV   proc=hub spec=SES.S.resume_ok session=2fd1fc9a
-04.389 SDK A SES session RESUMING → ACTIVE | RESUME.res | SES.C.RESUMING.resume_ok
-04.391 SDK A TRK qa_tourcut_p0 - → - | ROOM.C.JOINED.resume_snapshot | TRK.C.any.snapshot_same
-04.391 SDK A LINK 8701a55ebcdd350f OK → OK | table | LINK.C.any.table_carried_old
+15.920 SRV   proc=hub spec=SES.S.drop session=67084ff3 user=tourcut_A from=live+bound+rooms to=live+rooms cause=drop in.c=0
+15.921 SDK A SES session ACTIVE → RESUMING | ws.close | SES.C.any.drop_carry
+20.400 SRV   proc=hub spec=SES.S.bind_resume session=67084ff3 from=live+rooms to=live+bound+rooms+resumed cause=BIND
+20.406 SRV   proc=hub spec=SES.S.resume_ok session=67084ff3
+20.408 SDK A SES session RESUMING → ACTIVE | RESUME.res | SES.C.RESUMING.resume_ok
+20.408 SDK A TRK qa_tourcut_p0 - → - | ROOM.C.JOINED.resume_snapshot | TRK.C.any.snapshot_same
+20.408 SDK A LINK d6c9ad052c4a12ae OK → OK | table | LINK.C.any.table_carried_old
 ```
 
-- **미디어는 끊긴 적이 없다.** 서버가 A 에게 내보낸 수(stat 줄 `packets_sent`)는 B 가 마이크를 켠 57.32 부터 끊김 한가운데인 01.254 까지 196 — 초당 50 그대로 — 이고, 06.254 에 449 다. A 가 받은 B 의 소리는 499 패킷 · 감춘 표본(`concealed`) 0 이다. 끊긴 것은 제어(통지 · 요청)뿐이다.
-- **사다리 칸** — 기다림은 300 · 1200 · 2700ms 에 지터가 붙은 값이다(셋째 시도 +401 · 넷째 +923ms). 망은 01.833 에 돌아왔지만 다음 칸(04.376)까지 2.54초를 기다렸다 — §4-4.
-- **`RESUME` 은 조회다** — 응답은 `snapshot`(나 · 참가자 · 트랙) · `publications`(A 는 발행이 없어 `[]`) · `mline_tables`(`arev 2` · 줄 셋) 셋이다. SDK 는 서버마다 셋을 대조한다([연:RULE-SES-RES-RESUME-OK](../protocol/03-ses.md#RULE-SES-RES-RESUME-OK)) — 미디어 연결이 살아 있나 · 내 방이 스냅샷에 다 있나 · 내 발행이 `publications` 에 다 있나. 셋 다 참이고 `arev` 가 그대로라 재협상도 `READY` 도 없다.
-- **B 는 아무것도 못 느꼈다** — 끊긴 동안 B 에게 `PARTICIPANT_EVENT` 가 하나도 안 갔다. 세션 · 방 소속은 재개 창 동안 hub 에 남는다(`live+rooms`).
+- **미디어는 끊긴 적이 없다.** 서버가 A 에게 내보낸 수(stat 줄 `packets_sent`)를 보자. 끊기기 직전(15.544) 38 이고, 다시 붙은 직후(20.544) 309 다. 그 5초 중 4.49초가 끊긴 때인데 쉬지 않고 올랐다. A 가 받은 B 의 소리는 449 패킷이고 감춘 표본(`concealed`)은 0 이다. 끊긴 것은 제어(통지 · 요청)뿐이다.
+- **`in.c=0` 이 맞다.** 중계가 TCP 를 그냥 닫았다. hub 가 `LEAVE` 를 보내지 않았으니 사유 번호가 없다. 하트비트 시한으로 끊긴 ②와 이제 로그에서 갈린다(§4-2).
+- **사다리 칸** — 시도 사이 기다림은 앞 시도가 닫힌 뒤 310 · 1211 · 2941ms 였다. 사다리 300 · 1200 · 2700ms 에 셋째 시도부터 지터가 붙은 값이다. 망은 18.928 에 돌아왔다. 그런데 다음 칸(20.394)까지 1.47초를 기다렸다(§4-4).
+- **`RESUME` 은 조회다.** 응답은 셋이다. `snapshot`(나 · 참가자 · 트랙) · `publications`(A 는 발행이 없어 `[]`) · `mline_tables`(`arev 2` · m-line 셋)다.
+- SDK 는 서버마다 셋을 대조한다([연:RULE-SES-RES-RESUME-OK](../protocol/03-ses.md#RULE-SES-RES-RESUME-OK)). PeerConnection 이 살아 있나 · 내 방이 스냅샷에 다 있나 · 내 발행이 `publications` 에 다 있나. 셋 다 참이고 `arev` 가 그대로라 재협상도 `READY` 도 없다.
+- **B 는 아무것도 못 느꼈다.** 끊긴 동안 B 에게 `PARTICIPANT_EVENT` 가 하나도 안 갔다. 세션 · 방 소속은 재개 창 동안 hub 에 남는다(`live+rooms`).
 
 ### 3-2. ⑤ WS 만 — 서버사이드 SDK 도 같은 길
 
-녹음기(방은 node-c 의 sfud · 세션은 node-a 의 hub):
+녹음기(방은 node-c 의 SFU · 세션은 node-a 의 hub):
 
 ```
-07:27:27.021 node-a proc=hub spec=SES.S.drop        session=0c609836 user=oxpeer~peer_recorder_ws_cut from=hidden+live+bound+rooms to=hidden+live+rooms cause=drop in.c=0
-07:27:27.025 node-a proc=hub spec=SES.S.bind_resume session=0c609836 from=hidden+live+rooms to=hidden+live+bound+rooms+resumed cause=BIND
-07:27:27.031 node-a proc=hub spec=SES.S.resume_ok   session=0c609836
+13:47:51.400 node-a proc=hub spec=SES.S.drop        session=8ca20fc0 user=oxpeer~peer_recorder_ws_cut from=hidden+live+bound+rooms to=hidden+live+rooms cause=drop in.c=0
+13:47:51.404 node-a proc=hub spec=SES.S.bind_resume session=8ca20fc0 from=hidden+live+rooms to=hidden+live+bound+rooms+resumed cause=BIND
+13:47:51.410 node-a proc=hub spec=SES.S.resume_ok   session=8ca20fc0
 ```
 
-- drop → `resume_ok` 10ms. 시험 중계가 다시 붙는 연결을 바로 받아 사다리 첫 칸(0ms)에서 붙었다. ★**sfud 로그에는 그 사이 한 줄도 없다** — 미디어 서버는 신호가 끊긴 줄 모른다.
-- 끊김은 botA 발언 한가운데(2.5초)였다. 녹음 파일 하나에 botA 발언이 seq 1~183 · 183 패킷 · 잃은 0 으로 이어 들어갔다 — 발언권(DC)과 미디어(UDP)는 끊긴 적이 없다.
-- 에이전트(`peer_agent_ws_cut`) — 세션 `Resuming` → `Active` 13ms · hub drop → `resume_ok` 12ms. 발행은 `publications` 와 맞대 그대로 두고 다시 발행하지 않았다(`published` 하나). 청취 봇은 100ms 넘는 수신 공백이 없다(600 패킷 · 0.718~12.699초).
+- 끊김 → `resume_ok` 10ms 다. 시험 중계가 다시 붙는 WS 를 바로 받아 사다리 첫 칸(0ms)에서 붙었다.
+- ★**SFU 로그에는 그 사이 한 줄도 없다.** SFU 는 신호가 끊긴 줄 모른다.
+- 끊김은 botA 발언 한가운데(발언 시작 1.5초 뒤)였다. 녹음 파일 하나에 botA 발언이 seq 1~183 · 183 패킷 · 잃은 0 으로 이어 들어갔다. floor control(DC)과 미디어(UDP)는 끊긴 적이 없다.
+- 에이전트(`peer_agent_ws_cut`) — 세션 `Resuming` → `Active` 11ms 다. hub 끊김 → `resume_ok` 9ms 다. 발행은 `publications` 와 맞대 그대로 두고 다시 발행하지 않았다(`published` 하나). 청취 봇의 가장 긴 수신 공백은 21.7ms 다(600 패킷 · 0.725~12.706초).
 
-### 3-3. ② 재개 창 안에서 프로세스가 35초 얼었다 — `RESUME` + ICE 재시작
+### 3-3. ② 재개 창 안에서 프로세스가 35초 얼었다 — `RESUME` + ICE restart
 
 ```mermaid
 sequenceDiagram
   autonumber
   participant P as 녹음기 oxpeer
   participant H as oxhubd node-a
-  participant S as oxsfud node-b
-  Note over P: 약 23.74 SIGSTOP — 35초 얼림
-  Note over H: 49.741 마지막 수신(19.742 READY) 뒤 30초 — LEAVE 4008 · SES.S.drop
-  Note over S: 52.690 쌍 만료 30초 — Alive → Suspect · LINK_EVENT(보낼 소켓이 없다)
-  Note over P: 약 58.74 깨어남 — 밀린 타이머 · 4008 을 한꺼번에 본다
-  P->>S: 58.744 옛 쌍 STUN — Suspect → Alive nominated
-  P->>H: 58.747 BIND session_id → bind_resume
-  P->>H: 58.753 RESUME → resume_ok
-  P->>H: 58.758 ICE_RESTART
+  participant S as SFU oxsfud node-b
+  Note over P: 약 43:48.14 SIGSTOP — 35초 얼림
+  Note over H: 44:14.140 마지막 수신(43:44.139 READY) 뒤 30초 — LEAVE 4008 · SES.S.drop in.c=4008
+  Note over S: 44:16.778 쌍 만료 — Alive → Suspect · LINK_EVENT(보낼 소켓이 없다)
+  Note over P: 약 44:23.14 깨어남 — 밀린 타이머 · LEAVE 4008 을 한꺼번에 본다
+  P->>S: 23.142 옛 쌍 STUN — Suspect → Alive nominated
+  P->>H: 23.146 BIND session_id → bind_resume
+  P->>H: 23.152 RESUME → resume_ok
+  P->>H: 23.156 ICE_RESTART
   H->>S: 새 ufrag 발급 ice restart issued
-  P->>H: 58.761 READY — 발언권 다시 맞추기
-  S-->>P: MBCP IDLE(FLR.S.P.join.idle)
-  P->>S: 58.991 새 ufrag 검사 — ufrag promoted · 연결 둘 다
+  P->>H: 23.160 READY — floor control 상태 다시 맞추기
+  S-->>P: MBCP Floor Idle(FLR.S.P.join.idle)
+  P->>S: 23.389 새 ufrag 검사 — ufrag promoted · 트랜스포트 둘 다
 ```
 
-- **누가 먼저 아나** — hub 가 먼저(하트비트 시한 30초, 49.741) · sfud 가 3초 뒤(UDP 쌍 30초, 52.690). 얼어 있는 녹음기는 아무것도 모른다.
-- **깨어나서 무엇을 하나** — 깨어남은 사건이다([연:RULE-LINK-RECOVERY-WAKE](../protocol/09-link.md#RULE-LINK-RECOVERY-WAKE)). 밀린 타이머를 시한 초과로 세지 않고 처음부터 다시 판정한다. 녹음기 사건 차례: 연결 `Restarting` → 세션 `Resuming`(사유 `4008 HEARTBEAT_TIMEOUT` — hub 가 끊기 전에 보낸 `LEAVE` 를 깨어나 읽었다) → `Active` → 연결 `Up`.
-- **ICE 재시작은 왜** — 녹음기 사건 차례에서 연결 `Restarting`(시도 1)이 세션 `Resuming` 보다 먼저 나온다 — 깨어난 연결 층이 제 ICE 상태로 재시작을 골랐다. 서버 쪽 옛 쌍은 깨어난 약 3ms 뒤 STUN 으로 `Alive` 에 돌아왔지만 재시작은 그대로 갔다. 재시작은 DTLS · 구독 · 발행 · 발언권을 그대로 두고 자격만 바꾸는 싼 칸이다([연:R-SES-ICE-RESTART-WHY](../protocol/03-ses.md#R-SES-ICE-RESTART-WHY)) — 이 회차 234ms(발급 58.757 → 승격 58.991).
-- **`READY` 를 다시 보낸 까닭** — 끊긴 동안의 DC 통지는 재전송되지 않는다. 방마다 `READY` 를 다시 보내 서버가 지금 발언권 상태(`IDLE`)를 처음 알리듯 보내게 한다([연:RULE-LINK-RECOVERY-RESYNC](../protocol/09-link.md#RULE-LINK-RECOVERY-RESYNC)).
-- 깨어난 뒤 botB 발언이 139 패킷 · 잃은 0 으로 녹음됐다. `rebuilt 0` — 재구축 없이 이어받았다.
+- **누가 먼저 아나** — hub 가 먼저다(하트비트 시한 30초, 14.140). SFU 는 2.6초 뒤다(UDP 쌍 30초, 16.778). 얼어 있는 녹음기는 아무것도 모른다.
+- **깨어나서 무엇을 하나** — 깨어남은 사건이다([연:RULE-LINK-RECOVERY-WAKE](../protocol/09-link.md#RULE-LINK-RECOVERY-WAKE)). 밀린 타이머를 시한 초과로 세지 않는다. 처음부터 다시 판정한다.
+- 녹음기 사건 차례는 이렇다. 세션 `Resuming`(사유 `4008 HEARTBEAT_TIMEOUT` — hub 가 끊기 전에 보낸 `LEAVE` 를 깨어나 읽었다) → 연결 `Restarting`(시도 0) → 세션 `Active` → 연결 `Restarting`(시도 1) → 연결 `Up`.
+- **ICE restart 는 왜** — 깨어난 PeerConnection 층도 제 ICE 상태로 재시작을 고른다. 다만 세션 층 복구 중에는 보류한다. 그래서 `ICE_RESTART` 는 `resume_ok` 뒤에 나갔다(시도 0 → 1).
+- 서버 쪽 옛 쌍은 깨어난 직후 STUN 으로 `Alive` 에 돌아왔다. 그래도 재시작은 그대로 갔다. ICE restart 는 DTLS · 구독 · 발행 · floor control 을 그대로 두고 ICE 자격만 바꾸는 싼 단계다([연:R-SES-ICE-RESTART-WHY](../protocol/03-ses.md#R-SES-ICE-RESTART-WHY)). 이 회차 234ms 다(발급 23.156 → 승격 23.389).
+- **`READY` 를 다시 보낸 까닭** — 끊긴 동안의 DC 통지는 재전송되지 않는다. 방마다 `READY` 를 다시 보낸다. 그러면 서버가 지금 floor control 상태(Floor Idle)를 처음 알리듯 보낸다([연:RULE-LINK-RECOVERY-RESYNC](../protocol/09-link.md#RULE-LINK-RECOVERY-RESYNC)).
+- 깨어난 뒤 botB 발언이 139 패킷 · 잃은 0 으로 녹음됐다. `rebuilt 0` 이다. 재연결 없이 세션 재개로 이었다.
 
-### 3-4. ③ 재개 창 밖 — 95초 얼림 → 세션 재구축
-
-```
-07:24:53.299 node-a proc=hub spec=SES.S.drop    session=915c6956 from=hidden+live+bound+rooms to=hidden+live+rooms cause=drop
-07:24:56.256 node-a proc=sfu spec=SV-STATE-PEER-STATE session=915c6956 key=publish from=Alive to=Suspect cause=pair_expired
-07:25:53.869 node-a proc=hub spec=SES.S.TWindow session=915c6956 from=hidden+live+rooms to=- cause=TWindow      ← drop 뒤 60.57초
-07:25:53.873 node-a proc=sfu spec=SV-STATE-PEER-STATE session=915c6956 key=publish from=Suspect to=- cause=session_gone
-07:26:02.306 node-a proc=hub spec=SES.S.bind_new session=fcdedaa8 from=- to=hidden+live+bound cause=BIND          ← 깨어난 약 8ms 뒤 · 새 세션
-07:26:02.716 node-a proc=hub spec=CP-OP-ROOM-JOIN session=fcdedaa8 msg=ok                                        ← 분산 409ms
-07:26:02.726 node-a proc=sfu spec=SV-RULE-LINK-TRANSPORT session=fcdedaa8 msg="transport ready (dtls+srtp) publish"
-```
-
-- 깨어난 녹음기는 끊긴 줄 모르고 보관한 `session_id` 로 `BIND` 했다 → 서버는 그 세션을 이미 버렸다 → 응답의 `session_id` 가 다르다. 이것이 세션 재구축의 방아쇠 ②다([연:RULE-SES-REBUILD](../protocol/03-ses.md#RULE-SES-REBUILD)) — `RESUME` 을 아예 안 보낸다.
-- 재구축 차례 — 발언권을 `has no permission` 으로 내리고 · 방 보관본을 버리고 · 미디어 연결을 전부 닫고 · `ROOM_JOIN` 부터 다시. 첫 `ROOM_JOIN` 은 0~5초 균등으로 흩어 늦춘다 — 이 회차 409ms.
-- 녹음기 연결 흐름 `Connecting → Up → Restarting → Closed → Connecting → Up` · `joined 2` · `rebuilt 1`. 다음 botB 발언 140 패킷 · 잃은 0.
-
-### 3-5. ④ 운영 절단 — `LEAVE 2009` → 재구축 · 에이전트는 다시 발행
+### 3-4. ③ 재개 창 밖 — 95초 얼림 → 재연결
 
 ```
-07:27:05.988 node-a proc=hub spec=SES.S.drop_reclaim session=01c8dd31 user=oxpeer~peer_recorder_session_cut from=hidden+live+bound+rooms to=- cause=cut
-07:27:05.993 node-a proc=hub spec=SES.S.bind_new     session=4eed56c3 user=oxpeer~peer_recorder_session_cut cause=BIND   ← 5ms
-07:27:08.969 node-a proc=hub spec=CP-OP-ROOM-JOIN    session=4eed56c3 msg=ok                                              ← 분산 2,975ms(sfud 가 ROOM_JOIN 을 받은 08.968 까지)
+13:45:17.692 node-a proc=hub spec=SES.S.drop    session=f44c1528 from=hidden+live+bound+rooms to=hidden+live+rooms cause=drop in.c=4008
+13:45:20.778 node-b proc=sfu spec=SV-STATE-PEER-STATE session=f44c1528 key=publish from=Alive to=Suspect cause=pair_expired
+13:46:18.303 node-a proc=hub spec=SES.S.TWindow session=f44c1528 from=hidden+live+rooms to=- cause=TWindow      ← 끊김 뒤 60.61초
+13:46:18.308 node-b proc=sfu spec=SV-STATE-PEER-STATE session=f44c1528 key=publish from=Suspect to=- cause=session_gone
+13:46:26.697 node-a proc=hub spec=SES.S.bind_new session=e6620821 from=- to=hidden+live+bound cause=BIND          ← 깨어난 약 6ms 뒤 · 새 세션
+13:46:27.477 node-a proc=hub spec=CP-OP-ROOM-JOIN session=e6620821 msg=ok                                        ← 분산 780ms
+13:46:27.487 node-b proc=sfu spec=SV-RULE-LINK-TRANSPORT session=e6620821 msg="transport ready (dtls+srtp) publish"
+```
+
+- 깨어난 녹음기는 끊긴 줄 모르고 보관한 `session_id` 로 `BIND` 했다. 서버는 그 세션을 이미 버렸다. 그래서 응답의 `session_id` 가 다르다. 이것이 재연결의 방아쇠 ②다([연:RULE-SES-REBUILD](../protocol/03-ses.md#RULE-SES-REBUILD)). `RESUME` 을 아예 안 보낸다.
+- 재연결 차례 — floor control 을 `has no permission` 으로 내린다. 방 보관본을 버린다. PeerConnection 을 전부 닫는다. 그리고 `ROOM_JOIN` 부터 다시 한다.
+- 첫 `ROOM_JOIN` 은 0~5초 균등으로 흩어 늦춘다. 이 회차는 780ms 였다.
+- 녹음기 연결 흐름은 `Connecting → Up → Restarting → Closed → Connecting → Up` 이다. `joined 2` · `rebuilt 1` 이다. 다음 botB 발언은 140 패킷 · 잃은 0 이다.
+
+### 3-5. ④ 운영 절단 — `LEAVE 2009` → 재연결 · 에이전트는 다시 발행
+
+```
+13:47:30.348 node-a proc=hub spec=CP-CODE-SESSION-REVOKED op=LEAVE
+13:47:30.348 node-a proc=hub spec=SES.S.drop_reclaim session=20b8589d user=oxpeer~peer_recorder_session_cut from=hidden+live+bound+rooms to=- cause=cut
+13:47:30.353 node-a proc=hub spec=SES.S.bind_new     session=501c55f2 user=oxpeer~peer_recorder_session_cut cause=BIND   ← 5ms
+13:47:30.432 node-a proc=hub spec=CP-OP-ROOM-JOIN    session=501c55f2 msg=ok                                              ← 분산 79ms
 ```
 
 | | 녹음기(투명) | 에이전트(보이는 참가자) |
 |---|---|---|
-| 절단 → 새 `BIND` | 5ms | 4ms(07:20:48.196 → 48.200) |
-| 새 `BIND` → `ROOM_JOIN` | 2,975ms | 757ms |
-| 그 뒤 | 구독만 다시 · 다음 발언 140 패킷 · 잃은 0 | `PUBLISH_TRACKS` 새 `track_id`(`t0340079…` → `t1d53114…`) · 첫 RTP 48.971 |
-| 남이 본 것 | ★없음 — 투명 참가자는 퇴장 · 입장 통지가 안 나간다 | 청취 봇: `TRACK_EVENT remove` · `PARTICIPANT_EVENT left`(3.717) → `joined` · 새 트랙 csrc 70 → 71(4.474) · 수신 공백 774ms |
+| 절단 → 새 `BIND` | 5ms | 4ms(13:41:12.765 → 12.769) |
+| 새 `BIND` → `ROOM_JOIN` | 79ms | 841ms |
+| 그 뒤 | 구독만 다시 · 다음 발언 138 패킷 · 잃은 0 | `PUBLISH_TRACKS` 새 `track_id`(`t6656292…` → `te9e4be7…`) · 첫 RTP 13.642 |
+| 남이 본 것 | ★없음 — 투명 참가자는 퇴장 · 입장 통지가 안 나간다 | 청취 봇: `TRACK_EVENT remove` · `PARTICIPANT_EVENT left`(3.714) → `joined`(4.552) · 새 트랙 csrc 49 → 50(4.554) · 수신 공백 876ms |
 
-- 세션이 끊긴 이유는 `LEAVE 2009 SESSION_REVOKED` 로 온다 — 녹음기 사건 `reason (2009, "SESSION_REVOKED")`. 번호 뜻은 [12 장](12_ERRORS.md).
-- 에이전트의 발행은 세션과 함께 서버에서 풀렸다 — 재구축 끝에 다시 발행한다(그 발행 방이 지금 붙은 서버를 다시 읽는다). 듣는 쪽 공백 774ms 의 대부분은 분산 757ms 다.
+- 세션이 끊긴 이유는 `LEAVE 2009 SESSION_REVOKED` 로 온다. 녹음기 사건은 `reason (2009, "SESSION_REVOKED")` 다. 서버도 `CP-CODE-SESSION-REVOKED op=LEAVE` 한 줄을 남긴다. 번호 뜻은 [12 장](12_ERRORS.md)에 있다.
+- 에이전트의 발행은 세션과 함께 서버에서 풀렸다. 재연결 끝에 다시 발행한다. 그 발행 방이 지금 붙은 서버를 다시 읽는다. 듣는 쪽 공백 876ms 의 대부분은 분산 841ms 다.
 
-### 3-6. ⑥ 미디어 서버 유닛이 죽었다 — 그 서버만 재구축 → 방 없음
+### 3-6. ⑥ SFU 유닛이 죽었다 — 그 서버만 재연결 → 방 없음
 
 ```mermaid
 sequenceDiagram
   autonumber
   participant P as 녹음기
   participant H as oxhubd node-a
-  participant B as node-b 유닛
-  Note over B: 26.819 유닛 Running → Stopping → 26.822 Stopped(epoch fabe64ed…)
-  Note over H: 27.834 방 토큰이 사라졌다 — SV.rooms … to=hidden+live+bound cause=room_dropped
+  participant U as node-a SFU 유닛
+  Note over U: 52:51.191 유닛 Running → Stopping → 51.195 Stopped(epoch d391b1c5…)
+  Note over H: 52:52.243 방 토큰이 사라졌다 — SV.rooms … to=hidden+live+bound cause=room_dropped
   Note over P: ICE 흔들림 → Wobbly → WS 점검 → Restarting
-  P->>H: ICE_RESTART sfu_id=fabe64ed…
-  H-->>P: 37.063 3010 PEER_NOT_FOUND — 그 기동 신원이 없다
-  Note over P: Rebuilding(restart_3xxx) · 발언권 NOPERM · FloorTrusted false
+  P->>H: ICE_RESTART sfu_id=d391b1c5…
+  H-->>P: 53:01.439 3010 PEER_NOT_FOUND — 그 기동 신원이 없다
+  Note over P: Rebuilding(restart_3xxx) · floor NOPERM · FloorTrusted false
   P->>H: ROOM_JOIN(분산 뒤)
-  H-->>P: 39.025 3001 ROOM_NOT_FOUND
-  Note over P: 그 서버 연결 Closed · 세션은 Active
-  Note over B: 42.811 Starting → 42.914 Running — 새 epoch 7321e06f…
+  H-->>P: 53:01.954 3001 ROOM_NOT_FOUND
+  Note over P: 그 서버 PeerConnection Closed · 세션은 Active
+  Note over U: 53:07.184 Starting → 07.288 Running — 새 epoch bc4ec524…
 ```
 
-- **누가 먼저 아나** — hub 가 1.0초 만에 방 토큰이 사라진 것을 보고 세션에서 그 방을 뺀다(`room_dropped`). 녹음기는 ICE 로 안다 — 기다림 · WS 점검 · 재시작까지 유닛 정지 뒤 10.2초(이 회차는 그 안을 쪼개 재지 않았다).
-- **왜 `3010` 인가** — `ICE_RESTART` 는 `sfu_id`(그 미디어 서버의 기동 신원 `epoch`)로 서버를 찾는다. 유닛이 죽으면 그 신원이 없어지고, 다시 떠도 새 신원이다 — 옛 연결은 어느 서버도 모른다. `3xxx` 는 「치료 불가 확정」이라 그 서버만 재구축으로 올라간다([연:RULE-LINK-RECOVERY-REBUILD](../protocol/09-link.md#RULE-LINK-RECOVERY-REBUILD) ①).
-- **방은 유닛 메모리에 있었다** — 다시 들어가기는 `3001` 로 끝나고 그 서버 연결을 닫는다. ★세션은 산다(끝까지 `SES.S.leave` 만 찍힌다). 방 다시 만들기는 이 계약 밖이다. 유닛 로그 줄을 읽는 법은 [14 장](14_OXMESH.md), `3010` · `3001` 의 뜻은 [12 장](12_ERRORS.md).
+- **누가 먼저 아나** — hub 가 1.05초 만에 방 토큰이 사라진 것을 본다. 그리고 세션에서 그 방을 뺀다(`room_dropped`). 녹음기는 ICE 로 안다. 기다림 · WS 점검 · ICE restart 를 거쳐 `3010` 을 받기까지 유닛 정지 뒤 10.25초다(이 회차는 그 안을 쪼개 재지 않았다).
+- **왜 `3010` 인가** — `ICE_RESTART` 는 `sfu_id`(그 SFU 의 기동 신원 `epoch`)로 서버를 찾는다. 유닛이 죽으면 그 신원이 없어진다. 다시 떠도 새 신원이다. 옛 트랜스포트는 어느 서버도 모른다. `3xxx` 는 「치료 불가 확정」이라 그 서버만 재연결로 올라간다([연:RULE-LINK-RECOVERY-REBUILD](../protocol/09-link.md#RULE-LINK-RECOVERY-REBUILD) ①).
+- **방은 유닛 메모리에 있었다.** 다시 들어가기는 `3001` 로 끝나고 그 서버의 PeerConnection 을 닫는다. ★세션은 산다(끝까지 `SES.S.leave` 만 찍힌다). 방 다시 만들기는 이 계약 밖이다.
+- 유닛 로그 줄을 읽는 법은 [14 장](14_OXMESH.md), `3010` · `3001` 의 뜻은 [12 장](12_ERRORS.md)에 있다.
 
 ### 3-7. ⑦ 무발화 생존 — 35초 동안 한 패킷도 안 보낸 구독자
 
 ```
- 0.287 botB  send sig  READY arev 2
+ 0.277 botB  send sig  READY arev 2
 — RTP 묶음 —
-  botA  send ssrc 2684354657 pt 111 개수 1601 seq 0…1600 경과 0.287…35.283
-  botB  recv ssrc 1720982297 pt 111 개수 1600 seq 1…1600 경과 0.310…35.284
+  botA  send ssrc 2684354657 pt 111 개수 1604 seq 0…1603 경과 0.277…35.262
+  botB  recv ssrc 3349986658 pt 111 개수 1603 seq 1…1603 경과 0.299…35.262
 ```
 
-- botB 는 발행이 없다. 35초 동안 서버 로그에 botB 의 `Suspect` 가 한 줄도 없다 — 쌍 생존은 미디어가 아니라 ★**검증된 STUN 검사**로 갱신되고, 세션 생존은 `HEARTBEAT` 다. 끝은 봇이 스스로 나간 `ROOM_LEAVE` 다.
-- 이 생존의 값(상시 STUN · 하트비트 비용)은 [09 장](09_MIC_COST.md).
+- botB 는 발행이 없다. 35초 동안 서버 로그에 botB 의 `Suspect` 가 한 줄도 없다.
+- 쌍 생존은 미디어가 아니라 ★**검증된 STUN 검사**로 갱신된다. 세션 생존은 `HEARTBEAT` 다. 끝은 봇이 스스로 나간 `ROOM_LEAVE` 다.
+- 이 생존의 값(상시 STUN · 하트비트 비용)은 [09 장](09_MIC_COST.md)에 있다.
 
 ## 4. 깨지는 길 — 한 단계 더 나쁜 경우
 
 ### 4-1. 끊긴 동안 나간 통지는 사라진다
 
-②에서 sfud 는 52.690 에 `LINK_EVENT` 를 냈지만(`CP-OP-LINK-EVENT`), hub 는 49.741 에 이미 소켓을 뗐다 — 받을 곳이 없다. `RESUME` 은 끊긴 동안의 통지를 되보내지 않는다([연:R-SES-RESUME-NO-REPORT](../protocol/03-ses.md#R-SES-RESUME-NO-REPORT)). 따라잡는 수단은 스냅샷(방 · 트랙) · 배정표(`arev`) · 방마다 `READY`(발언권) 셋뿐이다.
-- **사용자가 겪는 것** — 셋 중 하나를 빠뜨리면 끊긴 동안 들어온 사람이 명단에 없고, 그 사이 올라온 트랙이 영영 안 붙는다([연:R-SES-RESUME-SYMPTOMS](../protocol/03-ses.md#R-SES-RESUME-SYMPTOMS)).
+②에서 SFU 는 16.778 에 `LINK_EVENT` 를 냈다(`CP-OP-LINK-EVENT`). 그런데 hub 는 14.140 에 이미 소켓을 뗐다. 받을 곳이 없다. `RESUME` 은 끊긴 동안의 통지를 되보내지 않는다([연:R-SES-RESUME-NO-REPORT](../protocol/03-ses.md#R-SES-RESUME-NO-REPORT)). 따라잡는 수단은 셋뿐이다. 스냅샷(방 · 트랙) · `mline_table`(`arev`) · 방마다 `READY`(floor control)다.
+- **사용자가 겪는 것** — 셋 중 하나를 빠뜨리면 끊긴 동안 들어온 사람이 명단에 없다. 그 사이 올라온 트랙이 영영 안 붙는다([연:R-SES-RESUME-SYMPTOMS](../protocol/03-ses.md#R-SES-RESUME-SYMPTOMS)).
 - **보는 법** — hub 는 소켓 없는 세션에 나간 통지를 `/admin/drops` 의 `notice_no_socket` 으로 센다(이 회차 값은 읽지 않았다).
 
-### 4-2. 끊긴 까닭이 서버 로그에서 빠진다(결함 의심)
+### 4-2. 끊긴 까닭이 서버 로그에 실린다(20261109 고침 · 서버 `f6bbf02` · 지금 실측)
 
-②에서 hub 는 하트비트 시한에 `LEAVE 4008` 을 보냈고 녹음기는 깨어나 그 사유를 읽었다(`reason (4008, "HEARTBEAT_TIMEOUT")`). 그런데 hub 의 끊김 줄은 이렇다:
+②에서 hub 는 하트비트 시한에 `LEAVE 4008` 을 보냈다. 녹음기는 깨어나 그 사유를 읽었다(`reason (4008, "HEARTBEAT_TIMEOUT")`). 지금 hub 의 줄은 이렇다.
 ```
-07:23:49.741 node-a proc=hub spec=SES.S.drop session=ef4ed18e user=oxpeer~peer_recorder_freeze ... cause=drop in.c=0
+13:44:14.140 node-a proc=hub spec=CP-CODE-HEARTBEAT-TIMEOUT op=LEAVE
+13:44:14.141 node-a proc=hub spec=SES.S.drop session=03d6bcf5 user=oxpeer~peer_recorder_freeze ... cause=drop in.c=4008
 ```
-`in.c` 는 끊을 때 보낸 사유 번호 칸이다 — ①의 TCP 닫힘(`in.c=0`)과 ②의 하트비트 시한이 로그에서 같은 꼴이 된다. 소스로 읽은 원인: `oxhubd/src/ses/conn.rs` 는 읽기 고리를 빠져나온 뒤 `leave_code` 를 읽는데, 그 값은 쓰기 태스크가 `LEAVE` 를 실제로 보낸 뒤에야 채운다 — 읽기가 먼저 끝나면 0 이다. 사용자는 아무것도 못 느낀다. 운영자가 「하트비트로 끊겼나 망이 끊겼나」를 hub 로그만으로 못 가른다.
+- `in.c` 는 끊을 때 보낸 사유 번호 칸이다. 지금은 ①의 TCP 닫힘(`in.c=0`)과 ②의 하트비트 시한(`in.c=4008`)이 로그에서 갈린다. 이 회차 서버 로그 조각에서 `in.c=4008` 은 두 줄(②와 ③), `in.c=1008` 은 세 줄이다.
+- **고치기 전에는 어땠나** — 같은 줄이 `in.c=0` 이었다. `oxhubd/src/ses/conn.rs` 는 읽기 고리를 빠져나온 뒤 `leave_code` 를 읽는다. 그 값은 쓰기 태스크가 `LEAVE` 를 실제로 보낸 뒤에 채운다. 읽기가 먼저 끝나면 0 이었다. 운영자가 「하트비트로 끊겼나 망이 끊겼나」를 hub 로그만으로 못 갈랐다.
+- **어떻게 고쳤나** — 쓰기 태스크가 끝나기를 기다린 뒤 `leave_code` 를 읽는다.
+- 끊김 줄 바로 앞의 `CP-CODE-HEARTBEAT-TIMEOUT op=LEAVE` 는 같은 날 들어간 다른 규칙이다 — 실패 응답 · 끊김 사유는 늘 한 줄([12 장](12_ERRORS.md) §4-3).
 
 ### 4-3. 과부하가 재개 창을 밀어낸다(규격 산수 — 이 회차로 재지 않았다)
 
-사다리 기다림만 더하면 44초 · 지터 최악 52초로 창(60초) 안이다 — 창이 사다리 합계보다 길어야 한다는 성립 조건이다([연:COND-SES-WINDOW-OVER-BACKOFF](../protocol/03-ses.md#COND-SES-WINDOW-OVER-BACKOFF)). 그런데 서버가 죽은 것이 아니라 느리기만 하면 시도마다 `T-bind`(10초)가 붙어 최악 152초가 된다([연:R-SES-TBIND-ADDS](../protocol/03-ses.md#R-SES-TBIND-ADDS)). 그래서 클라는 보내기 전에 끊긴 뒤 경과를 보고, 창을 넘었으면 `RESUME` 왕복을 태우지 않고 바로 재구축한다([연:RULE-SES-CLIENT-WATCHES-CLOCK](../protocol/03-ses.md#RULE-SES-CLIENT-WATCHES-CLOCK)). 안 보면 로그에 「세션이 없다」만 남고 원인이 과부하로 안 보인다.
+사다리 기다림만 더하면 44초 · 지터 최악 52초로 창(60초) 안이다. 창이 사다리 합계보다 길어야 한다는 성립 조건이다([연:COND-SES-WINDOW-OVER-BACKOFF](../protocol/03-ses.md#COND-SES-WINDOW-OVER-BACKOFF)).
+- 그런데 서버가 죽은 것이 아니라 느리기만 하면 시도마다 `T-bind`(10초)가 붙는다. 최악 152초가 된다([연:R-SES-TBIND-ADDS](../protocol/03-ses.md#R-SES-TBIND-ADDS)).
+- 그래서 클라는 보내기 전에 끊긴 뒤 경과를 본다. 창을 넘었으면 `RESUME` 왕복을 태우지 않고 바로 재연결한다([연:RULE-SES-CLIENT-WATCHES-CLOCK](../protocol/03-ses.md#RULE-SES-CLIENT-WATCHES-CLOCK)).
+- 안 보면 로그에 「세션이 없다」만 남고 원인이 과부하로 안 보인다.
 
-### 4-4. 망이 돌아왔는데 논다
+### 4-4. 망이 돌아왔는데 다음 칸까지 기다린다 · 브라우저 `online` 입구가 막는 것은 다른 고장이다
 
-①에서 망은 01.833 에 돌아왔지만 SDK 는 다음 칸 04.376 까지 2.54초를 기다렸다. 지금 SDK 는 브라우저의 `online` 사건을 듣지 않는다(`src` 에 리스너가 없다 — `platform/env.ts` 는 `navigator.onLine` 을 환경 보고에만 읽는다). 사다리 뒤쪽 칸에서 끊김이 풀리면 이 공백은 최대 7초 + 지터 1초까지 는다. 규격은 `online` 을 WS 점검의 방아쇠로 든다([연:RULE-LINK-RECOVERY-WS-FIRST](../protocol/09-link.md#RULE-LINK-RECOVERY-WS-FIRST)) — 재접속 사다리를 당기는 쓰임은 정하지 않았다.
+①에서 망은 18.928 에 돌아왔다. SDK 는 다음 칸 20.394 까지 1.47초를 기다렸다. 이것은 세션 층 재접속 사다리의 기다림이다. 사다리 뒤쪽 칸에서 끊김이 풀리면 이 공백은 최대 7초 + 지터 1초까지 는다. 규격은 사다리를 당기는 방아쇠를 정하지 않았다 — 남은 판단 거리다.
+
+20261109 에 SDK 가 브라우저 `online` 사건을 듣기 시작했다. 그 쓰임은 위 기다림이 아니다. 실제 동작을 차례로 보자.
+
+```
+브라우저 window 'online'
+  → 세션(`onOnline`)이 그 세션의 PeerConnection 마다 online() 을 부른다
+  → 그 PeerConnection 이 OK 면   LINK.C.OK.online         — CHECK 로 · HEARTBEAT 를 보낸다(흐름 제어 창을 거치지 않음)
+       2,000ms 안에 무엇이든 받음 → LINK.C.CHECK.ws_alive  — ICE_RESTART
+       못 받음                    → 소켓을 닫는다(LEAVE 없이) → 세션 재접속 사다리
+  → OK 가 아니면(이미 복구 중 · 닫힘) LINK.C.any.online_absorbed — 새 복구 0
+```
+
+- WS 점검은 첫 번째면 곧바로 나간다. 직전 복구 뒤 안정 시간(10,000ms)이 안 지났으면 사다리 칸값(0 · 300 · 1200 …ms)만큼 기다린다. 세션이 `ACTIVE` 가 아니면 보내지 않고 세션 복구 뒤로 미룬다(`link/core.ts` `wsCheck`).
+
+- **무엇을 막나** — 망이 바뀌면(Wi-Fi ↔ LTE) 옛 TCP 가 반쯤 열린 채 남는다. FIN 이 오지 않아 SDK 는 WS 가 죽은 줄 모른다. `online` 이 오면 ICE 흔들림 기다림(2,000ms) 없이 바로 WS 를 확인한다. [연:RULE-LINK-RECOVERY-WS-FIRST](../protocol/09-link.md#RULE-LINK-RECOVERY-WS-FIRST) 가 `online` 을 WS 점검 방아쇠로 든 까닭이다.
+- **두 가지를 갈라 읽는다** — ①의 4.49초(사다리 대기 1.47초 포함)는 중계 끊김의 실측이다. `online` 입구는 3층에서 재지 않았다.
+- **①의 1.47초를 줄이나** — 이 회차에서는 해당이 없다. 탐침은 중계를 서버 쪽에서 끊었다. 브라우저는 오프라인이 되지 않아 `online` 사건이 나지 않는다.
+- 브라우저가 망을 잃었다 되찾는 경우도 소스로 읽으면 같다. `online` 은 PeerConnection 층 입구로만 들어간다. 세션이 이미 `RESUMING` 이면 그 층의 복구는 보류되고, 세션 사다리를 당기는 코드는 없다(소스로 읽은 것 — 3층 미실측).
+- **고친 내용(20261109 · SDK `de8c4a9`)** — 규격 산문은 `online` 을 방아쇠로 들었다. 그런데 생성 상태기 원천에 그 입구가 없었고 SDK 리스너도 0 이었다. 원천에 입구 `LINK.C.OK.online` · `LINK.C.any.online_absorbed` 를 더했다. SDK 는 `connect()` 때 `online` 리스너를 달고 `close()` 때 뗀다. oxpeer 에도 같은 입구가 생성됐다. 다만 부르는 곳이 없다(브라우저 사건이라서).
+- **확인한 것** — 둘뿐이다. SDK 1층 시험 `SD-ENTRY-LINK-ONLINE` 이 두 갈래를 본다. ①쉬던 연결 → WS 점검 → 재시작. ②복구 중 → 흡수. 리스너를 빼면 빨강이다. 규격 모형 검증 판도 이 입구(`LINK.C.OK.online` · `LINK.C.any.online_absorbed`)를 지난다. 3층 탐침은 이 입구를 밟지 않는다.
 
 ## 5. 왜 이 모양인가
 
-- **복구는 세 단이다**([연:RULE-SES-RESUME-SIGNAL-ONLY](../protocol/03-ses.md#RULE-SES-RESUME-SIGNAL-ONLY)) — 시그널 복구(`RESUME`) · ICE 재시작 · 재구축. 재구축은 DTLS · 구독 · 발행 · 발언권을 전부 버리고 다시 짓는다. ICE 재시작은 그 값을 치르지 않는다 — 서버 후보는 host 하나라 「다시 뚫을」 경로가 없고, 되살리는 것은 브라우저 안의 연결 상태다([연:R-SES-ICE-RESTART-WHY](../protocol/03-ses.md#R-SES-ICE-RESTART-WHY)).
-- **버린 길 — 단 구분 없는 take-over.** 2026년 8월 말의 구판은 복구 단이 없었다 — `ROOM_JOIN` 이 `AlreadyInRoom` 이면 옛 참가자를 쫓아내고 새로 짓는 하나뿐이었고, ICE 재시작은 기각돼 있었다(선행 사례 대장 2-1 「우리 현행」 칸). 그 구조에서는 WS 만 흔들려도 영상이 끊겼다 붙는다([연:R-SES-RESUME-SYMPTOMS](../protocol/03-ses.md#R-SES-RESUME-SYMPTOMS) — 미디어가 살아 있는데 `RESUME` 을 안 보내면 복구가 아니라 재구축이다).
-- **버린 길 — 클라가 자기 상태를 신고.** LiveKit 의 `SyncState` 꼴(클라가 살아 있는 방 · 발행을 신고하고 서버가 방마다 판정)은 채택하지 않았다 — 클라가 죽은 방을 산 것으로 신고하면 「서버는 보내고 있다고 알고 클라는 못 받는」 무증상 실패가 된다([연:R-SES-RESUME-NO-REPORT](../protocol/03-ses.md#R-SES-RESUME-NO-REPORT)).
-- **흔들릴 때마다 재구축하지 않는다** — 발언권 · 구독 · 발행이 매번 리셋되고 멀쩡한 방까지 끊긴다([연:R-LINK-RECOVERY-SYMPTOMS](../protocol/09-link.md#R-LINK-RECOVERY-SYMPTOMS)). 재구축 첫 `ROOM_JOIN` 은 흩어 늦춘다 — 서버 하나가 다시 뜬 순간 단말 전부가 같은 틱에 몰리면 막 뜬 서버가 다시 눕는다([연:RULE-SES-REBUILD-JITTER](../protocol/03-ses.md#RULE-SES-REBUILD-JITTER)).
+- **복구는 세 단계다**([연:RULE-SES-RESUME-SIGNAL-ONLY](../protocol/03-ses.md#RULE-SES-RESUME-SIGNAL-ONLY)) — 세션 재개(`RESUME`) · ICE restart · 재연결(rebuild).
+  - 재연결은 DTLS · 구독 · 발행 · floor control 을 전부 버리고 다시 짓는다.
+  - ICE restart 는 그 값을 치르지 않는다. 서버 후보는 host 하나라 「다시 뚫을」 경로가 없다. 되살리는 것은 PeerConnection 안의 ICE 상태다([연:R-SES-ICE-RESTART-WHY](../protocol/03-ses.md#R-SES-ICE-RESTART-WHY)).
+- **버린 길 — 단계 구분 없는 take-over.** 2026년 8월 말의 구판은 복구 단계가 없었다. `ROOM_JOIN` 이 `AlreadyInRoom` 이면 옛 참가자를 쫓아내고 새로 짓는 길 하나뿐이었다. ICE restart 는 기각돼 있었다(선행 사례 대장 2-1 「우리 현행」 칸). 그 구조에서는 WS 만 흔들려도 영상이 끊겼다 붙는다. 미디어가 살아 있는데 `RESUME` 을 안 보내면 복구가 아니라 재연결이다([연:R-SES-RESUME-SYMPTOMS](../protocol/03-ses.md#R-SES-RESUME-SYMPTOMS)).
+- **버린 길 — 클라가 자기 상태를 신고.** LiveKit 의 `SyncState` 꼴은 채택하지 않았다. 클라가 살아 있는 방 · 발행을 신고하고 서버가 방마다 판정하는 꼴이다. 클라가 죽은 방을 산 것으로 신고하면 무증상 실패가 된다 — 「서버는 보내고 있다고 알고 클라는 못 받는다」([연:R-SES-RESUME-NO-REPORT](../protocol/03-ses.md#R-SES-RESUME-NO-REPORT)).
+- **흔들릴 때마다 재연결하지 않는다.** 그러면 floor control · 구독 · 발행이 매번 리셋되고 멀쩡한 방까지 끊긴다([연:R-LINK-RECOVERY-SYMPTOMS](../protocol/09-link.md#R-LINK-RECOVERY-SYMPTOMS)). 재연결 첫 `ROOM_JOIN` 은 흩어 늦춘다. 서버 하나가 다시 뜬 순간 단말 전부가 같은 틱에 몰리면 막 뜬 서버가 다시 눕는다([연:RULE-SES-REBUILD-JITTER](../protocol/03-ses.md#RULE-SES-REBUILD-JITTER)).
 
 > ★**우리만의 것 — 신호와 미디어가 따로 산다**
-> - **선택 배경** — WS(TCP)와 미디어(UDP)는 다른 경로라 따로 끊긴다. 신호가 끊겼다고 미디어를 버리면 짧은 흔들림마다 영상 · 음성이 끊긴다. 그래서 세션 수명을 소켓 수명보다 길게(재개 창 60초) 두고, 다시 붙으면 `RESUME` 한 번으로 **지금 상태**를 받는다 — 끊긴 동안의 통지를 하나씩 되보내지 않는다.
-> - **얻은 것** — ①에서 신호가 5.6초 끊긴 동안 소리는 499 패킷 · 감춘 표본 0 으로 이어졌고 재협상은 0 이다. ⑤에서 녹음 파일 하나가 끊김을 가로질러 잃은 0 으로 이어졌다. 이어받기 왕복은 6~10ms 다.
-> - **잃은 것** — 끊긴 동안 나간 통지는 사라진다(§4-1) — 따라잡기 재료 셋(스냅샷 · 배정표 · `READY`)을 SDK 가 빠짐없이 대조해야 한다. 재개 창 동안 서버는 죽었을지 모를 세션의 방 소속 · Peer 를 쥐고 있다(③에서 60.57초).
+> - **선택 배경** — WS(TCP)와 미디어(UDP)는 다른 경로라 따로 끊긴다. 신호가 끊겼다고 미디어를 버리면 짧은 흔들림마다 영상 · 음성이 끊긴다. 그래서 세션 수명을 소켓 수명보다 길게 둔다(재개 창 60초). 다시 붙으면 `RESUME` 한 번으로 **지금 상태**를 받는다. 끊긴 동안의 통지를 하나씩 되보내지 않는다.
+> - **얻은 것** — ①에서 신호가 4.5초 끊긴 동안 소리는 449 패킷 · 감춘 표본 0 으로 이어졌다. 재협상은 0 이다. ⑤에서 녹음 파일 하나가 끊김을 가로질러 잃은 0 으로 이어졌다. 세션 재개 왕복은 `BIND` → `resume_ok`(hub 줄) 5~6ms, 끊김 줄 → `resume_ok` 9~10ms 다.
+> - **잃은 것** — 끊긴 동안 나간 통지는 사라진다(§4-1). 따라잡기 재료 셋(스냅샷 · `mline_table` · `READY`)을 SDK 가 빠짐없이 대조해야 한다. 재개 창 동안 서버는 죽었을지 모를 세션의 방 소속 · Peer 를 쥐고 있다(③에서 60.61초).
 
-> ★**우리만의 것 — 복구 단위는 미디어 서버마다 연결이다**
-> - **선택 배경** — ([연:RULE-LINK-RECOVERY-UNIT](../protocol/09-link.md#RULE-LINK-RECOVERY-UNIT)) 한 미디어 서버가 살면 그 서버의 방은 다 살고, 죽으면 다 죽는다. 방 하나만 죽는 경우는 어차피 `3001` 로 못 살린다. 그래서 대조 · 수리 · 재구축을 방이 아니라 서버 단위로 한다. 연결이 방마다가 아니라 서버마다 하나인 사실은 [08 장](08_SLOT_SPEAKER.md).
-> - **얻은 것** — ⑥에서 미디어 유닛이 죽었는데 세션은 끝까지 살았다 — 그 서버 연결만 닫았다. 다른 서버의 방 · 발행은 손대지 않는다(이 회차는 서버가 하나라 다른 서버 방이 없었다 — 이 갈래는 재지 않았다).
-> - **잃은 것** — 방 상태가 유닛 메모리에 있어 유닛이 죽으면 방을 잃는다 — 녹음기는 `3001` 을 받고 그 방에서 빠졌다(유닛은 3.8초 뒤 새 신원으로 돌아왔다). 재구축 첫 `ROOM_JOIN` 이 최대 5초 늦는다(실측 409 · 757 · 2,975ms).
+> ★**우리만의 것 — 복구 단위는 SFU 마다 PeerConnection 이다**
+> - **선택 배경** — ([연:RULE-LINK-RECOVERY-UNIT](../protocol/09-link.md#RULE-LINK-RECOVERY-UNIT)) 한 SFU 가 살면 그 서버의 방은 다 살고, 죽으면 다 죽는다. 방 하나만 죽는 경우는 어차피 `3001` 로 못 살린다. 그래서 대조 · 수리 · 재연결을 방이 아니라 서버 단위로 한다. PeerConnection 이 방마다가 아니라 서버마다 하나인 사실은 [08 장](08_SLOT_SPEAKER.md)에 있다.
+> - **얻은 것** — ⑥에서 SFU 유닛이 죽었는데 세션은 끝까지 살았다. 그 서버의 PeerConnection 만 닫았다. 다른 서버의 방 · 발행은 손대지 않는다(이 회차는 녹음기가 든 서버가 하나라 다른 서버 방이 없었다 — 이 갈래는 재지 않았다).
+> - **잃은 것** — 방 상태가 유닛 메모리에 있어 유닛이 죽으면 방을 잃는다. 녹음기는 `3001` 을 받고 그 방에서 빠졌다(유닛은 정지 16.1초 뒤 — `3001` 뒤 5.3초 — 새 신원으로 돌아왔다). 재연결 첫 `ROOM_JOIN` 이 최대 5초 늦는다(실측 79 · 780 · 841ms).
 
 ## 6. 다른 SFU 는
 
@@ -258,59 +297,65 @@ sequenceDiagram
 
 | 상대 | 그쪽 방식 | 우리 | 우리 쪽 장점 | 우리 쪽 대가 |
 |---|---|---|---|---|
-| LiveKit(`livekit §6-1`~`§6-3`) | resume · ICE restart · full reconnect 3단. resume 은 클라의 `SyncState` 신고와 대조 — 서버가 모르는 발행이 하나라도 있으면 full | 같은 3단 · `RESUME` 은 신고 없는 조회 | 클라가 틀리게 신고하는 실패 모드가 없다 | 대조를 SDK 가 진다(서버마다 셋) |
-| LiveKit(`livekit §7-3`) | 시그널이 최근에 살아 있지 않으면 ICE 폴백을 안 한다 | ICE 재시작 앞에서 WS 부터 점검(`HEARTBEAT` · 2초) | 망 단절을 ICE 고장으로 오판하지 않는다 | 재시작이 점검 시간만큼 늦다 |
-| mediasoup(`mediasoup §0` · `§8-2`) | `RESTART_ICE` 원시 연산 하나 · 언제 부를지는 앱 몫 · consent 시한 기본 30초 | 사다리 · 단 · 단위까지 계약에 있다 · 쌍 만료 30초 | 앱이 복구를 짜지 않는다 · 브라우저 SDK 와 oxpeer 가 같은 원천에서 같은 길 | 정책을 바꾸려면 계약을 바꾼다 |
+| LiveKit(`livekit §6-1`~`§6-3`) | resume · ICE restart · full reconnect 3단. resume 은 클라의 `SyncState` 신고와 대조 — 서버가 모르는 발행이 하나라도 있으면 full | 같은 3단계 · `RESUME` 은 신고 없는 조회 | 클라가 틀리게 신고하는 실패 모드가 없다 | 대조를 SDK 가 진다(서버마다 셋) |
+| LiveKit(`livekit §7-3`) | 시그널이 최근에 살아 있지 않으면 ICE 폴백을 안 한다 | ICE restart 앞에서 WS 부터 점검(`HEARTBEAT` · 2초) · 브라우저 `online` 도 점검 방아쇠 | 망 단절을 ICE 고장으로 오판하지 않는다 | 재시작이 점검 시간만큼 늦다 |
+| mediasoup(`mediasoup §0` · `§8-2`) | `RESTART_ICE` 원시 연산 하나 · 언제 부를지는 앱 몫 · consent 시한 기본 30초 | 사다리 · 단계 · 단위까지 계약에 있다 · 쌍 만료 30초 | 앱이 복구를 짜지 않는다 · 브라우저 SDK 와 oxpeer 가 같은 원천에서 같은 길 | 정책을 바꾸려면 계약을 바꾼다 |
 | Janus(`Janus §2-1`) | `claim` — 끊긴 세션을 다른 연결 · 다른 전송(HTTP 등)이 인계 · `reclaim_session_timeout` | 같은 `session_id` 로 `BIND` — 같은 세션의 새 소켓 · WS 하나 | 계약이 좁다 | 전송을 갈아 끼워 인계하지 못한다 |
-| str0m(`str0m §8-1`) | ICE 에 `Failed` 가 일부러 없다 — 포기 판단은 상위 몫 | 클라는 사다리로 · 서버는 재개 창(세션) · 쌍 만료(연결)로 판단 | 포기 시각이 계약 값으로 정해진다 | 그 값이 틀리면 둘 다 고쳐야 한다([연:COND-SES-WINDOW-OVER-BACKOFF](../protocol/03-ses.md#COND-SES-WINDOW-OVER-BACKOFF)) |
-| Jitsi JVB(`JVB §9`) | make-before-break — ICE agent 둘을 나란히 · 전환 뒤 3초 옛 agent 유지 · 새 agent 대기 20초 | 전송 객체 하나가 옛 · 새 ufrag 를 함께 받다 새 것으로 검사가 오면 옛 것을 내린다 | 소켓 · 객체 하나로 겹친다 · ②에서 234ms | 자격 벌마다 최대 둘 — 그 사이 또 오면 대기분을 바꾼다 |
+| str0m(`str0m §8-1`) | ICE 에 `Failed` 가 일부러 없다 — 포기 판단은 상위 몫 | 클라는 사다리로 · 서버는 재개 창(세션) · 쌍 만료(트랜스포트)로 판단 | 포기 시각이 계약 값으로 정해진다 | 그 값이 틀리면 둘 다 고쳐야 한다([연:COND-SES-WINDOW-OVER-BACKOFF](../protocol/03-ses.md#COND-SES-WINDOW-OVER-BACKOFF)) |
+| Jitsi JVB(`JVB §9`) | make-before-break — ICE agent 둘을 나란히 · 전환 뒤 3초 옛 agent 유지 · 새 agent 대기 20초 | 트랜스포트 객체 하나가 옛 · 새 ufrag 를 함께 받다 새 것으로 검사가 오면 옛 것을 내린다 | 소켓 · 객체 하나로 겹친다 · ②에서 234ms | ICE 자격 벌마다 최대 둘 — 그 사이 또 오면 대기분을 바꾼다 |
 | Mumble(`Mumble §1-3`) | 서버 인증서 지문마다 UDP/TCP 판정을 기억해 다음 접속에 복원 | 기억하지 않는다 — 매 접속 백지 | 상태가 없다 | 첫 미디어까지 시간을 아끼지 못한다 |
 
 ## 7. 운영에서 보는 법
 
 | 사건 | 줄(실측) | 어디 |
 |---|---|---|
-| WS 끊김 | `spec=SES.S.drop … cause=drop in.c=<사유>` — §4-2 의 결함으로 지금은 0 이 찍힐 수 있다 | hub |
-| 이어받기 | `SES.S.bind_resume` → `SES.S.resume_ok` · `CP-OP-RESUME msg=ok` | hub |
-| 재개 창 만료 | `SES.S.TWindow … to=- cause=TWindow` → sfud `cause=session_gone` | hub · sfud |
-| 운영 절단 | `SES.S.drop_reclaim … cause=cut` | hub(`POST /admin/users/{user}/cut`) |
-| 미디어 연결 흔들림 | `SV-STATE-PEER-STATE … from=Alive to=Suspect cause=pair_expired` · `CP-OP-LINK-EVENT` | sfud |
-| ICE 재시작 | `SV-IMPL-LINK-ICE-RESTART msg="ice restart issued …"` → `"ufrag promoted …"` · `cause=ice_restart_checked` | sfud |
+| WS 끊김 | `spec=SES.S.drop … cause=drop in.c=<사유>` — hub 가 `LEAVE` 를 보냈으면 그 번호(바로 앞에 `CP-CODE-<이름> op=LEAVE`) · TCP 가 그냥 닫혔으면 0 | hub |
+| 세션 재개 | `SES.S.bind_resume` → `SES.S.resume_ok` · `CP-OP-RESUME msg=ok` | hub |
+| 재개 창 만료 | `SES.S.TWindow … to=- cause=TWindow` → SFU `cause=session_gone` | hub · SFU |
+| 운영 절단 | `CP-CODE-SESSION-REVOKED op=LEAVE` · `SES.S.drop_reclaim … cause=cut` | hub(`POST /admin/users/{user}/cut`) |
+| 미디어 흔들림 | `SV-STATE-PEER-STATE … from=Alive to=Suspect cause=pair_expired` · `CP-OP-LINK-EVENT` | SFU |
+| ICE restart | `SV-IMPL-LINK-ICE-RESTART msg="ice restart issued …"` → `"ufrag promoted …"` · `cause=ice_restart_checked` | SFU |
 | 유닛 죽음 뒤 | `SV.rooms … cause=room_dropped` · `CP-CODE-PEER-NOT-FOUND op=ICE_RESTART` · `CP-CODE-ROOM-NOT-FOUND op=ROOM_JOIN` | hub |
-| 재구축 | 같은 사용자의 `SES.S.bind_new`(새 세션 지문) → `CP-OP-ROOM-JOIN` | hub |
+| 재연결 | 같은 사용자의 `SES.S.bind_new`(새 세션 지문) → `CP-OP-ROOM-JOIN` | hub |
 
-- SDK 쪽은 전이 라벨로 보인다 — `SES.C.any.drop_carry` · `SES.C.any.Backoff` · `SES.C.RESUMING.bind_same` · `SES.C.RESUMING.resume_ok` · `ROOM.C.JOINED.resume_snapshot` · `LINK.C.any.table_carried_old`. 앱 이벤트는 `session { state: 'resuming', recovering: true }` → `active`.
-- 한 사용자의 끊김 · 복구를 시간 차례로 모아 보는 것(`/admin/history` · `oxadmin history <user>`)과 세션 지문(통화 번호)은 [17 장](17_OPERATIONS.md).
+- SDK 쪽은 전이 라벨로 보인다 — `SES.C.any.drop_carry` · `SES.C.any.Backoff` · `SES.C.RESUMING.bind_same` · `SES.C.RESUMING.resume_ok` · `ROOM.C.JOINED.resume_snapshot` · `LINK.C.any.table_carried_old` · `LINK.C.OK.online` · `LINK.C.any.online_absorbed`. 앱 이벤트는 `session { state: 'resuming', recovering: true }` → `active` 다.
+- 한 사용자의 끊김 · 복구를 시간 차례로 모아 보는 것(`/admin/history` · `oxadmin history <user>`)과 세션 지문은 [17 장](17_OPERATIONS.md)에 있다.
 
 ## 8. 소스 · 규격 좌표
 
 | 무엇 | 서버 | SDK · oxpeer | 규격 |
 |---|---|---|---|
-| 끊김 · 재개 창 · 이어받기 | `oxhubd/src/ses/mod.rs` `socket_dropped` · `sweep` · `resume` · `ops/mod.rs` `sweeper`(1초) · `oxsfud/src/ops/rooms.rs` `resume` | `src/domain/ses/core.ts` · `ses/clock.ts`(사다리 계산) · `domain/gen/session_client.ts` `LADDER` | [연:RULE-SES-RESUME-SIGNAL-ONLY](../protocol/03-ses.md#RULE-SES-RESUME-SIGNAL-ONLY) · [연:RULE-SES-RES-RESUME-OK](../protocol/03-ses.md#RULE-SES-RES-RESUME-OK) · [연:RULE-SES-BACKOFF-LADDER](../protocol/03-ses.md#RULE-SES-BACKOFF-LADDER) |
-| 하트비트 시한 → `LEAVE 4008` | `oxhubd/src/ses/conn.rs`(읽기 고리 시한 · `leave_code`) · `common/src/policy.rs` | — | [연:RULE-SES-HEARTBEAT](../protocol/03-ses.md#RULE-SES-HEARTBEAT) |
+| 끊김 · 재개 창 · 세션 재개 | `oxhubd/src/ses/mod.rs` `socket_dropped` · `sweep` · `resume` · `ops/mod.rs` `sweeper`(1초) · `oxsfud/src/ops/rooms.rs` `resume` | `src/domain/ses/core.ts` · `ses/clock.ts`(사다리 계산) · `domain/gen/session_client.ts` `LADDER` | [연:RULE-SES-RESUME-SIGNAL-ONLY](../protocol/03-ses.md#RULE-SES-RESUME-SIGNAL-ONLY) · [연:RULE-SES-RES-RESUME-OK](../protocol/03-ses.md#RULE-SES-RES-RESUME-OK) · [연:RULE-SES-BACKOFF-LADDER](../protocol/03-ses.md#RULE-SES-BACKOFF-LADDER) |
+| 하트비트 시한 → `LEAVE 4008` · 끊김 사유 | `oxhubd/src/ses/conn.rs`(읽기 고리 시한 · `leave` · 쓰기 태스크를 기다린 뒤 `leave_code`) · `common/src/policy.rs` | — | [연:RULE-SES-HEARTBEAT](../protocol/03-ses.md#RULE-SES-HEARTBEAT) |
 | 쌍 생존 · `LINK_EVENT` | `oxsfud/src/link/mod.rs` `UDP_PAIR_EXPIRE_MS` · `path_alive` · `oxsfud/src/ops/timers.rs` `liveness` | — | — |
-| ICE 재시작 | `oxhubd/src/ses/mod.rs` `route`(`node_of_epoch` → `3010`) · `oxsfud/src/ops/media.rs` `ice_restart` | `src/domain/link/core.ts` · oxpeer `src/generated/link_client.rs`(`LINK.C.RESTART.restart_3xxx`) | [연:RULE-LINK-RECOVERY-TIERS](../protocol/09-link.md#RULE-LINK-RECOVERY-TIERS) · [연:RULE-LINK-RECOVERY-WS-FIRST](../protocol/09-link.md#RULE-LINK-RECOVERY-WS-FIRST) |
-| 재구축 · 분산 | `oxhubd/src/ses/mod.rs` `cut` · `dispose` · `room_dropped` | `src/domain/gen/sdk_defaults.ts`(`massJitterMs` 등) · oxpeer `src/core/ses.rs` | [연:RULE-SES-REBUILD](../protocol/03-ses.md#RULE-SES-REBUILD) · [연:RULE-LINK-RECOVERY-REBUILD](../protocol/09-link.md#RULE-LINK-RECOVERY-REBUILD) · [연:RULE-SES-REBUILD-JITTER](../protocol/03-ses.md#RULE-SES-REBUILD-JITTER) |
+| ICE restart · WS 점검 | `oxhubd/src/ses/mod.rs` `route`(`node_of_epoch` → `3010`) · `oxsfud/src/ops/media.rs` `ice_restart` | `src/domain/link/core.ts`(`wsCheck`) · `src/internal/ses/signaling.ts` `probe` · `src/domain/gen/link_client.ts` · oxpeer `src/generated/link_client.rs`(`LINK.C.RESTART.restart_3xxx`) | [연:RULE-LINK-RECOVERY-TIERS](../protocol/09-link.md#RULE-LINK-RECOVERY-TIERS) · [연:RULE-LINK-RECOVERY-WS-FIRST](../protocol/09-link.md#RULE-LINK-RECOVERY-WS-FIRST) |
+| 브라우저 `online` 입구 | — | `src/domain/ses/core.ts` `onOnline`(`connect` 에 달고 `close` 에 뗀다) → `src/domain/link/core.ts` `online` · oxpeer `src/generated/link_client.rs` `online`(부르는 곳 없음) | [연:RULE-LINK-RECOVERY-WS-FIRST](../protocol/09-link.md#RULE-LINK-RECOVERY-WS-FIRST) |
+| 재연결 · 분산 | `oxhubd/src/ses/mod.rs` `cut` · `dispose` · `room_dropped` | `src/domain/gen/sdk_defaults.ts`(`massJitterMs` 등) · oxpeer `src/core/ses.rs` | [연:RULE-SES-REBUILD](../protocol/03-ses.md#RULE-SES-REBUILD) · [연:RULE-LINK-RECOVERY-REBUILD](../protocol/09-link.md#RULE-LINK-RECOVERY-REBUILD) · [연:RULE-SES-REBUILD-JITTER](../protocol/03-ses.md#RULE-SES-REBUILD-JITTER) |
 | 운영 표면 | `oxhubd/src/ops/http.rs`(`/admin/users/:user/cut` · `/admin/drops`) · `ops/admin.rs` `drops` | — | — |
 
 ## 9. 스스로 확인하는 질문
 
-<details><summary>1. ①에서 신호가 5.6초 끊긴 동안 A 는 B 의 소리를 들었나?</summary>
+<details><summary>1. ①에서 신호가 4.5초 끊긴 동안 A 는 B 의 소리를 들었나?</summary>
 
-들었다. 서버가 A 에게 보낸 수는 끊김 중에도 196 → 449 로 올랐고, A 는 499 패킷을 감춘 표본 0 으로 받았다. 끊긴 것은 WS(제어)뿐이고 미디어는 UDP 로 따로 산다.
+들었다. 서버가 A 에게 보낸 수는 끊기기 직전 38 에서 다시 붙은 직후 309 로 올랐다. A 는 449 패킷을 감춘 표본 0 으로 받았다. 끊긴 것은 WS(제어)뿐이다. 미디어는 UDP 로 따로 산다.
 </details>
 
-<details><summary>2. ②는 이어받기로, ③은 재구축으로 갔다. 두 회차를 가른 값은?</summary>
+<details><summary>2. ②는 세션 재개로, ③은 재연결로 갔다. 두 회차를 가른 값은?</summary>
 
-재개 창(60초)이다. 창은 hub 가 소켓을 뗀 순간(하트비트 시한 30초가 지난 때)부터 잰다. 35초 얼림은 drop 뒤 9초 만에 깨어나 창 안이었고, 95초 얼림은 drop 뒤 60.57초에 `TWindow` 로 세션이 지워진 뒤 깨어났다 — 보관한 `session_id` 로 `BIND` 하자 새 세션이 와서 재구축했다.
+재개 창(60초)이다. 창은 hub 가 소켓을 뗀 순간(하트비트 시한 30초가 지난 때)부터 잰다. 35초 얼림은 끊김 뒤 9초 만에 깨어나 창 안이었다. 95초 얼림은 끊김 뒤 60.61초에 `TWindow` 로 세션이 지워진 뒤 깨어났다. 보관한 `session_id` 로 `BIND` 하자 새 세션이 와서 재연결했다.
 </details>
 
 <details><summary>3. ⑥에서 녹음기는 왜 유닛이 돌아오기를 기다리지 않고 그 방을 포기했나?</summary>
 
-기다려도 소용이 없다. `ICE_RESTART` 는 옛 기동 신원(`epoch`)으로 서버를 찾는데, 돌아온 유닛은 새 신원이다 — `3010` 은 「서버가 그 연결을 모른다」는 확정이다. 방도 유닛 메모리와 함께 사라져 다시 들어가기가 `3001` 이다. 세션은 그대로 두고 그 서버 연결만 닫는 것이 규칙이다.
+기다려도 소용이 없다. `ICE_RESTART` 는 옛 기동 신원(`epoch`)으로 서버를 찾는다. 돌아온 유닛은 새 신원이다. `3010` 은 「서버가 그 트랜스포트를 모른다」는 확정이다. 방도 유닛 메모리와 함께 사라져 다시 들어가기가 `3001` 이다. 세션은 그대로 두고 그 서버의 PeerConnection 만 닫는 것이 규칙이다.
 </details>
 
-<details><summary>4. (깨지는 길) ②의 서버 로그만 보고 「하트비트 시한으로 끊겼다」고 말할 수 있나?</summary>
+<details><summary>4. ②의 서버 로그만 보고 「하트비트 시한으로 끊겼다」고 말할 수 있나?</summary>
 
-지금은 못 한다. hub 는 `LEAVE 4008` 을 보냈지만 끊김 줄은 `in.c=0` 이라 TCP 가 그냥 닫힌 ①과 같은 꼴이다(§4-2). 끊긴 시각이 마지막 수신 뒤 정확히 30초라는 것으로 짐작할 뿐이다. 클라(녹음기) 쪽 사건에는 `4008` 이 남아 있다.
+이제 말할 수 있다. hub 의 끊김 줄이 `in.c=4008` 이다. 바로 앞에 `CP-CODE-HEARTBEAT-TIMEOUT op=LEAVE` 줄도 있다(§4-2). TCP 가 그냥 닫힌 ①은 `in.c=0` 이라 갈린다. 고치기 전에는 둘 다 `in.c=0` 이라 끊긴 시각(마지막 수신 뒤 정확히 30초)으로 짐작할 뿐이었다.
+</details>
+
+<details><summary>5. (깨지는 길) ①에서 망이 돌아온 뒤 SDK 가 1.47초를 기다렸다. 브라우저 `online` 입구가 이 기다림을 줄이나?</summary>
+
+줄이지 않는다. 그 기다림은 세션 층 재접속 사다리의 다음 칸이다. 이 탐침은 중계에서 TCP 를 닫았을 뿐이라 브라우저에 `online` 사건이 나지 않는다. `online` 입구는 PeerConnection 층의 것이다. 망이 바뀌어 옛 TCP 가 반쯤 열린 채 남는 고장을 막는다 — ICE 흔들림 기다림 없이 바로 WS 를 점검한다(§4-4). 사다리를 당기는 방아쇠는 규격에 없다.
 </details>

@@ -124,7 +124,7 @@ fn trace(room: &str, e: &Entry, from: G, to: G, step: &Step, n: u64) {
     let t = common::log::Transition { area: "FLR", key: room, spec, from: from.as_str(), to: spec.map(|_| to.as_str()), cause: e.name, inputs: &e.ins };
     let mut l = t.line().key("room", room).key("floor_sequence", n);
     if let Some(o) = step.out.iter().find(|o| matches!(o.m.t, crate::flr::core::Mt::Idle | crate::flr::core::Mt::Taken)) {
-        l = l.key("mbcp_seq", o.m.n);
+        l = l.key("mbcp_seq", o.m.q);
     }
     if !e.user.is_empty() {
         l = l.key("session", super::session_of(e.user)).key("user", e.user);
