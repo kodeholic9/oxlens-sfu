@@ -189,8 +189,21 @@ pub fn bind_bound(ctx: &Ctx, s: &Session) {
     transition(s, Some("SES.S.bind_bound"), &st, Some(&st), "BIND", &[]);
 }
 
+pub fn code_line(f: &Failure, op: &str, s: Option<&Session>) {
+    let mut l = common::log::Line::ev(&format!("CP-CODE-{}", f.name.replace('_', "-")));
+    if let Some(s) = s {
+        l = l.key("session", &s.fp).key("user", &s.user_id);
+    }
+    l = l.rec("op", op);
+    if let Some(m) = f.message.as_deref().filter(|m| !m.is_empty()) {
+        l = l.msg(m.to_string());
+    }
+    common::log::emit(l);
+}
+
 fn fail_bind(ctx: &Ctx, conn: &Conn, op: u16, pid: u32, flags: u8, f: Failure, label: Option<&str>) {
     ctx.counters.code(f.code);
+    code_line(&f, "BIND", None);
     if let Some(l) = label {
         let t = Transition { area: "SES", key: "-", spec: Some(l), from: "-", to: Some("-"), cause: "BIND", inputs: &[] };
         common::log::emit(t.line());
@@ -536,13 +549,7 @@ pub async fn handle_request(ctx: &Arc<Ctx>, s: &Arc<Session>, conn: &Conn, r: Re
         }
         Err(f) => {
             ctx.counters.code(f.code);
-            common::log::emit(
-                common::log::Line::ev(&format!("CP-CODE-{}", f.name.replace('_', "-")))
-                    .key("session", &s.fp)
-                    .key("user", &s.user_id)
-                    .rec("op", r.op.name())
-                    .msg(f.message.clone().unwrap_or_default()),
-            );
+            code_line(&f, r.op.name(), Some(s));
             conn.reply_fail(r.op_num, r.pid, r.flags, &f);
         }
     }

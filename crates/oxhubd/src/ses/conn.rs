@@ -51,6 +51,7 @@ impl Conn {
     }
 
     pub fn leave(&self, code: Code) {
+        super::code_line(&code.failure(), "LEAVE", None);
         let _ = self.tx.send(Out::Leave { code, details: None });
     }
 }
@@ -258,7 +259,12 @@ pub async fn serve(ws: WebSocket, ctx: Arc<Ctx>) {
             Some(op) => {
                 let _ = req_tx.send((s, Request { op, op_num: h.op, pid: h.pid, flags: h.flags, body: f.body.to_vec() }));
             }
-            None => conn.reply_fail(h.op, h.pid, h.flags, &Code::UnknownOp.failure()),
+            None => {
+                let f = Code::UnknownOp.failure();
+                ctx.counters.code(f.code);
+                super::code_line(&f, &format!("{:#06x}", h.op), session.as_deref());
+                conn.reply_fail(h.op, h.pid, h.flags, &f);
+            }
         }
     }
     drop(req_tx);
