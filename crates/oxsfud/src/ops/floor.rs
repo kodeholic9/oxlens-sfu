@@ -12,8 +12,8 @@ use oxsig::msg::Kind;
 
 use crate::flr::bind::Effect;
 use crate::flr::core::{Floor, G, Msg, Mt, Step};
-use crate::fwd::rt::{Item, media, mono_us};
-use crate::fwd::{Ctl, DownRow, OPUS_SILENCE, PRIME_FRAMES, SILENCE_FRAMES, SlotFan};
+use crate::fwd::rt::mono_us;
+use crate::fwd::SlotFan;
 use crate::link::Transport;
 use crate::room::Room;
 
@@ -24,7 +24,6 @@ pub const T8_MS: u64 = mbcp::timers::T8_MS;
 pub const T9_MS: u64 = mbcp::timers::T9_MS;
 pub const T20_MS: u64 = mbcp::timers::T20_MS;
 pub const T21_MS: u64 = mbcp::timers::T21_MS;
-pub const FRAME_MS: u64 = 20;
 
 type Key = (&'static str, Option<String>);
 
@@ -99,7 +98,6 @@ fn duration(name: &str) -> u64 {
 struct Plan {
     step: Step,
     effects: Vec<Effect>,
-    from_idle: bool,
 }
 
 pub struct Entry<'a> {
@@ -142,7 +140,6 @@ where
         let Ok(mut ck) = rf.clock.lock() else { return Step::default() };
         let now = now_ms();
         let t2_left = ck.timers.get(&("T2", None)).map(|at| (at.saturating_sub(now) / 1000) as u32).unwrap_or((t2_ms() / 1000) as u32);
-        let was_idle = fl.g == G::Idle;
         let from = fl.g;
         let Some(step) = f(&mut fl, t2_left) else { return Step::default() };
         ck.events += 1;
@@ -161,7 +158,7 @@ where
             }
         }
         rearm(&fl, &mut ck, now);
-        Plan { step, effects, from_idle: was_idle }
+        Plan { step, effects }
     };
     rf.wake.notify_one();
     execute(room, &plan);
@@ -203,7 +200,7 @@ fn execute(room: &Arc<Room>, p: &Plan) {
             continue;
         }
         match e {
-            Effect::Bind { user, .. } => bind_media(room, user, p.from_idle),
+            Effect::Bind { user, .. } => bind_media(room, user),
             Effect::Release { .. } => release_media(room, prev.as_deref()),
         }
     }
@@ -378,39 +375,6 @@ fn fire(f: &mut Floor, name: &str, u: &str) -> Step {
     }
 }
 
-fn group_rows(rows: &[Arc<DownRow>], skip: Option<&str>) -> Vec<Vec<Arc<DownRow>>> {
-    let n = media().map(|m| m.workers.len()).unwrap_or(1).max(1);
-    let mut by: Vec<Vec<Arc<DownRow>>> = vec![Vec::new(); n];
-    for r in rows {
-        if Some(r.user.as_str()) == skip {
-            continue;
-        }
-        by[r.conn.worker.min(n - 1)].push(r.clone());
-    }
-    by
-}
-
-fn push_frames(fan: &Arc<SlotFan>, skip: Option<&str>, key: u64, prime: bool) {
-    let Some(m) = media() else { return };
-    let rows: Vec<Arc<DownRow>> = fan.rows.load().iter().cloned().collect();
-    let seq = fan.prime_seq.fetch_add(1, Ordering::AcqRel);
-    let ts = fan.prime_ts.fetch_add(960, Ordering::AcqRel);
-    let from = m.workers.len() + 1;
-    for (i, g) in group_rows(&rows, skip).into_iter().enumerate() {
-        if g.is_empty() {
-            continue;
-        }
-        let ctl = Ctl::Frames { rows: g, payload: OPUS_SILENCE.to_vec(), src_key: key, seq, ts, fan: fan.clone(), prime };
-        if !m.workers[i].push(from, Item::Ctl(ctl)) {
-            super::drop_count("egress_queue_full");
-        }
-    }
-}
-
-fn room_audio_opus(room: &Room) -> bool {
-    room.media_codecs.audio.as_deref().map(|a| a.eq_ignore_ascii_case("opus")).unwrap_or(true)
-}
-
 fn slot_sources(room: &Room, user: &str) -> Vec<u32> {
     let Some(ctx) = super::sfu().and_then(|s| s.pubs.get(user)) else { return Vec::new() };
     ctx.streams().into_iter().filter(|st| st.is_half() && st.room.load().as_str() == room.id).map(|st| st.csrc).collect()
@@ -436,28 +400,14 @@ fn pli_while_bound(fan: &Arc<SlotFan>, t: &Arc<crate::r#pub::PubTrack>) {
     }
 }
 
-fn bind_media(room: &Arc<Room>, user: &str, from_idle: bool) {
+fn bind_media(room: &Arc<Room>, user: &str) {
     let (videos, video_ok) = slot_video(room, user);
     if !video_ok {
         tracing::warn!(kind = "diag", spec = "SV-IMPL-FLR-MEDIA-BIND", session = %super::session_of(user), room = %room.id, user = %user, "slot video codec differs from room — video not bound");
     }
-    let prime = from_idle && room_audio_opus(room);
     let speaker = Arc::new(user.to_string());
-    let key = room.slot(Kind::Audio).bind(Some(speaker.clone()), prime);
-    room.slot(Kind::Video).bind(video_ok.then_some(speaker), false);
-    if prime {
-        let audio = room.slot(Kind::Audio).clone();
-        let speaker = user.to_string();
-        super::spawn(async move {
-            for _ in 0..PRIME_FRAMES {
-                if audio.priming.load(Ordering::Acquire) == 0 || audio.episode.load(Ordering::Acquire) != key {
-                    break;
-                }
-                push_frames(&audio, Some(&speaker), key, true);
-                tokio::time::sleep(Duration::from_millis(FRAME_MS)).await;
-            }
-        });
-    }
+    room.slot(Kind::Audio).bind(Some(speaker.clone()));
+    room.slot(Kind::Video).bind(video_ok.then_some(speaker));
     if video_ok {
         let fan = room.slot(Kind::Video);
         for st in &videos {
@@ -478,22 +428,8 @@ fn release_media(room: &Arc<Room>, prev: Option<&str>) {
             }
         }
     }
-    let key = room.slot(Kind::Audio).release();
+    room.slot(Kind::Audio).release();
     room.slot(Kind::Video).release();
-    if !room_audio_opus(room) {
-        return;
-    }
-    let audio = room.slot(Kind::Audio).clone();
-    let skip = prev.map(|p| p.to_string());
-    super::spawn(async move {
-        for _ in 0..SILENCE_FRAMES {
-            if audio.episode.load(Ordering::Acquire) != key {
-                break;
-            }
-            push_frames(&audio, skip.as_deref(), key, false);
-            tokio::time::sleep(Duration::from_millis(FRAME_MS)).await;
-        }
-    });
 }
 
 pub fn snapshot(room: &Room) -> serde_json::Value {

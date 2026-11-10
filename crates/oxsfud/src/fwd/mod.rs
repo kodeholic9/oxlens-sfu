@@ -5,7 +5,7 @@
 pub mod core;
 pub mod rt;
 
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arc_swap::{ArcSwap, ArcSwapOption};
@@ -18,9 +18,6 @@ use core::Rewriter;
 use rt::{Item, Worker, media, mono_us};
 
 pub const LAYER_PAUSE: u8 = 255;
-pub const PRIME_FRAMES: u32 = 250;
-pub const SILENCE_FRAMES: u32 = 3;
-pub const OPUS_SILENCE: [u8; 3] = [0xf8, 0xff, 0xfe];
 pub const BLOCKED_NOTIFY_US: u64 = 500_000;
 
 pub struct DownRow {
@@ -126,12 +123,6 @@ pub struct SlotFan {
     pub speaker: ArcSwapOption<String>,
     pub bind: Mutex<crate::flr::bind::Slot>,
     pub episode: AtomicU64,
-    pub priming: AtomicU32,
-    pub silence: AtomicU32,
-    pub prime_seq: AtomicU16,
-    pub prime_ts: AtomicU32,
-    pub last_prime_us: AtomicU64,
-    pub silence_skip: ArcSwapOption<String>,
     pub first_rtp_us: AtomicU64,
     pub last_rtp_us: AtomicU64,
     pub last_notify_us: AtomicU64,
@@ -145,12 +136,6 @@ impl SlotFan {
             speaker: ArcSwapOption::empty(),
             bind: Mutex::new(crate::flr::bind::Slot::default()),
             episode: AtomicU64::new(1 << 40),
-            priming: AtomicU32::new(0),
-            silence: AtomicU32::new(0),
-            prime_seq: AtomicU16::new(0),
-            prime_ts: AtomicU32::new(0),
-            last_prime_us: AtomicU64::new(0),
-            silence_skip: ArcSwapOption::empty(),
             first_rtp_us: AtomicU64::new(0),
             last_rtp_us: AtomicU64::new(0),
             last_notify_us: AtomicU64::new(0),
@@ -161,20 +146,16 @@ impl SlotFan {
         self.speaker.load().as_deref().map(|s| s.as_str() == user).unwrap_or(false)
     }
 
-    pub fn bind(&self, speaker: Option<Arc<String>>, prime: bool) -> u64 {
+    pub fn bind(&self, speaker: Option<Arc<String>>) -> u64 {
         self.first_rtp_us.store(0, Ordering::Release);
         self.last_notify_us.store(0, Ordering::Release);
         self.close_rtx();
-        if prime {
-            self.priming.store(PRIME_FRAMES, Ordering::Release);
-        }
         self.speaker.store(speaker);
         self.episode.fetch_add(1, Ordering::AcqRel) + 1
     }
 
     pub fn release(&self) -> u64 {
         self.speaker.store(None);
-        self.priming.store(0, Ordering::Release);
         self.close_rtx();
         self.episode.fetch_add(1, Ordering::AcqRel) + 1
     }
@@ -193,12 +174,11 @@ impl SlotFan {
     }
 
     pub fn pass_gate(&self, at_us: u64) -> bool {
-        self.priming.store(0, Ordering::Release);
         self.first_rtp_us.compare_exchange(0, at_us, Ordering::AcqRel, Ordering::Acquire).is_ok()
     }
 
-    pub fn frame_live(&self, episode: u64, prime: bool) -> bool {
-        self.episode.load(Ordering::Acquire) == episode && (!prime || self.first_rtp_us.load(Ordering::Acquire) == 0)
+    pub fn live(&self, episode: u64) -> bool {
+        self.episode.load(Ordering::Acquire) == episode
     }
 }
 
@@ -227,14 +207,12 @@ pub struct Egress {
 pub enum Ctl {
     Pli { tr: Arc<Transport>, track: Arc<crate::r#pub::PubTrack> },
     Sr { row: Arc<DownRow>, src_key: u64, sr: crate::rtcp::Sr, rtp: u32 },
-    Frames { rows: Vec<Arc<DownRow>>, payload: Vec<u8>, src_key: u64, seq: u16, ts: u32, fan: Arc<SlotFan>, prime: bool },
 }
 
 impl Ctl {
     pub fn packets(&self) -> usize {
         match self {
             Ctl::Pli { .. } | Ctl::Sr { .. } => 1,
-            Ctl::Frames { rows, .. } => rows.len().max(1),
         }
     }
 }
@@ -380,7 +358,7 @@ fn process(w: &Arc<Worker>, item: Item) {
         Item::In { tr, data, at_us } => ingress(w, &tr, data, at_us),
         Item::Out(e) => {
             if let Some((fan, ep)) = &e.slot
-                && !fan.frame_live(*ep, false)
+                && !fan.live(*ep)
             {
                 crate::ops::drop_count("slot_stale");
                 return;
@@ -396,39 +374,6 @@ fn process(w: &Arc<Worker>, item: Item) {
         Item::Ctl(c) => match c {
             Ctl::Pli { tr, track } => crate::rtcp::send_pli(w, &tr, &track),
             Ctl::Sr { row, src_key, sr, rtp } => crate::rtcp::send_sr(w, &row, src_key, &sr, rtp),
-            Ctl::Frames { rows, payload, src_key, seq, ts, fan, prime } => {
-                if !fan.frame_live(src_key, prime) {
-                    crate::ops::drop_count(if fan.episode.load(Ordering::Acquire) != src_key { "frame_stale" } else { "prime_after_rtp" });
-                    return;
-                }
-                let mut b = Vec::with_capacity(12 + payload.len());
-                b.extend_from_slice(&[0x80, 111]);
-                b.extend_from_slice(&seq.to_be_bytes());
-                b.extend_from_slice(&ts.to_be_bytes());
-                b.extend_from_slice(&0u32.to_be_bytes());
-                b.extend_from_slice(&payload);
-                let pkt = Pkt {
-                    data: Bytes::from(b),
-                    hlen: 12,
-                    seq,
-                    ts,
-                    marker: false,
-                    audio_level: None,
-                    src_key,
-                    covers: core::opus_toc_samples(&payload),
-                    at_us: mono_us(),
-                    keyframe: false,
-                    transit: false,
-                    track: None,
-                };
-                for r in &rows {
-                    if !r.open() {
-                        crate::ops::drop_count("row_gate");
-                        continue;
-                    }
-                    send_down(w, r, &pkt);
-                }
-            }
         },
     }
 }

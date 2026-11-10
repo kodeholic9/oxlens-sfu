@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.10 · 정:RULE-FWD-MEDIA-WORKERS · 정:IMPL-FLR-MEDIA-BIND · 정:IMPL-FWD-SOURCE-SWITCH · model: claude-opus-5-5
-//! 1층 — 워커 사이로 넘긴 묶음은 받는 워커가 적용하는 차례에 다시 판단한다. 슬롯 묶음은 게이트를 지난 일화가 그대로인지 · 줄은 판단한 뒤 다시 실리지 않았는지 본다(링 사이 차례가 없어 앞 화자의 묶음이 새 화자 패킷 뒤에 적용되면 재기록기가 앞 출처로 되돌아간다). 결합은 첫 RTP 기록 · 재전송 문 · 예열을 먼저 놓고 화자를 마지막에 보인다(context 202611/20261111a).
+// spec: v1.11 · 정:RULE-FWD-MEDIA-WORKERS · 정:IMPL-FLR-MEDIA-BIND · 정:IMPL-FWD-SOURCE-SWITCH · model: claude-opus-5-5
+//! 1층 — 워커 사이로 넘긴 묶음은 받는 워커가 적용하는 차례에 다시 판단한다. 슬롯 묶음은 게이트를 지난 일화가 그대로인지 · 줄은 판단한 뒤 다시 실리지 않았는지 본다(링 사이 차례가 없어 앞 화자의 묶음이 새 화자 패킷 뒤에 적용되면 재기록기가 앞 출처로 되돌아간다). 결합은 첫 RTP 기록 · 재전송 문을 먼저 놓고 화자를 보인 뒤 일화를 올린다 · 반이중 영상 PLI 는 보내는 차례에 화자인지 본다(context 202611/20261111a).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -17,24 +17,24 @@ fn who(u: &str) -> Option<Arc<String>> {
 #[test]
 fn slot_packet_admitted_before_release_is_dropped_when_applied_after_it() {
     let fan = SlotFan::new(true);
-    fan.bind(who("a"), false);
+    fan.bind(who("a"));
     let ep = fan.admit("a").expect("speaker passes the gate");
-    assert!(fan.frame_live(ep, false), "정:RULE-FWD-MEDIA-WORKERS packet of the current episode is sent");
+    assert!(fan.live(ep), "정:RULE-FWD-MEDIA-WORKERS packet of the current episode is sent");
     fan.release();
     assert!(fan.admit("a").is_none(), "정:IMPL-FLR-MEDIA-BIND released speaker does not pass the gate");
-    assert!(!fan.frame_live(ep, false), "정:RULE-FWD-MEDIA-WORKERS S-sym-IMPL-FLR-MEDIA-BIND-7 packet admitted before release is not sent when applied after it");
+    assert!(!fan.live(ep), "정:RULE-FWD-MEDIA-WORKERS S-sym-IMPL-FLR-MEDIA-BIND-7 packet admitted before release is not sent when applied after it");
 }
 
 #[test]
 fn old_speaker_packet_is_dropped_after_succession_and_new_speaker_packet_is_kept() {
     let fan = SlotFan::new(true);
-    fan.bind(who("a"), false);
+    fan.bind(who("a"));
     let old = fan.admit("a").expect("a passes");
-    fan.bind(who("b"), false);
+    fan.bind(who("b"));
     let new = fan.admit("b").expect("b passes");
     assert!(fan.admit("a").is_none(), "정:IMPL-FLR-MEDIA-BIND only the new speaker passes after succession");
-    assert!(!fan.frame_live(old, false), "정:RULE-FWD-MEDIA-WORKERS S-sym-IMPL-FLR-MEDIA-BIND-7 old speaker packet applied after succession is not sent");
-    assert!(fan.frame_live(new, false), "정:RULE-FWD-MEDIA-WORKERS new speaker packet is sent");
+    assert!(!fan.live(old), "정:RULE-FWD-MEDIA-WORKERS S-sym-IMPL-FLR-MEDIA-BIND-7 old speaker packet applied after succession is not sent");
+    assert!(fan.live(new), "정:RULE-FWD-MEDIA-WORKERS new speaker packet is sent");
 }
 
 #[test]
@@ -90,10 +90,23 @@ fn bind_shows_the_speaker_only_after_the_first_rtp_record_is_cleared() {
     };
     for i in 1..=200_000u64 {
         fan.first_rtp_us.store(i, Ordering::Release);
-        fan.bind(Some(Arc::new(i.to_string())), false);
+        fan.bind(Some(Arc::new(i.to_string())));
     }
     stop.store(true, Ordering::Release);
     let bad = reader.join().unwrap();
     assert!(seen.load(Ordering::Relaxed) > 0, "reader observed the slot");
     assert_eq!(bad, 0, "정:IMPL-FLR-MEDIA-BIND S-sym-IMPL-FLR-MEDIA-BIND-6 the new speaker is never visible with the previous episode's first-RTP record");
+}
+
+#[test]
+fn pli_for_half_duplex_video_is_sent_only_while_bound() {
+    use oxsfud::rtcp::pli_wanted;
+    let fan = SlotFan::new(false);
+    fan.speaker.store(Some(Arc::new("a".to_string())));
+    assert!(pli_wanted(true, Some(&fan), "a"), "정:IMPL-FLR-MEDIA-BIND bound speaker gets PLI");
+    assert!(!pli_wanted(true, Some(&fan), "b"), "정:IMPL-FLR-MEDIA-BIND other user's half track gets none");
+    fan.speaker.store(None);
+    assert!(!pli_wanted(true, Some(&fan), "a"), "정:IMPL-FLR-MEDIA-BIND pending PLI is not sent after release");
+    assert!(!pli_wanted(true, None, "a"), "정:IMPL-FLR-MEDIA-BIND no slot means no PLI for half track");
+    assert!(pli_wanted(false, None, "a"), "정:IMPL-FLR-MEDIA-BIND full duplex is not gated by the slot");
 }
