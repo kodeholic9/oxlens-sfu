@@ -343,8 +343,21 @@ fn throttle_ms(t: &PubTrack) -> u64 {
     if t.rid == Some(0) { p.media.pli_throttle_low_ms as u64 } else { p.media.pli_throttle_high_ms as u64 }
 }
 
+pub fn pli_wanted(half: bool, slot: Option<&crate::fwd::SlotFan>, user: &str) -> bool {
+    !half || slot.is_some_and(|f| f.speaker_is(user))
+}
+
 pub fn request_pli(t: &Arc<PubTrack>, infra: bool) {
     if t.stream.kind != Kind::Video {
+        return;
+    }
+    let half = t.stream.is_half();
+    let slot = if half { crate::ops::slot_of(t.stream.room.load().as_str(), Kind::Video) } else { None };
+    if !pli_wanted(half, slot.as_deref(), &t.stream.user) {
+        if let Ok(mut p) = t.pli.lock() {
+            p.pending = false;
+        }
+        crate::ops::drop_count("pli_unbound");
         return;
     }
     let now = common::now_ms();

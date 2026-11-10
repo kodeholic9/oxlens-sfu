@@ -152,6 +152,15 @@ impl SlotFan {
     pub fn speaker_is(&self, user: &str) -> bool {
         self.speaker.load().as_deref().map(|s| s.as_str() == user).unwrap_or(false)
     }
+
+    pub fn pass_gate(&self, at_us: u64) -> bool {
+        self.priming.store(0, Ordering::Release);
+        self.first_rtp_us.compare_exchange(0, at_us, Ordering::AcqRel, Ordering::Acquire).is_ok()
+    }
+
+    pub fn frame_live(&self, episode: u64, prime: bool) -> bool {
+        self.episode.load(Ordering::Acquire) == episode && (!prime || self.first_rtp_us.load(Ordering::Acquire) == 0)
+    }
 }
 
 #[derive(Clone)]
@@ -178,7 +187,7 @@ pub struct Egress {
 pub enum Ctl {
     Rtcp { tr: Arc<Transport>, data: Vec<u8> },
     Rtx { row: Arc<DownRow>, seqs: Vec<u16> },
-    Frames { rows: Vec<Arc<DownRow>>, payload: Vec<u8>, src_key: u64, seq: u16, ts: u32 },
+    Frames { rows: Vec<Arc<DownRow>>, payload: Vec<u8>, src_key: u64, seq: u16, ts: u32, fan: Arc<SlotFan>, prime: bool },
 }
 
 impl Ctl {
@@ -338,7 +347,11 @@ fn process(w: &Arc<Worker>, item: Item) {
         Item::Ctl(c) => match c {
             Ctl::Rtcp { tr, data } => crate::rtcp::send_rtcp(w, &tr, &data),
             Ctl::Rtx { row, seqs } => crate::rtcp::send_rtx(w, &row, &seqs),
-            Ctl::Frames { rows, payload, src_key, seq, ts } => {
+            Ctl::Frames { rows, payload, src_key, seq, ts, fan, prime } => {
+                if !fan.frame_live(src_key, prime) {
+                    crate::ops::drop_count(if fan.episode.load(Ordering::Acquire) != src_key { "frame_stale" } else { "prime_after_rtp" });
+                    return;
+                }
                 let mut b = Vec::with_capacity(12 + payload.len());
                 b.extend_from_slice(&[0x80, 111]);
                 b.extend_from_slice(&seq.to_be_bytes());
@@ -511,8 +524,7 @@ fn forward(w: &Arc<Worker>, tr: &Arc<Transport>, track: &Arc<crate::r#pub::PubTr
             }
             return;
         }
-        fan.priming.store(0, Ordering::Release);
-        let first = fan.first_rtp_us.compare_exchange(0, at_us, Ordering::AcqRel, Ordering::Acquire).is_ok();
+        let first = fan.pass_gate(at_us);
         fan.last_rtp_us.store(at_us, Ordering::Release);
         let prev = fan.last_notify_us.load(Ordering::Relaxed);
         if first || at_us.saturating_sub(prev) >= BLOCKED_NOTIFY_US {

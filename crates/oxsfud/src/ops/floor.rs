@@ -390,7 +390,7 @@ fn group_rows(rows: &[Arc<DownRow>], skip: Option<&str>) -> Vec<Vec<Arc<DownRow>
     by
 }
 
-fn push_frames(fan: &SlotFan, skip: Option<&str>, key: u64) {
+fn push_frames(fan: &Arc<SlotFan>, skip: Option<&str>, key: u64, prime: bool) {
     let Some(m) = media() else { return };
     let rows: Vec<Arc<DownRow>> = fan.rows.load().iter().cloned().collect();
     let seq = fan.prime_seq.fetch_add(1, Ordering::AcqRel);
@@ -400,7 +400,7 @@ fn push_frames(fan: &SlotFan, skip: Option<&str>, key: u64) {
         if g.is_empty() {
             continue;
         }
-        let ctl = Ctl::Frames { rows: g, payload: OPUS_SILENCE.to_vec(), src_key: key, seq, ts };
+        let ctl = Ctl::Frames { rows: g, payload: OPUS_SILENCE.to_vec(), src_key: key, seq, ts, fan: fan.clone(), prime };
         if !m.workers[i].push(from, Item::Ctl(ctl)) {
             super::drop_count("egress_queue_full");
         }
@@ -464,7 +464,7 @@ fn bind_media(room: &Arc<Room>, user: &str, from_idle: bool) {
                 if audio.priming.load(Ordering::Acquire) == 0 || audio.episode.load(Ordering::Acquire) != key {
                     break;
                 }
-                push_frames(&audio, Some(&speaker), key);
+                push_frames(&audio, Some(&speaker), key, true);
                 tokio::time::sleep(Duration::from_millis(FRAME_MS)).await;
             }
             audio.priming.store(0, Ordering::Release);
@@ -512,7 +512,7 @@ fn release_media(room: &Arc<Room>, prev: Option<&str>) {
             if audio.episode.load(Ordering::Acquire) != key {
                 break;
             }
-            push_frames(&audio, skip.as_deref(), key);
+            push_frames(&audio, skip.as_deref(), key, false);
             tokio::time::sleep(Duration::from_millis(FRAME_MS)).await;
         }
     });
