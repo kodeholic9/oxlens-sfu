@@ -309,11 +309,11 @@ pub fn parse_twcc(body: &[u8]) -> Option<(u16, Vec<Option<i64>>)> {
     Some((base, out))
 }
 
-pub fn emit(tr: &Arc<Transport>, data: Vec<u8>) {
+fn post(tr: &Transport, from: Option<usize>, c: Ctl) {
     let Some(m) = media() else { return };
     let Some(w) = m.workers.get(tr.worker) else { return };
-    let from = m.workers.len() + 1;
-    if !w.push(from, Item::Ctl(Ctl::Rtcp { tr: tr.clone(), data })) {
+    let from = from.map(|i| i + 1).unwrap_or(m.workers.len() + 1);
+    if !w.push(from, Item::Ctl(c)) {
         crate::ops::drop_count("egress_queue_full");
     }
 }
@@ -347,17 +347,21 @@ pub fn pli_wanted(half: bool, slot: Option<&crate::fwd::SlotFan>, user: &str) ->
     !half || slot.is_some_and(|f| f.speaker_is(user))
 }
 
-pub fn request_pli(t: &Arc<PubTrack>, infra: bool) {
-    if t.stream.kind != Kind::Video {
-        return;
-    }
+fn pli_bound(t: &PubTrack) -> bool {
     let half = t.stream.is_half();
     let slot = if half { crate::ops::slot_of(t.stream.room.load().as_str(), Kind::Video) } else { None };
-    if !pli_wanted(half, slot.as_deref(), &t.stream.user) {
-        if let Ok(mut p) = t.pli.lock() {
-            p.pending = false;
-        }
-        crate::ops::drop_count("pli_unbound");
+    if pli_wanted(half, slot.as_deref(), &t.stream.user) {
+        return true;
+    }
+    if let Ok(mut p) = t.pli.lock() {
+        p.pending = false;
+    }
+    crate::ops::drop_count("pli_unbound");
+    false
+}
+
+pub fn request_pli(t: &Arc<PubTrack>, infra: bool) {
+    if t.stream.kind != Kind::Video || !pli_bound(t) {
         return;
     }
     let now = common::now_ms();
@@ -379,8 +383,23 @@ pub fn request_pli(t: &Arc<PubTrack>, infra: bool) {
         }
     };
     if fire && let Some(tr) = t.transport.upgrade() {
-        emit(&tr, build_pli(t.ssrc));
+        post(&tr, None, Ctl::Pli { tr: tr.clone(), track: t.clone() });
     }
+}
+
+pub fn send_pli(w: &Worker, tr: &Transport, t: &PubTrack) {
+    if pli_bound(t) {
+        send_rtcp(w, tr, &build_pli(t.ssrc));
+    }
+}
+
+pub fn send_sr(w: &Worker, row: &DownRow, src_key: u64, sr: &Sr, rtp: u32) {
+    let translated = match row.rw.lock() {
+        Ok(rw) if rw.src == Some(src_key) => rw.translate_sr_ts(rtp),
+        _ => return,
+    };
+    let pk = build_sr(row.ssrc, sr, translated, row.sent.load(Ordering::Relaxed) as u32, row.bytes.load(Ordering::Relaxed) as u32);
+    send_rtcp(w, &row.conn, &pk);
 }
 
 pub fn pli_burst(t: &Arc<PubTrack>) {
@@ -534,7 +553,7 @@ pub fn on_rtcp(w: &Arc<Worker>, tr: &Arc<Transport>, plain: &[u8]) {
     let table = crate::ops::table_of(tr.id);
     for p in split(plain) {
         match (p.pt, p.fmt) {
-            (200, _) => on_sr(tr, p.body),
+            (200, _) => on_sr(w, tr, p.body),
             (201, _) => {
                 let Some(t) = &table else {
                     crate::ops::drop_count("rtcp_unresolved");
@@ -584,7 +603,7 @@ pub fn on_rtcp(w: &Arc<Worker>, tr: &Arc<Transport>, plain: &[u8]) {
     }
 }
 
-fn on_sr(tr: &Arc<Transport>, body: &[u8]) {
+fn on_sr(w: &Worker, tr: &Arc<Transport>, body: &[u8]) {
     let Some(ssrc) = be32(body, 0) else { return };
     let ing = tr.ingress.load();
     let Some(track) = ing.get(&ssrc).filter(|t| t.ssrc == ssrc).cloned() else {
@@ -597,12 +616,14 @@ fn on_sr(tr: &Arc<Transport>, body: &[u8]) {
         g.insert(ssrc, sr);
     }
     for row in crate::ops::rows_of_source(&track) {
-        let translated = match row.rw.lock() {
-            Ok(rw) if rw.src == Some(track.src_key) => rw.translate_sr_ts(rtp),
-            _ => continue,
-        };
-        let pk = build_sr(row.ssrc, &sr, translated, row.sent.load(Ordering::Relaxed) as u32, row.bytes.load(Ordering::Relaxed) as u32);
-        emit(&row.conn, pk);
+        if !row.src_track.load().as_ref().is_some_and(|t| Arc::ptr_eq(t, &track)) {
+            continue;
+        }
+        if row.conn.worker == w.id {
+            send_sr(w, &row, track.src_key, &sr, rtp);
+        } else {
+            post(&row.conn, Some(w.id), Ctl::Sr { row: row.clone(), src_key: track.src_key, sr, rtp });
+        }
     }
 }
 

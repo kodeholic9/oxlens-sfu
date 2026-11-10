@@ -441,23 +441,12 @@ fn bind_media(room: &Arc<Room>, user: &str, from_idle: bool) {
     if !video_ok {
         tracing::warn!(kind = "diag", spec = "SV-IMPL-FLR-MEDIA-BIND", session = %super::session_of(user), room = %room.id, user = %user, "slot video codec differs from room — video not bound");
     }
-    for k in [Kind::Audio, Kind::Video] {
-        let fan = room.slot(k);
-        let bind = k == Kind::Audio || video_ok;
-        fan.speaker.store(bind.then(|| Arc::new(user.to_string())));
-        fan.episode.fetch_add(1, Ordering::AcqRel);
-        fan.first_rtp_us.store(0, Ordering::Release);
-        fan.last_notify_us.store(0, Ordering::Release);
-        if k == Kind::Video {
-            for r in fan.rows.load().iter() {
-                r.rtx_gate_until_new.store(true, Ordering::Release);
-            }
-        }
-    }
-    let audio = room.slot(Kind::Audio).clone();
-    if from_idle && room_audio_opus(room) {
-        audio.priming.store(PRIME_FRAMES, Ordering::Release);
-        let key = audio.episode.load(Ordering::Acquire);
+    let prime = from_idle && room_audio_opus(room);
+    let speaker = Arc::new(user.to_string());
+    let key = room.slot(Kind::Audio).bind(Some(speaker.clone()), prime);
+    room.slot(Kind::Video).bind(video_ok.then_some(speaker), false);
+    if prime {
+        let audio = room.slot(Kind::Audio).clone();
         let speaker = user.to_string();
         super::spawn(async move {
             for _ in 0..PRIME_FRAMES {
@@ -467,7 +456,6 @@ fn bind_media(room: &Arc<Room>, user: &str, from_idle: bool) {
                 push_frames(&audio, Some(&speaker), key, true);
                 tokio::time::sleep(Duration::from_millis(FRAME_MS)).await;
             }
-            audio.priming.store(0, Ordering::Release);
         });
     }
     if video_ok {
@@ -490,22 +478,12 @@ fn release_media(room: &Arc<Room>, prev: Option<&str>) {
             }
         }
     }
-    for k in [Kind::Audio, Kind::Video] {
-        let fan = room.slot(k);
-        fan.speaker.store(None);
-        fan.priming.store(0, Ordering::Release);
-        fan.episode.fetch_add(1, Ordering::AcqRel);
-        if k == Kind::Video {
-            for r in fan.rows.load().iter() {
-                r.rtx_gate_until_new.store(true, Ordering::Release);
-            }
-        }
-    }
+    let key = room.slot(Kind::Audio).release();
+    room.slot(Kind::Video).release();
     if !room_audio_opus(room) {
         return;
     }
     let audio = room.slot(Kind::Audio).clone();
-    let key = audio.episode.load(Ordering::Acquire);
     let skip = prev.map(|p| p.to_string());
     super::spawn(async move {
         for _ in 0..SILENCE_FRAMES {

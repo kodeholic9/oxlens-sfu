@@ -110,6 +110,14 @@ impl DownRow {
     pub fn open(&self) -> bool {
         self.since.load(Ordering::Acquire) <= self.acked.load(Ordering::Acquire)
     }
+
+    pub fn rev(&self) -> u64 {
+        self.since.load(Ordering::Acquire)
+    }
+}
+
+pub fn row_same(r: &DownRow, rev: u64) -> bool {
+    r.rev() == rev
 }
 
 pub struct SlotFan {
@@ -153,6 +161,37 @@ impl SlotFan {
         self.speaker.load().as_deref().map(|s| s.as_str() == user).unwrap_or(false)
     }
 
+    pub fn bind(&self, speaker: Option<Arc<String>>, prime: bool) -> u64 {
+        self.first_rtp_us.store(0, Ordering::Release);
+        self.last_notify_us.store(0, Ordering::Release);
+        self.close_rtx();
+        if prime {
+            self.priming.store(PRIME_FRAMES, Ordering::Release);
+        }
+        self.speaker.store(speaker);
+        self.episode.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    pub fn release(&self) -> u64 {
+        self.speaker.store(None);
+        self.priming.store(0, Ordering::Release);
+        self.close_rtx();
+        self.episode.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    fn close_rtx(&self) {
+        if !self.audio {
+            for r in self.rows.load().iter() {
+                r.rtx_gate_until_new.store(true, Ordering::Release);
+            }
+        }
+    }
+
+    pub fn admit(&self, user: &str) -> Option<u64> {
+        let ep = self.episode.load(Ordering::Acquire);
+        self.speaker_is(user).then_some(ep)
+    }
+
     pub fn pass_gate(&self, at_us: u64) -> bool {
         self.priming.store(0, Ordering::Release);
         self.first_rtp_us.compare_exchange(0, at_us, Ordering::AcqRel, Ordering::Acquire).is_ok()
@@ -181,20 +220,20 @@ pub struct Pkt {
 
 pub struct Egress {
     pub pkt: Pkt,
-    pub targets: Vec<Arc<DownRow>>,
+    pub targets: Vec<(Arc<DownRow>, u64)>,
+    pub slot: Option<(Arc<SlotFan>, u64)>,
 }
 
 pub enum Ctl {
-    Rtcp { tr: Arc<Transport>, data: Vec<u8> },
-    Rtx { row: Arc<DownRow>, seqs: Vec<u16> },
+    Pli { tr: Arc<Transport>, track: Arc<crate::r#pub::PubTrack> },
+    Sr { row: Arc<DownRow>, src_key: u64, sr: crate::rtcp::Sr, rtp: u32 },
     Frames { rows: Vec<Arc<DownRow>>, payload: Vec<u8>, src_key: u64, seq: u16, ts: u32, fan: Arc<SlotFan>, prime: bool },
 }
 
 impl Ctl {
     pub fn packets(&self) -> usize {
         match self {
-            Ctl::Rtcp { .. } => 1,
-            Ctl::Rtx { seqs, .. } => seqs.len().max(1),
+            Ctl::Pli { .. } | Ctl::Sr { .. } => 1,
             Ctl::Frames { rows, .. } => rows.len().max(1),
         }
     }
@@ -340,13 +379,23 @@ fn process(w: &Arc<Worker>, item: Item) {
     match item {
         Item::In { tr, data, at_us } => ingress(w, &tr, data, at_us),
         Item::Out(e) => {
-            for t in &e.targets {
+            if let Some((fan, ep)) = &e.slot
+                && !fan.frame_live(*ep, false)
+            {
+                crate::ops::drop_count("slot_stale");
+                return;
+            }
+            for (t, rev) in &e.targets {
+                if !row_same(t, *rev) {
+                    crate::ops::drop_count("row_stale");
+                    continue;
+                }
                 send_down(w, t, &e.pkt);
             }
         }
         Item::Ctl(c) => match c {
-            Ctl::Rtcp { tr, data } => crate::rtcp::send_rtcp(w, &tr, &data),
-            Ctl::Rtx { row, seqs } => crate::rtcp::send_rtx(w, &row, &seqs),
+            Ctl::Pli { tr, track } => crate::rtcp::send_pli(w, &tr, &track),
+            Ctl::Sr { row, src_key, sr, rtp } => crate::rtcp::send_sr(w, &row, src_key, &sr, rtp),
             Ctl::Frames { rows, payload, src_key, seq, ts, fan, prime } => {
                 if !fan.frame_live(src_key, prime) {
                     crate::ops::drop_count(if fan.episode.load(Ordering::Acquire) != src_key { "frame_stale" } else { "prime_after_rtp" });
@@ -373,6 +422,10 @@ fn process(w: &Arc<Worker>, item: Item) {
                     track: None,
                 };
                 for r in &rows {
+                    if !r.open() {
+                        crate::ops::drop_count("row_gate");
+                        continue;
+                    }
                     send_down(w, r, &pkt);
                 }
             }
@@ -511,19 +564,20 @@ fn forward(w: &Arc<Worker>, tr: &Arc<Transport>, track: &Arc<crate::r#pub::PubTr
         crate::ops::drop_count("no_pub_room");
         return;
     };
-    let mut targets: Vec<Arc<DownRow>> = Vec::new();
+    let mut targets: Vec<(Arc<DownRow>, u64)> = Vec::new();
+    let mut slot: Option<(Arc<SlotFan>, u64)> = None;
     if stream.is_half() {
         let Some(fan) = crate::ops::slot_of(&room, stream.kind) else {
             crate::ops::drop_count("prefan_gate");
             return;
         };
-        if !fan.speaker_is(&tr.user) {
+        let Some(ep) = fan.admit(&tr.user) else {
             crate::ops::drop_count("prefan_gate");
             if track.blocked_notify(at_us) {
                 crate::ops::floor_blocked_rtp(&room, tr);
             }
             return;
-        }
+        };
         let first = fan.pass_gate(at_us);
         fan.last_rtp_us.store(at_us, Ordering::Release);
         let prev = fan.last_notify_us.load(Ordering::Relaxed);
@@ -535,18 +589,21 @@ fn forward(w: &Arc<Worker>, tr: &Arc<Transport>, track: &Arc<crate::r#pub::PubTr
             if r.user == tr.user {
                 continue;
             }
+            let rev = r.rev();
             if !r.open() {
                 crate::ops::drop_count("row_gate");
                 continue;
             }
-            targets.push(r.clone());
+            targets.push((r.clone(), rev));
         }
+        slot = Some((fan.clone(), ep));
     } else {
         if !on_pub_room(stream, room.as_str()) {
             crate::ops::drop_count("no_pub_room");
             return;
         }
         for r in stream.rows.load().iter() {
+            let rev = r.rev();
             if let Some(why) = row_gate(stream, r) {
                 crate::ops::drop_count(why);
                 continue;
@@ -554,7 +611,7 @@ fn forward(w: &Arc<Worker>, tr: &Arc<Transport>, track: &Arc<crate::r#pub::PubTr
             if stream.kind == Kind::Video && stream.simulcast && !crate::sim::pass(r, track, keyframe, now_ms) {
                 continue;
             }
-            targets.push(r.clone());
+            targets.push((r.clone(), rev));
         }
     }
     if targets.is_empty() {
@@ -564,9 +621,9 @@ fn forward(w: &Arc<Worker>, tr: &Arc<Transport>, track: &Arc<crate::r#pub::PubTr
         Some(m) => m,
         None => return,
     };
-    let mut by_worker: Vec<Vec<Arc<DownRow>>> = vec![Vec::new(); m.workers.len()];
+    let mut by_worker: Vec<Vec<(Arc<DownRow>, u64)>> = vec![Vec::new(); m.workers.len()];
     for t in targets {
-        let i = t.conn.worker.min(m.workers.len() - 1);
+        let i = t.0.conn.worker.min(m.workers.len() - 1);
         by_worker[i].push(t);
     }
     for (i, rows) in by_worker.into_iter().enumerate() {
@@ -574,10 +631,10 @@ fn forward(w: &Arc<Worker>, tr: &Arc<Transport>, track: &Arc<crate::r#pub::PubTr
             continue;
         }
         if i == w.id {
-            for r in &rows {
+            for (r, _) in &rows {
                 send_down(w, r, &pkt);
             }
-        } else if !m.workers[i].push(w.id + 1, Item::Out(Egress { pkt: pkt.clone(), targets: rows })) {
+        } else if !m.workers[i].push(w.id + 1, Item::Out(Egress { pkt: pkt.clone(), targets: rows, slot: slot.clone() })) {
             crate::ops::drop_count("egress_queue_full");
         }
     }

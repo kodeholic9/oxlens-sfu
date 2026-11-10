@@ -51,6 +51,8 @@ pub const DROP_NAMES: &[&str] = &[
     "pre_boundary",
     "prime_after_rtp",
     "frame_stale",
+    "slot_stale",
+    "row_stale",
     "rtcp_unresolved",
     "pli_throttled",
     "pli_unbound",
