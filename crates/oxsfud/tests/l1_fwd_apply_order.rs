@@ -128,6 +128,17 @@ fn row_commands_beyond_the_packet_limit_and_the_ring_are_never_dropped() {
 }
 
 #[test]
+fn an_empty_row_command_queue_is_skipped_and_a_posted_command_is_applied_on_the_next_drain() {
+    let row = Arc::new(row_with_source(11));
+    let q = RowCmds::default();
+    assert!(q.is_empty() && q.drain() == 0, "정:RULE-FWD-MEDIA-WORKERS an empty row command queue costs the worker loop nothing");
+    q.push(RowCmd { row: row.clone(), rev: 2, reset: true });
+    assert!(!q.is_empty(), "정:RULE-FWD-MEDIA-WORKERS a posted command keeps the worker from parking");
+    assert_eq!(q.drain(), 1, "정:RULE-FWD-MEDIA-WORKERS S-sym-RULE-FWD-MEDIA-WORKERS-17 the posted command is applied on the next drain");
+    assert!(q.is_empty() && row_same(&row, 2), "정:RULE-FWD-MEDIA-WORKERS the queue is empty again after the drain");
+}
+
+#[test]
 fn an_older_row_command_arriving_late_is_skipped() {
     let row = row_with_source(11);
     assert!(apply_row_cmd(&row, 5, true));

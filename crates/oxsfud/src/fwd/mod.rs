@@ -5,7 +5,7 @@
 pub mod core;
 pub mod rt;
 
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arc_swap::{ArcSwap, ArcSwapOption};
@@ -138,24 +138,34 @@ pub fn apply_row_cmd(row: &DownRow, rev: u64, reset: bool) -> bool {
 }
 
 #[derive(Default)]
-pub struct RowCmds(crossbeam_queue::SegQueue<RowCmd>);
+pub struct RowCmds {
+    q: crossbeam_queue::SegQueue<RowCmd>,
+    pending: AtomicUsize,
+}
 
 impl RowCmds {
     pub fn push(&self, c: RowCmd) {
-        self.0.push(c);
+        self.pending.fetch_add(1, Ordering::SeqCst);
+        self.q.push(c);
     }
 
     pub fn drain(&self) -> usize {
+        if self.pending.load(Ordering::Relaxed) == 0 {
+            return 0;
+        }
         let mut n = 0;
-        while let Some(c) = self.0.pop() {
+        while let Some(c) = self.q.pop() {
             apply_row_cmd(&c.row, c.rev, c.reset);
             n += 1;
+        }
+        if n > 0 {
+            self.pending.fetch_sub(n, Ordering::AcqRel);
         }
         n
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.pending.load(Ordering::SeqCst) == 0
     }
 }
 
