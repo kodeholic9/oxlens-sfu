@@ -4,6 +4,7 @@
 
 mod http;
 
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -494,34 +495,58 @@ fn bus(c: &Ctx, all: bool) -> Result<(), String> {
     if c.raw(&v) {
         return Ok(());
     }
-    let mut views: Vec<(String, Option<Vec<String>>)> = Vec::new();
-    for n in arr(&v, "nodes") {
-        let name = cell(&n["node"]);
-        match n.get("bus") {
-            Some(b) => {
-                let mut seen: Vec<String> = arr(b, "nodes").iter().map(|x| format!("{}/{}", cell(&x["node"]), cell(&x["inst"]))).collect();
-                seen.sort();
-                views.push((name, Some(seen)));
-            }
-            None => views.push((name, None)),
-        }
-    }
+    let views = bus_views(&v);
     let rows: Vec<Value> = views
         .iter()
         .map(|(n, s)| match s {
-            Some(s) => json!({ "node": n, "sees": s }),
-            None => json!({ "node": n, "sees": "error" }),
+            Some((s, r)) => json!({ "node": n, "sees": s, "rooms": r.len() }),
+            None => json!({ "node": n, "sees": "error", "rooms": "error" }),
         })
         .collect();
-    table(&rows, &["node", "sees"]);
-    let first = views.first().and_then(|x| x.1.clone());
-    let agree = !views.is_empty() && views.iter().all(|(_, s)| s.is_some() && s.clone() == first);
-    if agree {
+    table(&rows, &["node", "sees", "rooms"]);
+    if bus_agree(&views) {
         println!("합의: 전 node 가 같은 것을 본다");
-    } else {
-        println!("불일치: node 마다 보는 것이 다르다(또는 못 닿은 node 가 있다)");
+        return Ok(());
+    }
+    println!("불일치: node 마다 보는 것이 다르다(또는 못 닿은 node 가 있다)");
+    let diff = rooms_diff(&views);
+    if !diff.is_empty() {
+        println!("\nrooms_seen 다름");
+        table(&diff, &["room", "seen_by", "missing_on"]);
     }
     Ok(())
+}
+
+type BusView = (String, Option<(Vec<String>, BTreeSet<String>)>);
+
+fn bus_views(v: &Value) -> Vec<BusView> {
+    arr(v, "nodes")
+        .iter()
+        .map(|n| {
+            let seen = n.get("bus").map(|b| {
+                let mut nodes: Vec<String> = arr(b, "nodes").iter().map(|x| format!("{}/{}", cell(&x["node"]), cell(&x["inst"]))).collect();
+                nodes.sort();
+                let rooms: BTreeSet<String> = arr(b, "rooms_seen").iter().map(|x| format!("{}@{}/{}", cell(&x["room_id"]), cell(&x["node"]), cell(&x["inst"]))).collect();
+                (nodes, rooms)
+            });
+            (cell(&n["node"]), seen)
+        })
+        .collect()
+}
+
+fn bus_agree(views: &[BusView]) -> bool {
+    let first = views.first().and_then(|x| x.1.clone());
+    !views.is_empty() && views.iter().all(|(_, s)| s.is_some() && s.clone() == first)
+}
+
+fn rooms_diff(views: &[BusView]) -> Vec<Value> {
+    let all: BTreeSet<&String> = views.iter().filter_map(|(_, s)| s.as_ref()).flat_map(|(_, r)| r.iter()).collect();
+    all.into_iter()
+        .filter_map(|room| {
+            let (with, without): (Vec<&BusView>, Vec<&BusView>) = views.iter().filter(|(_, s)| s.is_some()).partition(|(_, s)| s.as_ref().is_some_and(|(_, r)| r.contains(room)));
+            (!without.is_empty()).then(|| json!({ "room": room, "seen_by": with.iter().map(|x| x.0.clone()).collect::<Vec<_>>(), "missing_on": without.iter().map(|x| x.0.clone()).collect::<Vec<_>>() }))
+        })
+        .collect()
 }
 
 fn main() {
@@ -559,5 +584,33 @@ fn main() {
     if let Err(e) = run(&c, &o) {
         eprintln!("{e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod bus_tests {
+    use super::*;
+
+    fn all(rooms_c: &[&str]) -> Value {
+        let view = |rooms: &[&str]| json!({ "nodes": [{ "node": "node-a", "inst": "1" }, { "node": "node-b", "inst": "2" }], "rooms_seen": rooms.iter().map(|r| json!({ "room_id": r, "node": "node-c", "inst": "9" })).collect::<Vec<_>>() });
+        json!({ "nodes": [{ "node": "node-a", "bus": view(&[]) }, { "node": "node-b", "bus": view(&[]) }, { "node": "node-c", "bus": view(rooms_c) }] })
+    }
+
+    #[test]
+    fn same_nodes_but_different_rooms_seen_is_not_agreement() {
+        let v = bus_views(&all(&["r1"]));
+        assert!(!bus_agree(&v), "node 목록이 같아도 방 배치가 다르면 합의가 아니다");
+        let d = rooms_diff(&v);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0]["room"], "r1@node-c/9");
+        assert_eq!(d[0]["missing_on"], json!(["node-a", "node-b"]));
+    }
+
+    #[test]
+    fn same_nodes_and_rooms_is_agreement_and_unreachable_node_is_not() {
+        assert!(bus_agree(&bus_views(&all(&[]))));
+        let mut v = all(&[]);
+        v["nodes"][1].as_object_mut().unwrap().remove("bus");
+        assert!(!bus_agree(&bus_views(&v)));
     }
 }

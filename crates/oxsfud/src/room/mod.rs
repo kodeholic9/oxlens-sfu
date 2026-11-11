@@ -51,6 +51,7 @@ pub struct RoomState {
     pub seq: u64,
     pub overrides: HashMap<String, Permission>,
     pub empty_since: u64,
+    pub empty_ticks: u64,
     pub ever_joined: bool,
     pub empty_seen: bool,
     pub closed: bool,
@@ -209,6 +210,7 @@ impl Room {
         m.permission = s.overrides.get(&m.user).copied().or(token_perm).unwrap_or_default();
         s.ever_joined = true;
         s.empty_since = 0;
+        s.empty_ticks = 0;
         s.empty_seen = false;
         let notify = !rejoin && !m.hidden;
         let info = m.info();
@@ -263,21 +265,27 @@ impl Room {
         Some((old, p, hidden))
     }
 
-    pub fn ttl_due(&self, now: u64) -> bool {
+    pub fn ttl_due(&self, now: u64, period_ms: u64) -> bool {
         let Ok(mut s) = self.st.lock() else { return false };
         if !s.members.is_empty() {
             s.empty_since = 0;
+            s.empty_ticks = 0;
             s.empty_seen = false;
             return false;
         }
         if s.ever_joined && s.empty_since == 0 {
             s.empty_since = now;
+            s.empty_ticks = 0;
             s.empty_seen = true;
             return false;
         }
         let ttl = if s.ever_joined { self.departure_ttl } else { self.unused_ttl };
         if ttl == PERMANENT {
             return false;
+        }
+        if s.ever_joined {
+            s.empty_ticks += 1;
+            return s.empty_ticks.saturating_mul(period_ms.max(1)) >= ttl as u64 * 1000;
         }
         now.saturating_sub(s.empty_since) >= ttl as u64 * 1000
     }

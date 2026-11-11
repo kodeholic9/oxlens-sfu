@@ -59,7 +59,7 @@ async fn sweep() {
     let Some(s) = super::sfu() else { return };
     let now = common::now_ms();
     for r in s.rooms.all() {
-        if r.registered() == 0 && r.ttl_due(now) {
+        if r.registered() == 0 && r.ttl_due(now, SWEEP_MS) {
             super::rooms::destroy_room(&r, "SV-IMPL-ROOM-LIFE", "ttl").await;
         }
     }

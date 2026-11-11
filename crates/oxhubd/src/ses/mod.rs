@@ -189,10 +189,12 @@ pub fn bind_bound(ctx: &Ctx, s: &Session) {
     transition(s, Some("SES.S.bind_bound"), &st, Some(&st), "BIND", &[]);
 }
 
-pub fn code_line(f: &Failure, op: &str, s: Option<&Session>) {
+pub fn code_line(f: &Failure, op: &str, s: Option<&Session>, user: Option<&str>) {
     let mut l = common::log::Line::ev(&format!("CP-CODE-{}", f.name.replace('_', "-")));
     if let Some(s) = s {
         l = l.key("session", &s.fp).key("user", &s.user_id);
+    } else if let Some(u) = user {
+        l = l.key("user", u);
     }
     l = l.rec("op", op);
     if let Some(m) = f.message.as_deref().filter(|m| !m.is_empty()) {
@@ -201,9 +203,9 @@ pub fn code_line(f: &Failure, op: &str, s: Option<&Session>) {
     common::log::emit(l);
 }
 
-fn fail_bind(ctx: &Ctx, conn: &Conn, op: u16, pid: u32, flags: u8, f: Failure, label: Option<&str>) {
+fn fail_bind(ctx: &Ctx, conn: &Conn, (op, pid, flags): (u16, u32, u8), f: Failure, label: Option<&str>, user: Option<&str>) {
     ctx.counters.code(f.code);
-    code_line(&f, "BIND", None);
+    code_line(&f, "BIND", None, user);
     if let Some(l) = label {
         let t = Transition { area: "SES", key: "-", spec: Some(l), from: "-", to: Some("-"), cause: "BIND", inputs: &[] };
         common::log::emit(t.line());
@@ -215,12 +217,12 @@ pub async fn bind(ctx: &Arc<Ctx>, conn: &Conn, op: u16, pid: u32, flags: u8, bod
     let req: BindReq = match oxsig::frame::parse_body(body) {
         Ok(r) => r,
         Err(_) => {
-            fail_bind(ctx, conn, op, pid, flags, Code::InvalidPayload.failure(), None);
+            fail_bind(ctx, conn, (op, pid, flags), Code::InvalidPayload.failure(), None, None);
             return None;
         }
     };
     if req.client_ver.unwrap_or(1) != 1 {
-        fail_bind(ctx, conn, op, pid, flags, Code::VersionMismatch.failure(), None);
+        fail_bind(ctx, conn, (op, pid, flags), Code::VersionMismatch.failure(), None, None);
         return None;
     }
     if let Some(sid) = req.session_id.as_deref().filter(|s| !s.is_empty())
@@ -239,7 +241,7 @@ pub async fn bind(ctx: &Arc<Ctx>, conn: &Conn, op: u16, pid: u32, flags: u8, bod
         if let Some(o) = old
             && o.id != conn.id
         {
-            o.leave(Code::DuplicateSession);
+            o.leave(Code::DuplicateSession, Some(&s));
         }
         let to = s.state_name(ctx.full_flag());
         transition(&s, Some("SES.S.bind_resume"), &from, Some(&to), "BIND", &[]);
@@ -247,14 +249,14 @@ pub async fn bind(ctx: &Arc<Ctx>, conn: &Conn, op: u16, pid: u32, flags: u8, bod
         return Some(s);
     }
     let Some(token) = req.token.as_deref() else {
-        fail_bind(ctx, conn, op, pid, flags, Code::MissingField.failure().with_message("token"), None);
+        fail_bind(ctx, conn, (op, pid, flags), Code::MissingField.failure().with_message("token"), None, None);
         return None;
     };
     let id = match ctx.accounts.verify_user(token) {
         Ok(i) => i,
         Err(c) => {
             let label = if c == Code::TokenExpired { "SES.S.bind_2003" } else { "SES.S.bind_2002" };
-            fail_bind(ctx, conn, op, pid, flags, c.failure(), Some(label));
+            fail_bind(ctx, conn, (op, pid, flags), c.failure(), Some(label), None);
             return None;
         }
     };
@@ -264,13 +266,13 @@ pub async fn bind(ctx: &Arc<Ctx>, conn: &Conn, op: u16, pid: u32, flags: u8, bod
         let n = local.max(deploy);
         ctx.full.store(n >= ctx.policy.quota.max_sessions, Ordering::Relaxed);
         if ctx.full_flag() {
-            fail_bind(ctx, conn, op, pid, flags, Code::QuotaExceeded.failure(), Some("SES.S.bind_4003"));
+            fail_bind(ctx, conn, (op, pid, flags), Code::QuotaExceeded.failure(), Some("SES.S.bind_4003"), Some(&id.user_id));
             return None;
         }
     }
     if let Some(old) = ctx.session_of_user(&id.user_id) {
         if let Some(c) = old.conn() {
-            c.leave(Code::DuplicateSession);
+            c.leave(Code::DuplicateSession, Some(&old));
         }
         dispose(ctx, &old, "SES.S.bind_new", "evict").await;
     }
@@ -354,7 +356,7 @@ async fn resume_session(ctx: &Arc<Ctx>, sid: &str) -> Option<Arc<Session>> {
 pub async fn hand_over(ctx: &Arc<Ctx>, sid: &str) -> Option<SessionData> {
     let s = ctx.session(sid)?;
     if let Some(c) = s.conn() {
-        c.leave(Code::DuplicateSession);
+        c.leave(Code::DuplicateSession, Some(&s));
     }
     let d = s.st.lock().ok().map(|st| SessionData {
         sid: s.sid.clone(),
@@ -453,7 +455,7 @@ pub async fn sweep(ctx: &Arc<Ctx>) {
 pub async fn evict_sid(ctx: &Arc<Ctx>, sid: &str) {
     if let Some(s) = ctx.session(sid) {
         if let Some(c) = s.conn() {
-            c.leave(Code::DuplicateSession);
+            c.leave(Code::DuplicateSession, Some(&s));
         }
         dispose(ctx, &s, "SES.S.bind_new", "evict").await;
     }
@@ -462,7 +464,7 @@ pub async fn evict_sid(ctx: &Arc<Ctx>, sid: &str) {
 pub async fn cut(ctx: &Arc<Ctx>, user: &str) -> Vec<String> {
     let Some(s) = ctx.session_of_user(user) else { return Vec::new() };
     if let Some(c) = s.conn() {
-        c.leave(Code::SessionRevoked);
+        c.leave(Code::SessionRevoked, Some(&s));
     }
     dispose(ctx, &s, "SES.S.drop_reclaim", "cut").await;
     vec![s.fp.clone()]
@@ -473,7 +475,7 @@ pub fn shutdown_all(ctx: &Arc<Ctx>) -> usize {
     let mut n = 0;
     for s in ctx.sessions() {
         if let Some(c) = s.conn() {
-            c.leave(Code::ServerShutdown);
+            c.leave(Code::ServerShutdown, Some(&s));
             n += 1;
         }
     }
@@ -549,7 +551,7 @@ pub async fn handle_request(ctx: &Arc<Ctx>, s: &Arc<Session>, conn: &Conn, r: Re
         }
         Err(f) => {
             ctx.counters.code(f.code);
-            code_line(&f, r.op.name(), Some(s));
+            code_line(&f, r.op.name(), Some(s), None);
             conn.reply_fail(r.op_num, r.pid, r.flags, &f);
         }
     }

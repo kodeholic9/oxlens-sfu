@@ -172,7 +172,7 @@ impl Bus {
                     tracing::info!(kind = "diag", spec = "SV-RULE-BUS-PRESENCE", "bus isolation over — other node token back (live view {live})");
                 }
                 for r in s.dropped_rooms {
-                    let why = if s.released.contains(&r) { "held room released — owner node not live" } else { "room token delete settled" };
+                    let why = if s.released.contains(&r) { "held room released — not redeclared after isolation" } else { "room token delete settled" };
                     tracing::info!(kind = "diag", spec = "SV-RULE-BUS-EVENTS", room = %r, "drop candidate: {why} (live view {live})");
                     tracing::info!(kind = "diag", spec = "SV-RULE-BUS-EVENTS", room = %r, "room token gone — local routing dropped");
                     let _ = b.tx.send(BusEvent::RoomDropped(r));

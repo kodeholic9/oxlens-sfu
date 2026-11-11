@@ -50,8 +50,8 @@ impl Conn {
         let _ = self.tx.send(Out::Reply { flags, op, pid, body: serde_json::to_vec(f).unwrap_or_default() });
     }
 
-    pub fn leave(&self, code: Code) {
-        super::code_line(&code.failure(), "LEAVE", None);
+    pub fn leave(&self, code: Code, s: Option<&super::Session>) {
+        super::code_line(&code.failure(), "LEAVE", s, None);
         let _ = self.tx.send(Out::Leave { code, details: None });
     }
 }
@@ -170,7 +170,7 @@ pub async fn serve(ws: WebSocket, ctx: Arc<Ctx>) {
         let limit = if session.is_none() { T_BIND } else { Duration::from_millis(ctx.policy.hub.heartbeat_timeout_ms as u64) };
         let msg = match tokio::time::timeout(limit, stream.next()).await {
             Err(_) => {
-                conn.leave(Code::HeartbeatTimeout);
+                conn.leave(Code::HeartbeatTimeout, session.as_deref());
                 break;
             }
             Ok(None) | Ok(Some(Err(_))) => break,
@@ -180,7 +180,7 @@ pub async fn serve(ws: WebSocket, ctx: Arc<Ctx>) {
             Message::Binary(b) => b,
             Message::Close(_) => break,
             Message::Text(_) => {
-                conn.leave(Code::ProtocolError);
+                conn.leave(Code::ProtocolError, session.as_deref());
                 break;
             }
             _ => continue,
@@ -188,7 +188,7 @@ pub async fn serve(ws: WebSocket, ctx: Arc<Ctx>) {
         let f = match frame::decode(&data) {
             Ok(f) => f,
             Err(_) => {
-                conn.leave(Code::ProtocolError);
+                conn.leave(Code::ProtocolError, session.as_deref());
                 break;
             }
         };
@@ -202,7 +202,7 @@ pub async fn serve(ws: WebSocket, ctx: Arc<Ctx>) {
         }
         if !f.body.is_empty() && serde_json::from_slice::<serde_json::Value>(f.body).is_err() {
             conn.reply_fail(h.op, h.pid, h.flags, &Code::ProtocolError.failure());
-            conn.leave(Code::ProtocolError);
+            conn.leave(Code::ProtocolError, session.as_deref());
             break;
         }
         let op = Op::from_u16(h.op);
@@ -219,12 +219,12 @@ pub async fn serve(ws: WebSocket, ctx: Arc<Ctx>) {
                         m = stream.next(), if !early && !gone => match m {
                             Some(Ok(Message::Binary(b))) => {
                                 super::pre_bind_other(&ctx, frame::decode(&b).ok().and_then(|x| Op::from_u16(x.header.op)));
-                                conn.leave(Code::NotBound);
+                                conn.leave(Code::NotBound, session.as_deref());
                                 early = true;
                             }
                             Some(Ok(Message::Text(_))) => {
                                 super::pre_bind_other(&ctx, None);
-                                conn.leave(Code::NotBound);
+                                conn.leave(Code::NotBound, session.as_deref());
                                 early = true;
                             }
                             Some(Ok(Message::Close(_))) | Some(Err(_)) | None => gone = true,
@@ -239,7 +239,7 @@ pub async fn serve(ws: WebSocket, ctx: Arc<Ctx>) {
                 continue;
             }
             super::pre_bind_other(&ctx, op);
-            conn.leave(Code::NotBound);
+            conn.leave(Code::NotBound, session.as_deref());
             break;
         };
         match op {
@@ -247,7 +247,7 @@ pub async fn serve(ws: WebSocket, ctx: Arc<Ctx>) {
             Some(Op::Bind) => {
                 super::bind_bound(&ctx, &s);
                 conn.reply_fail(h.op, h.pid, h.flags, &Code::ProtocolError.failure());
-                conn.leave(Code::ProtocolError);
+                conn.leave(Code::ProtocolError, session.as_deref());
                 break;
             }
             Some(Op::Leave) => {
@@ -262,7 +262,7 @@ pub async fn serve(ws: WebSocket, ctx: Arc<Ctx>) {
             None => {
                 let f = Code::UnknownOp.failure();
                 ctx.counters.code(f.code);
-                super::code_line(&f, &format!("{:#06x}", h.op), session.as_deref());
+                super::code_line(&f, &format!("{:#06x}", h.op), session.as_deref(), None);
                 conn.reply_fail(h.op, h.pid, h.flags, &f);
             }
         }

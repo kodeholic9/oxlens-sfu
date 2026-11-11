@@ -37,12 +37,12 @@ pub fn status_of(code: u16) -> StatusCode {
 }
 
 fn fail(f: Failure) -> Response {
-    crate::ses::code_line(&f, "HTTP", None);
+    crate::ses::code_line(&f, "HTTP", None, None);
     (status_of(f.code), axum::Json(f)).into_response()
 }
 
 fn fail_status(st: u16, f: Failure) -> Response {
-    crate::ses::code_line(&f, "HTTP", None);
+    crate::ses::code_line(&f, "HTTP", None, None);
     (StatusCode::from_u16(st).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), axum::Json(f)).into_response()
 }
 

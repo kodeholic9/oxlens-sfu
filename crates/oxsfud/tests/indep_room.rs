@@ -34,12 +34,12 @@ fn hidden_member_keeps_room_alive() {
     assert_eq!(r.registered(), 1, "S-sym-IMPL-ROOM-LIFE-1 hidden member is registered");
     let base = r.created_at;
     for dt in [1u64, 5_000, 60_000, 10_000_000, 10_000_001] {
-        assert!(!r.ttl_due(base + dt), "S-sym-IMPL-ROOM-LIFE-1 room with only a hidden recorder must not expire · +{dt}ms");
+        assert!(!r.ttl_due(base + dt, 5_000), "S-sym-IMPL-ROOM-LIFE-1 room with only a hidden recorder must not expire · +{dt}ms");
     }
     r.remove("rec-bot");
     let t1 = base + 20_000_000;
-    let first = r.ttl_due(t1);
-    let second = r.ttl_due(t1 + 1);
+    let first = r.ttl_due(t1, 5_000);
+    let second = r.ttl_due(t1 + 1, 5_000);
     assert!(!first, "S-sym-IMPL-ROOM-LIFE-1 first sweep after the last leave only records the empty time");
     assert!(second, "S-sym-IMPL-ROOM-LIFE-1 control: departure TTL 0 expires on the following sweep once really empty");
 }
@@ -49,12 +49,12 @@ fn permanent_room_never_expires() {
     let r = room(PERMANENT, PERMANENT);
     let base = r.created_at;
     for dt in [0u64, 1, 1 << 40] {
-        assert!(!r.ttl_due(base + dt), "S-sym-IMPL-ROOM-LIFE-1 permanent marker never expires (unused) · +{dt}");
+        assert!(!r.ttl_due(base + dt, 5_000), "S-sym-IMPL-ROOM-LIFE-1 permanent marker never expires (unused) · +{dt}");
     }
     r.join(member("a", false), false, None);
     r.remove("a");
     for dt in [10u64, 20, 1 << 41] {
-        assert!(!r.ttl_due(base + dt), "S-sym-IMPL-ROOM-LIFE-1 permanent marker never expires (departure) · +{dt}");
+        assert!(!r.ttl_due(base + dt, 5_000), "S-sym-IMPL-ROOM-LIFE-1 permanent marker never expires (departure) · +{dt}");
     }
 }
 
