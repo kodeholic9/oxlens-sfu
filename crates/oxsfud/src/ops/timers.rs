@@ -186,7 +186,7 @@ fn eligible_from(room: &Room, tid: &str, row: &crate::fwd::DownRow, user: &str, 
     }
     if row.slot {
         let fan = room.slot(row.kind);
-        let sp = fan.speaker.load_full()?;
+        let sp = fan.speaker()?;
         if sp.as_str() == user {
             return None;
         }

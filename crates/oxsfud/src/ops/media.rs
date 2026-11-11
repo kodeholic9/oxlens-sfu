@@ -511,7 +511,7 @@ pub fn ready(c: &Ctx, body: &Value) -> Result<Value, Failure> {
             }
         }
     }
-    let speaker = room.slot(Kind::Video).speaker.load_full();
+    let speaker = room.slot(Kind::Video).speaker();
     if let Some(sp) = speaker
         && sp.as_str() != c.user
         && let Some(ctx) = s.pubs.get(&sp)

@@ -52,7 +52,7 @@ pub struct DownRow {
     pub pending_pli_at: AtomicU64,
     pub paused: AtomicBool,
     pub priority: AtomicU8,
-    pub rtx_gate_until_new: AtomicBool,
+    pub last_ep: AtomicU64,
     pub src_track: ArcSwapOption<crate::r#pub::PubTrack>,
     pub rr_loss: AtomicU8,
     pub rr_at: AtomicU64,
@@ -95,7 +95,7 @@ impl DownRow {
             pending_pli_at: AtomicU64::new(0),
             paused: AtomicBool::new(false),
             priority: AtomicU8::new(0),
-            rtx_gate_until_new: AtomicBool::new(false),
+            last_ep: AtomicU64::new(0),
             src_track: ArcSwapOption::empty(),
             rr_loss: AtomicU8::new(0),
             rr_at: AtomicU64::new(0),
@@ -117,15 +117,33 @@ pub fn row_same(r: &DownRow, rev: u64) -> bool {
     r.rev() == rev
 }
 
+pub struct Episode {
+    pub id: u64,
+    pub speaker: Option<Arc<String>>,
+    pub first_rtp_us: AtomicU64,
+    pub last_notify_us: AtomicU64,
+}
+
+impl Episode {
+    fn new(id: u64, speaker: Option<Arc<String>>) -> Episode {
+        Episode { id, speaker, first_rtp_us: AtomicU64::new(0), last_notify_us: AtomicU64::new(0) }
+    }
+
+    pub fn speaker_is(&self, user: &str) -> bool {
+        self.speaker.as_deref().is_some_and(|s| s.as_str() == user)
+    }
+
+    pub fn pass_gate(&self, at_us: u64) -> bool {
+        self.first_rtp_us.compare_exchange(0, at_us, Ordering::AcqRel, Ordering::Acquire).is_ok()
+    }
+}
+
 pub struct SlotFan {
     pub audio: bool,
     pub rows: ArcSwap<Vec<Arc<DownRow>>>,
-    pub speaker: ArcSwapOption<String>,
+    pub ep: ArcSwap<Episode>,
     pub bind: Mutex<crate::flr::bind::Slot>,
-    pub episode: AtomicU64,
-    pub first_rtp_us: AtomicU64,
     pub last_rtp_us: AtomicU64,
-    pub last_notify_us: AtomicU64,
 }
 
 impl SlotFan {
@@ -133,53 +151,49 @@ impl SlotFan {
         SlotFan {
             audio,
             rows: ArcSwap::from_pointee(Vec::new()),
-            speaker: ArcSwapOption::empty(),
+            ep: ArcSwap::from_pointee(Episode::new(1 << 40, None)),
             bind: Mutex::new(crate::flr::bind::Slot::default()),
-            episode: AtomicU64::new(1 << 40),
-            first_rtp_us: AtomicU64::new(0),
             last_rtp_us: AtomicU64::new(0),
-            last_notify_us: AtomicU64::new(0),
         }
     }
 
     pub fn speaker_is(&self, user: &str) -> bool {
-        self.speaker.load().as_deref().map(|s| s.as_str() == user).unwrap_or(false)
+        self.ep.load().speaker_is(user)
+    }
+
+    pub fn speaker(&self) -> Option<Arc<String>> {
+        self.ep.load().speaker.clone()
+    }
+
+    pub fn episode(&self) -> u64 {
+        self.ep.load().id
+    }
+
+    fn swap(&self, speaker: Option<Arc<String>>) -> u64 {
+        let prev = self.ep.rcu(|cur| Episode::new(cur.id + 1, speaker.clone()));
+        prev.id + 1
     }
 
     pub fn bind(&self, speaker: Option<Arc<String>>) -> u64 {
-        self.first_rtp_us.store(0, Ordering::Release);
-        self.last_notify_us.store(0, Ordering::Release);
-        self.close_rtx();
-        self.speaker.store(speaker);
-        self.episode.fetch_add(1, Ordering::AcqRel) + 1
+        self.swap(speaker)
     }
 
     pub fn release(&self) -> u64 {
-        self.speaker.store(None);
-        self.close_rtx();
-        self.episode.fetch_add(1, Ordering::AcqRel) + 1
+        self.swap(None)
     }
 
-    fn close_rtx(&self) {
-        if !self.audio {
-            for r in self.rows.load().iter() {
-                r.rtx_gate_until_new.store(true, Ordering::Release);
-            }
-        }
-    }
-
-    pub fn admit(&self, user: &str) -> Option<u64> {
-        let ep = self.episode.load(Ordering::Acquire);
-        self.speaker_is(user).then_some(ep)
-    }
-
-    pub fn pass_gate(&self, at_us: u64) -> bool {
-        self.first_rtp_us.compare_exchange(0, at_us, Ordering::AcqRel, Ordering::Acquire).is_ok()
+    pub fn admit(&self, user: &str) -> Option<Arc<Episode>> {
+        let ep = self.ep.load_full();
+        ep.speaker_is(user).then_some(ep)
     }
 
     pub fn live(&self, episode: u64) -> bool {
-        self.episode.load(Ordering::Acquire) == episode
+        self.ep.load().id == episode
     }
+}
+
+pub fn rtx_closed(last_ep: u64, cur_ep: u64) -> bool {
+    last_ep != cur_ep
 }
 
 #[derive(Clone)]
@@ -196,6 +210,7 @@ pub struct Pkt {
     pub keyframe: bool,
     pub transit: bool,
     pub track: Option<Arc<crate::r#pub::PubTrack>>,
+    pub ep: u64,
 }
 
 pub struct Egress {
@@ -364,11 +379,7 @@ fn process(w: &Arc<Worker>, item: Item) {
                 return;
             }
             for (t, rev) in &e.targets {
-                if !row_same(t, *rev) {
-                    crate::ops::drop_count("row_stale");
-                    continue;
-                }
-                send_down(w, t, &e.pkt);
+                deliver(w, t, *rev, &e.pkt);
             }
         }
         Item::Ctl(c) => match c {
@@ -487,7 +498,7 @@ fn forward(w: &Arc<Worker>, tr: &Arc<Transport>, track: &Arc<crate::r#pub::PubTr
     let audio_level = if stream.kind == Kind::Audio { ext_get(rtp.ext, ids.audio_level).and_then(|v| v.first().copied()) } else { None };
     let payload = &plain[rtp.hlen..];
     let keyframe = stream.kind == Kind::Video && crate::trk::is_keyframe(stream.codec_name(), payload);
-    let pkt = Pkt {
+    let mut pkt = Pkt {
         data: plain.clone(),
         hlen: rtp.hlen,
         seq: rtp.seq,
@@ -500,6 +511,7 @@ fn forward(w: &Arc<Worker>, tr: &Arc<Transport>, track: &Arc<crate::r#pub::PubTr
         keyframe,
         transit: true,
         track: Some(track.clone()),
+        ep: 0,
     };
     if keyframe {
         track.last_keyframe_ms.store(now_ms, Ordering::Release);
@@ -523,13 +535,14 @@ fn forward(w: &Arc<Worker>, tr: &Arc<Transport>, track: &Arc<crate::r#pub::PubTr
             }
             return;
         };
-        let first = fan.pass_gate(at_us);
+        let first = ep.pass_gate(at_us);
         fan.last_rtp_us.store(at_us, Ordering::Release);
-        let prev = fan.last_notify_us.load(Ordering::Relaxed);
+        let prev = ep.last_notify_us.load(Ordering::Relaxed);
         if first || at_us.saturating_sub(prev) >= BLOCKED_NOTIFY_US {
-            fan.last_notify_us.store(at_us, Ordering::Relaxed);
+            ep.last_notify_us.store(at_us, Ordering::Relaxed);
             crate::ops::floor_rtp(&room, tr, first);
         }
+        pkt.ep = ep.id;
         for r in fan.rows.load().iter() {
             if r.user == tr.user {
                 continue;
@@ -541,7 +554,7 @@ fn forward(w: &Arc<Worker>, tr: &Arc<Transport>, track: &Arc<crate::r#pub::PubTr
             }
             targets.push((r.clone(), rev));
         }
-        slot = Some((fan.clone(), ep));
+        slot = Some((fan.clone(), ep.id));
     } else {
         if !on_pub_room(stream, room.as_str()) {
             crate::ops::drop_count("no_pub_room");
@@ -576,13 +589,21 @@ fn forward(w: &Arc<Worker>, tr: &Arc<Transport>, track: &Arc<crate::r#pub::PubTr
             continue;
         }
         if i == w.id {
-            for (r, _) in &rows {
-                send_down(w, r, &pkt);
+            for (r, rev) in &rows {
+                deliver(w, r, *rev, &pkt);
             }
         } else if !m.workers[i].push(w.id + 1, Item::Out(Egress { pkt: pkt.clone(), targets: rows, slot: slot.clone() })) {
             crate::ops::drop_count("egress_queue_full");
         }
     }
+}
+
+pub fn deliver(w: &Worker, row: &DownRow, rev: u64, pkt: &Pkt) {
+    if !row_same(row, rev) {
+        crate::ops::drop_count("row_stale");
+        return;
+    }
+    send_down(w, row, pkt);
 }
 
 pub fn send_down(w: &Worker, row: &DownRow, pkt: &Pkt) {
@@ -615,13 +636,13 @@ pub fn send_down(w: &Worker, row: &DownRow, pkt: &Pkt) {
         crate::ops::drop_count("pre_boundary");
         return;
     };
-    if mapped.switched || row.src_track.load().is_none() {
-        if row.kind == Kind::Video {
-            row.rtx_gate_until_new.store(false, Ordering::Release);
-        }
-        if let Some(t) = &pkt.track {
-            row.src_track.store(Some(t.clone()));
-        }
+    if pkt.ep != 0 {
+        row.last_ep.store(pkt.ep, Ordering::Release);
+    }
+    if (mapped.switched || row.src_track.load().is_none())
+        && let Some(t) = &pkt.track
+    {
+        row.src_track.store(Some(t.clone()));
     }
     let twcc = conn.twcc_seq.fetch_add(1, Ordering::AcqRel);
     let table = row.ext.load();

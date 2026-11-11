@@ -644,8 +644,9 @@ pub fn send_rtx(w: &Worker, row: &DownRow, seqs: &[u16]) {
     let now = common::now_ms();
     let rtx_pt = row.rtx_pt.load(Ordering::Relaxed);
     let Some(rtx_ssrc) = row.rtx_ssrc else { return };
+    let slot_ep = if row.slot { row.room.load().as_deref().and_then(|r| crate::ops::slot_of(r, row.kind)).map(|f| f.episode()) } else { None };
     for &out_seq in seqs {
-        if row.rtx_gate_until_new.load(Ordering::Acquire) {
+        if slot_ep.is_some_and(|cur| crate::fwd::rtx_closed(row.last_ep.load(Ordering::Acquire), cur)) {
             crate::ops::drop_count("rtx_gate");
             continue;
         }

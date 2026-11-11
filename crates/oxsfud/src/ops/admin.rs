@@ -72,7 +72,7 @@ fn rooms() -> Result<Value, Failure> {
 fn room_snapshot(rid: &str) -> Result<Value, Failure> {
     let s = sfu()?;
     let room = s.rooms.get(rid).ok_or_else(|| Code::RoomNotFound.failure())?;
-    let slot = |k: Kind| json!(room.slot(k).speaker.load_full().map(|x| x.as_str().to_string()));
+    let slot = |k: Kind| json!(room.slot(k).speaker().map(|x| x.as_str().to_string()));
     Ok(json!({ "room": {
         "room_id": room.id,
         "name": room.name,

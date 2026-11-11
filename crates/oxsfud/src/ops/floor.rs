@@ -388,12 +388,12 @@ fn slot_video(room: &Room, user: &str) -> (Vec<Arc<crate::r#pub::PubStream>>, bo
 }
 
 fn pli_while_bound(fan: &Arc<SlotFan>, t: &Arc<crate::r#pub::PubTrack>) {
-    let ep = fan.episode.load(Ordering::Acquire);
+    let ep = fan.episode();
     for d in crate::rtcp::PLI_BURST_MS {
         let (fan, t) = (fan.clone(), t.clone());
         super::spawn(async move {
             tokio::time::sleep(Duration::from_millis(d)).await;
-            if fan.episode.load(Ordering::Acquire) == ep {
+            if fan.episode() == ep {
                 crate::rtcp::request_pli(&t, true);
             }
         });
