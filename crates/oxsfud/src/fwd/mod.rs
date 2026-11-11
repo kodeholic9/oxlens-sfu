@@ -120,13 +120,15 @@ pub fn row_same(r: &DownRow, rev: u64) -> bool {
 pub struct Episode {
     pub id: u64,
     pub speaker: Option<Arc<String>>,
+    pub grant: u64,
     pub first_rtp_us: AtomicU64,
+    pub last_rtp_us: AtomicU64,
     pub last_notify_us: AtomicU64,
 }
 
 impl Episode {
-    fn new(id: u64, speaker: Option<Arc<String>>) -> Episode {
-        Episode { id, speaker, first_rtp_us: AtomicU64::new(0), last_notify_us: AtomicU64::new(0) }
+    fn new(id: u64, speaker: Option<Arc<String>>, grant: u64) -> Episode {
+        Episode { id, speaker, grant, first_rtp_us: AtomicU64::new(0), last_rtp_us: AtomicU64::new(0), last_notify_us: AtomicU64::new(0) }
     }
 
     pub fn speaker_is(&self, user: &str) -> bool {
@@ -143,7 +145,6 @@ pub struct SlotFan {
     pub rows: ArcSwap<Vec<Arc<DownRow>>>,
     pub ep: ArcSwap<Episode>,
     pub bind: Mutex<crate::flr::bind::Slot>,
-    pub last_rtp_us: AtomicU64,
 }
 
 impl SlotFan {
@@ -151,9 +152,8 @@ impl SlotFan {
         SlotFan {
             audio,
             rows: ArcSwap::from_pointee(Vec::new()),
-            ep: ArcSwap::from_pointee(Episode::new(1 << 40, None)),
+            ep: ArcSwap::from_pointee(Episode::new(1 << 40, None, 0)),
             bind: Mutex::new(crate::flr::bind::Slot::default()),
-            last_rtp_us: AtomicU64::new(0),
         }
     }
 
@@ -169,17 +169,17 @@ impl SlotFan {
         self.ep.load().id
     }
 
-    fn swap(&self, speaker: Option<Arc<String>>) -> u64 {
-        let prev = self.ep.rcu(|cur| Episode::new(cur.id + 1, speaker.clone()));
+    fn swap(&self, speaker: Option<Arc<String>>, grant: u64) -> u64 {
+        let prev = self.ep.rcu(|cur| Episode::new(cur.id + 1, speaker.clone(), grant));
         prev.id + 1
     }
 
-    pub fn bind(&self, speaker: Option<Arc<String>>) -> u64 {
-        self.swap(speaker)
+    pub fn bind(&self, speaker: Option<Arc<String>>, grant: u64) -> u64 {
+        self.swap(speaker, grant)
     }
 
     pub fn release(&self) -> u64 {
-        self.swap(None)
+        self.swap(None, 0)
     }
 
     pub fn admit(&self, user: &str) -> Option<Arc<Episode>> {
@@ -536,11 +536,11 @@ fn forward(w: &Arc<Worker>, tr: &Arc<Transport>, track: &Arc<crate::r#pub::PubTr
             return;
         };
         let first = ep.pass_gate(at_us);
-        fan.last_rtp_us.store(at_us, Ordering::Release);
+        ep.last_rtp_us.store(at_us, Ordering::Release);
         let prev = ep.last_notify_us.load(Ordering::Relaxed);
         if first || at_us.saturating_sub(prev) >= BLOCKED_NOTIFY_US {
             ep.last_notify_us.store(at_us, Ordering::Relaxed);
-            crate::ops::floor_rtp(&room, tr, first);
+            crate::ops::floor_rtp(&room, tr, first, ep.grant);
         }
         pkt.ep = ep.id;
         for r in fan.rows.load().iter() {

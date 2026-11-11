@@ -41,6 +41,7 @@ pub struct RoomFloor {
     pub clock: Mutex<Clock>,
     pub wake: tokio::sync::Notify,
     pub stop: std::sync::atomic::AtomicBool,
+    pub jobs: tokio::sync::mpsc::UnboundedSender<Job>,
 }
 
 static CLOCKS: OnceLock<Mutex<HashMap<String, Arc<RoomFloor>>>> = OnceLock::new();
@@ -62,12 +63,13 @@ pub fn of(room: &str) -> Option<Arc<RoomFloor>> {
 }
 
 pub fn open(room: &Arc<Room>) {
-    let rf = Arc::new(RoomFloor { clock: Mutex::new(Clock::default()), wake: tokio::sync::Notify::new(), stop: Default::default() });
+    let (jobs, rx) = tokio::sync::mpsc::unbounded_channel();
+    let rf = Arc::new(RoomFloor { clock: Mutex::new(Clock::default()), wake: tokio::sync::Notify::new(), stop: Default::default(), jobs });
     if let Ok(mut g) = clocks().lock() {
         g.insert(room.id.clone(), rf.clone());
     }
     let r = room.clone();
-    super::spawn(async move { timer_task(r, rf).await });
+    super::spawn(async move { room_task(r, rf, rx).await });
 }
 
 pub fn close(room: &str) {
@@ -95,9 +97,15 @@ fn duration(name: &str) -> u64 {
     }
 }
 
-struct Plan {
+pub enum Exec {
+    Bind { effect: Effect, user: String, g: u64, videos: Vec<Arc<crate::r#pub::PubStream>>, video_ok: bool },
+    Release { effect: Effect, prev_videos: Vec<Arc<crate::r#pub::PubStream>> },
+}
+
+pub struct Job {
     step: Step,
-    effects: Vec<Effect>,
+    sources: Vec<Vec<u32>>,
+    effects: Vec<Exec>,
 }
 
 pub struct Entry<'a> {
@@ -152,17 +160,25 @@ where
                     ck.granted_at = now;
                     ck.first_rtp_at = None;
                     ck.last_rtp_at = None;
-                    effects.push(Effect::Bind { user: u.clone(), g: ck.grant_no });
+                    let (videos, video_ok) = slot_video(room, u);
+                    effects.push(Exec::Bind { effect: Effect::Bind { user: u.clone(), g: ck.grant_no }, user: u.clone(), g: ck.grant_no, videos, video_ok });
                 }
-                crate::flr::core::Fx::Release(_) => effects.push(Effect::Release { g: ck.grant_no }),
+                crate::flr::core::Fx::Release(_) => {
+                    let prev_videos = fl.prev.as_deref().map(|p| slot_video(room, p).0).unwrap_or_default();
+                    effects.push(Exec::Release { effect: Effect::Release { g: ck.grant_no }, prev_videos });
+                }
             }
         }
         rearm(&fl, &mut ck, now);
-        Plan { step, effects }
+        let sources = step.out.iter().map(|o| if o.m.t == Mt::Taken { o.m.a.as_deref().map(|u| slot_sources(room, u)).unwrap_or_default() } else { Vec::new() }).collect();
+        let ret = step.clone();
+        if !(step.out.is_empty() && effects.is_empty()) && rf.jobs.send(Job { step, sources, effects }).is_err() {
+            super::drop_count("exec_order");
+        }
+        ret
     };
     rf.wake.notify_one();
-    execute(room, &plan);
-    plan.step
+    plan
 }
 
 fn rearm(fl: &Floor, ck: &mut Clock, now: u64) {
@@ -184,24 +200,62 @@ fn rearm(fl: &Floor, ck: &mut Clock, now: u64) {
     }
 }
 
-fn execute(room: &Arc<Room>, p: &Plan) {
-    let reason = if p.step.labels.contains(&"FLR.S.gate.not_in_room") { Some("not_in_room") } else { None };
-    for o in &p.step.out {
-        let sources = if o.m.t == Mt::Taken { o.m.a.as_deref().map(|u| slot_sources(room, u)).unwrap_or_default() } else { Vec::new() };
-        if let Some(m) = to_mbcp(&o.m, &room.id, reason, &sources) {
+fn execute(room: &Arc<Room>, job: Job) {
+    let mut applied = Vec::new();
+    for e in job.effects {
+        let effect = match &e {
+            Exec::Bind { effect, .. } | Exec::Release { effect, .. } => effect.clone(),
+        };
+        let a = room.slot(Kind::Audio).bind.lock().map(|mut s| s.apply(&effect)).unwrap_or(false);
+        let v = room.slot(Kind::Video).bind.lock().map(|mut s| s.apply(&effect)).unwrap_or(false);
+        if !(a || v) {
+            if matches!(effect, Effect::Bind { .. }) {
+                super::drop_count("exec_order");
+            }
+            continue;
+        }
+        match &e {
+            Exec::Bind { user, g, video_ok, .. } => {
+                if !video_ok {
+                    tracing::warn!(kind = "diag", spec = "SV-IMPL-FLR-MEDIA-BIND", session = %super::session_of(user), room = %room.id, user = %user, "slot video codec differs from room — video not bound");
+                }
+                let speaker = Arc::new(user.clone());
+                room.slot(Kind::Audio).bind(Some(speaker.clone()), *g);
+                room.slot(Kind::Video).bind(video_ok.then_some(speaker), *g);
+            }
+            Exec::Release { .. } => {
+                room.slot(Kind::Audio).release();
+                room.slot(Kind::Video).release();
+            }
+        }
+        applied.push(e);
+    }
+    let reason = if job.step.labels.contains(&"FLR.S.gate.not_in_room") { Some("not_in_room") } else { None };
+    for (o, sources) in job.step.out.iter().zip(job.sources.iter()) {
+        if let Some(m) = to_mbcp(&o.m, &room.id, reason, sources) {
             send(&o.to, &m);
         }
     }
-    let prev = room.floor.lock().ok().and_then(|f| f.prev.clone());
-    for e in &p.effects {
-        let a = room.slot(Kind::Audio).bind.lock().map(|mut s| s.apply(e)).unwrap_or(false);
-        let v = room.slot(Kind::Video).bind.lock().map(|mut s| s.apply(e)).unwrap_or(false);
-        if !(a || v) {
-            continue;
-        }
+    for e in &applied {
         match e {
-            Effect::Bind { user, .. } => bind_media(room, user),
-            Effect::Release { .. } => release_media(room, prev.as_deref()),
+            Exec::Bind { videos, video_ok: true, .. } => {
+                let fan = room.slot(Kind::Video);
+                for st in videos {
+                    for t in st.physical() {
+                        pli_while_bound(fan, &t);
+                    }
+                }
+            }
+            Exec::Release { prev_videos, .. } => {
+                for st in prev_videos {
+                    for t in st.physical() {
+                        if let Ok(mut g) = t.pli.lock() {
+                            g.pending = false;
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -271,43 +325,54 @@ pub fn dc_in(tr: &Arc<Transport>, buf: &[u8]) {
     run(&room, Entry::of("server_rx", &user), |f, t2| Some(f.server_rx(&user, &cm, half, t2)));
 }
 
-pub fn on_rtp(room_id: &str, user: &str, first: bool) {
+pub fn obs_recorded(pkt_grant: u64, clock_grant: u64) -> bool {
+    pkt_grant != 0 && pkt_grant == clock_grant
+}
+
+pub fn on_rtp(room_id: &str, user: &str, first: bool, grant: u64) {
     let Some(s) = super::sfu() else { return };
     let Some(room) = s.rooms.get(room_id) else { return };
     if let Some(rf) = of(room_id)
         && let Ok(mut ck) = rf.clock.lock()
+        && obs_recorded(grant, ck.grant_no)
     {
-        let speaker = room.slot(Kind::Audio).speaker_is(user) || room.slot(Kind::Video).speaker_is(user);
-        if speaker {
-            let now = now_ms();
-            if first || ck.first_rtp_at.is_none() {
-                ck.first_rtp_at.get_or_insert(now);
-            }
-            ck.last_rtp_at = Some(now);
+        let now = now_ms();
+        if first || ck.first_rtp_at.is_none() {
+            ck.first_rtp_at.get_or_insert(now);
         }
+        ck.last_rtp_at = Some(now);
     }
     run(&room, Entry::of("rtp", user), |f, _| Some(f.rtp(user)));
 }
 
-fn last_rtp_ms(room: &Room) -> Option<u64> {
-    let a = room.slot(Kind::Audio).last_rtp_us.load(Ordering::Acquire);
-    let v = room.slot(Kind::Video).last_rtp_us.load(Ordering::Acquire);
-    let m = a.max(v);
+fn last_rtp_ms(room: &Room, grant: u64) -> Option<u64> {
+    let at = |k: Kind| {
+        let ep = room.slot(k).ep.load();
+        if obs_recorded(ep.grant, grant) { ep.last_rtp_us.load(Ordering::Acquire) } else { 0 }
+    };
+    let m = at(Kind::Audio).max(at(Kind::Video));
     if m == 0 { None } else { Some(m / 1000) }
 }
 
-async fn timer_task(room: Arc<Room>, rf: Arc<RoomFloor>) {
+async fn room_task(room: Arc<Room>, rf: Arc<RoomFloor>, mut jobs: tokio::sync::mpsc::UnboundedReceiver<Job>) {
     loop {
         if rf.stop.load(Ordering::Acquire) {
+            while let Ok(job) = jobs.try_recv() {
+                execute(&room, job);
+            }
             return;
         }
         let next = rf.clock.lock().ok().and_then(|c| c.timers.values().min().copied());
         let wait = next.map(|at| at.saturating_sub(now_ms())).unwrap_or(60_000);
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_millis(wait)) => {}
-            _ = rf.wake.notified() => continue,
+            biased;
+            job = jobs.recv() => match job {
+                Some(job) => execute(&room, job),
+                None => return,
+            },
+            _ = rf.wake.notified() => {}
+            _ = tokio::time::sleep(Duration::from_millis(wait)) => fire_due(&room, &rf),
         }
-        fire_due(&room, &rf);
     }
 }
 
@@ -315,7 +380,7 @@ fn fire_due(room: &Arc<Room>, rf: &Arc<RoomFloor>) {
     let now = now_ms();
     let due: Vec<Key> = match rf.clock.lock() {
         Ok(mut c) => {
-            let lr = last_rtp_ms(room).filter(|t| *t >= c.granted_at);
+            let lr = last_rtp_ms(room, c.grant_no).filter(|t| *t >= c.granted_at);
             if lr.is_some() {
                 c.last_rtp_at = lr;
             }
@@ -400,38 +465,6 @@ fn pli_while_bound(fan: &Arc<SlotFan>, t: &Arc<crate::r#pub::PubTrack>) {
     }
 }
 
-fn bind_media(room: &Arc<Room>, user: &str) {
-    let (videos, video_ok) = slot_video(room, user);
-    if !video_ok {
-        tracing::warn!(kind = "diag", spec = "SV-IMPL-FLR-MEDIA-BIND", session = %super::session_of(user), room = %room.id, user = %user, "slot video codec differs from room — video not bound");
-    }
-    let speaker = Arc::new(user.to_string());
-    room.slot(Kind::Audio).bind(Some(speaker.clone()));
-    room.slot(Kind::Video).bind(video_ok.then_some(speaker));
-    if video_ok {
-        let fan = room.slot(Kind::Video);
-        for st in &videos {
-            for t in st.physical() {
-                pli_while_bound(fan, &t);
-            }
-        }
-    }
-}
-
-fn release_media(room: &Arc<Room>, prev: Option<&str>) {
-    if let Some(p) = prev {
-        for st in slot_video(room, p).0 {
-            for t in st.physical() {
-                if let Ok(mut g) = t.pli.lock() {
-                    g.pending = false;
-                }
-            }
-        }
-    }
-    room.slot(Kind::Audio).release();
-    room.slot(Kind::Video).release();
-}
-
 pub fn snapshot(room: &Room) -> serde_json::Value {
     let (state, speaker, prio, queue) = match room.floor.lock() {
         Ok(f) => {
@@ -445,11 +478,11 @@ pub fn snapshot(room: &Room) -> serde_json::Value {
         }
         Err(_) => ("IDLE", None, 0, Vec::new()),
     };
-    let (first, last, mut timers, granted) = match of(&room.id).and_then(|rf| rf.clock.lock().ok().map(|c| (c.first_rtp_at, c.last_rtp_at, c.timers.clone(), c.granted_at))) {
-        Some((a, b, t, g)) => (a, b, t, g),
-        None => (None, None, BTreeMap::new(), 0),
+    let (first, last, mut timers, granted, grant_no) = match of(&room.id).and_then(|rf| rf.clock.lock().ok().map(|c| (c.first_rtp_at, c.last_rtp_at, c.timers.clone(), c.granted_at, c.grant_no))) {
+        Some((a, b, t, g, n)) => (a, b, t, g, n),
+        None => (None, None, BTreeMap::new(), 0, 0),
     };
-    let last = last_rtp_ms(room).filter(|t| *t >= granted).max(last);
+    let last = last_rtp_ms(room, grant_no).filter(|t| *t >= granted).max(last);
     if let (Some(at), Some(lr)) = (timers.get_mut(&("T1", None)), last) {
         let pushed = lr.max(granted) + T1_MS;
         if pushed > *at {

@@ -166,7 +166,7 @@ fn stall(win: &mut HashMap<usize, (u64, u64)>) {
                 }
                 let slot = row.slot;
                 let speaker_spoke = !slot || {
-                    let lr = room.slot(row.kind).last_rtp_us.load(Ordering::Acquire) / 1000;
+                    let lr = room.slot(row.kind).ep.load().last_rtp_us.load(Ordering::Acquire) / 1000;
                     lr > 0 && mono_to_wall(lr) > ws
                 };
                 if sent == s0 && speaker_spoke {

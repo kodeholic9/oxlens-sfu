@@ -17,7 +17,7 @@ fn who(u: &str) -> Option<Arc<String>> {
 #[test]
 fn slot_packet_admitted_before_release_is_dropped_when_applied_after_it() {
     let fan = SlotFan::new(true);
-    fan.bind(who("a"));
+    fan.bind(who("a"), 1);
     let ep = fan.admit("a").expect("speaker passes the gate").id;
     assert!(fan.live(ep), "정:RULE-FWD-MEDIA-WORKERS packet of the current episode is sent");
     fan.release();
@@ -28,9 +28,9 @@ fn slot_packet_admitted_before_release_is_dropped_when_applied_after_it() {
 #[test]
 fn old_speaker_packet_is_dropped_after_succession_and_new_speaker_packet_is_kept() {
     let fan = SlotFan::new(true);
-    fan.bind(who("a"));
+    fan.bind(who("a"), 2);
     let old = fan.admit("a").expect("a passes").id;
-    fan.bind(who("b"));
+    fan.bind(who("b"), 3);
     let new = fan.admit("b").expect("b passes").id;
     assert!(fan.admit("a").is_none(), "정:IMPL-FLR-MEDIA-BIND only the new speaker passes after succession");
     assert!(!fan.live(old), "정:RULE-FWD-MEDIA-WORKERS S-sym-IMPL-FLR-MEDIA-BIND-7 old speaker packet applied after succession is not sent");
@@ -91,7 +91,7 @@ fn gate_never_sees_a_new_speaker_with_the_previous_episode_first_rtp_record() {
     };
     for i in 1..=200_000u64 {
         fan.ep.load().first_rtp_us.store(i, Ordering::Release);
-        fan.bind(Some(Arc::new(i.to_string())));
+        fan.bind(Some(Arc::new(i.to_string())), i);
     }
     stop.store(true, Ordering::Release);
     let bad = reader.join().unwrap();
@@ -104,13 +104,13 @@ fn regrant_of_the_same_speaker_opens_the_rtx_gate_with_its_first_packet() {
     let fan = SlotFan::new(false);
     let mut rw = Rewriter::new(90_000);
     let a = 7u64;
-    let e1 = fan.bind(who("a"));
+    let e1 = fan.bind(who("a"), 4);
     let first = rw.map(a, 100, 0, 1_000, 1).unwrap();
     let mut last = e1;
     assert!(!rtx_closed(last, fan.episode()), "정:RULE-RTCP-NACK-DOWN gate open after the speaker's first packet");
     fan.release();
     assert!(rtx_closed(last, fan.episode()), "정:RULE-RTCP-NACK-DOWN gate closed after release");
-    let e3 = fan.bind(who("a"));
+    let e3 = fan.bind(who("a"), 5);
     assert!(rtx_closed(last, fan.episode()), "정:RULE-RTCP-NACK-DOWN gate closed until the regranted speaker's first packet");
     let again = rw.map(a, 101, 3_000, 4_000, 1).unwrap();
     let _ = first;
@@ -123,11 +123,25 @@ fn regrant_of_the_same_speaker_opens_the_rtx_gate_with_its_first_packet() {
 fn pli_for_half_duplex_video_is_sent_only_while_bound() {
     use oxsfud::rtcp::pli_wanted;
     let fan = SlotFan::new(false);
-    fan.bind(who("a"));
+    fan.bind(who("a"), 6);
     assert!(pli_wanted(true, Some(&fan), "a"), "정:IMPL-FLR-MEDIA-BIND bound speaker gets PLI");
     assert!(!pli_wanted(true, Some(&fan), "b"), "정:IMPL-FLR-MEDIA-BIND other user's half track gets none");
     fan.release();
     assert!(!pli_wanted(true, Some(&fan), "a"), "정:IMPL-FLR-MEDIA-BIND pending PLI is not sent after release");
     assert!(!pli_wanted(true, None, "a"), "정:IMPL-FLR-MEDIA-BIND no slot means no PLI for half track");
     assert!(pli_wanted(false, None, "a"), "정:IMPL-FLR-MEDIA-BIND full duplex is not gated by the slot");
+}
+
+#[test]
+fn rtp_observation_is_recorded_only_under_the_grant_that_admitted_it() {
+    use oxsfud::ops::floor::obs_recorded;
+    assert!(obs_recorded(2, 2), "정:IMPL-FLR-RTP-OBSERVE packet admitted under the current grant feeds its clock");
+    assert!(!obs_recorded(1, 2), "정:IMPL-FLR-RTP-OBSERVE S-sym-IMPL-FLR-RTP-OBSERVE-4 the previous speaker's packet between the judgment and its execution does not feed the new grant's clock");
+    assert!(!obs_recorded(0, 0), "정:IMPL-FLR-RTP-OBSERVE a release episode carries no grant");
+    let fan = SlotFan::new(true);
+    fan.bind(who("a"), 7);
+    let ep = fan.admit("a").expect("a passes");
+    assert_eq!(ep.grant, 7, "정:IMPL-FLR-RTP-OBSERVE the episode carries the grant number of its bind");
+    fan.release();
+    assert_eq!(fan.ep.load().grant, 0, "정:IMPL-FLR-RTP-OBSERVE release episode has no grant");
 }
