@@ -148,6 +148,7 @@ pub struct Change {
     pub old: Option<(String, String)>,
     pub was: SubState,
     pub new: Option<(String, String)>,
+    pub rev: u64,
 }
 
 #[derive(Default)]
@@ -429,7 +430,7 @@ impl Table {
         r.down.src.store(Some(Arc::new((c.track_id.clone(), c.room.clone()))));
         r.down.gate.store(gate);
         r.down.loaded_at.store(now, Ordering::Release);
-        out.push(Change { down: r.down.clone(), class: r.class, old, was, new: Some((c.track_id.clone(), c.room.clone())) });
+        out.push(Change { down: r.down.clone(), class: r.class, old, was, new: Some((c.track_id.clone(), c.room.clone())), rev });
     }
 
     fn rehome(s: &mut State, i: usize, c: &Cand, rev: u64, now: u64, out: &mut Vec<Change>) {
@@ -442,7 +443,7 @@ impl Table {
         r.down.room.store(Some(Arc::new(c.room.clone())));
         r.down.src.store(Some(Arc::new((c.track_id.clone(), c.room.clone()))));
         r.down.gate.store(gate);
-        out.push(Change { down: r.down.clone(), class: r.class, old, was, new: Some((c.track_id.clone(), c.room.clone())) });
+        out.push(Change { down: r.down.clone(), class: r.class, old, was, new: Some((c.track_id.clone(), c.room.clone())), rev });
     }
 
     fn unload(s: &mut State, i: usize, rev: u64, out: &mut Vec<Change>) {
@@ -455,7 +456,7 @@ impl Table {
         r.down.src.store(None);
         r.down.room.store(None);
         r.down.gate.store(None);
-        out.push(Change { down: r.down.clone(), class: r.class, old: Some(old), was, new: None });
+        out.push(Change { down: r.down.clone(), class: r.class, old: Some(old), was, new: None, rev });
     }
 
     fn fresh_slot_rows(s: &State, cands: &[Cand], want_slot: &BTreeSet<(String, Kind)>) -> usize {

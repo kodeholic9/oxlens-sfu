@@ -53,6 +53,7 @@ pub struct DownRow {
     pub paused: AtomicBool,
     pub priority: AtomicU8,
     pub last_ep: AtomicU64,
+    pub applied: AtomicU64,
     pub src_track: ArcSwapOption<crate::r#pub::PubTrack>,
     pub rr_loss: AtomicU8,
     pub rr_at: AtomicU64,
@@ -96,6 +97,7 @@ impl DownRow {
             paused: AtomicBool::new(false),
             priority: AtomicU8::new(0),
             last_ep: AtomicU64::new(0),
+            applied: AtomicU64::new(0),
             src_track: ArcSwapOption::empty(),
             rr_loss: AtomicU8::new(0),
             rr_at: AtomicU64::new(0),
@@ -114,7 +116,61 @@ impl DownRow {
 }
 
 pub fn row_same(r: &DownRow, rev: u64) -> bool {
-    r.rev() == rev
+    r.applied.load(Ordering::Acquire) == rev
+}
+
+pub struct RowCmd {
+    pub row: Arc<DownRow>,
+    pub rev: u64,
+    pub reset: bool,
+}
+
+pub fn apply_row_cmd(row: &DownRow, rev: u64, reset: bool) -> bool {
+    if rev <= row.applied.load(Ordering::Acquire) {
+        return false;
+    }
+    if reset && let Ok(mut rw) = row.rw.lock() {
+        rw.src = None;
+    }
+    row.src_track.store(None);
+    row.applied.store(rev, Ordering::Release);
+    true
+}
+
+#[derive(Default)]
+pub struct RowCmds(crossbeam_queue::SegQueue<RowCmd>);
+
+impl RowCmds {
+    pub fn push(&self, c: RowCmd) {
+        self.0.push(c);
+    }
+
+    pub fn drain(&self) -> usize {
+        let mut n = 0;
+        while let Some(c) = self.0.pop() {
+            apply_row_cmd(&c.row, c.rev, c.reset);
+            n += 1;
+        }
+        n
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+pub fn post_row(row: Arc<DownRow>, rev: u64, reset: bool) {
+    let Some(w) = media().and_then(|m| m.workers.get(row.conn.worker)) else {
+        apply_row_cmd(&row, rev, reset);
+        return;
+    };
+    w.rows.push(RowCmd { row, rev, reset });
+    std::sync::atomic::fence(Ordering::SeqCst);
+    if w.sleeping.load(Ordering::SeqCst)
+        && let Some(t) = w.thread.get()
+    {
+        t.unpark();
+    }
 }
 
 pub struct Episode {
@@ -330,7 +386,7 @@ pub fn worker_loop(w: &Arc<Worker>) {
     let mut next_tick = mono_us();
     let mut idle = 0u32;
     loop {
-        let mut did = 0usize;
+        let mut did = w.rows.drain();
         for ring in &w.inbox {
             while let Some(item) = ring.pop() {
                 let n = match &item {
@@ -359,7 +415,7 @@ pub fn worker_loop(w: &Arc<Worker>) {
         }
         w.sleeping.store(true, Ordering::SeqCst);
         std::sync::atomic::fence(Ordering::SeqCst);
-        let empty = w.inbox.iter().all(|r| r.is_empty());
+        let empty = w.rows.is_empty() && w.inbox.iter().all(|r| r.is_empty());
         if empty {
             std::thread::park_timeout(std::time::Duration::from_millis(5));
         }

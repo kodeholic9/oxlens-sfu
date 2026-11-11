@@ -118,14 +118,8 @@ pub fn apply_changes(changes: &[Change]) {
                 }
             }
         }
-        c.down.src_track.store(None);
         c.down.layer.store(LAYER_PAUSE, Ordering::Release);
-        if c.new.is_some()
-            && c.new != c.old
-            && let Ok(mut rw) = c.down.rw.lock()
-        {
-            rw.src = None;
-        }
+        crate::fwd::post_row(c.down.clone(), c.rev, c.new.is_some() && c.new != c.old);
         if let Some((tid, rid)) = &c.new {
             match c.class {
                 Class::Full => {

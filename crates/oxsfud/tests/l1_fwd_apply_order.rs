@@ -1,12 +1,13 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.12 · 정:RULE-FWD-MEDIA-WORKERS · 정:IMPL-FLR-MEDIA-BIND · 정:IMPL-FWD-SOURCE-SWITCH · model: claude-opus-5-5
-//! 1층 — 워커 사이로 넘긴 묶음은 받는 워커가 적용하는 차례에 다시 판단한다. 슬롯 묶음은 게이트를 지난 일화가 그대로인지 · 줄은 판단한 뒤 다시 실리지 않았는지 본다(링 사이 차례가 없어 앞 화자의 묶음이 새 화자 패킷 뒤에 적용되면 재기록기가 앞 출처로 되돌아간다). 슬롯 상태는 일화 묶음 하나를 통째로 바꿔 끼운다 · 재전송 문은 줄이 마지막으로 보낸 일화와 지금 일화로 유도한다(같은 사람 재허가도 새 일화 첫 패킷에서 열린다 · R16) · 반이중 영상 PLI 는 보내는 차례에 화자인지 본다(context 202611/20261111a · 20261111c 층 ①).
+//! 1층 — 워커 사이로 넘긴 묶음은 받는 워커가 적용하는 차례에 다시 판단한다. 슬롯 묶음은 게이트를 지난 일화가 그대로인지 · 줄은 판단한 뒤 다시 실리지 않았는지 본다(링 사이 차례가 없어 앞 화자의 묶음이 새 화자 패킷 뒤에 적용되면 재기록기가 앞 출처로 되돌아간다). 슬롯 상태는 일화 묶음 하나를 통째로 바꿔 끼운다 · 재전송 문은 줄이 마지막으로 보낸 일화와 지금 일화로 유도한다 · 줄의 재기록기 출처 · 실린 트랙은 그 워커가 줄 명령으로만 바꾸고 묶음은 명령을 적용한 세대와 견준다(층 ③)(같은 사람 재허가도 새 일화 첫 패킷에서 열린다 · R16) · 반이중 영상 PLI 는 보내는 차례에 화자인지 본다(context 202611/20261111a · 20261111c 층 ①).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use oxsfud::fwd::core::Rewriter;
-use oxsfud::fwd::{DownRow, SlotFan, row_same, rtx_closed};
+use oxsfud::fwd::rt::{CTL_RING, DEFAULT_QUEUE_PACKETS};
+use oxsfud::fwd::{DownRow, RowCmd, RowCmds, SlotFan, apply_row_cmd, row_same, rtx_closed};
 use oxsfud::link::{Role, Transport};
 use oxsig::msg::Kind;
 
@@ -60,12 +61,80 @@ fn row_reloaded_after_the_decision_is_not_sent() {
     let acked = Arc::new(AtomicU64::new(3));
     let row = DownRow::create(tr, "0".into(), Kind::Audio, false, 1, None, acked.clone());
     row.since.store(3, Ordering::Release);
+    apply_row_cmd(&row, 3, false);
     let rev = row.rev();
     assert!(row.open() && row_same(&row, rev), "정:RULE-FWD-MEDIA-WORKERS row open at the decision");
     row.since.store(4, Ordering::Release);
+    apply_row_cmd(&row, 4, true);
     assert!(!row_same(&row, rev), "정:RULE-FWD-MEDIA-WORKERS row reloaded after the decision is not sent");
     acked.store(4, Ordering::Release);
     assert!(!row_same(&row, rev), "정:RULE-FWD-MEDIA-WORKERS even after the new load is acked the old decision stays stale");
+}
+
+fn row_with_source(src: u64) -> DownRow {
+    let tr = Transport::new(9, "s", "", Role::Both, 0, false);
+    let row = DownRow::create(tr, "0".into(), Kind::Audio, false, 1, None, Arc::new(AtomicU64::new(1)));
+    row.since.store(1, Ordering::Release);
+    apply_row_cmd(&row, 1, false);
+    let mut rw = row.rw.lock().unwrap();
+    for i in 0..3u16 {
+        rw.map(src, 100 + i, 960 * i as u32, 1_000 + 20 * i as u64, 960).unwrap();
+    }
+    drop(rw);
+    row
+}
+
+#[test]
+fn control_never_writes_the_row_rewriter_or_its_source_track() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut bad = Vec::new();
+    for dir in ["ops", "sub", "flr", "gc", "room"] {
+        let Ok(rd) = std::fs::read_dir(root.join(dir)) else { continue };
+        for e in rd.flatten() {
+            let text = std::fs::read_to_string(e.path()).unwrap_or_default();
+            for (n, line) in text.lines().enumerate() {
+                if line.contains("rw.src =") || line.contains("src_track.store(") {
+                    bad.push(format!("{}:{}", e.path().display(), n + 1));
+                }
+            }
+        }
+    }
+    assert!(bad.is_empty(), "정:RULE-FWD-MEDIA-WORKERS S-sym-RULE-FWD-MEDIA-WORKERS-16 only the row's worker writes the rewriter source and the source track: {bad:?}");
+}
+
+#[test]
+fn reassign_leaves_the_flowing_source_until_the_row_worker_applies_the_command() {
+    let row = row_with_source(11);
+    let decided = row.rev();
+    row.since.store(2, Ordering::Release);
+    assert_eq!(row.rw.lock().unwrap().src, Some(11), "정:RULE-FWD-MEDIA-WORKERS S-sym-RULE-FWD-MEDIA-WORKERS-16 closing the row does not touch the rewriter");
+    assert!(row_same(&row, decided), "정:RULE-FWD-MEDIA-WORKERS a bundle decided before the command still goes out on the source it was decided for");
+    assert!(!row_same(&row, 2), "정:RULE-FWD-MEDIA-WORKERS S-sym-RULE-FWD-MEDIA-WORKERS-18 a new-generation bundle that arrives before the row command is row_stale");
+    assert!(apply_row_cmd(&row, 2, true));
+    assert_eq!(row.rw.lock().unwrap().src, None, "정:RULE-FWD-MEDIA-WORKERS the row worker opens the source when it applies the command");
+    assert!(row_same(&row, 2) && !row_same(&row, decided), "정:RULE-FWD-MEDIA-WORKERS S-sym-RULE-FWD-MEDIA-WORKERS-18 after the command only the new generation goes out");
+}
+
+#[test]
+fn row_commands_beyond_the_packet_limit_and_the_ring_are_never_dropped() {
+    let row = Arc::new(row_with_source(11));
+    let q = RowCmds::default();
+    let n = (DEFAULT_QUEUE_PACKETS + CTL_RING) as u64;
+    for rev in 2..2 + n {
+        q.push(RowCmd { row: row.clone(), rev, reset: true });
+    }
+    assert_eq!(q.drain() as u64, n, "정:RULE-FWD-MEDIA-WORKERS S-sym-RULE-FWD-MEDIA-WORKERS-17 every row command is applied");
+    assert!(q.is_empty() && row_same(&row, 1 + n), "정:RULE-FWD-MEDIA-WORKERS S-sym-RULE-FWD-MEDIA-WORKERS-17 the last generation is the applied one");
+}
+
+#[test]
+fn an_older_row_command_arriving_late_is_skipped() {
+    let row = row_with_source(11);
+    assert!(apply_row_cmd(&row, 5, true));
+    row.rw.lock().unwrap().map(22, 7_000, 0, 2_000, 960).unwrap();
+    assert!(!apply_row_cmd(&row, 4, true), "정:IMPL-SUB-TABLE S-sym-IMPL-SUB-TABLE-9 an older command is skipped");
+    assert!(row_same(&row, 5), "정:IMPL-SUB-TABLE S-sym-IMPL-SUB-TABLE-9 the applied generation never goes down");
+    assert_eq!(row.rw.lock().unwrap().src, Some(22), "정:IMPL-SUB-TABLE S-sym-IMPL-SUB-TABLE-9 the skipped command does not clear the flowing source");
 }
 
 #[test]
