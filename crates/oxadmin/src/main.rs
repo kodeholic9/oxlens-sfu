@@ -535,15 +535,20 @@ fn bus_views(v: &Value) -> Vec<BusView> {
 }
 
 fn bus_agree(views: &[BusView]) -> bool {
-    let first = views.first().and_then(|x| x.1.clone());
-    !views.is_empty() && views.iter().all(|(_, s)| s.is_some() && s.clone() == first)
+    let first = views.first().and_then(|x| x.1.as_ref()).map(|x| x.0.clone());
+    !views.is_empty() && views.iter().all(|(_, s)| s.as_ref().map(|x| x.0.clone()) == first) && first.is_some() && rooms_diff(views).is_empty()
+}
+
+fn room_owner(room: &str) -> &str {
+    room.rsplit_once('@').map(|(_, at)| at.split_once('/').map_or(at, |(n, _)| n)).unwrap_or("")
 }
 
 fn rooms_diff(views: &[BusView]) -> Vec<Value> {
     let all: BTreeSet<&String> = views.iter().filter_map(|(_, s)| s.as_ref()).flat_map(|(_, r)| r.iter()).collect();
     all.into_iter()
         .filter_map(|room| {
-            let (with, without): (Vec<&BusView>, Vec<&BusView>) = views.iter().filter(|(_, s)| s.is_some()).partition(|(_, s)| s.as_ref().is_some_and(|(_, r)| r.contains(room)));
+            let (with, without): (Vec<&BusView>, Vec<&BusView>) =
+                views.iter().filter(|(n, s)| s.is_some() && n != room_owner(room)).partition(|(_, s)| s.as_ref().is_some_and(|(_, r)| r.contains(room)));
             (!without.is_empty()).then(|| json!({ "room": room, "seen_by": with.iter().map(|x| x.0.clone()).collect::<Vec<_>>(), "missing_on": without.iter().map(|x| x.0.clone()).collect::<Vec<_>>() }))
         })
         .collect()
@@ -591,25 +596,35 @@ fn main() {
 mod bus_tests {
     use super::*;
 
-    fn all(rooms_c: &[&str]) -> Value {
-        let view = |rooms: &[&str]| json!({ "nodes": [{ "node": "node-a", "inst": "1" }, { "node": "node-b", "inst": "2" }], "rooms_seen": rooms.iter().map(|r| json!({ "room_id": r, "node": "node-c", "inst": "9" })).collect::<Vec<_>>() });
-        json!({ "nodes": [{ "node": "node-a", "bus": view(&[]) }, { "node": "node-b", "bus": view(&[]) }, { "node": "node-c", "bus": view(rooms_c) }] })
+    fn view(rooms: &[(&str, &str)]) -> Value {
+        json!({ "nodes": [{ "node": "node-a", "inst": "1" }, { "node": "node-b", "inst": "2" }, { "node": "node-c", "inst": "3" }], "rooms_seen": rooms.iter().map(|(r, n)| json!({ "room_id": r, "node": n, "inst": "9" })).collect::<Vec<_>>() })
+    }
+
+    fn all(a: &[(&str, &str)], b: &[(&str, &str)], c: &[(&str, &str)]) -> Value {
+        json!({ "nodes": [{ "node": "node-a", "bus": view(a) }, { "node": "node-b", "bus": view(b) }, { "node": "node-c", "bus": view(c) }] })
     }
 
     #[test]
-    fn same_nodes_but_different_rooms_seen_is_not_agreement() {
-        let v = bus_views(&all(&["r1"]));
-        assert!(!bus_agree(&v), "node 목록이 같아도 방 배치가 다르면 합의가 아니다");
+    fn owner_does_not_list_its_own_room_and_that_is_agreement() {
+        let v = bus_views(&all(&[("r1", "node-c")], &[("r1", "node-c")], &[]));
+        assert!(bus_agree(&v), "rooms_seen 은 자기 방을 빼고 낸다 — 주인 node 에 없는 것은 어긋남이 아니다");
+        assert!(rooms_diff(&v).is_empty());
+    }
+
+    #[test]
+    fn same_nodes_but_a_room_left_on_one_node_is_not_agreement() {
+        let v = bus_views(&all(&[("r1", "node-c")], &[], &[]));
+        assert!(!bus_agree(&v), "node 목록이 같아도 남의 방 라우팅이 한 node 에만 남으면 합의가 아니다");
         let d = rooms_diff(&v);
         assert_eq!(d.len(), 1);
         assert_eq!(d[0]["room"], "r1@node-c/9");
-        assert_eq!(d[0]["missing_on"], json!(["node-a", "node-b"]));
+        assert_eq!(d[0]["missing_on"], json!(["node-b"]));
     }
 
     #[test]
-    fn same_nodes_and_rooms_is_agreement_and_unreachable_node_is_not() {
-        assert!(bus_agree(&bus_views(&all(&[]))));
-        let mut v = all(&[]);
+    fn unreachable_node_is_not_agreement() {
+        assert!(bus_agree(&bus_views(&all(&[], &[], &[]))));
+        let mut v = all(&[], &[], &[]);
         v["nodes"][1].as_object_mut().unwrap().remove("bus");
         assert!(!bus_agree(&bus_views(&v)));
     }
