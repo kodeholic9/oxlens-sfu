@@ -10,7 +10,7 @@ use std::time::Duration;
 use oxsig::Op;
 use oxsig::msg::*;
 
-use crate::fwd::LAYER_PAUSE;
+use crate::fwd::{Episode, LAYER_PAUSE};
 use crate::gc::Why;
 use crate::link::PeerState;
 use crate::room::Room;
@@ -151,7 +151,7 @@ fn stall(win: &mut HashMap<usize, (u64, u64)>) {
                 }
                 let key = Arc::as_ptr(&row) as usize;
                 seen.insert(key);
-                let Some(start) = eligible_from(&room, &tid, &row, &u, ready) else {
+                let Some((start, ep)) = eligible_from(&room, &tid, &row, &u, ready) else {
                     win.remove(&key);
                     continue;
                 };
@@ -164,11 +164,10 @@ fn stall(win: &mut HashMap<usize, (u64, u64)>) {
                 if now.saturating_sub(ws) < STALL_MS / 2 {
                     continue;
                 }
-                let slot = row.slot;
-                let speaker_spoke = !slot || {
-                    let lr = room.slot(row.kind).ep.load().last_rtp_us.load(Ordering::Acquire) / 1000;
+                let speaker_spoke = ep.as_ref().is_none_or(|ep| {
+                    let lr = ep.last_rtp_us.load(Ordering::Acquire) / 1000;
                     lr > 0 && mono_to_wall(lr) > ws
-                };
+                });
                 if sent == s0 && speaker_spoke {
                     sync_required(&room, &u, now, &tid, start, ws);
                 }
@@ -179,14 +178,19 @@ fn stall(win: &mut HashMap<usize, (u64, u64)>) {
     win.retain(|k, _| seen.contains(k));
 }
 
-fn eligible_from(room: &Room, tid: &str, row: &crate::fwd::DownRow, user: &str, ready: u64) -> Option<u64> {
+pub fn slot_start(ep_grant: u64, clock: Option<(u64, u64)>, ready: u64) -> Option<u64> {
+    let (grant_no, granted_wall) = clock?;
+    (grant_no == ep_grant).then(|| ready.max(granted_wall))
+}
+
+fn eligible_from(room: &Room, tid: &str, row: &crate::fwd::DownRow, user: &str, ready: u64) -> Option<(u64, Option<Arc<Episode>>)> {
     let s = super::sfu()?;
     if !row.open() || row.paused.load(Ordering::Acquire) {
         return None;
     }
     if row.slot {
-        let fan = room.slot(row.kind);
-        let sp = fan.speaker()?;
+        let ep = room.slot(row.kind).ep.load_full();
+        let sp = ep.speaker.clone()?;
         if sp.as_str() == user {
             return None;
         }
@@ -195,8 +199,8 @@ fn eligible_from(room: &Room, tid: &str, row: &crate::fwd::DownRow, user: &str, 
         if !bound {
             return None;
         }
-        let granted = super::floor::of(&room.id).and_then(|rf| rf.clock.lock().ok().map(|c| c.granted_at)).map(mono_to_wall).unwrap_or(0);
-        return Some(ready.max(granted));
+        let clock = super::floor::of(&room.id).and_then(|rf| rf.clock.lock().ok().map(|c| (c.grant_no, mono_to_wall(c.granted_at))));
+        return slot_start(ep.grant, clock, ready).map(|start| (start, Some(ep)));
     }
     let st = s.stream(tid)?;
     if st.is_half() {
@@ -215,9 +219,9 @@ fn eligible_from(room: &Room, tid: &str, row: &crate::fwd::DownRow, user: &str, 
         if first == 0 {
             return None;
         }
-        return Some(ready.max(first));
+        return Some((ready.max(first), None));
     }
-    Some(ready)
+    Some((ready, None))
 }
 
 fn sync_required(room: &Room, user: &str, now: u64, track: &str, start: u64, window_from: u64) {
