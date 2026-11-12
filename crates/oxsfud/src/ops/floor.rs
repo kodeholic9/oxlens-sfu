@@ -99,7 +99,7 @@ fn duration(name: &str) -> u64 {
 
 pub enum Exec {
     Bind { effect: Effect, user: String, g: u64, videos: Vec<Arc<crate::r#pub::PubStream>>, video_ok: bool },
-    Release { effect: Effect, prev_videos: Vec<Arc<crate::r#pub::PubStream>> },
+    Release { effect: Effect },
 }
 
 pub struct Job {
@@ -164,8 +164,7 @@ where
                     effects.push(Exec::Bind { effect: Effect::Bind { user: u.clone(), g: ck.grant_no }, user: u.clone(), g: ck.grant_no, videos, video_ok });
                 }
                 crate::flr::core::Fx::Release(_) => {
-                    let prev_videos = fl.prev.as_deref().map(|p| slot_video(room, p).0).unwrap_or_default();
-                    effects.push(Exec::Release { effect: Effect::Release { g: ck.grant_no }, prev_videos });
+                    effects.push(Exec::Release { effect: Effect::Release { g: ck.grant_no } });
                 }
             }
         }
@@ -237,25 +236,13 @@ fn execute(room: &Arc<Room>, job: Job) {
         }
     }
     for e in &applied {
-        match e {
-            Exec::Bind { videos, video_ok: true, .. } => {
-                let fan = room.slot(Kind::Video);
-                for st in videos {
-                    for t in st.physical() {
-                        pli_while_bound(fan, &t);
-                    }
+        if let Exec::Bind { videos, video_ok: true, .. } = e {
+            let fan = room.slot(Kind::Video);
+            for st in videos {
+                for t in st.physical() {
+                    pli_while_bound(fan, &t);
                 }
             }
-            Exec::Release { prev_videos, .. } => {
-                for st in prev_videos {
-                    for t in st.physical() {
-                        if let Ok(mut g) = t.pli.lock() {
-                            g.pending = false;
-                        }
-                    }
-                }
-            }
-            _ => {}
         }
     }
 }

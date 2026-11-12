@@ -282,14 +282,13 @@ pub struct Egress {
 }
 
 pub enum Ctl {
-    Pli { tr: Arc<Transport>, track: Arc<crate::r#pub::PubTrack> },
     Sr { row: Arc<DownRow>, src_key: u64, sr: crate::rtcp::Sr, rtp: u32 },
 }
 
 impl Ctl {
     pub fn packets(&self) -> usize {
         match self {
-            Ctl::Pli { .. } | Ctl::Sr { .. } => 1,
+            Ctl::Sr { .. } => 1,
         }
     }
 }
@@ -445,7 +444,6 @@ fn process(w: &Arc<Worker>, item: Item) {
             }
         }
         Item::Ctl(c) => match c {
-            Ctl::Pli { tr, track } => crate::rtcp::send_pli(w, &tr, &track),
             Ctl::Sr { row, src_key, sr, rtp } => crate::rtcp::send_sr(w, &row, src_key, &sr, rtp),
         },
     }

@@ -14,7 +14,7 @@ use oxsig::msg::Kind;
 use crate::fwd::rt::{Item, Worker, media, mono_us};
 use crate::fwd::{Ctl, DownRow, parse_rtp};
 use crate::link::{PathKey, Transport};
-use crate::r#pub::PubTrack;
+use crate::r#pub::{PliState, PubTrack};
 use crate::sub::ext::{ExtInput, build as ext_build};
 use core::TwccRecv;
 
@@ -350,46 +350,62 @@ pub fn pli_wanted(half: bool, slot: Option<&crate::fwd::SlotFan>, user: &str) ->
 fn pli_bound(t: &PubTrack) -> bool {
     let half = t.stream.is_half();
     let slot = if half { crate::ops::slot_of(t.stream.room.load().as_str(), Kind::Video) } else { None };
-    if pli_wanted(half, slot.as_deref(), &t.stream.user) {
-        return true;
-    }
-    if let Ok(mut p) = t.pli.lock() {
-        p.pending = false;
-    }
-    crate::ops::drop_count("pli_unbound");
-    false
+    pli_wanted(half, slot.as_deref(), &t.stream.user)
 }
+
+pub const PLI_INFRA: u8 = 1;
+pub const PLI_USER: u8 = 2;
 
 pub fn request_pli(t: &Arc<PubTrack>, infra: bool) {
-    if t.stream.kind != Kind::Video || !pli_bound(t) {
+    if t.stream.kind != Kind::Video {
         return;
     }
-    let now = common::now_ms();
-    let gap = throttle_ms(t);
-    let fire = {
-        let Ok(mut p) = t.pli.lock() else { return };
-        if p.last_ms == 0 || now.saturating_sub(p.last_ms) >= gap {
-            p.last_ms = now;
-            p.pending = false;
-            p.sent += 1;
-            true
-        } else {
-            if infra {
-                p.pending = true;
-            } else {
-                crate::ops::drop_count("pli_throttled");
-            }
-            false
-        }
-    };
-    if fire && let Some(tr) = t.transport.upgrade() {
-        post(&tr, None, Ctl::Pli { tr: tr.clone(), track: t.clone() });
-    }
+    t.pli_want.fetch_or(if infra { PLI_INFRA } else { PLI_USER }, Ordering::AcqRel);
 }
 
-pub fn send_pli(w: &Worker, tr: &Transport, t: &PubTrack) {
-    if pli_bound(t) {
-        send_rtcp(w, tr, &build_pli(t.ssrc));
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PliGo {
+    Idle,
+    Unbound,
+    Send,
+    Hold,
+    Throttled,
+}
+
+pub fn pli_decide(p: &mut PliState, want: u8, bound: bool, now: u64, gap: u64) -> PliGo {
+    if want == 0 && !p.pending {
+        return PliGo::Idle;
+    }
+    if !bound {
+        p.pending = false;
+        return PliGo::Unbound;
+    }
+    if p.last_ms == 0 || now.saturating_sub(p.last_ms) >= gap {
+        p.last_ms = now;
+        p.pending = false;
+        p.sent += 1;
+        return PliGo::Send;
+    }
+    let infra = want & PLI_INFRA != 0;
+    if infra {
+        p.pending = true;
+    }
+    if want & PLI_USER != 0 && !infra { PliGo::Throttled } else { PliGo::Hold }
+}
+
+fn pli_tick(w: &Worker, tr: &Transport, t: &PubTrack, now: u64) {
+    let want = t.pli_want.swap(0, Ordering::AcqRel);
+    let Ok(mut p) = t.pli.lock() else { return };
+    if want == 0 && !p.pending {
+        return;
+    }
+    let go = pli_decide(&mut p, want, pli_bound(t), now, throttle_ms(t));
+    drop(p);
+    match go {
+        PliGo::Send => send_rtcp(w, tr, &build_pli(t.ssrc)),
+        PliGo::Unbound => crate::ops::drop_count("pli_unbound"),
+        PliGo::Throttled => crate::ops::drop_count("pli_throttled"),
+        PliGo::Idle | PliGo::Hold => {}
     }
 }
 
@@ -508,10 +524,7 @@ fn uplink(w: &Worker, tr: &Arc<Transport>, ups: &[Arc<PubTrack>], now: u64, now_
             if gave_up {
                 request_pli(t, true);
             }
-            let flush = t.pli.lock().map(|p| p.pending && now.saturating_sub(p.last_ms) >= throttle_ms(t)).unwrap_or(false);
-            if flush {
-                request_pli(t, true);
-            }
+            pli_tick(w, tr, t, now);
         }
     }
     if due(&tr.rtc.next_rr, now, RR_MS) {
