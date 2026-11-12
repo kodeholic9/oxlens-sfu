@@ -44,11 +44,9 @@ pub struct DownRow {
     pub bytes: AtomicU64,
     pub last_at: AtomicU64,
     pub loaded_at: AtomicU64,
-    pub layer: AtomicU8,
-    pub target: AtomicU8,
+    pub lstate: AtomicU64,
     pub cap: AtomicU8,
     pub auto_cap: AtomicU8,
-    pub pending_since: AtomicU64,
     pub pending_pli_at: AtomicU64,
     pub paused: AtomicBool,
     pub priority: AtomicU8,
@@ -88,11 +86,9 @@ impl DownRow {
             bytes: AtomicU64::new(0),
             last_at: AtomicU64::new(0),
             loaded_at: AtomicU64::new(0),
-            layer: AtomicU8::new(LAYER_PAUSE),
-            target: AtomicU8::new(1),
+            lstate: AtomicU64::new(crate::sim::LayerState { layer: LAYER_PAUSE, target: 1, since: 0, rev: 0 }.pack()),
             cap: AtomicU8::new(1),
             auto_cap: AtomicU8::new(1),
-            pending_since: AtomicU64::new(0),
             pending_pli_at: AtomicU64::new(0),
             paused: AtomicBool::new(false),
             priority: AtomicU8::new(0),
@@ -632,7 +628,7 @@ fn forward(w: &Arc<Worker>, tr: &Arc<Transport>, track: &Arc<crate::r#pub::PubTr
                 crate::ops::drop_count(why);
                 continue;
             }
-            if stream.kind == Kind::Video && stream.simulcast && !crate::sim::pass(r, track, keyframe, now_ms) {
+            if stream.kind == Kind::Video && stream.simulcast && !crate::sim::pass(r, track, keyframe, now_ms, rev) {
                 continue;
             }
             targets.push((r.clone(), rev));

@@ -11,7 +11,6 @@ use oxsig::{Code, Failure, Op};
 use serde_json::{Value, json};
 
 use super::handle::Ctx;
-use crate::fwd::LAYER_PAUSE;
 use crate::link::{Cred, Peer};
 use crate::r#pub::{PER_PERSON, PER_REQUEST, PubStream, PubTrack, PublishState, StreamInit, index_add, index_remove};
 use crate::room::{Room, notice};
@@ -118,15 +117,12 @@ pub fn apply_changes(changes: &[Change]) {
                 }
             }
         }
-        c.down.layer.store(LAYER_PAUSE, Ordering::Release);
+        crate::sim::reset(&c.down, c.rev, c.class == Class::Full && c.new.is_some(), common::now_ms());
         crate::fwd::post_row(c.down.clone(), c.rev, c.new.is_some() && c.new != c.old);
         if let Some((tid, rid)) = &c.new {
             match c.class {
                 Class::Full => {
                     if let Some(st) = s.stream(tid) {
-                        let t = c.down.cap.load(Ordering::Acquire).min(c.down.auto_cap.load(Ordering::Acquire));
-                        c.down.target.store(t, Ordering::Release);
-                        c.down.pending_since.store(common::now_ms(), Ordering::Release);
                         let d = c.down.clone();
                         st.rows.rcu(move |v| {
                             let mut n = (**v).clone();

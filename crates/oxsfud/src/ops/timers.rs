@@ -207,7 +207,8 @@ fn eligible_from(room: &Room, tid: &str, row: &crate::fwd::DownRow, user: &str, 
         return None;
     }
     if row.kind == Kind::Video {
-        if st.simulcast && row.layer.load(Ordering::Acquire) == LAYER_PAUSE && row.target.load(Ordering::Acquire) == LAYER_PAUSE {
+        let ls = crate::sim::layer_state(row);
+        if st.simulcast && ls.layer == LAYER_PAUSE && ls.target == LAYER_PAUSE {
             return None;
         }
         let first = st.first_rtp_ms.load(Ordering::Acquire);
