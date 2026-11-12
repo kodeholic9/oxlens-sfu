@@ -73,12 +73,9 @@ pub struct LayerState {
     pub layer: u8,
     pub target: u8,
     pub since: u64,
-    pub rev: u64,
 }
 
-pub const GEN_BITS: u32 = 18;
-const GEN_MASK: u64 = (1 << GEN_BITS) - 1;
-const SINCE_MASK: u64 = (1 << 42) - 1;
+const SINCE_MASK: u64 = (1 << 60) - 1;
 
 fn code(l: u8) -> u64 {
     if l == LAYER_PAUSE { 2 } else { (l & 1) as u64 }
@@ -90,25 +87,24 @@ fn layer_of(c: u64) -> u8 {
 
 impl LayerState {
     pub fn pack(&self) -> u64 {
-        ((self.since & SINCE_MASK) << 22) | (code(self.layer) << 20) | (code(self.target) << 18) | (self.rev & GEN_MASK)
+        ((self.since & SINCE_MASK) << 4) | (code(self.layer) << 2) | code(self.target)
     }
 
     pub fn unpack(w: u64) -> LayerState {
-        LayerState { layer: layer_of((w >> 20) & 3), target: layer_of((w >> 18) & 3), since: w >> 22, rev: w & GEN_MASK }
-    }
-
-    pub fn owned_by(&self, rev: u64) -> bool {
-        self.rev == rev & GEN_MASK
-    }
-
-    pub fn older_than(&self, rev: u64) -> bool {
-        let d = (rev & GEN_MASK).wrapping_sub(self.rev) & GEN_MASK;
-        d != 0 && d < (1 << (GEN_BITS - 1))
+        LayerState { layer: layer_of((w >> 2) & 3), target: layer_of(w & 3), since: w >> 4 }
     }
 }
 
 pub fn layer_state(row: &DownRow) -> LayerState {
     LayerState::unpack(row.lstate.load(Ordering::Acquire))
+}
+
+fn put(row: &DownRow, s: LayerState) {
+    row.lstate.store(s.pack(), Ordering::Release);
+}
+
+pub fn want(row: &DownRow) -> u8 {
+    row.cap.load(Ordering::Acquire).min(row.auto_cap.load(Ordering::Acquire))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,72 +145,68 @@ pub fn step(s: LayerState, l: u8, keyframe: bool, now: u64, retry_due: bool, h_s
     }
     if cur == 1 && l == 0 && h_stale {
         if keyframe {
-            return Step { next: Some(LayerState { layer: 0, target: 0, since: now, ..s }), fwd: true, pli: Pli::None };
+            return Step { next: Some(LayerState { layer: 0, target: 0, since: now }), fwd: true, pli: Pli::None };
         }
         return Step { next: Some(LayerState { target: 0, since: now, ..s }), fwd: false, pli: Pli::Here };
     }
     keep(false, Pli::None)
 }
 
-pub fn set_target(row: &DownRow, want: u8, now: u64) -> bool {
-    row.lstate
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |w| {
-            let s = LayerState::unpack(w);
-            (s.target != want).then(|| LayerState { target: want, since: now, ..s }.pack())
-        })
-        .is_ok()
+pub fn adopt_state(row: &DownRow, now: u64) -> Option<u8> {
+    let s = layer_state(row);
+    let w = want(row);
+    if s.target == w {
+        return None;
+    }
+    put(row, LayerState { target: w, since: now, ..s });
+    Some(w)
 }
 
-pub fn retarget(row: &DownRow, any: &PubTrack, now: u64) {
-    let want = row.cap.load(Ordering::Acquire).min(row.auto_cap.load(Ordering::Acquire));
-    if set_target(row, want, now)
-        && let Some(t) = sibling(any, want)
+pub fn adopt(row: &DownRow, any: &PubTrack, now: u64) {
+    if let Some(w) = adopt_state(row, now)
+        && let Some(t) = sibling(any, w)
     {
         crate::rtcp::request_pli(&t, true);
     }
 }
 
-pub fn advance(row: &DownRow, rev: u64, f: impl Fn(LayerState) -> Step) -> Option<Step> {
-    loop {
-        let w = row.lstate.load(Ordering::Acquire);
-        let s = LayerState::unpack(w);
-        if !s.owned_by(rev) {
-            return None;
-        }
-        let st = f(s);
-        if let Some(n) = st.next
-            && row.lstate.compare_exchange(w, n.pack(), Ordering::AcqRel, Ordering::Acquire).is_err()
-        {
-            continue;
-        }
-        return Some(st);
+pub fn request(row: &DownRow, any: &PubTrack) {
+    let w = want(row);
+    if layer_state(row).target != w
+        && let Some(t) = sibling(any, w)
+    {
+        crate::rtcp::request_pli(&t, true);
     }
 }
 
-pub fn reset(row: &DownRow, rev: u64, retarget: bool, now: u64) {
-    let want = row.cap.load(Ordering::Acquire).min(row.auto_cap.load(Ordering::Acquire));
-    let _ = row.lstate.fetch_update(Ordering::AcqRel, Ordering::Acquire, |w| {
-        let s = LayerState::unpack(w);
-        if !s.older_than(rev) {
-            return None;
-        }
-        let n = if retarget { LayerState { layer: LAYER_PAUSE, target: want, since: now, rev } } else { LayerState { layer: LAYER_PAUSE, rev, ..s } };
-        Some(n.pack())
-    });
+pub fn reset(row: &DownRow, now: u64) {
+    put(row, LayerState { layer: LAYER_PAUSE, target: want(row), since: now });
 }
 
-pub fn pass(row: &DownRow, t: &Arc<PubTrack>, keyframe: bool, now: u64, rev: u64) -> bool {
+pub fn judge(row: &DownRow, l: u8, keyframe: bool, now: u64, retry_due: bool, h_stale: impl Fn(LayerState) -> bool) -> (Step, Option<u8>) {
+    let adopted = adopt_state(row, now);
+    let s = layer_state(row);
+    let st = step(s, l, keyframe, now, retry_due, h_stale(s));
+    if let Some(n) = st.next {
+        put(row, n);
+    }
+    (st, adopted)
+}
+
+pub fn admit(row: &DownRow, t: &Arc<PubTrack>, keyframe: bool, now: u64) -> bool {
     if row.paused.load(Ordering::Acquire) {
         return false;
     }
     let l = t.rid.unwrap_or(1);
     let retry_due = now.saturating_sub(row.pending_pli_at.load(Ordering::Relaxed)) >= PENDING_PLI_RETRY_MS;
-    let Some(st) = advance(row, rev, |s| {
-        let h_stale = s.layer == 1 && s.target == 1 && l == 0 && sibling(t, 1).is_some_and(|h| now.saturating_sub(h.last_rtp_ms.load(Ordering::Acquire)) > INBAND_MS);
-        step(s, l, keyframe, now, retry_due, h_stale)
-    }) else {
-        return false;
-    };
+    let (st, adopted) = judge(row, l, keyframe, now, retry_due, |s| {
+        s.layer == 1 && s.target == 1 && l == 0 && sibling(t, 1).is_some_and(|h| now.saturating_sub(h.last_rtp_ms.load(Ordering::Acquire)) > INBAND_MS)
+    });
+    if let Some(w) = adopted
+        && let Some(ts) = sibling(t, w)
+    {
+        crate::rtcp::request_pli(&ts, true);
+    }
     match st.pli {
         Pli::Retry(x) => {
             row.pending_pli_at.store(now, Ordering::Relaxed);
@@ -381,7 +373,7 @@ pub fn tick(tr: &Arc<Transport>, now: u64) {
     }
     for (r, t) in rows {
         r.auto_cap.store(level, Ordering::Release);
-        retarget(&r, &t, now);
+        adopt(&r, &t, now);
     }
 }
 
@@ -470,7 +462,7 @@ pub fn on_twcc(tr: &Arc<Transport>, _t: &crate::sub::Table, body: &[u8]) {
     s.aimd.update(now, usage, acked_bps);
 }
 
-pub fn subscribe_layer(row: &DownRow, any: &Arc<PubTrack>, spatial: Option<u8>, paused: Option<bool>, priority: Option<u8>, now: u64) {
+pub fn subscribe_layer(row: &DownRow, any: &Arc<PubTrack>, spatial: Option<u8>, paused: Option<bool>, priority: Option<u8>) {
     if let Some(sp) = spatial {
         row.cap.store(sp.min(1), Ordering::Release);
     }
@@ -480,13 +472,13 @@ pub fn subscribe_layer(row: &DownRow, any: &Arc<PubTrack>, spatial: Option<u8>, 
     if let Some(p) = paused {
         let was = row.paused.swap(p, Ordering::AcqRel);
         if was && !p {
-            let want = row.cap.load(Ordering::Acquire).min(row.auto_cap.load(Ordering::Acquire));
-            if let Some(t) = sibling(any, want).or_else(|| Some(any.clone())) {
+            if let Some(t) = sibling(any, want(row)).or_else(|| Some(any.clone())) {
                 crate::rtcp::request_pli(&t, true);
             }
+            return;
         }
     }
-    retarget(row, any, now);
+    request(row, any);
 }
 
 #[cfg(test)]

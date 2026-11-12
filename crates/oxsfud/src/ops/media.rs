@@ -117,7 +117,6 @@ pub fn apply_changes(changes: &[Change]) {
                 }
             }
         }
-        crate::sim::reset(&c.down, c.rev, c.class == Class::Full && c.new.is_some(), common::now_ms());
         crate::fwd::post_row(c.down.clone(), c.rev, c.new.is_some() && c.new != c.old);
         if let Some((tid, rid)) = &c.new {
             match c.class {
@@ -524,7 +523,6 @@ pub fn subscribe_layer(c: &Ctx, body: &Value) -> Result<Value, Failure> {
     let s = sfu()?;
     let (peer, _room) = joined_as(c, &req.room_id, &req.join_id)?;
     let Some(t) = s.table(&peer) else { return ok(&Empty {}) };
-    let now = common::now_ms();
     let mut resync = false;
     for x in &req.targets {
         if s.stream(&x.track_id).is_some() && t.set_pref(&x.track_id, x.priority, x.paused) {
@@ -540,7 +538,7 @@ pub fn subscribe_layer(c: &Ctx, body: &Value) -> Result<Value, Failure> {
             continue;
         }
         let (Some(row), Some(any)) = (t.row_of_track(&x.track_id), st.physical().into_iter().next()) else { continue };
-        crate::sim::subscribe_layer(&row, &any, x.spatial, x.paused, x.priority, now);
+        crate::sim::subscribe_layer(&row, &any, x.spatial, x.paused, x.priority);
     }
     ok(&Empty {})
 }

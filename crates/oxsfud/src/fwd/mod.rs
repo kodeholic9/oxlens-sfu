@@ -86,7 +86,7 @@ impl DownRow {
             bytes: AtomicU64::new(0),
             last_at: AtomicU64::new(0),
             loaded_at: AtomicU64::new(0),
-            lstate: AtomicU64::new(crate::sim::LayerState { layer: LAYER_PAUSE, target: 1, since: 0, rev: 0 }.pack()),
+            lstate: AtomicU64::new(crate::sim::LayerState { layer: LAYER_PAUSE, target: 1, since: 0 }.pack()),
             cap: AtomicU8::new(1),
             auto_cap: AtomicU8::new(1),
             pending_pli_at: AtomicU64::new(0),
@@ -127,6 +127,9 @@ pub fn apply_row_cmd(row: &DownRow, rev: u64, reset: bool) -> bool {
     }
     if reset && let Ok(mut rw) = row.rw.lock() {
         rw.src = None;
+    }
+    if reset {
+        crate::sim::reset(row, common::now_ms());
     }
     row.src_track.store(None);
     row.applied.store(rev, Ordering::Release);
@@ -626,9 +629,6 @@ fn forward(w: &Arc<Worker>, tr: &Arc<Transport>, track: &Arc<crate::r#pub::PubTr
                 crate::ops::drop_count(why);
                 continue;
             }
-            if stream.kind == Kind::Video && stream.simulcast && !crate::sim::pass(r, track, keyframe, now_ms, rev) {
-                continue;
-            }
             targets.push((r.clone(), rev));
         }
     }
@@ -661,6 +661,14 @@ fn forward(w: &Arc<Worker>, tr: &Arc<Transport>, track: &Arc<crate::r#pub::PubTr
 pub fn deliver(w: &Worker, row: &DownRow, rev: u64, pkt: &Pkt) {
     if !row_same(row, rev) {
         crate::ops::drop_count("row_stale");
+        return;
+    }
+    if !row.slot
+        && let Some(t) = &pkt.track
+        && t.stream.simulcast
+        && t.stream.kind == Kind::Video
+        && !crate::sim::admit(row, t, pkt.keyframe, common::now_ms())
+    {
         return;
     }
     send_down(w, row, pkt);
