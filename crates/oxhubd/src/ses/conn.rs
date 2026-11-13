@@ -32,27 +32,35 @@ pub enum Out {
 #[derive(Clone)]
 pub struct Conn {
     pub id: u64,
-    pub tx: mpsc::UnboundedSender<Out>,
+    pub tx: mpsc::Sender<Out>,
+    pub over: Arc<tokio::sync::Notify>,
 }
 
 impl Conn {
     pub fn send(&self, o: Out) -> bool {
-        self.tx.send(o).is_ok()
+        match self.tx.try_send(o) {
+            Ok(()) => true,
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.over.notify_one();
+                false
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => false,
+        }
     }
 
     pub fn reply_ok(&self, op: u16, pid: u32, req_flags: u8, body: Vec<u8>) {
         let flags = (req_flags & !frame::KIND_MASK) | FrameKind::Ok.bits();
-        let _ = self.tx.send(Out::Reply { flags, op, pid, body });
+        self.send(Out::Reply { flags, op, pid, body });
     }
 
     pub fn reply_fail(&self, op: u16, pid: u32, req_flags: u8, f: &oxsig::Failure) {
         let flags = (req_flags & !frame::KIND_MASK) | FrameKind::Fail.bits();
-        let _ = self.tx.send(Out::Reply { flags, op, pid, body: serde_json::to_vec(f).unwrap_or_default() });
+        self.send(Out::Reply { flags, op, pid, body: serde_json::to_vec(f).unwrap_or_default() });
     }
 
     pub fn leave(&self, code: Code, s: Option<&super::Session>) {
         super::code_line(&code.failure(), "LEAVE", s, None);
-        let _ = self.tx.send(Out::Leave { code, details: None });
+        self.send(Out::Leave { code, details: None });
     }
 }
 
@@ -93,10 +101,11 @@ impl Writer {
 pub async fn serve(ws: WebSocket, ctx: Arc<Ctx>) {
     let id = CONN_SEQ.fetch_add(1, Ordering::Relaxed);
     let (mut sink, mut stream) = ws.split();
-    let (tx, mut rx) = mpsc::unbounded_channel::<Out>();
-    let conn = Conn { id, tx: tx.clone() };
+    let (tx, mut rx) = mpsc::channel::<Out>(QUEUE_MAX);
+    let over = Arc::new(tokio::sync::Notify::new());
+    let conn = Conn { id, tx: tx.clone(), over: over.clone() };
     let window = ctx.policy.hub.ws_flow_window.clamp(1, 10) as usize;
-    let (req_tx, mut req_rx) = mpsc::unbounded_channel::<(Arc<Session>, Request)>();
+    let (req_tx, mut req_rx) = mpsc::channel::<(Arc<Session>, Request)>(QUEUE_MAX);
     let leave_code = Arc::new(std::sync::Mutex::new(None::<Code>));
 
     let lc = leave_code.clone();
@@ -105,6 +114,7 @@ pub async fn serve(ws: WebSocket, ctx: Arc<Ctx>) {
         let mut tick = tokio::time::interval(Duration::from_millis(500));
         loop {
             let ev = tokio::select! {
+                _ = over.notified() => Some(Out::Leave { code: Code::FlowOverflow, details: None }),
                 o = rx.recv() => o,
                 _ = tick.tick() => {
                     if w.inflight.values().any(|t| t.elapsed() > T_ACK) {
@@ -195,7 +205,7 @@ pub async fn serve(ws: WebSocket, ctx: Arc<Ctx>) {
         let h = f.header;
         match h.kind() {
             FrameKind::Ok | FrameKind::Fail => {
-                let _ = conn.tx.send(Out::Ack(h.pid));
+                conn.send(Out::Ack(h.pid));
                 continue;
             }
             FrameKind::Request => {}
@@ -252,12 +262,17 @@ pub async fn serve(ws: WebSocket, ctx: Arc<Ctx>) {
             }
             Some(Op::Leave) => {
                 super::client_leave(&ctx, &s, &conn).await;
-                let _ = conn.tx.send(Out::Close);
+                conn.send(Out::Close);
                 session = None;
                 break;
             }
             Some(op) => {
-                let _ = req_tx.send((s, Request { op, op_num: h.op, pid: h.pid, flags: h.flags, body: f.body.to_vec() }));
+                if let Err(e) = req_tx.try_send((s, Request { op, op_num: h.op, pid: h.pid, flags: h.flags, body: f.body.to_vec() })) {
+                    if matches!(e, mpsc::error::TrySendError::Full(_)) {
+                        conn.leave(Code::FlowOverflow, session.as_deref());
+                    }
+                    break;
+                }
             }
             None => {
                 let f = Code::UnknownOp.failure();
@@ -269,7 +284,7 @@ pub async fn serve(ws: WebSocket, ctx: Arc<Ctx>) {
     }
     drop(req_tx);
     let _ = processor.await;
-    let _ = conn.tx.send(Out::Close);
+    let _ = tokio::time::timeout(T_BIND, conn.tx.send(Out::Close)).await;
     let _ = writer.await;
     let code = leave_code.lock().ok().and_then(|g| *g);
     if let Some(s) = session {
@@ -289,4 +304,21 @@ async fn send_leave(
     let bytes = frame::encode(FrameKind::Request, Op::Leave.as_u16(), pid, &serde_json::to_vec(&body).unwrap_or_default());
     sink.send(Message::Binary(bytes)).await?;
     sink.send(Message::Close(None)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn full_send_queue_raises_overflow_instead_of_growing() {
+        let (tx, mut rx) = mpsc::channel::<Out>(2);
+        let over = Arc::new(tokio::sync::Notify::new());
+        let c = Conn { id: 1, tx, over: over.clone() };
+        assert!(c.send(Out::Ack(1)));
+        assert!(c.send(Out::Ack(2)));
+        assert!(!c.send(Out::Ack(3)), "연:RULE-TRN-FLOW-CONTROL 상한을 넘으면 넣지 않는다");
+        assert!(tokio::time::timeout(Duration::from_millis(50), over.notified()).await.is_ok(), "넘침 신호 — writer 가 FLOW_OVERFLOW 로 끊는다");
+        assert!(matches!(rx.recv().await, Some(Out::Ack(1))));
+    }
 }

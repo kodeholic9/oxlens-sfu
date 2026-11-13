@@ -411,7 +411,10 @@ pub fn probe(w: &Worker, tr: &Arc<Transport>, now_us: u64) {
 }
 
 pub fn on_twcc(tr: &Arc<Transport>, _t: &crate::sub::Table, body: &[u8]) {
-    let Some((base, arrivals)) = crate::rtcp::parse_twcc(body) else { return };
+    let Some((base, arrivals)) = crate::rtcp::parse_twcc(body) else {
+        crate::ops::drop_count("rtcp_malformed");
+        return;
+    };
     if mode() != Mode::V2 {
         return;
     }

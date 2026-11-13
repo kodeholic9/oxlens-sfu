@@ -50,6 +50,10 @@ fn clocks() -> &'static Mutex<HashMap<String, Arc<RoomFloor>>> {
     CLOCKS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+pub fn count() -> usize {
+    clocks().lock().map(|g| g.len()).unwrap_or(0)
+}
+
 pub fn now_ms() -> u64 {
     mono_us() / 1000
 }

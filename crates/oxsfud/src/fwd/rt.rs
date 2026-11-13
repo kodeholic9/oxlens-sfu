@@ -559,7 +559,9 @@ fn datagram(m: &Media, st: &mut RecvState, data: &[u8], key: PathKey, at_us: u64
             let tr = st.by_addr.get(&key).cloned().or_else(|| known.cloned());
             match tr {
                 Some(t) => {
-                    let _ = t.dtls_in.send(data.to_vec());
+                    if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = t.dtls_in.try_send(data.to_vec()) {
+                        crate::ops::drop_count("dtls_in_full");
+                    }
                     Some(t)
                 }
                 None => {

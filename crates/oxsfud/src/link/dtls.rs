@@ -22,7 +22,7 @@ const DCEP_ACK: u8 = 0x02;
 
 pub struct Io {
     pub tr: Arc<Transport>,
-    rx: AMutex<mpsc::UnboundedReceiver<Vec<u8>>>,
+    rx: AMutex<mpsc::Receiver<Vec<u8>>>,
     local: SocketAddr,
 }
 
@@ -34,11 +34,7 @@ impl webrtc_util::Conn for Io {
     async fn recv(&self, buf: &mut [u8]) -> webrtc_util::Result<usize> {
         let mut rx = self.rx.lock().await;
         match rx.recv().await {
-            Some(d) => {
-                let n = d.len().min(buf.len());
-                buf[..n].copy_from_slice(&d[..n]);
-                Ok(n)
-            }
+            Some(d) => fill(&d, buf),
             None => Err(webrtc_util::Error::Other("closed".into())),
         }
     }
@@ -65,6 +61,15 @@ impl webrtc_util::Conn for Io {
     fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
         self
     }
+}
+
+fn fill(d: &[u8], buf: &mut [u8]) -> webrtc_util::Result<usize> {
+    if d.len() > buf.len() {
+        crate::ops::drop_count("oversize");
+        return Err(webrtc_util::Error::Other(format!("datagram {} > dtls read buffer {}", d.len(), buf.len())));
+    }
+    buf[..d.len()].copy_from_slice(d);
+    Ok(d.len())
 }
 
 pub fn certificate() -> Result<(dtls::crypto::Certificate, String), String> {
@@ -258,12 +263,12 @@ async fn sctp_loop(tr: Arc<Transport>, conn: Arc<dtls::conn::DTLSConn>, mut stop
         remote,
     };
     let Some(mut dc_rx) = tr.dc_rx.lock().ok().and_then(|mut g| g.take()) else { return };
-    let (in_tx, mut in_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (in_tx, mut in_rx) = mpsc::channel::<Vec<u8>>(super::SCTP_IN_MAX);
     let reader = conn.clone();
     let rtask = tokio::spawn(async move {
         let mut buf = vec![0u8; 65_536];
         while let Ok(n) = reader.read(&mut buf, None).await {
-            if in_tx.send(buf[..n].to_vec()).is_err() {
+            if in_tx.send(buf[..n].to_vec()).await.is_err() {
                 break;
             }
         }
@@ -290,4 +295,19 @@ async fn sctp_loop(tr: Arc<Transport>, conn: Arc<dtls::conn::DTLSConn>, mut stop
     rtask.abort();
     let _ = conn.close().await;
     tr.dc_open.store(false, Ordering::Release);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oversized_datagram_is_an_error_not_a_silent_cut() {
+        let mut buf = [0u8; 8];
+        assert_eq!(fill(&[1, 2, 3], &mut buf).ok(), Some(3));
+        assert_eq!(&buf[..3], &[1, 2, 3]);
+        assert_eq!(fill(&[7; 8], &mut buf).ok(), Some(8));
+        assert!(fill(&[9; 9], &mut buf).is_err());
+        assert_eq!(buf, [7; 8]);
+    }
 }

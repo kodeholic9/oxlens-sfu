@@ -295,4 +295,28 @@ fn stat() {
                 .rec("pli_count", tx.pli_in.load(Ordering::Relaxed)),
         );
     }
+    let peers = s.peers();
+    common::log::emit(
+        common::log::Line::new(common::log::Kind::Stat)
+            .rec("max_rss_bytes", max_rss_bytes())
+            .rec("open_fds", open_fds())
+            .rec("peers", peers.len())
+            .rec("links", peers.iter().map(|p| p.transports().len()).sum::<usize>())
+            .rec("rooms", s.rooms.map.lock().map(|g| g.len()).unwrap_or(0))
+            .rec("tracks", s.tracks.lock().map(|g| g.len()).unwrap_or(0))
+            .rec("tables", s.tables.map.lock().map(|g| g.len()).unwrap_or(0))
+            .rec("floor_rooms", super::floor::count())
+            .rec("dc_pending", crate::aux::pending_users()),
+    );
+}
+
+fn max_rss_bytes() -> u64 {
+    use nix::sys::resource::{UsageWho, getrusage};
+    let Ok(u) = getrusage(UsageWho::RUSAGE_SELF) else { return 0 };
+    let rss = u.max_rss().max(0) as u64;
+    if cfg!(target_os = "macos") { rss } else { rss * 1_024 }
+}
+
+fn open_fds() -> usize {
+    std::fs::read_dir("/dev/fd").map(|d| d.count()).unwrap_or(0)
 }

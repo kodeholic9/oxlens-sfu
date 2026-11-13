@@ -870,6 +870,32 @@ mod tests {
         assert!(!t.sync(&a, 3).changed, "정:IMPL-ROOM-JOIN ⑤ rollback resync changes nothing");
     }
 
+    #[test]
+    fn sync_ends_and_stays_bounded_on_extreme_inputs() {
+        for budget in [0usize, 1, 2, 40, usize::MAX] {
+            let t = Table::new(Transport::new(1, "u", "", Role::Both, 0, false), PcMode::Two, budget);
+            let mut big: Vec<Cand> = (0..2_000)
+                .map(|i| cand(&format!("t{i}"), &format!("r{}", i % 7), if i % 2 == 0 { Kind::Audio } else { Kind::Video }, Class::Full, [i64::MIN, -1, 0, 1, i64::MAX][i % 5]))
+                .collect();
+            big.extend((0..50).map(|i| cand(&format!("ptt-r{i}-audio"), &format!("r{i}"), Kind::Audio, Class::Slot, 0)));
+            big.push(cand("t0", "r0", Kind::Audio, Class::Full, 0));
+            let mut paused = big.clone();
+            for c in &mut paused {
+                c.paused = true;
+            }
+            for (k, c) in [&big[..], &[], &paused[..], &big[..1], &big[..]].iter().enumerate() {
+                let _ = t.sync(c, 1 + k as u64);
+                let snap = t.snapshot("e");
+                let full_rows = snap.mlines.len();
+                assert!(full_rows <= FULL_AUDIO + FULL_VIDEO + budget.min(1_000), "줄 수가 상한을 넘는다 — 예산 {budget} · {full_rows}");
+                let mut ssrcs: Vec<u32> = snap.mlines.iter().map(|m| m.ssrc).collect();
+                ssrcs.sort_unstable();
+                ssrcs.dedup();
+                assert_eq!(ssrcs.len(), snap.mlines.len(), "줄 SSRC 가 겹친다");
+            }
+        }
+    }
+
     fn vid(id: &str, codec: &str, rank: i64) -> Cand {
         Cand { codec: codec.into(), ..cand(id, "r", Kind::Video, Class::Full, rank) }
     }

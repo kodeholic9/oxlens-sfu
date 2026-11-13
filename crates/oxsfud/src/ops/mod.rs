@@ -53,6 +53,7 @@ pub const DROP_NAMES: &[&str] = &[
     "row_stale",
     "exec_order",
     "rtcp_unresolved",
+    "rtcp_malformed",
     "pli_throttled",
     "pli_unbound",
     "nack_audio",
@@ -63,6 +64,8 @@ pub const DROP_NAMES: &[&str] = &[
     "dc_unknown_svc",
     "dc_no_room",
     "dc_backlog_full",
+    "dc_out_full",
+    "dtls_in_full",
     "bus_ev_drop",
 ];
 

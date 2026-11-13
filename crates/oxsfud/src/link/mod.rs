@@ -22,6 +22,9 @@ pub const UDP_PAIR_EXPIRE_MS: u64 = 30_000;
 pub const DTLS_HANDSHAKE_SECS: u64 = 30;
 pub const DTLS_MTU: usize = 1_200;
 pub const SOCKET_BUF: usize = 4 * 1024 * 1024;
+pub const DTLS_IN_MAX: usize = 256;
+pub const DC_OUT_MAX: usize = 256;
+pub const SCTP_IN_MAX: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PathKey {
@@ -94,10 +97,10 @@ pub struct Transport {
     pub closed: AtomicBool,
     pub twcc_seq: AtomicU16,
     pub tx: TxStats,
-    pub dtls_in: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
-    pub dtls_rx: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>>>,
-    pub dc_out: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
-    pub dc_rx: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>>>,
+    pub dtls_in: tokio::sync::mpsc::Sender<Vec<u8>>,
+    pub dtls_rx: Mutex<Option<tokio::sync::mpsc::Receiver<Vec<u8>>>>,
+    pub dc_out: tokio::sync::mpsc::Sender<Vec<u8>>,
+    pub dc_rx: Mutex<Option<tokio::sync::mpsc::Receiver<Vec<u8>>>>,
     pub dc_open: AtomicBool,
     pub stop: tokio::sync::watch::Sender<bool>,
     pub ingress: arc_swap::ArcSwap<std::collections::HashMap<u32, Arc<crate::r#pub::PubTrack>>>,
@@ -117,8 +120,8 @@ pub struct ExtIds {
 
 impl Transport {
     pub fn new(id: u64, user: &str, session: &str, role: Role, worker: usize, source_tag: bool) -> Arc<Transport> {
-        let (dtls_in, dtls_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (dc_out, dc_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (dtls_in, dtls_rx) = tokio::sync::mpsc::channel(DTLS_IN_MAX);
+        let (dc_out, dc_rx) = tokio::sync::mpsc::channel(DC_OUT_MAX);
         let (stop, _) = tokio::sync::watch::channel(false);
         let now = common::now_ms();
         Arc::new(Transport {

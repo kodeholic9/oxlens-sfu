@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.12 · 정:RULE-FWD-MEDIA-WORKERS · 정:RULE-OPS-OBSERVE · model: claude-opus-5-5
+// spec: v1.12 · 정:RULE-FWD-MEDIA-WORKERS · S-sym-RULE-FWD-MEDIA-WORKERS-19 · 정:RULE-OPS-OBSERVE · model: claude-opus-5-5
 //! 기형 입력 1층 — 바깥 바이트를 처음 만지는 해석(RTP · 확장 · Opus TOC · STUN · TCP 틀 · 키프레임 · RTCP · NACK · TWCC · DC · 발언권 TLV · WS 틀)이 어떤 바이트에도 panic 하지 않는다. 정상 표본을 길이마다 자르고 · 바이트를 바꾸고 · 길이 칸을 속이고 · 씨앗 고정 무작위와 과대 입력을 넣는다(context 202611/20261113f A2).
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -65,7 +65,9 @@ fn ws_sample() -> Vec<u8> {
     oxsig::frame::encode(oxsig::frame::FrameKind::Request, 513, 7, br#"{"room_id":"r"}"#)
 }
 
-fn parsers() -> Vec<(&'static str, fn(&[u8]), Vec<u8>)> {
+type Probe = (&'static str, fn(&[u8]), Vec<u8>);
+
+fn parsers() -> Vec<Probe> {
     vec![
         ("rtp", |b| {
             if let Some(r) = parse_rtp(b) {

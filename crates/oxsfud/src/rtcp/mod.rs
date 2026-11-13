@@ -564,7 +564,11 @@ fn uplink(w: &Worker, tr: &Arc<Transport>, ups: &[Arc<PubTrack>], now: u64, now_
 
 pub fn on_rtcp(w: &Arc<Worker>, tr: &Arc<Transport>, plain: &[u8]) {
     let table = crate::ops::table_of(tr.id);
-    for p in split(plain) {
+    let packets = split(plain);
+    if packets.iter().map(|p| 4 + p.body.len()).sum::<usize>() != plain.len() {
+        crate::ops::drop_count("rtcp_malformed");
+    }
+    for p in packets {
         match (p.pt, p.fmt) {
             (200, _) => on_sr(w, tr, p.body),
             (201, _) => {
@@ -575,7 +579,10 @@ pub fn on_rtcp(w: &Arc<Worker>, tr: &Arc<Transport>, plain: &[u8]) {
                 on_rr(t, p.body);
             }
             (205, 1) => {
-                let Some((media_ssrc, seqs)) = parse_nack(p.body) else { continue };
+                let Some((media_ssrc, seqs)) = parse_nack(p.body) else {
+                    crate::ops::drop_count("rtcp_malformed");
+                    continue;
+                };
                 match table.as_ref().and_then(|t| t.row_by_ssrc(media_ssrc)) {
                     Some((row, _)) => {
                         row.nacks.fetch_add(seqs.len() as u64, Ordering::Relaxed);
@@ -598,7 +605,10 @@ pub fn on_rtcp(w: &Arc<Worker>, tr: &Arc<Transport>, plain: &[u8]) {
             }
             (206, 1) | (206, 4) => {
                 let media_ssrc = if p.fmt == 4 { be32(p.body, 8) } else { be32(p.body, 4) };
-                let Some(ms) = media_ssrc else { continue };
+                let Some(ms) = media_ssrc else {
+                    crate::ops::drop_count("rtcp_malformed");
+                    continue;
+                };
                 match table.as_ref().and_then(|t| t.row_by_ssrc(ms)) {
                     Some((row, _)) => {
                         tr.tx.pli_in.fetch_add(1, Ordering::Relaxed);
@@ -617,13 +627,19 @@ pub fn on_rtcp(w: &Arc<Worker>, tr: &Arc<Transport>, plain: &[u8]) {
 }
 
 fn on_sr(w: &Worker, tr: &Arc<Transport>, body: &[u8]) {
-    let Some(ssrc) = be32(body, 0) else { return };
+    let Some(ssrc) = be32(body, 0) else {
+        crate::ops::drop_count("rtcp_malformed");
+        return;
+    };
     let ing = tr.ingress.load();
     let Some(track) = ing.get(&ssrc).filter(|t| t.ssrc == ssrc).cloned() else {
         crate::ops::drop_count("rtcp_unresolved");
         return;
     };
-    let (Some(hi), Some(lo), Some(rtp)) = (be32(body, 4), be32(body, 8), be32(body, 12)) else { return };
+    let (Some(hi), Some(lo), Some(rtp)) = (be32(body, 4), be32(body, 8), be32(body, 12)) else {
+        crate::ops::drop_count("rtcp_malformed");
+        return;
+    };
     let sr = Sr { ntp: ((hi as u64) << 32) | lo as u64, rtp, at_us: mono_us() };
     if let Ok(mut g) = tr.rtc.sr.lock() {
         g.insert(ssrc, sr);
