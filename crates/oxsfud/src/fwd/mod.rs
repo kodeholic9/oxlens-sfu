@@ -606,6 +606,7 @@ fn forward(w: &Arc<Worker>, tr: &Arc<Transport>, track: &Arc<crate::r#pub::PubTr
             crate::ops::floor_rtp(&room, tr, first, ep.grant);
         }
         pkt.ep = ep.id;
+        pkt.src_key = core::episode_src(track.src_key, ep.id);
         for r in fan.rows.load().iter() {
             if r.user == tr.user {
                 continue;
@@ -756,8 +757,51 @@ pub fn send_down(w: &Worker, row: &DownRow, pkt: &Pkt) {
 
 #[cfg(test)]
 mod tests {
+    use super::core::{Rewriter, episode_src};
     use super::voice_onset;
     use crate::sub::{VOICE_DELAY_MS, VOICE_GAP_MS, VOICE_RETRY_MS};
+
+    struct Sender {
+        seq: u16,
+        ts: u32,
+        at: u64,
+    }
+
+    impl Sender {
+        fn spurt(&mut self, rw: &mut Rewriter, key: u64, n: u32) -> Vec<u32> {
+            let mut out = Vec::new();
+            for _ in 0..n {
+                if let Some(m) = rw.map(key, self.seq, self.ts, self.at, 960) {
+                    out.push(m.ts);
+                }
+                self.seq = self.seq.wrapping_add(1);
+                self.ts = self.ts.wrapping_add(960);
+                self.at += 20;
+            }
+            out
+        }
+    }
+
+    fn across_pause(first_key: u64, second_key: u64, pause_ms: u64) -> u32 {
+        let mut rw = Rewriter::new(48_000);
+        let mut s = Sender { seq: 100, ts: 1_000, at: 0 };
+        let a = s.spurt(&mut rw, first_key, 50);
+        s.at += pause_ms;
+        let b = s.spurt(&mut rw, second_key, 50);
+        b[0].wrapping_sub(a[a.len() - 1])
+    }
+
+    #[test]
+    fn regrant_same_speaker_is_a_source_switch() {
+        for pause_ms in [1_000u64, 5_000, 30_000] {
+            let gap = across_pause(episode_src(7, 1 << 40), episode_src(7, (1 << 40) + 2), pause_ms) as u64;
+            let want = (pause_ms + 20) * 48;
+            assert!(gap + 960 >= want && gap <= want + 960, "쉼 {pause_ms}ms 건너 ts 차 {gap} — 흐른 시간만큼 벌어져야 한다");
+            assert_eq!(across_pause(7, 7, pause_ms), 960, "출처가 트랙이면 멈춘 ts 가 그대로 나간다(고치기 전 꼴)");
+        }
+        assert_ne!(episode_src(7, 1 << 40), episode_src(7, (1 << 40) + 1));
+        assert_ne!(episode_src(7, 1 << 40), episode_src(8, 1 << 40));
+    }
 
     fn talk(from: u64, until: u64, step: u64, last: u64) -> Option<u64> {
         let (mut prev, mut run) = (0, 0);

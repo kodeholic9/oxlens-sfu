@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-FWD-SOURCE-SWITCH · 정:PROP-FWD-SWITCH-SEQ-CONTIGUOUS · 정:PROP-FWD-SWITCH-TS-FORWARD · 정:RULE-CONC-SANS-IO · 정:IMPL-SUB-SUBSCRIBER-TABLE · model: claude-opus-5-5
+// spec: v1.12 · 정:IMPL-FWD-SOURCE-SWITCH · 정:PROP-FWD-SWITCH-SEQ-CONTIGUOUS · 정:PROP-FWD-SWITCH-TS-FORWARD · 정:RULE-CONC-SANS-IO · 정:IMPL-SUB-SUBSCRIBER-TABLE · model: claude-opus-5-5
 //! 재기록기 — 다운링크 SSRC 하나의 단일 오프셋(seq · ts) · 전환 하한 = 앞 패킷이 덮는 길이 · NACK 되돌림 · SR 번역 · PT 교체. 시계는 인자.
 
 pub fn serial_after(a: u16, b: u16) -> bool {
@@ -8,6 +8,10 @@ pub fn serial_after(a: u16, b: u16) -> bool {
 
 pub fn serial_before(a: u16, b: u16) -> bool {
     a != b && !serial_after(a, b)
+}
+
+pub fn episode_src(src: u64, episode: u64) -> u64 {
+    src.rotate_left(32) ^ episode
 }
 
 pub const BOUNDARY_WINDOW: u16 = 16384;

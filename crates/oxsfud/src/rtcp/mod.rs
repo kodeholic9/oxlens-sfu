@@ -410,8 +410,9 @@ fn pli_tick(w: &Worker, tr: &Transport, t: &PubTrack, now: u64) {
 }
 
 pub fn send_sr(w: &Worker, row: &DownRow, src_key: u64, sr: &Sr, rtp: u32) {
+    let key = if row.slot { crate::fwd::core::episode_src(src_key, row.last_ep.load(Ordering::Acquire)) } else { src_key };
     let translated = match row.rw.lock() {
-        Ok(rw) if rw.src == Some(src_key) => rw.translate_sr_ts(rtp),
+        Ok(rw) if rw.src == Some(key) => rw.translate_sr_ts(rtp),
         _ => return,
     };
     let pk = build_sr(row.ssrc, sr, translated, row.sent.load(Ordering::Relaxed) as u32, row.bytes.load(Ordering::Relaxed) as u32);
