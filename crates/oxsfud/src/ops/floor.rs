@@ -310,6 +310,9 @@ pub fn dc_in(tr: &Arc<Transport>, buf: &[u8]) {
         super::drop_count("dc_no_room");
         return;
     }
+    if m.msg_type == mbcp::RELEASE {
+        tr.release_rx_us.store(tr.dtls_rx_us.load(Ordering::Acquire), Ordering::Release);
+    }
     let Some(cm) = from_mbcp(&m) else { return };
     let user = tr.user.clone();
     let half = super::media::has_half(&user);

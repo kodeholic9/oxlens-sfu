@@ -97,8 +97,10 @@ pub struct Transport {
     pub closed: AtomicBool,
     pub twcc_seq: AtomicU16,
     pub tx: TxStats,
-    pub dtls_in: tokio::sync::mpsc::Sender<Vec<u8>>,
-    pub dtls_rx: Mutex<Option<tokio::sync::mpsc::Receiver<Vec<u8>>>>,
+    pub dtls_in: tokio::sync::mpsc::Sender<Datagram>,
+    pub dtls_rx: Mutex<Option<tokio::sync::mpsc::Receiver<Datagram>>>,
+    pub dtls_rx_us: AtomicU64,
+    pub release_rx_us: AtomicU64,
     pub dc_out: tokio::sync::mpsc::Sender<Vec<u8>>,
     pub dc_rx: Mutex<Option<tokio::sync::mpsc::Receiver<Vec<u8>>>>,
     pub dc_open: AtomicBool,
@@ -108,6 +110,8 @@ pub struct Transport {
     pub pub_room: ArcSwapOption<String>,
     pub rtc: crate::rtcp::ConnRtcp,
 }
+
+pub type Datagram = (u64, Vec<u8>);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ExtIds {
@@ -145,6 +149,8 @@ impl Transport {
             tx: TxStats::default(),
             dtls_in,
             dtls_rx: Mutex::new(Some(dtls_rx)),
+            dtls_rx_us: AtomicU64::new(0),
+            release_rx_us: AtomicU64::new(0),
             dc_out,
             dc_rx: Mutex::new(Some(dc_rx)),
             dc_open: AtomicBool::new(false),

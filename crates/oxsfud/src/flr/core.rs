@@ -816,14 +816,25 @@ impl Floor {
         let mut r = Step::default();
         let st = self.part_of(u);
         let p = self.p(u);
-        p.c8 += 1;
+        let c8 = p.c8;
         let rc = p.rcause;
+        let g_taken = p.g_taken;
         if st == Some(P::Prevoke) {
+            self.p(u).c8 += 1;
             r.labels.push("FLR.S.P.PREVOKE.T8");
             self.send(&mut r, u, Mt::Revoke, None, rc, 0);
-        } else {
+        } else if c8 < timers::C8 as u32 {
+            self.p(u).c8 += 1;
             r.labels.push("FLR.S.P.NPSENDS.T8");
             self.send(&mut r, u, Mt::Revoke, None, revoke::NO_PERMISSION as u32, 0);
+        } else if g_taken {
+            r.labels.push("FLR.S.P.NPSENDS.T8_giveup_taken");
+            let h = self.holder();
+            self.send_e(&mut r, u, P::NpTaken, Msg::new(Mt::Taken, h, 0, 0));
+        } else {
+            r.labels.push("FLR.S.P.NPSENDS.T8_giveup_idle");
+            let prev = self.prev.clone();
+            self.send_e(&mut r, u, P::NpIdle, Msg::new(Mt::Idle, prev, 0, 0));
         }
         r
     }
@@ -873,7 +884,7 @@ impl Floor {
     pub fn armed_participant(&self, u: &str) -> Vec<&'static str> {
         let mut on = Vec::new();
         let Some(p) = self.parts.get(u) else { return on };
-        if matches!(p.part, Some(P::Prevoke) | Some(P::NpSends)) && p.c8 < timers::C8 as u32 {
+        if (p.part == Some(P::Prevoke) && p.c8 < timers::C8 as u32) || (p.part == Some(P::NpSends) && p.c8 <= timers::C8 as u32) {
             on.push("T8");
         }
         if p.retry {
@@ -909,6 +920,40 @@ mod tests {
         assert_eq!(r.fx, vec![Fx::Release(Some("a".into()))]);
         assert!(r.out.iter().any(|o| o.to == "a" && o.m.t == Mt::Ack && o.m.n == RELEASE_TYPE));
         assert!(!r.out.iter().any(|o| o.to == "a" && o.m.t == Mt::Idle));
+    }
+
+    #[test]
+    fn trailing_rtp_revoke_gives_up_and_resyncs() {
+        for taken in [false, true] {
+            let mut f = Floor::new(10, 30);
+            f.ws_join("a", true);
+            f.ws_join("b", true);
+            f.ws_pub_select("a");
+            f.ws_pub_select("b");
+            f.server_rx("a", &Msg::new(Mt::Request, None, 5, 0), true, 0);
+            f.server_rx("a", &Msg::new(Mt::Release, None, 0, 0), true, 0);
+            if taken {
+                f.server_rx("b", &Msg::new(Mt::Request, None, 5, 0), true, 0);
+            }
+            let r = f.rtp("a");
+            assert!(r.labels.iter().any(|l| l.starts_with("FLR.S.P.NP_")), "{:?}", r.labels);
+            assert_eq!(f.part_name("a"), "NPSENDS");
+            let mut revokes = 0;
+            let mut last = Vec::new();
+            for _ in 0..10 {
+                if !f.armed_participant("a").contains(&"T8") {
+                    break;
+                }
+                let r = f.t8("a");
+                revokes += r.out.iter().filter(|o| o.to == "a" && o.m.t == Mt::Revoke).count();
+                last = r.out.iter().filter(|o| o.to == "a").map(|o| o.m.t).collect();
+            }
+            assert_eq!(revokes, timers::C8 as usize - 1, "T8 재전송은 C8 원장대로");
+            assert_eq!(f.part_name("a"), if taken { "NP_TAKEN" } else { "NP_IDLE" }, "재전송을 다 쓰면 지금 발언권 상태로 다시 맞춘다");
+            assert_eq!(last, vec![if taken { Mt::Taken } else { Mt::Idle }]);
+            let r = f.server_rx("a", &Msg::new(Mt::Request, None, 5, 0), true, 0);
+            assert!(!r.labels.iter().any(|l| l.starts_with("FLR.S.P.NPSENDS")), "다시 맞춘 뒤 요청은 버려지지 않는다 {:?}", r.labels);
+        }
     }
 
     #[test]

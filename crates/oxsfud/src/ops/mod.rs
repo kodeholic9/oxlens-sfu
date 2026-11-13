@@ -45,6 +45,7 @@ pub const DROP_NAMES: &[&str] = &[
     "rid_unknown",
     "no_pub_room",
     "prefan_gate",
+    "pre_release_tail",
     "ready_gate",
     "row_gate",
     "await_keyframe",

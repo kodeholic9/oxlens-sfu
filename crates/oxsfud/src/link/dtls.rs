@@ -22,7 +22,7 @@ const DCEP_ACK: u8 = 0x02;
 
 pub struct Io {
     pub tr: Arc<Transport>,
-    rx: AMutex<mpsc::Receiver<Vec<u8>>>,
+    rx: AMutex<mpsc::Receiver<super::Datagram>>,
     local: SocketAddr,
 }
 
@@ -34,7 +34,10 @@ impl webrtc_util::Conn for Io {
     async fn recv(&self, buf: &mut [u8]) -> webrtc_util::Result<usize> {
         let mut rx = self.rx.lock().await;
         match rx.recv().await {
-            Some(d) => fill(&d, buf),
+            Some((at, d)) => {
+                self.tr.dtls_rx_us.store(at, Ordering::Release);
+                fill(&d, buf)
+            }
             None => Err(webrtc_util::Error::Other("closed".into())),
         }
     }

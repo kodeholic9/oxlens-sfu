@@ -257,6 +257,10 @@ impl SlotFan {
     }
 }
 
+pub fn pre_release(rtp_at_us: u64, release_at_us: u64) -> bool {
+    release_at_us != 0 && rtp_at_us < release_at_us
+}
+
 pub fn rtx_closed(last_ep: u64, cur_ep: u64) -> bool {
     last_ep != cur_ep
 }
@@ -592,6 +596,10 @@ fn forward(w: &Arc<Worker>, tr: &Arc<Transport>, track: &Arc<crate::r#pub::PubTr
             return;
         };
         let Some(ep) = fan.admit(&tr.user) else {
+            if pre_release(at_us, tr.release_rx_us.load(Ordering::Acquire)) {
+                crate::ops::drop_count("pre_release_tail");
+                return;
+            }
             crate::ops::drop_count("prefan_gate");
             if track.blocked_notify(at_us) {
                 crate::ops::floor_blocked_rtp(&room, tr);
@@ -789,6 +797,14 @@ mod tests {
         s.at += pause_ms;
         let b = s.spurt(&mut rw, second_key, 50);
         b[0].wrapping_sub(a[a.len() - 1])
+    }
+
+    #[test]
+    fn rtp_received_before_release_is_a_tail_not_a_violation() {
+        assert!(super::pre_release(1_000, 1_500));
+        assert!(!super::pre_release(1_500, 1_500));
+        assert!(!super::pre_release(2_000, 1_500));
+        assert!(!super::pre_release(1_000, 0), "놓기를 받은 적이 없으면 꼬리가 아니다");
     }
 
     #[test]
