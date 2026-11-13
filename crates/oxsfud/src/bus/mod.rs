@@ -120,7 +120,7 @@ impl Bus {
                     g.insert(room.to_string(), t);
                 }
             }
-            Err(e) => tracing::warn!(kind = "diag", room = %room, "room token: {e}"),
+            Err(e) => tracing::warn!(kind = "diag", spec = "SV-RULE-BUS-PRESENCE", room = %room, "room token: {e}"),
         }
     }
 
@@ -185,7 +185,7 @@ impl Bus {
 
 pub fn notice_line(n: &Notice) -> common::log::Line {
     let Some(op) = oxsig::Op::from_u16(n.op) else {
-        return common::log::Line::new(common::log::Kind::Diag).rec("op", n.op).msg("notice of unknown op");
+        return common::log::Line::diag("SV-RULE-BUS-EVENTS").rec("op", n.op).msg("notice of unknown op");
     };
     let mut l = common::log::Line::ev(&format!("CP-OP-{}", op.name().replace('_', "-")));
     if let Some(r) = &n.room_id {

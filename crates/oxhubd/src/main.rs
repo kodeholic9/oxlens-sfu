@@ -150,7 +150,7 @@ async fn run(cfg: HubCfg) -> i32 {
     tokio::spawn(ops::sweeper(hub.clone()));
     let tls = cfg.system.hub.tls.as_ref().map(|t| (t.cert.clone(), t.key.clone()));
     if let Err(e) = ops::http::serve(hub.clone(), &cfg.listen, tls).await {
-        tracing::warn!(kind = "diag", "{e}");
+        tracing::warn!(kind = "diag", spec = "SV-IMPL-CFG-SYSTEM-FILE", "{e}");
         return 2;
     }
     sup.start_sfu(bus.clone());

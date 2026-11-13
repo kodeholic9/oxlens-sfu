@@ -105,7 +105,7 @@ pub async fn run(tr: Arc<Transport>, cert: dtls::crypto::Certificate, local: Soc
         _ = stop.changed() => return,
     };
     if let Err(e) = srtp_keys(&tr, &conn).await {
-        tracing::warn!(kind = "diag", session = %tr.session, user = %tr.user, "srtp keys: {e}");
+        tracing::warn!(kind = "diag", spec = "SV-RULE-LINK-TRANSPORT", session = %tr.session, user = %tr.user, "srtp keys: {e}");
         return;
     }
     tr.ready.store(true, Ordering::Release);

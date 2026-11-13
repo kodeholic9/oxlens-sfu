@@ -292,9 +292,9 @@ impl Supervisor {
         u.set(UnitState::Running, "hello");
         if !self.node_declared.swap(true, Ordering::SeqCst) {
             if let Err(e) = bus.declare_self().await {
-                tracing::warn!(kind = "diag", unit = %u.id, "node token: {e}");
+                tracing::warn!(kind = "diag", spec = "SV-RULE-BUS-PRESENCE", unit = %u.id, "node token: {e}");
             } else {
-                common::log::emit(common::log::Line::new(common::log::Kind::Diag).key("unit", &u.id).msg("node token declared"));
+                common::log::emit(common::log::Line::diag("SV-RULE-BUS-PRESENCE").key("unit", &u.id).msg("node token declared"));
             }
         }
     }

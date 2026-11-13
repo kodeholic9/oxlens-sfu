@@ -56,6 +56,12 @@ impl Line {
         l
     }
 
+    pub fn diag(spec: &str) -> Line {
+        let mut l = Line::new(Kind::Diag);
+        l.spec = Some(spec.to_string());
+        l
+    }
+
     pub fn key(mut self, name: &str, v: impl ToString) -> Line {
         let v = v.to_string();
         if let Some(i) = key_index(name)

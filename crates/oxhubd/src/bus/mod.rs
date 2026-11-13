@@ -309,7 +309,7 @@ impl Bus {
         match (sub, g.get_mut(&name)) {
             (Ok(sub), Some(e)) if e.1.is_none() => e.1 = Some(sub),
             (Err(err), Some(e)) if e.1.is_none() => {
-                tracing::warn!(kind = "diag", key = %name, "interest subscriber: {err}");
+                tracing::warn!(kind = "diag", spec = "SV-RULE-BUS-EVENTS", key = %name, "interest subscriber: {err}");
                 g.remove(&name);
             }
             _ => {}

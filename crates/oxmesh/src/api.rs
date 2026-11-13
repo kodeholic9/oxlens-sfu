@@ -141,6 +141,7 @@ impl Mesh {
         let (listen, advertise, connect) = (some(listen), some(cfg.advertise.join(",")), some(cfg.connect.join(",")));
         tracing::info!(
             kind = "diag",
+            spec = "SV-RULE-MESH-SHAPE",
             me = %cfg.node,
             router = cfg.router,
             listen = listen.as_deref(),
