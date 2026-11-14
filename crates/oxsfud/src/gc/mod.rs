@@ -58,9 +58,6 @@ pub fn leave(peer: &Arc<Peer>, room_id: &str, why: Why, keep_roster: bool) -> bo
     if let Ok(mut g) = peer.rooms.lock() {
         g.remove(room_id);
     }
-    if let Some(t) = s.table(peer) {
-        t.forget_room(room_id);
-    }
     let last = peer.rooms().is_empty();
     crate::ops::media::resync_peer(peer, !last);
     let mut removed = Vec::new();
@@ -116,12 +113,7 @@ pub fn reap(peer: &Arc<Peer>, why: Why) {
         crate::aux::forget(&peer.user);
         crate::rtcp::forget_user(&peer.user);
     }
-    if let Some(t) = s.tables.remove(peer.subscribe.id) {
-        s.tables.keep(&peer.sid, t.arev());
-        for (tid, st) in t.states() {
-            crate::ops::transition("SUB", &tid, "SV-STATE-SUBSCRIBE-STATE", st.name(), "-", why.as_str(), &[("session", &peer.session), ("user", &peer.user)]);
-        }
-    }
+    crate::ops::media::retire_table(peer, why.as_str());
     let m = crate::fwd::rt::media();
     for (i, tr) in peer.transports().into_iter().enumerate() {
         if tr.closed.swap(true, Ordering::AcqRel) {

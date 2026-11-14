@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-PUB-ADD · 정:IMPL-PUB-REMOVE · 정:IMPL-PUB-TRACK-SET · 정:IMPL-SUB-PIPELINE · 정:IMPL-SUB-TABLE · 정:IMPL-SUB-READY-GATE · 정:IMPL-PUB-RID-SPATIAL · 정:IMPL-AFF-PUB-MOVE · 정:IMPL-LINK-ICE-RESTART · 정:IMPL-ROOM-EMIT · 정:CAND-PUB-NOT-PUB-ROOM-ORDER · 연:RULE-AFF-PUB-ONLY · 연:RULE-AFF-TWO-ROOMS-ONE-REQ · 연:RULE-AFF-FAIL · 연:RULE-SUB-READY-WHAT · 연:RULE-ROOM-JOIN-ID · 연:RULE-TRN-IDEMPOTENT · 연:RULE-PUB-REMOVE-FORM · model: claude-opus-5-5
+// spec: v1.6 · 정:IMPL-PUB-ADD · 정:IMPL-PUB-REMOVE · 정:IMPL-PUB-TRACK-SET · 정:IMPL-SUB-PIPELINE · 정:IMPL-SUB-TABLE · 정:IMPL-SUB-READY-GATE · 정:IMPL-PUB-RID-SPATIAL · 정:IMPL-AFF-PUB-MOVE · 정:IMPL-LINK-ICE-RESTART · 정:IMPL-ROOM-EMIT · 정:RULE-CONC-SIX · 정:IMPL-GC-PEER-REAP · 정:CAND-PUB-NOT-PUB-ROOM-ORDER · 연:RULE-AFF-PUB-ONLY · 연:RULE-AFF-TWO-ROOMS-ONE-REQ · 연:RULE-AFF-FAIL · 연:RULE-SUB-READY-WHAT · 연:RULE-ROOM-JOIN-ID · 연:RULE-TRN-IDEMPOTENT · 연:RULE-PUB-REMOVE-FORM · model: claude-opus-5-5
 //! 미디어 op 조율 — 발행(검사 차례 ①~⑦ · 논리 먼저 물리 나중) · 구독 배관(대상 산출 → 배정표 → 줄 붙이기/떼기 → `MLINE_EVENT`) · `READY` · `SUBSCRIBE_LAYER` · `TRACK_SET` · `ICE_RESTART` · `AFFILIATION` · `MESSAGE`.
 
 use std::collections::BTreeSet;
@@ -14,7 +14,7 @@ use super::handle::Ctx;
 use crate::link::{Cred, Peer};
 use crate::r#pub::{PER_PERSON, PER_REQUEST, PubStream, PubTrack, PublishState, StreamInit, index_add, index_remove};
 use crate::room::{Room, notice};
-use crate::sub::{Cand, Change, Class, SyncOut};
+use crate::sub::{Cand, Change, Class, SyncOut, Table};
 
 
 fn sfu() -> Result<&'static Arc<super::Sfu>, Failure> {
@@ -69,9 +69,8 @@ fn voice_rank(s: &PubStream) -> i64 {
     s.physical().iter().map(|t| t.last_voice_ms.load(Ordering::Acquire)).max().unwrap_or(0) as i64
 }
 
-pub fn cands_for(p: &Peer) -> Vec<Cand> {
+fn cands_for(p: &Peer, table: &Table) -> Vec<Cand> {
     let Some(s) = super::sfu() else { return Vec::new() };
-    let table = s.table(p);
     let mut out = Vec::new();
     for rid in p.rooms() {
         let Some(room) = s.rooms.get(&rid) else { continue };
@@ -86,7 +85,7 @@ pub fn cands_for(p: &Peer) -> Vec<Cand> {
             if st.user == p.user || st.is_half() {
                 continue;
             }
-            let (prio, paused) = table.as_ref().map(|t| t.pref(&st.track_id)).unwrap_or((0, false));
+            let (prio, paused) = table.pref(&st.track_id);
             let rank = if st.kind == Kind::Video { prio as i64 } else { voice_rank(&st) };
             out.push(Cand { track_id: st.track_id.clone(), room: rid.clone(), kind: st.kind, class: Class::Full, codec: st.codec_name().to_string(), rank, paused });
         }
@@ -100,7 +99,7 @@ pub fn room_streams(room: &str) -> Vec<Arc<PubStream>> {
     all.into_iter().filter(|st| crate::trk::listed(st, room)).collect()
 }
 
-pub fn apply_changes(changes: &[Change]) {
+fn apply_changes(changes: &[Change]) {
     let Some(s) = super::sfu() else { return };
     for c in changes {
         if let Some((tid, rid)) = &c.old {
@@ -148,14 +147,34 @@ pub fn apply_changes(changes: &[Change]) {
 pub fn resync_peer(p: &Peer, notify: bool) -> SyncOut {
     let Some(s) = super::sfu() else { return SyncOut::default() };
     let Some(t) = s.table(p) else { return SyncOut::default() };
-    let out = t.sync(&cands_for(p), common::now_ms());
+    let _turn = t.turn.lock().unwrap_or_else(|e| e.into_inner());
+    if !s.table(p).is_some_and(|x| Arc::ptr_eq(&x, &t)) {
+        return SyncOut::default();
+    }
+    settle(s, p, &t, &cands_for(p, &t), notify, "unload")
+}
+
+pub fn retire_table(p: &Peer, why: &str) {
+    let Some(s) = super::sfu() else { return };
+    let Some(t) = s.table(p) else { return };
+    let _turn = t.turn.lock().unwrap_or_else(|e| e.into_inner());
+    if !s.table(p).is_some_and(|x| Arc::ptr_eq(&x, &t)) {
+        return;
+    }
+    settle(s, p, &t, &[], false, why);
+    s.tables.remove(p.subscribe.id);
+    s.tables.keep(&p.sid, t.arev());
+}
+
+fn settle(s: &super::Sfu, p: &Peer, t: &Table, cands: &[Cand], notify: bool, unload: &str) -> SyncOut {
+    let out = t.sync(cands, common::now_ms());
     apply_changes(&out.changes);
     for c in &out.changes {
         if c.old.as_ref().map(|o| &o.0) == c.new.as_ref().map(|n| &n.0) {
             continue;
         }
         if let Some((tid, _)) = &c.old {
-            super::transition("SUB", tid, "SV-STATE-SUBSCRIBE-STATE", c.was.name(), "-", "unload", &[("session", &p.session), ("user", &p.user)]);
+            super::transition("SUB", tid, "SV-STATE-SUBSCRIBE-STATE", c.was.name(), "-", unload, &[("session", &p.session), ("user", &p.user)]);
         }
         if let Some((tid, _)) = &c.new {
             super::transition("SUB", tid, "SV-STATE-SUBSCRIBE-STATE", "-", "Created", "load", &[("session", &p.session), ("user", &p.user)]);

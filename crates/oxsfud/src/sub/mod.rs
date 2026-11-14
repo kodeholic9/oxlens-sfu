@@ -184,6 +184,7 @@ pub struct Table {
     pub acked: Arc<AtomicU64>,
     pub st: Mutex<State>,
     pub slot_budget: usize,
+    pub turn: Mutex<()>,
 }
 
 fn rand_u32() -> u32 {
@@ -199,6 +200,7 @@ impl Table {
             acked: Arc::new(AtomicU64::new(0)),
             st: Mutex::new(State::default()),
             slot_budget,
+            turn: Mutex::new(()),
         })
     }
 
@@ -482,7 +484,7 @@ impl Table {
         fresh
     }
 
-    pub fn sync(&self, cands: &[Cand], now: u64) -> SyncOut {
+    pub(crate) fn sync(&self, cands: &[Cand], now: u64) -> SyncOut {
         let mut out = SyncOut::default();
         let Ok(mut s) = self.st.lock() else { return out };
         let rev = s.arev + 1;
@@ -640,6 +642,9 @@ impl Table {
             .filter(|c| c.class == Class::Full && c.kind == Kind::Audio && !c.paused && !placed.contains(&(c.track_id.clone(), c.room.clone())))
             .map(|c| c.track_id.clone())
             .collect();
+        let rooms: BTreeSet<&str> = cands.iter().map(|c| c.room.as_str()).collect();
+        s.gates.retain(|r, _| rooms.contains(r.as_str()));
+        s.ready_at.retain(|r, _| rooms.contains(r.as_str()));
         out.unplaced_add = unplaced.difference(&s.unplaced).cloned().collect();
         out.unplaced_del = s.unplaced.difference(&unplaced).cloned().collect();
         s.unplaced = unplaced;
@@ -649,13 +654,6 @@ impl Table {
         }
         out.changes = ch;
         out
-    }
-
-    pub fn states(&self) -> Vec<(String, SubState)> {
-        self.st
-            .lock()
-            .map(|s| s.rows.iter().filter_map(|r| r.track.as_ref().map(|t| (t.0.clone(), r.state))).collect())
-            .unwrap_or_default()
     }
 
     pub fn ready(&self, room: &str, arev: u64, now: u64) -> (bool, Vec<(String, String)>) {
@@ -1048,5 +1046,51 @@ mod tests {
         let snap = t.snapshot("e");
         assert_eq!(snap.mlines.len(), FULL_VIDEO);
         assert!(snap.mlines.iter().any(|m| m.track_id.as_deref() == Some("hot")));
+    }
+
+    fn room_cands(room: &str) -> Vec<Cand> {
+        vec![cand(&format!("ptt-{room}-audio"), room, Kind::Audio, Class::Slot, 0), cand(&format!("ptt-{room}-video"), room, Kind::Video, Class::Slot, 0)]
+    }
+
+    fn gate_open(t: &Table, track: &str) -> Option<bool> {
+        t.row_of_track(track).and_then(|r| r.gate.load_full()).map(|g| g.load(Ordering::Acquire))
+    }
+
+    fn remembers(t: &Table, room: &str) -> (bool, bool) {
+        t.st.lock().map(|s| (s.gates.contains_key(room), s.ready_at.contains_key(room))).unwrap_or((true, true))
+    }
+
+    #[test]
+    fn a_resync_that_loses_a_room_forgets_its_gate_and_first_ready() {
+        let t = Table::new(Transport::new(1, "u", "", Role::Both, 0, false), PcMode::Two, 40);
+        let mut x = room_cands("x");
+        x.push(cand("v", "x", Kind::Video, Class::Full, 0));
+        t.sync(&x, 1);
+        assert_eq!(gate_open(&t, "v"), Some(false), "정:IMPL-SUB-READY-GATE a loaded full video row starts behind a closed gate");
+        t.ready("x", t.arev(), 2);
+        assert_eq!(gate_open(&t, "v"), Some(true));
+        assert_eq!(remembers(&t, "x"), (true, true));
+        let mut y = room_cands("y");
+        y.push(cand("w", "y", Kind::Video, Class::Full, 0));
+        t.sync(&y, 3);
+        assert_eq!(remembers(&t, "x"), (false, false), "정:IMPL-SUB-READY-GATE the resync that loses room x forgets its gate and its first READY time");
+        assert_eq!(remembers(&t, "y"), (true, false), "정:IMPL-SUB-READY-GATE the room that is among the targets keeps the gate this resync built");
+        t.sync(&x, 4);
+        assert_eq!(gate_open(&t, "v"), Some(false), "정:IMPL-SUB-READY-GATE coming back to room x builds a new closed gate — the opened one is not reused");
+        assert!(t.ready_at("x").is_none(), "정:IMPL-SUB-READY-GATE the first READY time of the earlier stay is gone");
+    }
+
+    #[test]
+    fn a_resync_refused_at_the_row_limit_forgets_nothing() {
+        let t = Table::new(Transport::new(1, "u", "", Role::Both, 0, false), PcMode::Two, 2);
+        let mut x = room_cands("x");
+        x.push(cand("v", "x", Kind::Video, Class::Full, 0));
+        t.sync(&x, 1);
+        t.ready("x", t.arev(), 2);
+        let mut more = room_cands("y");
+        more.extend(room_cands("z"));
+        assert!(t.sync(&more, 3).mid_limit);
+        assert_eq!(remembers(&t, "x"), (true, true), "정:IMPL-SUB-READY-GATE a resync that returns at the row limit judges nothing and forgets nothing");
+        assert_eq!(gate_open(&t, "v"), Some(true));
     }
 }
