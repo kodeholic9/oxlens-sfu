@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.7 · 정:IMPL-FLR-LOCK · 정:IMPL-FLR-RTP-OBSERVE · 정:IMPL-FLR-MEDIA-BIND · 정:IMPL-FLR-FIRST-NOTICE · 정:IMPL-FLR-MEMBER-JOIN · 정:RULE-FLR-SNAPSHOT · 연:RULE-FLR-TIMERS · 연:TRN.frame.DC · 정:IMPL-FLR-POLICY · 정:CAND-FLR-RELEASE-SILENCE-SPEAKER · 정:CAND-FWD-PRIME-SOURCE · 정:CAND-FWD-PRIME-EPISODE · 운영:RULE-LOG-TRANSITION · model: claude-opus-5-5
+// spec: v1.7 · 정:IMPL-FLR-LOCK · 정:IMPL-FLR-RTP-OBSERVE · 정:IMPL-FLR-MEDIA-BIND · 정:IMPL-FLR-FIRST-NOTICE · 정:IMPL-FLR-MEMBER-JOIN · 정:RULE-FLR-SNAPSHOT · 연:RULE-FLR-TIMERS · 연:TRN.frame.DC · 정:IMPL-FLR-POLICY · 정:CAND-FLR-RELEASE-SILENCE-SPEAKER · 정:CAND-FWD-PRIME-SOURCE · 정:CAND-FWD-PRIME-EPISODE · 운영:RULE-LOG-TRANSITION · 정:IMPL-FWD-ROOM · model: claude-opus-5-5
 //! 발언권 집행 — 판정은 방 락 안(보낼 것 · 걸 타이머 · 효과에 `grant_no`) · 집행은 락 밖(MBCP 를 DC 로 · 타이머는 가장 이른 만료 시각에 깨어난다 · 슬롯 결합 · 예열 CN · 해제 무음 · PLI burst).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -435,13 +435,11 @@ fn fire(f: &mut Floor, name: &str, u: &str) -> Step {
 }
 
 fn slot_sources(room: &Room, user: &str) -> Vec<u32> {
-    let Some(ctx) = super::sfu().and_then(|s| s.pubs.get(user)) else { return Vec::new() };
-    ctx.streams().into_iter().filter(|st| st.is_half() && st.room.load().as_str() == room.id).map(|st| st.csrc).collect()
+    super::media::half_in(&room.id, user).into_iter().map(|st| st.csrc).collect()
 }
 
 fn slot_video(room: &Room, user: &str) -> (Vec<Arc<crate::r#pub::PubStream>>, bool) {
-    let Some(ctx) = super::sfu().and_then(|s| s.pubs.get(user)) else { return (Vec::new(), true) };
-    let vs: Vec<_> = ctx.streams().into_iter().filter(|st| st.kind == Kind::Video && st.is_half() && st.room.load().as_str() == room.id).collect();
+    let vs: Vec<_> = super::media::half_in(&room.id, user).into_iter().filter(|st| st.kind == Kind::Video).collect();
     let ok = vs.iter().all(|st| crate::trk::matches_room(Kind::Video, st.codec.as_deref(), st.fmtp.as_deref(), &room.media_codecs));
     (vs, ok)
 }

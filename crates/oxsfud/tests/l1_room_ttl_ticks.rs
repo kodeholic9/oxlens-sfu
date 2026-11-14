@@ -28,7 +28,7 @@ fn member(user: &str) -> Member {
 
 fn emptied(departure: u32) -> (Arc<Room>, u64) {
     let r = room(3_600, departure);
-    r.join(member("a"), false, None);
+    r.join(member("a"), None).expect("registered");
     r.remove("a");
     let t0 = r.created_at + 1_000_000;
     assert!(!r.ttl_due(t0, SWEEP), "S-sym-IMPL-ROOM-LIFE-1 the sweep that first sees the room empty only records it");
@@ -52,7 +52,7 @@ fn departure_ttl_is_rounded_up_to_whole_sweeps_and_never_expires_early() {
 fn rejoin_resets_the_sweep_count() {
     let (r, t0) = emptied(10);
     assert!(!r.ttl_due(t0 + SWEEP, SWEEP));
-    r.join(member("a"), false, None);
+    r.join(member("a"), None).expect("registered");
     r.remove("a");
     assert!(!r.ttl_due(t0 + 2 * SWEEP, SWEEP), "S-sym-IMPL-ROOM-LIFE-1 first sweep after the second departure only records");
     assert!(!r.ttl_due(t0 + 3 * SWEEP, SWEEP), "S-sym-IMPL-ROOM-LIFE-1 count restarted — 1 sweep < 10s");

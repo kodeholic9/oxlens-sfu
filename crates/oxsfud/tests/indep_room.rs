@@ -29,7 +29,7 @@ const DOWN: Permission = Permission { publish_audio: false, publish_video: true,
 #[test]
 fn hidden_member_keeps_room_alive() {
     let r = room(0, 0);
-    r.join(member("rec-bot", true), false, None);
+    r.join(member("rec-bot", true), None).expect("registered");
     assert_eq!(r.user_count(), 0, "S-sym-IMPL-ROOM-LIFE-1 hidden member is not visible in user_count");
     assert_eq!(r.registered(), 1, "S-sym-IMPL-ROOM-LIFE-1 hidden member is registered");
     let base = r.created_at;
@@ -51,7 +51,7 @@ fn permanent_room_never_expires() {
     for dt in [0u64, 1, 1 << 40] {
         assert!(!r.ttl_due(base + dt, 5_000), "S-sym-IMPL-ROOM-LIFE-1 permanent marker never expires (unused) · +{dt}");
     }
-    r.join(member("a", false), false, None);
+    r.join(member("a", false), None).expect("registered");
     r.remove("a");
     for dt in [10u64, 20, 1 << 41] {
         assert!(!r.ttl_due(base + dt, 5_000), "S-sym-IMPL-ROOM-LIFE-1 permanent marker never expires (departure) · +{dt}");
@@ -61,8 +61,8 @@ fn permanent_room_never_expires() {
 #[test]
 fn same_permission_twice_is_a_no_op() {
     let r = room(PERMANENT, PERMANENT);
-    r.join(member("a", false), false, None);
-    r.join(member("b", false), false, None);
+    r.join(member("a", false), None).expect("registered");
+    r.join(member("b", false), None).expect("registered");
     let s0 = r.version().seq;
     let first = r.set_permission("a", DOWN);
     assert!(first.is_some(), "S-sym-IMPL-ROOM-PERMISSION-2 member permission update accepted");
@@ -79,11 +79,11 @@ fn same_permission_twice_is_a_no_op() {
 #[test]
 fn override_outlives_membership() {
     let r = room(PERMANENT, PERMANENT);
-    r.join(member("a", false), false, Some(Permission::ALL));
+    r.join(member("a", false), Some(Permission::ALL)).expect("registered");
     assert!(r.set_permission("a", DOWN).is_some(), "S-sym-IMPL-ROOM-PERMISSION-3 bits lowered for a member");
     r.remove("a");
     assert!(!r.has("a"), "S-sym-IMPL-ROOM-PERMISSION-3 left the room");
-    r.join(member("a", false), false, Some(Permission::ALL));
+    r.join(member("a", false), Some(Permission::ALL)).expect("registered");
     assert_eq!(r.member("a").map(|m| m.permission), Some(DOWN), "S-sym-IMPL-ROOM-PERMISSION-3 leaving and re-joining does not lift the lowered bits");
     assert_eq!(r.permission_for("a", Some(Permission::ALL)), DOWN, "S-sym-IMPL-ROOM-PERMISSION-3 the room's override wins over the token value");
     assert!(r.set_permission("a", Permission::ALL).is_some(), "S-sym-IMPL-ROOM-PERMISSION-3 bits raised back to default");

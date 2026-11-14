@@ -548,6 +548,12 @@ pub fn on_pub_room(stream: &crate::r#pub::PubStream, pub_room: &str) -> bool {
     stream.room.load().as_str() == pub_room
 }
 
+pub fn half_slot(tr: &Transport, kind: Kind) -> Result<(Arc<String>, Arc<SlotFan>), &'static str> {
+    let room = tr.pub_room.load_full().ok_or("no_pub_room")?;
+    let fan = crate::ops::slot_of(&room, kind).ok_or("prefan_gate")?;
+    Ok((room, fan))
+}
+
 pub fn row_gate(stream: &crate::r#pub::PubStream, r: &DownRow) -> Option<&'static str> {
     if !r.open() {
         return Some("row_gate");
@@ -583,17 +589,15 @@ fn forward(w: &Arc<Worker>, tr: &Arc<Transport>, track: &Arc<crate::r#pub::PubTr
     if keyframe {
         track.last_keyframe_ms.store(now_ms, Ordering::Release);
     }
-    let peer_room = tr.pub_room.load_full();
-    let Some(room) = peer_room else {
-        crate::ops::drop_count("no_pub_room");
-        return;
-    };
     let mut targets: Vec<(Arc<DownRow>, u64)> = Vec::new();
     let mut slot: Option<(Arc<SlotFan>, u64)> = None;
     if stream.is_half() {
-        let Some(fan) = crate::ops::slot_of(&room, stream.kind) else {
-            crate::ops::drop_count("prefan_gate");
-            return;
+        let (room, fan) = match half_slot(tr, stream.kind) {
+            Ok(x) => x,
+            Err(why) => {
+                crate::ops::drop_count(why);
+                return;
+            }
         };
         let Some(ep) = fan.admit(&tr.user) else {
             if pre_release(at_us, tr.release_rx_us.load(Ordering::Acquire)) {
@@ -628,6 +632,10 @@ fn forward(w: &Arc<Worker>, tr: &Arc<Transport>, track: &Arc<crate::r#pub::PubTr
         }
         slot = Some((fan.clone(), ep.id));
     } else {
+        let Some(room) = tr.pub_room.load_full() else {
+            crate::ops::drop_count("no_pub_room");
+            return;
+        };
         if !on_pub_room(stream, room.as_str()) {
             crate::ops::drop_count("no_pub_room");
             return;

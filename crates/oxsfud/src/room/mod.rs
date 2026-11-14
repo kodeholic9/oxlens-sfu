@@ -1,13 +1,13 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-ROOM-LIFE · 정:IMPL-ROOM-DERIVED · 정:IMPL-ROOM-VERSION-ISSUE · 정:IMPL-ROOM-EMIT · 정:IMPL-ROOM-PERMISSION · 연:RULE-ROOM-HIDDEN · 연:ROOM.type.MemberInfo · 정:RULE-ROOM-SERVER-SCOPE · 연:RULE-ROOM-LISTENERS-IN-ROSTER · 연:RULE-ROOM-PARTICIPANT-TYPE · 정:RULE-DOC-SCOPE-SERVER · model: claude-opus-5-5
+// spec: v1.6 · 정:IMPL-ROOM-LIFE · 정:IMPL-ROOM-DERIVED · 정:IMPL-ROOM-VERSION-ISSUE · 정:IMPL-ROOM-EMIT · 정:IMPL-ROOM-PERMISSION · 연:RULE-ROOM-HIDDEN · 연:ROOM.type.MemberInfo · 정:RULE-ROOM-SERVER-SCOPE · 연:RULE-ROOM-LISTENERS-IN-ROSTER · 연:RULE-ROOM-PARTICIPANT-TYPE · 정:RULE-DOC-SCOPE-SERVER · 정:IMPL-ROOM-JOIN · model: claude-opus-5-5
 //! 방 — 정체 · 명단(등록 기준 — 투명 포함) · 권한 오버라이드 표 · version(seq 증가와 통지 enqueue 를 한 임계 구역에서) · 수명(TTL 둘 · 영구 표지) · 발언권 판정 로직 · 슬롯 둘.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use common::envelope::Notice;
-use oxsig::Op;
 use oxsig::msg::{MediaCodecs, MemberInfo, ParticipantEventBody, ParticipantEventType, Permission, RoomSummary, Version};
+use oxsig::{Code, Op};
 
 use crate::flr::core::Floor;
 use crate::fwd::SlotFan;
@@ -205,14 +205,21 @@ impl Room {
         !hidden && self.user_count() >= self.capacity
     }
 
-    pub fn join(&self, mut m: Member, rejoin: bool, token_perm: Option<Permission>) -> u64 {
-        let Ok(mut s) = self.st.lock() else { return 0 };
+    pub fn join(&self, mut m: Member, token_perm: Option<Permission>) -> Result<u64, Code> {
+        let Ok(mut s) = self.st.lock() else { return Err(Code::InternalError) };
+        if s.closed {
+            return Err(Code::RoomNotFound);
+        }
+        let fresh = !s.members.contains_key(&m.user);
+        if !m.hidden && fresh && s.members.values().filter(|x| !x.hidden).count() as u32 >= self.capacity {
+            return Err(Code::RoomFull);
+        }
         m.permission = s.overrides.get(&m.user).copied().or(token_perm).unwrap_or_default();
         s.ever_joined = true;
         s.empty_since = 0;
         s.empty_ticks = 0;
         s.empty_seen = false;
-        let notify = !rejoin && !m.hidden;
+        let notify = fresh && !m.hidden;
         let info = m.info();
         let user = m.user.clone();
         s.members.insert(user.clone(), m);
@@ -231,7 +238,7 @@ impl Room {
             };
             crate::bus::room_notice(&self.id, notice(Op::ParticipantEvent, &body, vec![user], &self.id));
         }
-        s.seq
+        Ok(s.seq)
     }
 
     pub fn bump_and_send<F>(&self, f: F) -> u64
@@ -283,11 +290,16 @@ impl Room {
         if ttl == PERMANENT {
             return false;
         }
-        if s.ever_joined {
+        let due = if s.ever_joined {
             s.empty_ticks += 1;
-            return s.empty_ticks.saturating_mul(period_ms.max(1)) >= ttl as u64 * 1000;
+            s.empty_ticks.saturating_mul(period_ms.max(1)) >= ttl as u64 * 1000
+        } else {
+            now.saturating_sub(s.empty_since) >= ttl as u64 * 1000
+        };
+        if due {
+            s.closed = true;
         }
-        now.saturating_sub(s.empty_since) >= ttl as u64 * 1000
+        due
     }
 }
 

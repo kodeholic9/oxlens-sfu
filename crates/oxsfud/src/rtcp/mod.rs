@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-RTCP-TERMINATE · 정:RULE-RTCP-NACK-UP · 정:RULE-RTCP-NACK-DOWN · 정:RULE-OPS-DROPS · 정:CAND-RTCP-SENDER-SSRC · 정:CAND-RTCP-REMB-ESTIMATE · 정:CAND-RTCP-RR-PER-STREAM · 정:CAND-RTCP-NACK-BUDGET-UNIT · 정:CAND-RTCP-RTX-GATE-WINDOW · model: claude-opus-5-5
+// spec: v1.6 · 정:IMPL-RTCP-TERMINATE · 정:RULE-RTCP-NACK-UP · 정:RULE-RTCP-NACK-DOWN · 정:RULE-OPS-DROPS · 정:CAND-RTCP-SENDER-SSRC · 정:CAND-RTCP-REMB-ESTIMATE · 정:CAND-RTCP-RR-PER-STREAM · 정:CAND-RTCP-NACK-BUDGET-UNIT · 정:CAND-RTCP-RTX-GATE-WINDOW · 정:IMPL-FWD-ROOM · model: claude-opus-5-5
 //! RTCP 종단 — 서버가 짓는 것(Ingress RR 1000ms · TWCC 100ms · REMB 1000ms · NACK 상향 · PLI 스로틀) · 구독자 것 소비(RR · NACK → RTX · PLI · TWCC) · 발행자 SR 번역 · `1pc` 분해. sender SSRC 1.
 
 pub mod core;
@@ -347,9 +347,9 @@ pub fn pli_wanted(half: bool, slot: Option<&crate::fwd::SlotFan>, user: &str) ->
     !half || slot.is_some_and(|f| f.speaker_is(user))
 }
 
-fn pli_bound(t: &PubTrack) -> bool {
+fn pli_bound(tr: &Transport, t: &PubTrack) -> bool {
     let half = t.stream.is_half();
-    let slot = if half { crate::ops::slot_of(t.stream.room.load().as_str(), Kind::Video) } else { None };
+    let slot = if half { crate::fwd::half_slot(tr, Kind::Video).ok().map(|(_, f)| f) } else { None };
     pli_wanted(half, slot.as_deref(), &t.stream.user)
 }
 
@@ -399,7 +399,7 @@ fn pli_tick(w: &Worker, tr: &Transport, t: &PubTrack, now: u64) {
     if want == 0 && !p.pending {
         return;
     }
-    let go = pli_decide(&mut p, want, pli_bound(t), now, throttle_ms(t));
+    let go = pli_decide(&mut p, want, pli_bound(tr, t), now, throttle_ms(t));
     drop(p);
     match go {
         PliGo::Send => send_rtcp(w, tr, &build_pli(t.ssrc)),

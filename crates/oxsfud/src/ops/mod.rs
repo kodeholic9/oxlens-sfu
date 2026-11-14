@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-DOC-OWNERSHIP · 정:RULE-OPS-DROPS · 정:RULE-OPS-OBSERVE · 정:RULE-CONC-HOT-PATH · 정:IMPL-ERR-ISSUERS · 정:CAND-OPS-SERVER-TRANSITION-SPEC · 정:CAND-DOC-ORCHESTRATION-ASPECT · 운영:RULE-LOG-TRANSITION · 운영:RULE-LOG-KEYS · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-DOC-OWNERSHIP · 정:RULE-OPS-DROPS · 정:RULE-OPS-OBSERVE · 정:RULE-CONC-HOT-PATH · 정:IMPL-ERR-ISSUERS · 정:CAND-OPS-SERVER-TRANSITION-SPEC · 정:CAND-DOC-ORCHESTRATION-ASPECT · 운영:RULE-LOG-TRANSITION · 운영:RULE-LOG-KEYS · 정:IMPL-FWD-ROOM · model: claude-opus-5-5
 //! 가로지르는 것 — 프로세스 상태 하나(Peer · 방 · 발행 · 배정표) · 버림 계수(닫힌 목록) · 코드별 계수 · 영역 사이 조율(입장 · 발행 · 구독 · 발언권 집행 · 운영).
 
 pub mod admin;
@@ -189,8 +189,8 @@ pub fn table_of(conn: u64) -> Option<Arc<Table>> {
 
 pub fn rows_of_source(t: &PubTrack) -> Vec<Arc<DownRow>> {
     if t.stream.is_half() {
-        let room = t.stream.room.load_full();
-        return slot_of(&room, t.stream.kind).map(|f| f.rows.load().iter().cloned().collect()).unwrap_or_default();
+        let Some(tr) = t.transport.upgrade() else { return Vec::new() };
+        return crate::fwd::half_slot(&tr, t.stream.kind).ok().map(|(_, f)| f.rows.load().iter().cloned().collect()).unwrap_or_default();
     }
     t.stream.rows.load().iter().cloned().collect()
 }

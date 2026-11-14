@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-ROOM-JOIN · 정:IMPL-ROOM-LIFE · 정:IMPL-ROOM-SERVER-CONFIG · 정:IMPL-ROOM-RESYNC · 정:IMPL-ROOM-DERIVED · 정:IMPL-SES-RESUME · 정:IMPL-FLR-MEMBER-JOIN · 정:CAND-ROOM-JOIN-AGAIN-EDGE · 정:CAND-ROOM-TTL-PERMANENT-MARK · 연:RULE-ROOM-LEAVE-PROC · 연:RULE-ROOM-LEAVE-FAIL · 연:RULE-ROOM-SELECT · 연:RULE-ROOM-JOIN-NO-TYPE-CHECK · 연:RULE-ROOM-DETAIL-PROC · 연:RULE-ROOM-DETAIL-TWO-USES · 연:RULE-ROOM-DETAIL-FAIL · 연:RULE-ROOM-LIST-PROC · 연:RULE-ROOM-LIST-FORM · 연:RULE-ROOM-CREATE-FAIL · 연:RULE-ROOM-JOIN-ID · 연:RULE-ROOM-JOIN-REPLACE · 연:RULE-ROOM-LEAVE-FORM · 연:RULE-TRN-IDEMPOTENT · model: claude-opus-5-5
+// spec: v1.6 · 정:IMPL-ROOM-JOIN · 정:IMPL-ROOM-LIFE · 정:IMPL-ROOM-SERVER-CONFIG · 정:IMPL-ROOM-RESYNC · 정:IMPL-ROOM-DERIVED · 정:IMPL-SES-RESUME · 정:IMPL-FLR-MEMBER-JOIN · 정:CAND-ROOM-JOIN-AGAIN-EDGE · 정:CAND-ROOM-TTL-PERMANENT-MARK · 연:RULE-ROOM-LEAVE-PROC · 연:RULE-ROOM-LEAVE-FAIL · 연:RULE-ROOM-SELECT · 연:RULE-ROOM-JOIN-NO-TYPE-CHECK · 연:RULE-ROOM-DETAIL-PROC · 연:RULE-ROOM-DETAIL-TWO-USES · 연:RULE-ROOM-DETAIL-FAIL · 연:RULE-ROOM-LIST-PROC · 연:RULE-ROOM-LIST-FORM · 연:RULE-ROOM-CREATE-FAIL · 연:RULE-ROOM-JOIN-ID · 연:RULE-ROOM-JOIN-REPLACE · 연:RULE-ROOM-LEAVE-FORM · 연:RULE-TRN-IDEMPOTENT · 정:IMPL-GC-PEER-REAP · model: claude-opus-5-5
 //! 방 op 조율 — 입장 차례 ②재입장 축출 ③정원 ④방 수 ⑤배정표(원자 — 모자라면 되돌림) ⑥명단 · `pub_room` · 통지 · 퇴장 · 재개 스냅샷 · 방 생성(멱등) · 상세 · 목록 · 세션 폐기.
 
 use std::collections::BTreeMap;
@@ -127,7 +127,7 @@ pub fn tracks_of(room: &Room) -> Vec<TrackEntry> {
 pub fn join(c: &Ctx, body: &Value) -> Result<Value, Failure> {
     let req: RoomJoinReq = parse(body)?;
     let s = sfu()?;
-    let room = s.rooms.get(&req.room_id).ok_or_else(|| Code::RoomNotFound.failure())?;
+    let room = s.rooms.get(&req.room_id).filter(|r| !r.closed()).ok_or_else(|| Code::RoomNotFound.failure())?;
     if let Some(ms) = c.over
         && !room.has(&c.user)
     {
@@ -175,13 +175,7 @@ pub fn join(c: &Ctx, body: &Value) -> Result<Value, Failure> {
     }
     let out = super::media::resync_peer(&peer, false);
     if out.mid_limit {
-        if let Ok(mut g) = peer.rooms.lock() {
-            g.remove(&req.room_id);
-        }
-        super::media::resync_peer(&peer, false);
-        if peer.rooms().is_empty() {
-            crate::gc::reap(&peer, Why::Leave);
-        }
+        back_out(&peer, &req.room_id);
         if rejoin && room.remove(&c.user).is_some() {
             room.announce_left(&c.user);
         }
@@ -199,7 +193,12 @@ pub fn join(c: &Ctx, body: &Value) -> Result<Value, Failure> {
         metadata: claims.metadata.clone(),
         permission: Permission::default(),
     };
-    room.join(member, rejoin, claims.permission);
+    if let Err(code) = room.join(member, claims.permission) {
+        back_out(&peer, &req.room_id);
+        let f = code.failure();
+        return Err(if code == Code::RoomFull { f.with_details(serde_json::json!({ "capacity": room.capacity })) } else { f });
+    }
+    super::media::resync_peer(&peer, false);
     let me = room.member(&c.user).ok_or_else(|| Code::InternalError.failure())?;
     let u = c.user.clone();
     let fr = me.permission.floor_request;
@@ -226,6 +225,16 @@ pub fn join(c: &Ctx, body: &Value) -> Result<Value, Failure> {
     }
     peer.ever_sent_join.store(true, Ordering::Release);
     join_res(s, &peer, &room, &me)
+}
+
+fn back_out(peer: &Arc<Peer>, room_id: &str) {
+    if let Ok(mut g) = peer.rooms.lock() {
+        g.remove(room_id);
+    }
+    super::media::resync_peer(peer, false);
+    if peer.rooms().is_empty() {
+        crate::gc::reap(peer, Why::Leave);
+    }
 }
 
 fn join_same(s: &super::Sfu, peer: &Arc<Peer>, room: &Arc<Room>) -> Result<Value, Failure> {
@@ -267,11 +276,13 @@ pub fn session_gone(env: &Envelope) -> Result<Value, Failure> {
     let s = sfu()?;
     let user = env.user_id.clone().unwrap_or_default();
     let sid = env.sid.clone().unwrap_or_default();
-    if let Some(p) = s.peer(&user)
-        && (sid.is_empty() || p.sid == sid)
-    {
-        crate::gc::evict(&p, None, Why::SessionGone);
-        s.tables.forget(&p.sid);
+    let hit = s.peer(&user).filter(|p| sid.is_empty() || p.sid == sid);
+    if let Some(p) = &hit {
+        crate::gc::evict(p, None, Why::SessionGone);
+    }
+    let key = hit.map(|p| p.sid.clone()).unwrap_or(sid);
+    if !key.is_empty() {
+        s.tables.forget(&key);
     }
     Ok(json!({}))
 }
@@ -376,7 +387,6 @@ pub fn list() -> Result<Value, Failure> {
 
 pub async fn destroy_room(room: &Arc<Room>, spec: &str, why: &str) {
     let Some(s) = super::sfu() else { return };
-    room.close();
     s.rooms.remove(&room.id);
     s.publish_slots();
     super::floor::close(&room.id);

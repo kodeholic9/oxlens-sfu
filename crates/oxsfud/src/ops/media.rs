@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-PUB-ADD · 정:IMPL-PUB-REMOVE · 정:IMPL-PUB-TRACK-SET · 정:IMPL-SUB-PIPELINE · 정:IMPL-SUB-TABLE · 정:IMPL-SUB-READY-GATE · 정:IMPL-PUB-RID-SPATIAL · 정:IMPL-AFF-PUB-MOVE · 정:IMPL-LINK-ICE-RESTART · 정:IMPL-ROOM-EMIT · 정:RULE-CONC-SIX · 정:IMPL-GC-PEER-REAP · 정:CAND-PUB-NOT-PUB-ROOM-ORDER · 연:RULE-AFF-PUB-ONLY · 연:RULE-AFF-TWO-ROOMS-ONE-REQ · 연:RULE-AFF-FAIL · 연:RULE-SUB-READY-WHAT · 연:RULE-ROOM-JOIN-ID · 연:RULE-TRN-IDEMPOTENT · 연:RULE-PUB-REMOVE-FORM · model: claude-opus-5-5
+// spec: v1.6 · 정:IMPL-PUB-ADD · 정:IMPL-PUB-REMOVE · 정:IMPL-PUB-TRACK-SET · 정:IMPL-SUB-PIPELINE · 정:IMPL-SUB-TABLE · 정:IMPL-SUB-READY-GATE · 정:IMPL-PUB-RID-SPATIAL · 정:IMPL-AFF-PUB-MOVE · 정:IMPL-LINK-ICE-RESTART · 정:IMPL-ROOM-EMIT · 정:RULE-CONC-SIX · 정:IMPL-GC-PEER-REAP · 정:CAND-PUB-NOT-PUB-ROOM-ORDER · 연:RULE-AFF-PUB-ONLY · 연:RULE-AFF-TWO-ROOMS-ONE-REQ · 연:RULE-AFF-FAIL · 연:RULE-SUB-READY-WHAT · 연:RULE-ROOM-JOIN-ID · 연:RULE-TRN-IDEMPOTENT · 연:RULE-PUB-REMOVE-FORM · 정:IMPL-FWD-ROOM · model: claude-opus-5-5
 //! 미디어 op 조율 — 발행(검사 차례 ①~⑦ · 논리 먼저 물리 나중) · 구독 배관(대상 산출 → 배정표 → 줄 붙이기/떼기 → `MLINE_EVENT`) · `READY` · `SUBSCRIBE_LAYER` · `TRACK_SET` · `ICE_RESTART` · `AFFILIATION` · `MESSAGE`.
 
 use std::collections::BTreeSet;
@@ -429,6 +429,15 @@ pub fn has_half(user: &str) -> bool {
     super::sfu().and_then(|s| s.pubs.get(user)).map(|c| c.has_half()).unwrap_or(false)
 }
 
+pub fn half_in(room_id: &str, user: &str) -> Vec<Arc<PubStream>> {
+    let Some(s) = super::sfu() else { return Vec::new() };
+    let Some(p) = s.peer(user) else { return Vec::new() };
+    if p.publish.pub_room.load().as_ref().map(|r| r.as_str()) != Some(room_id) {
+        return Vec::new();
+    }
+    s.pubs.get(user).map(|c| c.streams()).unwrap_or_default().into_iter().filter(|st| st.is_half()).collect()
+}
+
 fn release_floor_if_speaker(user: &str, room_id: &str) {
     let Some(s) = super::sfu() else { return };
     let Some(room) = s.rooms.get(room_id) else { return };
@@ -482,8 +491,10 @@ fn unpublish(c: &Ctx, room_id: &str, join_id: &str, ids: &[String]) -> Result<Va
     }
     let mut removed: std::collections::BTreeMap<String, Vec<TrackEntry>> = std::collections::BTreeMap::new();
     for st in &list {
-        if st.is_half() {
-            release_floor_if_speaker(&c.user, &st.room.load());
+        if st.is_half()
+            && let Some(pr) = crate::aff::pub_room(&peer)
+        {
+            release_floor_if_speaker(&c.user, &pr);
         }
         let listed = st.listed.swap(false, Ordering::AcqRel);
         drop_stream(&peer, st);
@@ -522,10 +533,9 @@ pub fn ready(c: &Ctx, body: &Value) -> Result<Value, Failure> {
     let speaker = room.slot(Kind::Video).speaker();
     if let Some(sp) = speaker
         && sp.as_str() != c.user
-        && let Some(ctx) = s.pubs.get(&sp)
     {
-        for st in ctx.streams() {
-            if st.kind == Kind::Video && st.is_half() && st.room.load().as_str() == req.room_id {
+        for st in half_in(&req.room_id, &sp) {
+            if st.kind == Kind::Video {
                 for t in st.physical() {
                     crate::rtcp::request_pli(&t, true);
                 }
@@ -618,7 +628,8 @@ fn set_duplex_of(c: &Ctx, peer: &Peer, room: &Arc<Room>, st: &Arc<PubStream>, d:
         return Err(Code::NotPubRoom.failure());
     }
     if d == Duplex::Full {
-        release_floor_if_speaker(&c.user, &st.room.load());
+        release_floor_if_speaker(&c.user, &room.id);
+        st.room.store(Arc::new(room.id.clone()));
     }
     st.set_duplex(d);
     st.muted.store(false, Ordering::Release);
