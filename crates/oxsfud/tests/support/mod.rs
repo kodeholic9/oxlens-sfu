@@ -52,7 +52,6 @@ pub fn sfu() -> &'static Arc<Sfu> {
         pubs: Default::default(),
         tables: Default::default(),
         tracks: Default::default(),
-        slots: arc_swap::ArcSwap::from_pointee(Default::default()),
         next_id: AtomicU64::new(1),
         drops: ops::DROP_NAMES.iter().map(|_| AtomicU64::new(0)).collect(),
         codes: Default::default(),
@@ -76,7 +75,7 @@ pub fn room(id: &str) -> Arc<Room> {
 
 pub fn room_with(id: &str, capacity: u32) -> Arc<Room> {
     let s = sfu();
-    let r = s.rooms.insert(Room::new(RoomInit {
+    let (r, fresh) = s.rooms.insert(Room::new(RoomInit {
         id: id.into(),
         name: id.into(),
         capacity,
@@ -86,7 +85,7 @@ pub fn room_with(id: &str, capacity: u32) -> Arc<Room> {
         epoch: s.epoch.clone(),
         floor: Floor::new(10, 30),
     }));
-    s.publish_slots();
+    assert!(fresh, "stand check — room {id} is new in the room set");
     r
 }
 

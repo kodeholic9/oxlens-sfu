@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-GC-FOUR · 정:IMPL-ROOM-LIFE · 정:IMPL-ROOM-STALL · 정:IMPL-LINK-PEER-STATE · 정:RULE-LINK-PAIR-LIVENESS · 정:IMPL-BUS-HOME-LOST · 정:IMPL-SUB-READY-GATE · 운영:RULE-LOG-KIND · 정:CAND-BUS-HOME-INST · 정:CAND-ROOM-STALL-COOL-UNIT · 정:IMPL-FWD-ROOM · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-GC-FOUR · 정:IMPL-ROOM-LIFE · 정:IMPL-ROOM-STALL · 정:IMPL-LINK-PEER-STATE · 정:RULE-LINK-PAIR-LIVENESS · 정:IMPL-BUS-HOME-LOST · 정:IMPL-SUB-READY-GATE · 운영:RULE-LOG-KIND · 정:CAND-BUS-HOME-INST · 정:CAND-ROOM-STALL-COOL-UNIT · 정:IMPL-FWD-ROOM · 정:IMPL-FLR-LOCK · model: claude-opus-5-5
 //! 제어 런타임의 주기 작업 — room sweep 5s(TTL) · 정체 판정 5s(창은 시작점 뒤에서만 · 반이중은 화자 RTP 가 창 안에 있을 때만 · 쿨다운 (방, 사람) 30s) · 쌍별 생존 1s(경로 쌍이 죽으면 `Suspect` 와 `LINK_EVENT` 한 번) · 홈 잃음 · 게이트 시한 latch · stat 줄.
 
 use std::collections::HashMap;
@@ -203,7 +203,8 @@ pub fn eligible_from(room: &Room, tid: &str, row: &crate::fwd::DownRow, user: &s
         if !Arc::ptr_eq(&fan, room.slot(row.kind)) {
             return None;
         }
-        let clock = super::floor::of(&room.id).and_then(|rf| rf.clock.lock().ok().map(|c| (c.grant_no, mono_to_wall(c.granted_at))));
+        let rf = &room.exec;
+        let clock = rf.running().then(|| rf.clock.lock().ok().map(|c| (c.grant_no, mono_to_wall(c.granted_at)))).flatten();
         return slot_start(ep.grant, clock, ready).map(|start| (start, Some(ep)));
     }
     let st = s.stream(tid)?;

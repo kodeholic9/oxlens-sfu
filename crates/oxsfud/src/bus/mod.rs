@@ -1,14 +1,16 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · 정:RULE-BUS-PRESENCE · 정:RULE-BUS-EVENTS · 정:IMPL-BUS-HOME-LOST · 운영:LOG.log.LINE · 운영:RULE-LOG-KIND · model: claude-opus-5-5
-//! sfud 의 버스 — oxmesh client(로컬 hub 에만 · 202610/20261031e) · `room` 토큰 선언 · `ev` put 은 낸 차례 그대로 한 줄로(데이터 레인 — 차면 버리고 센다) · `node` 토큰 history 구독(홈 잃음).
+// spec: v1.6 · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · 정:RULE-BUS-PRESENCE · 정:RULE-BUS-EVENTS · 정:IMPL-BUS-HOME-LOST · 운영:LOG.log.LINE · 운영:RULE-LOG-KIND · 정:IMPL-ROOM-LIFE · model: claude-opus-5-5
+//! sfud 의 버스 — oxmesh client(로컬 hub 에만 · 202610/20261031e) · `room` 토큰 선언(토큰은 그 방이 든다 — 재선언은 방 집합에서) · `ev` put 은 낸 차례 그대로 한 줄로(데이터 레인 — 차면 버리고 센다) · `node` 토큰 history 구독(홈 잃음).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use common::envelope::Notice;
 use common::keyspace::{Keys, Parsed};
-use oxmesh::{Mesh, Token, TokenEvent};
+use oxmesh::{Mesh, TokenEvent};
 use tokio::sync::mpsc;
+
+pub use oxmesh::Token as RoomToken;
 
 static BUS: OnceLock<Arc<Bus>> = OnceLock::new();
 
@@ -23,7 +25,6 @@ pub struct Bus {
     pub epoch: String,
     session: Mesh,
     tx: mpsc::UnboundedSender<Put>,
-    room_tokens: Mutex<HashMap<String, Token>>,
     pub nodes: Mutex<HashMap<String, (String, bool, u64)>>,
     pub seen_other: Mutex<bool>,
     pub ev_drop: std::sync::atomic::AtomicU64,
@@ -48,7 +49,6 @@ impl Bus {
             epoch: epoch.to_string(),
             session,
             tx,
-            room_tokens: Mutex::new(HashMap::new()),
             nodes: Mutex::new(HashMap::new()),
             seen_other: Mutex::new(false),
             ev_drop: std::sync::atomic::AtomicU64::new(0),
@@ -92,7 +92,7 @@ impl Bus {
                         Err(_) => false,
                     };
                     if back {
-                        tokio::spawn(async move { b.redeclare_rooms().await });
+                        tokio::spawn(crate::ops::rooms::redeclare());
                     }
                 }
             }
@@ -112,35 +112,14 @@ impl Bus {
         let _ = self.tx.send(Put::User(user.to_string(), n));
     }
 
-    pub async fn declare_room(&self, room: &str) {
+    pub async fn declare_room(&self, room: &str) -> Option<RoomToken> {
         let key = self.keys.room_token(room, &self.node, &self.epoch);
         match self.session.declare_token(&key).await {
-            Ok(t) => {
-                if let Ok(mut g) = self.room_tokens.lock() {
-                    g.insert(room.to_string(), t);
-                }
+            Ok(t) => Some(t),
+            Err(e) => {
+                tracing::warn!(kind = "diag", spec = "SV-RULE-BUS-PRESENCE", room = %room, "room token: {e}");
+                None
             }
-            Err(e) => tracing::warn!(kind = "diag", spec = "SV-RULE-BUS-PRESENCE", room = %room, "room token: {e}"),
-        }
-    }
-
-    pub async fn redeclare_rooms(&self) {
-        let rooms: Vec<String> = self.room_tokens.lock().map(|g| g.keys().cloned().collect()).unwrap_or_default();
-        if rooms.is_empty() {
-            return;
-        }
-        for r in &rooms {
-            let held = self.room_tokens.lock().map(|mut g| g.remove(r).is_some()).unwrap_or(false);
-            if held {
-                self.declare_room(r).await;
-            }
-        }
-        tracing::info!(kind = "diag", spec = "SV-RULE-BUS-PRESENCE", "local hub token back — room tokens redeclared ({})", rooms.len());
-    }
-
-    pub fn undeclare_room(&self, room: &str) {
-        if let Ok(mut g) = self.room_tokens.lock() {
-            g.remove(room);
         }
     }
 
@@ -171,9 +150,6 @@ impl Bus {
     }
 
     pub async fn close(&self) {
-        if let Ok(mut g) = self.room_tokens.lock() {
-            g.clear();
-        }
         if let Ok(mut g) = self._subs.lock() {
             for h in g.drain(..) {
                 h.abort();

@@ -1,10 +1,10 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.7 · 정:IMPL-FLR-LOCK · 정:IMPL-FLR-RTP-OBSERVE · 정:IMPL-FLR-MEDIA-BIND · 정:IMPL-FLR-FIRST-NOTICE · 정:IMPL-FLR-MEMBER-JOIN · 정:RULE-FLR-SNAPSHOT · 연:RULE-FLR-TIMERS · 연:TRN.frame.DC · 정:IMPL-FLR-POLICY · 정:CAND-FLR-RELEASE-SILENCE-SPEAKER · 정:CAND-FWD-PRIME-SOURCE · 정:CAND-FWD-PRIME-EPISODE · 운영:RULE-LOG-TRANSITION · 정:IMPL-FWD-ROOM · model: claude-opus-5-5
-//! 발언권 집행 — 판정은 방 락 안(보낼 것 · 걸 타이머 · 효과에 `grant_no`) · 집행은 락 밖(MBCP 를 DC 로 · 타이머는 가장 이른 만료 시각에 깨어난다 · 슬롯 결합 · 예열 CN · 해제 무음 · PLI burst).
+// spec: v1.7 · 정:IMPL-FLR-LOCK · 정:IMPL-FLR-RTP-OBSERVE · 정:IMPL-FLR-MEDIA-BIND · 정:IMPL-FLR-FIRST-NOTICE · 정:IMPL-FLR-MEMBER-JOIN · 정:RULE-FLR-SNAPSHOT · 연:RULE-FLR-TIMERS · 연:TRN.frame.DC · 정:IMPL-FLR-POLICY · 정:CAND-FLR-RELEASE-SILENCE-SPEAKER · 정:CAND-FWD-PRIME-SOURCE · 정:CAND-FWD-PRIME-EPISODE · 운영:RULE-LOG-TRANSITION · 정:IMPL-FWD-ROOM · 정:IMPL-ROOM-LIFE · 정:RULE-CONC-SIX · model: claude-opus-5-5
+//! 발언권 집행 — 판정은 방 락 안(보낼 것 · 걸 타이머 · 효과에 `grant_no`) · 집행은 락 밖(MBCP 를 DC 로 · 타이머는 가장 이른 만료 시각에 깨어난다 · 슬롯 결합 · 예열 CN · 해제 무음 · PLI burst). 시계 · 집행 큐 · 집행자는 그 방의 것(`Room.exec`) — 지음 → 돎 을 이긴 쪽만 집행자를 띄우고, 돎일 때만 판정한다.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use oxsig::floor as mbcp;
@@ -37,21 +37,51 @@ pub struct Clock {
     pub last_rtp_at: Option<u64>,
 }
 
+const BUILT: u8 = 0;
+const RUNNING: u8 = 1;
+const STOPPED: u8 = 2;
+
 pub struct RoomFloor {
     pub clock: Mutex<Clock>,
     pub wake: tokio::sync::Notify,
-    pub stop: std::sync::atomic::AtomicBool,
-    pub jobs: tokio::sync::mpsc::UnboundedSender<Job>,
+    state: AtomicU8,
+    jobs: tokio::sync::mpsc::UnboundedSender<Job>,
+    rx: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Job>>>,
 }
 
-static CLOCKS: OnceLock<Mutex<HashMap<String, Arc<RoomFloor>>>> = OnceLock::new();
+impl RoomFloor {
+    pub fn new() -> RoomFloor {
+        let (jobs, rx) = tokio::sync::mpsc::unbounded_channel();
+        RoomFloor { clock: Mutex::new(Clock::default()), wake: tokio::sync::Notify::new(), state: AtomicU8::new(BUILT), jobs, rx: Mutex::new(Some(rx)) }
+    }
 
-fn clocks() -> &'static Mutex<HashMap<String, Arc<RoomFloor>>> {
-    CLOCKS.get_or_init(|| Mutex::new(HashMap::new()))
+    pub fn running(&self) -> bool {
+        self.state.load(Ordering::Acquire) == RUNNING
+    }
+
+    fn stopped(&self) -> bool {
+        self.state.load(Ordering::Acquire) == STOPPED
+    }
+}
+
+impl Default for RoomFloor {
+    fn default() -> Self {
+        RoomFloor::new()
+    }
+}
+
+static LIVE: AtomicUsize = AtomicUsize::new(0);
+
+struct Live;
+
+impl Drop for Live {
+    fn drop(&mut self) {
+        LIVE.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 pub fn count() -> usize {
-    clocks().lock().map(|g| g.len()).unwrap_or(0)
+    LIVE.load(Ordering::Acquire)
 }
 
 pub fn now_ms() -> u64 {
@@ -62,25 +92,21 @@ fn wall(at_mono: u64) -> u64 {
     common::now_ms().saturating_sub(now_ms()).saturating_add(at_mono)
 }
 
-pub fn of(room: &str) -> Option<Arc<RoomFloor>> {
-    clocks().lock().ok().and_then(|g| g.get(room).cloned())
+pub fn start(room: &Arc<Room>) -> bool {
+    let rf = &room.exec;
+    if rf.state.compare_exchange(BUILT, RUNNING, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        return false;
+    }
+    let Some(rx) = rf.rx.lock().ok().and_then(|mut g| g.take()) else { return false };
+    LIVE.fetch_add(1, Ordering::AcqRel);
+    let (r, live) = (room.clone(), Live);
+    super::spawn(async move { room_task(r, rx, live).await });
+    true
 }
 
-pub fn open(room: &Arc<Room>) {
-    let (jobs, rx) = tokio::sync::mpsc::unbounded_channel();
-    let rf = Arc::new(RoomFloor { clock: Mutex::new(Clock::default()), wake: tokio::sync::Notify::new(), stop: Default::default(), jobs });
-    if let Ok(mut g) = clocks().lock() {
-        g.insert(room.id.clone(), rf.clone());
-    }
-    let r = room.clone();
-    super::spawn(async move { room_task(r, rf, rx).await });
-}
-
-pub fn close(room: &str) {
-    if let Some(rf) = clocks().lock().ok().and_then(|mut g| g.remove(room)) {
-        rf.stop.store(true, Ordering::Release);
-        rf.wake.notify_one();
-    }
+pub fn stop(room: &Room) {
+    room.exec.state.store(STOPPED, Ordering::Release);
+    room.exec.wake.notify_one();
 }
 
 fn t2_ms() -> u64 {
@@ -146,7 +172,10 @@ pub fn run<F>(room: &Arc<Room>, e: Entry, f: F) -> Step
 where
     F: FnOnce(&mut Floor, u32) -> Option<Step>,
 {
-    let Some(rf) = of(&room.id) else { return Step::default() };
+    let rf = &room.exec;
+    if !rf.running() {
+        return Step::default();
+    }
     let plan = {
         let Ok(mut fl) = room.floor.lock() else { return Step::default() };
         let Ok(mut ck) = rf.clock.lock() else { return Step::default() };
@@ -326,8 +355,8 @@ pub fn obs_recorded(pkt_grant: u64, clock_grant: u64) -> bool {
 pub fn on_rtp(room_id: &str, user: &str, first: bool, grant: u64) {
     let Some(s) = super::sfu() else { return };
     let Some(room) = s.rooms.get(room_id) else { return };
-    if let Some(rf) = of(room_id)
-        && let Ok(mut ck) = rf.clock.lock()
+    if room.exec.running()
+        && let Ok(mut ck) = room.exec.clock.lock()
         && obs_recorded(grant, ck.grant_no)
     {
         let now = now_ms();
@@ -348,9 +377,10 @@ fn last_rtp_ms(room: &Room, grant: u64) -> Option<u64> {
     if m == 0 { None } else { Some(m / 1000) }
 }
 
-async fn room_task(room: Arc<Room>, rf: Arc<RoomFloor>, mut jobs: tokio::sync::mpsc::UnboundedReceiver<Job>) {
+async fn room_task(room: Arc<Room>, mut jobs: tokio::sync::mpsc::UnboundedReceiver<Job>, _live: Live) {
+    let rf = &room.exec;
     loop {
-        if rf.stop.load(Ordering::Acquire) {
+        if rf.stopped() {
             while let Ok(job) = jobs.try_recv() {
                 execute(&room, job);
             }
@@ -365,14 +395,14 @@ async fn room_task(room: Arc<Room>, rf: Arc<RoomFloor>, mut jobs: tokio::sync::m
                 None => return,
             },
             _ = rf.wake.notified() => {}
-            _ = tokio::time::sleep(Duration::from_millis(wait)) => fire_due(&room, &rf),
+            _ = tokio::time::sleep(Duration::from_millis(wait)) => fire_due(&room),
         }
     }
 }
 
-fn fire_due(room: &Arc<Room>, rf: &Arc<RoomFloor>) {
+fn fire_due(room: &Arc<Room>) {
     let now = now_ms();
-    let due: Vec<Key> = match rf.clock.lock() {
+    let due: Vec<Key> = match room.exec.clock.lock() {
         Ok(mut c) => {
             let lr = last_rtp_ms(room, c.grant_no).filter(|t| *t >= c.granted_at);
             if lr.is_some() {
@@ -470,7 +500,8 @@ pub fn snapshot(room: &Room) -> serde_json::Value {
         }
         Err(_) => ("IDLE", None, 0, Vec::new()),
     };
-    let (first, last, mut timers, granted, grant_no) = match of(&room.id).and_then(|rf| rf.clock.lock().ok().map(|c| (c.first_rtp_at, c.last_rtp_at, c.timers.clone(), c.granted_at, c.grant_no))) {
+    let rf = &room.exec;
+    let (first, last, mut timers, granted, grant_no) = match rf.running().then(|| rf.clock.lock().ok().map(|c| (c.first_rtp_at, c.last_rtp_at, c.timers.clone(), c.granted_at, c.grant_no))).flatten() {
         Some((a, b, t, g, n)) => (a, b, t, g, n),
         None => (None, None, BTreeMap::new(), 0, 0),
     };

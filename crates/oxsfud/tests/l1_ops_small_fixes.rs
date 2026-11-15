@@ -72,7 +72,7 @@ fn half(name: &str) -> Half {
 }
 
 fn grant(h: &Half) {
-    floor::open(&h.r1);
+    assert!(floor::start(&h.r1), "stand check — the room's executor starts");
     let (u, l) = (h.u.p.user.clone(), h.l.p.user.clone());
     floor::run(&h.r1, Entry::of("ws_join", &u), |f, _| Some(f.ws_join(&u, true)));
     floor::run(&h.r1, Entry::of("ws_join", &l), |f, _| Some(f.ws_join(&l, true)));

@@ -14,7 +14,6 @@ use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use arc_swap::ArcSwap;
 use common::envelope::Notice;
 use common::policy::Policy;
 use oxsig::Op;
@@ -86,7 +85,6 @@ pub struct Sfu {
     pub pubs: Pubs,
     pub tables: Tables,
     pub tracks: Mutex<HashMap<String, Arc<PubStream>>>,
-    pub slots: ArcSwap<HashMap<String, [Arc<SlotFan>; 2]>>,
     pub next_id: AtomicU64,
     pub drops: Vec<AtomicU64>,
     pub codes: Mutex<BTreeMap<u16, u64>>,
@@ -169,16 +167,11 @@ impl Sfu {
     pub fn stream(&self, track_id: &str) -> Option<Arc<PubStream>> {
         self.tracks.lock().ok().and_then(|g| g.get(track_id).cloned())
     }
-
-    pub fn publish_slots(&self) {
-        let m: HashMap<String, [Arc<SlotFan>; 2]> = self.rooms.all().into_iter().map(|r| (r.id.clone(), r.slots.clone())).collect();
-        self.slots.store(Arc::new(m));
-    }
 }
 
 pub fn slot_of(room: &str, kind: Kind) -> Option<Arc<SlotFan>> {
     let s = SFU.get()?;
-    let g = s.slots.load();
+    let g = s.rooms.slots.load();
     let pair = g.get(room)?;
     Some(if kind == Kind::Audio { pair[0].clone() } else { pair[1].clone() })
 }

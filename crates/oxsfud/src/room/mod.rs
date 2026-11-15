@@ -1,10 +1,11 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-ROOM-LIFE · 정:IMPL-ROOM-DERIVED · 정:IMPL-ROOM-VERSION-ISSUE · 정:IMPL-ROOM-EMIT · 정:IMPL-ROOM-PERMISSION · 연:RULE-ROOM-HIDDEN · 연:ROOM.type.MemberInfo · 정:RULE-ROOM-SERVER-SCOPE · 연:RULE-ROOM-LISTENERS-IN-ROSTER · 연:RULE-ROOM-PARTICIPANT-TYPE · 정:RULE-DOC-SCOPE-SERVER · 정:IMPL-ROOM-JOIN · model: claude-opus-5-5
-//! 방 — 정체 · 명단(등록 기준 — 투명 포함) · 권한 오버라이드 표 · version(seq 증가와 통지 enqueue 를 한 임계 구역에서) · 수명(TTL 둘 · 영구 표지) · 발언권 판정 로직 · 슬롯 둘.
+// spec: v1.6 · 정:IMPL-ROOM-LIFE · 정:IMPL-ROOM-DERIVED · 정:IMPL-ROOM-VERSION-ISSUE · 정:IMPL-ROOM-EMIT · 정:IMPL-ROOM-PERMISSION · 연:RULE-ROOM-HIDDEN · 연:ROOM.type.MemberInfo · 정:RULE-ROOM-SERVER-SCOPE · 연:RULE-ROOM-LISTENERS-IN-ROSTER · 연:RULE-ROOM-PARTICIPANT-TYPE · 정:RULE-DOC-SCOPE-SERVER · 정:IMPL-ROOM-JOIN · 정:IMPL-FWD-ROOM · 정:IMPL-FLR-LOCK · model: claude-opus-5-5
+//! 방 — 정체 · 명단(등록 기준 — 투명 포함) · 권한 오버라이드 표 · version(seq 증가와 통지 enqueue 를 한 임계 구역에서) · 수명(TTL 둘 · 영구 표지) · 발언권 판정 로직 · 집행 재료 · 슬롯 둘 · `room` 토큰. 방 집합은 넣기 · 빼기가 그 잠금 안에서 패킷 길의 방 → 슬롯 사본까지 고치고, 빼기는 그 방일 때만 뺀다.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
+use arc_swap::ArcSwap;
 use common::envelope::Notice;
 use oxsig::msg::{MediaCodecs, MemberInfo, ParticipantEventBody, ParticipantEventType, Permission, RoomSummary, Version};
 use oxsig::{Code, Op};
@@ -45,7 +46,7 @@ impl Member {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct RoomState {
     pub members: BTreeMap<String, Member>,
     pub seq: u64,
@@ -55,6 +56,7 @@ pub struct RoomState {
     pub ever_joined: bool,
     pub empty_seen: bool,
     pub closed: bool,
+    pub token: Option<crate::bus::RoomToken>,
 }
 
 pub struct Room {
@@ -68,6 +70,7 @@ pub struct Room {
     pub epoch: String,
     pub st: Mutex<RoomState>,
     pub floor: Mutex<Floor>,
+    pub exec: crate::ops::floor::RoomFloor,
     pub slots: [Arc<SlotFan>; 2],
     pub stall_cool: Mutex<HashMap<String, u64>>,
 }
@@ -97,9 +100,22 @@ impl Room {
             epoch: i.epoch,
             st: Mutex::new(RoomState { seq: 0, empty_since: now, ..Default::default() }),
             floor: Mutex::new(i.floor),
+            exec: crate::ops::floor::RoomFloor::new(),
             slots: [Arc::new(SlotFan::new(true)), Arc::new(SlotFan::new(false))],
             stall_cool: Mutex::new(HashMap::new()),
         })
+    }
+
+    pub fn hold_token(&self, t: crate::bus::RoomToken) {
+        if let Ok(mut s) = self.st.lock() {
+            s.token = Some(t);
+        }
+    }
+
+    pub fn drop_token(&self) {
+        if let Ok(mut s) = self.st.lock() {
+            s.token = None;
+        }
     }
 
     pub fn slot(&self, kind: oxsig::msg::Kind) -> &Arc<SlotFan> {
@@ -316,6 +332,11 @@ pub fn notice<T: serde::Serialize>(op: Op, body: &T, exclude: Vec<String>, room:
 #[derive(Default)]
 pub struct Rooms {
     pub map: Mutex<HashMap<String, Arc<Room>>>,
+    pub slots: ArcSwap<HashMap<String, [Arc<SlotFan>; 2]>>,
+}
+
+fn slot_index(g: &HashMap<String, Arc<Room>>) -> HashMap<String, [Arc<SlotFan>; 2]> {
+    g.iter().map(|(id, r)| (id.clone(), r.slots.clone())).collect()
 }
 
 impl Rooms {
@@ -327,12 +348,23 @@ impl Rooms {
         self.map.lock().map(|g| g.values().cloned().collect()).unwrap_or_default()
     }
 
-    pub fn insert(&self, r: Arc<Room>) -> Arc<Room> {
-        let Ok(mut g) = self.map.lock() else { return r };
-        g.entry(r.id.clone()).or_insert(r).clone()
+    pub fn insert(&self, r: Arc<Room>) -> (Arc<Room>, bool) {
+        let Ok(mut g) = self.map.lock() else { return (r, false) };
+        if let Some(have) = g.get(&r.id) {
+            return (have.clone(), false);
+        }
+        g.insert(r.id.clone(), r.clone());
+        self.slots.store(Arc::new(slot_index(&g)));
+        (r, true)
     }
 
-    pub fn remove(&self, id: &str) -> Option<Arc<Room>> {
-        self.map.lock().ok().and_then(|mut g| g.remove(id))
+    pub fn remove(&self, r: &Arc<Room>) -> bool {
+        let Ok(mut g) = self.map.lock() else { return false };
+        if !g.get(&r.id).is_some_and(|x| Arc::ptr_eq(x, r)) {
+            return false;
+        }
+        g.remove(&r.id);
+        self.slots.store(Arc::new(slot_index(&g)));
+        true
     }
 }

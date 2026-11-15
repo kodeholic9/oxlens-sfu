@@ -154,7 +154,6 @@ async fn run(cfg: SfuCfg) -> i32 {
         pubs: Default::default(),
         tables: Default::default(),
         tracks: Default::default(),
-        slots: arc_swap::ArcSwap::from_pointee(Default::default()),
         next_id: AtomicU64::new(1),
         drops: ops::DROP_NAMES.iter().map(|_| AtomicU64::new(0)).collect(),
         codes: Default::default(),

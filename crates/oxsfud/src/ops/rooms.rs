@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-ROOM-JOIN · 정:IMPL-ROOM-LIFE · 정:IMPL-ROOM-SERVER-CONFIG · 정:IMPL-ROOM-RESYNC · 정:IMPL-ROOM-DERIVED · 정:IMPL-SES-RESUME · 정:IMPL-FLR-MEMBER-JOIN · 정:CAND-ROOM-JOIN-AGAIN-EDGE · 정:CAND-ROOM-TTL-PERMANENT-MARK · 연:RULE-ROOM-LEAVE-PROC · 연:RULE-ROOM-LEAVE-FAIL · 연:RULE-ROOM-SELECT · 연:RULE-ROOM-JOIN-NO-TYPE-CHECK · 연:RULE-ROOM-DETAIL-PROC · 연:RULE-ROOM-DETAIL-TWO-USES · 연:RULE-ROOM-DETAIL-FAIL · 연:RULE-ROOM-LIST-PROC · 연:RULE-ROOM-LIST-FORM · 연:RULE-ROOM-CREATE-FAIL · 연:RULE-ROOM-JOIN-ID · 연:RULE-ROOM-JOIN-REPLACE · 연:RULE-ROOM-LEAVE-FORM · 연:RULE-TRN-IDEMPOTENT · 정:IMPL-GC-PEER-REAP · model: claude-opus-5-5
-//! 방 op 조율 — 입장 차례 ②재입장 축출 ③정원 ④방 수 ⑤배정표(원자 — 모자라면 되돌림) ⑥명단 · `pub_room` · 통지 · 퇴장 · 재개 스냅샷 · 방 생성(멱등) · 상세 · 목록 · 세션 폐기.
+// spec: v1.6 · 정:IMPL-ROOM-JOIN · 정:IMPL-ROOM-LIFE · 정:IMPL-ROOM-SERVER-CONFIG · 정:IMPL-ROOM-RESYNC · 정:IMPL-ROOM-DERIVED · 정:IMPL-SES-RESUME · 정:IMPL-FLR-MEMBER-JOIN · 정:CAND-ROOM-JOIN-AGAIN-EDGE · 정:CAND-ROOM-TTL-PERMANENT-MARK · 연:RULE-ROOM-LEAVE-PROC · 연:RULE-ROOM-LEAVE-FAIL · 연:RULE-ROOM-SELECT · 연:RULE-ROOM-JOIN-NO-TYPE-CHECK · 연:RULE-ROOM-DETAIL-PROC · 연:RULE-ROOM-DETAIL-TWO-USES · 연:RULE-ROOM-DETAIL-FAIL · 연:RULE-ROOM-LIST-PROC · 연:RULE-ROOM-LIST-FORM · 연:RULE-ROOM-CREATE-FAIL · 연:RULE-ROOM-JOIN-ID · 연:RULE-ROOM-JOIN-REPLACE · 연:RULE-ROOM-LEAVE-FORM · 연:RULE-TRN-IDEMPOTENT · 정:IMPL-GC-PEER-REAP · 정:IMPL-FLR-LOCK · 정:RULE-BUS-PRESENCE · model: claude-opus-5-5
+//! 방 op 조율 — 입장 차례 ②재입장 축출 ③정원 ④방 수 ⑤배정표(원자 — 모자라면 되돌림) ⑥명단 · `pub_room` · 통지 · 퇴장 · 재개 스냅샷 · 방 생성(멱등 — 방 집합에 새로 넣은 쪽만 집행자를 띄우고 토큰을 선언) · 상세 · 목록 · 방 지우기(그 방일 때만) · `room` 토큰 재선언(방 집합에서) · 세션 폐기.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -343,15 +343,16 @@ pub async fn create(env: &Envelope) -> Result<Value, Failure> {
         epoch: s.epoch.clone(),
         floor: crate::flr::core::Floor::new(s.policy.floor.queue_max as usize, s.policy.floor.t2_stop_talking_secs as u32),
     });
-    let room = s.rooms.insert(room);
-    s.publish_slots();
-    if super::floor::of(&room.id).is_none() {
-        super::floor::open(&room);
+    let (room, fresh) = s.rooms.insert(room);
+    if fresh {
+        super::floor::start(&room);
+        if let Some(b) = crate::bus::get()
+            && let Some(t) = b.declare_room(&room.id).await
+        {
+            room.hold_token(t);
+        }
+        tracing::info!(kind = "diag", spec = "SV-IMPL-ROOM-LIFE", room = %room.id, "in.unused_ttl" = room.unused_ttl, "in.departure_ttl" = room.departure_ttl, "room created");
     }
-    if let Some(b) = crate::bus::get() {
-        b.declare_room(&room.id).await;
-    }
-    tracing::info!(kind = "diag", spec = "SV-IMPL-ROOM-LIFE", room = %room.id, "in.unused_ttl" = room.unused_ttl, "in.departure_ttl" = room.departure_ttl, "room created");
     ok(&CreateRoomRes { room_id: room.id.clone(), name: room.name.clone(), capacity: room.capacity, created_at: room.created_at, media_codecs: room.media_codecs.clone() })
 }
 
@@ -387,14 +388,29 @@ pub fn list() -> Result<Value, Failure> {
 
 pub async fn destroy_room(room: &Arc<Room>, spec: &str, why: &str) {
     let Some(s) = super::sfu() else { return };
-    s.rooms.remove(&room.id);
-    s.publish_slots();
-    super::floor::close(&room.id);
+    if !s.rooms.remove(room) {
+        return;
+    }
+    super::floor::stop(room);
     for t in s.tables.map.lock().map(|g| g.values().cloned().collect::<Vec<_>>()).unwrap_or_default() {
         t.forget_room(&room.id);
     }
-    if let Some(b) = crate::bus::get() {
-        b.undeclare_room(&room.id);
-    }
+    room.drop_token();
     tracing::info!(kind = "diag", spec = spec, room = %room.id, "room removed ({why})");
+}
+
+pub async fn redeclare() {
+    let (Some(s), Some(b)) = (super::sfu(), crate::bus::get()) else { return };
+    let rooms = s.rooms.all();
+    let n = rooms.len();
+    if n == 0 {
+        return;
+    }
+    for r in rooms {
+        r.drop_token();
+        if let Some(t) = b.declare_room(&r.id).await {
+            r.hold_token(t);
+        }
+    }
+    tracing::info!(kind = "diag", spec = "SV-RULE-BUS-PRESENCE", "local hub token back — room tokens redeclared ({n})");
 }
