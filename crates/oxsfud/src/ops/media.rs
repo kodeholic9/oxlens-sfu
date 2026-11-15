@@ -29,10 +29,14 @@ fn ok<T: serde::Serialize>(v: &T) -> Result<Value, Failure> {
     serde_json::to_value(v).map_err(|_| Code::InternalError.failure())
 }
 
+pub fn own(c: &Ctx) -> Option<Arc<Peer>> {
+    super::sfu().and_then(|s| s.peer(&c.user)).filter(|p| p.sid == c.sid)
+}
+
 pub fn joined(c: &Ctx, room_id: &str) -> Result<(Arc<Peer>, Arc<Room>), Failure> {
     let s = sfu()?;
     let room = s.rooms.get(room_id).ok_or_else(|| Code::RoomNotFound.failure())?;
-    let peer = s.peer(&c.user).ok_or_else(|| Code::NotInRoom.failure())?;
+    let peer = own(c).ok_or_else(|| Code::NotInRoom.failure())?;
     if !peer.in_room(room_id) {
         return Err(Code::NotInRoom.failure());
     }
@@ -477,7 +481,7 @@ fn unpublish(c: &Ctx, room_id: &str, join_id: &str, ids: &[String]) -> Result<Va
         Ok((p, _)) => p,
         Err(f) if f.code == Code::NotInRoom.num() || f.code == Code::RoomNotFound.num() => {
             let away = s.pubs.get(&c.user).is_some_and(|ctx| !ids.is_empty() && ids.iter().all(|id| ctx.find(id).is_some_and(|st| st.room.load().is_empty())));
-            match s.peer(&c.user) {
+            match own(c) {
                 Some(p) if away => p,
                 _ => return Err(f),
             }
@@ -650,7 +654,7 @@ pub fn ice_restart(c: &Ctx, body: &Value) -> Result<Value, Failure> {
     if req.sfu_id != s.epoch {
         return Err(Code::PeerNotFound.failure());
     }
-    let peer = s.peer(&c.user).ok_or_else(|| Code::PeerNotFound.failure())?;
+    let peer = own(c).ok_or_else(|| Code::PeerNotFound.failure())?;
     let m = crate::fwd::rt::media().ok_or_else(|| Code::InternalError.failure())?;
     let mut creds = Vec::new();
     for tr in peer.transports() {
@@ -720,7 +724,7 @@ pub fn move_pub(peer: &Peer, to: Option<&Arc<Room>>, token: Option<Permission>) 
 pub fn affiliation(c: &Ctx, body: &Value) -> Result<Value, Failure> {
     let req: AffiliationReq = parse(body)?;
     let s = sfu()?;
-    let peer = s.peer(&c.user).ok_or_else(|| Code::NotInRoom.failure())?;
+    let peer = own(c).ok_or_else(|| Code::NotInRoom.failure())?;
     let token = c.claims.as_ref().and_then(|x| x.permission);
     let old = crate::aff::pub_room(&peer);
     let entry = |room: &str, j: &Option<String>, k: &str| -> Result<(), Failure> {
