@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::bus::Bus;
+use common::envelope::Reply;
 use store::{Dir, HISTORY_DEFAULT, HISTORY_MAX, Roster, Sent, Store};
 
 pub const FANOUT_WHAT: &str = "chat";
@@ -58,11 +59,8 @@ impl Chat {
         Ok(r)
     }
 
-    pub async fn recipients(&self, d: &Deliver) -> Vec<String> {
-        match self.roster_at_least(&d.message.space_id, d.ver).await {
-            Ok(r) => r.at(d.message.t),
-            Err(_) => Vec::new(),
-        }
+    pub async fn recipients(&self, d: &Deliver) -> Result<Vec<String>, Code> {
+        self.roster_at_least(&d.message.space_id, d.ver).await.map(|r| r.at(d.message.t))
     }
 
     pub async fn handle(&self, user: &str, sid: &str, op: Op, body: Value) -> Result<Answer, Failure> {
@@ -90,7 +88,7 @@ impl Chat {
                 let before: Option<u64> = oxsig::code::field(&body, "before")?;
                 let limit: Option<u32> = oxsig::code::field(&body, "limit")?;
                 let limit = limit.unwrap_or(HISTORY_DEFAULT);
-                if limit > HISTORY_MAX {
+                if limit == 0 || limit > HISTORY_MAX {
                     return Err(Code::InvalidPayload.failure().with_message("limit"));
                 }
                 let dir = match (after, before) {
@@ -138,11 +136,22 @@ fn json<T: Serialize>(v: &T) -> Result<Value, Failure> {
 
 pub async fn fanout_others(bus: &Bus, d: &Deliver) -> Vec<String> {
     let payload = serde_json::to_vec(d).unwrap_or_default();
-    let others: Vec<String> = bus.live_nodes().into_iter().map(|(n, _)| n).filter(|n| n != &bus.node).collect();
-    let asks = others.iter().map(|n| bus.query(n, FANOUT_WHAT, payload.clone()));
     let mut failed = Vec::new();
-    for (node, r) in others.iter().zip(futures_util::future::join_all(asks).await) {
-        if r.is_err() {
+    let mut live = Vec::new();
+    for (n, up) in bus.known_nodes() {
+        if n == bus.node {
+            continue;
+        }
+        if up {
+            live.push(n);
+        } else {
+            failed.push(n);
+        }
+    }
+    let asks = live.iter().map(|n| bus.query(n, FANOUT_WHAT, payload.clone()));
+    for (node, r) in live.iter().zip(futures_util::future::join_all(asks).await) {
+        let ok = r.ok().and_then(|b| Reply::decode(&b).ok()).is_some_and(|x| matches!(x, Reply::Ok { .. }));
+        if !ok {
             failed.push(node.clone());
         }
     }

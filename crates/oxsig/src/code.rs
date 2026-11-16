@@ -140,7 +140,7 @@ impl Code {
             Code::PreconditionFailed => (3009, "PRECONDITION_FAILED", Some(false)),
             Code::PeerNotFound => (3010, "PEER_NOT_FOUND", Some(false)),
             Code::NotPubRoom => (3011, "NOT_PUB_ROOM", Some(false)),
-            Code::SpaceNotFound => (3012, "SPACE_NOT_FOUND", Some(false)),
+            Code::SpaceNotFound => (3012, "SPACE_NOT_FOUND", Some(true)),
             Code::NotSpaceMember => (3013, "NOT_SPACE_MEMBER", Some(false)),
             Code::ChatDisabled => (3014, "CHAT_DISABLED", Some(true)),
             Code::MsgIdConflict => (3015, "MSG_ID_CONFLICT", Some(true)),

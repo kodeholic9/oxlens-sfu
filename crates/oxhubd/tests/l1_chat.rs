@@ -144,4 +144,75 @@ fn unread_is_total_minus_read() {
     assert_eq!(s.view("b", "S").expect("view"), 2);
     let e = s.list("b").expect("list").remove(0);
     assert_eq!(e.total - e.read, 0, "after view nothing is unread");
+    let a = s.list("a").expect("list").remove(0);
+    assert_eq!(a.total - a.read, 0, "the sender has read up to what it sent");
+}
+
+fn temp_db(tag: &str) -> String {
+    let p = std::env::temp_dir().join(format!("oxchat-{tag}-{}-{}.db", std::process::id(), common::now_ms()));
+    p.to_string_lossy().into_owned()
+}
+
+#[test]
+fn two_stores_on_one_file_never_share_a_t() {
+    let path = temp_db("two");
+    let a = Store::open(&path, Visibility::Shared).expect("open a");
+    a.create_space("S", None).expect("space");
+    a.join("S", "a", 1).expect("join");
+    let b = Store::open(&path, Visibility::Shared).expect("open b");
+    let run = |st: Store, k: u32| {
+        std::thread::spawn(move || {
+            (0..40u32)
+                .map(|i| match st.send("a", "S", &format!("a/{k:04x}{i:04x}-4f50-4a6b-8c7d-9e0f1a2b3c4d"), "m", 5000).expect("send") {
+                    Sent::Fresh { msg, .. } => msg.t,
+                    Sent::Again { .. } => panic!("fresh ids"),
+                })
+                .collect::<Vec<u64>>()
+        })
+    };
+    let (ha, hb) = (run(a, 1), run(b, 2));
+    let mut ts: Vec<u64> = ha.join().expect("a").into_iter().chain(hb.join().expect("b")).collect();
+    let n = ts.len();
+    ts.sort();
+    ts.dedup();
+    assert_eq!(ts.len(), n, "S-sym-IMPL-CHAT-STORE-1 — two gateways on one file never stamp the same t");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn visibility_is_fixed_at_join() {
+    let path = temp_db("vis");
+    let s = Store::open(&path, Visibility::Joined).expect("open");
+    s.create_space("S", None).expect("space");
+    s.join("S", "a", 1).expect("join a");
+    fresh_t(s.send("a", "S", ID_A, "before", 10));
+    s.join("S", "b", 20).expect("join b");
+    drop(s);
+    let s = Store::open(&path, Visibility::Shared).expect("reopen with another default");
+    assert!(s.history("b", "S", Dir::Latest, 60).expect("history").messages.is_empty(), "a later policy change does not reach a member who already joined");
+    s.join("S", "c", 30).expect("join c");
+    assert_eq!(s.history("c", "S", Dir::Latest, 60).expect("history").messages.len(), 1, "a new member gets the policy of its own join");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_retry_after_leaving_still_gets_the_first_t() {
+    let s = store(Visibility::Shared);
+    s.join("S", "a", 1).expect("join");
+    let t = fresh_t(s.send("a", "S", ID_A, "x", 10));
+    s.leave("S", "a", 20).expect("leave");
+    match s.send("a", "S", ID_A, "x", 30).expect("retry") {
+        Sent::Again { msg } => assert_eq!(msg.t, t, "the stored message answers the retry even after leaving"),
+        Sent::Fresh { .. } => panic!("must not store again"),
+    }
+}
+
+#[test]
+fn same_msg_id_in_another_space_conflicts() {
+    let s = store(Visibility::Shared);
+    s.create_space("T", None).expect("space T");
+    s.join("S", "a", 1).expect("join S");
+    s.join("T", "a", 1).expect("join T");
+    fresh_t(s.send("a", "S", ID_A, "x", 10));
+    assert_eq!(s.send("a", "T", ID_A, "x", 10), Err(Code::MsgIdConflict), "a msg_id is global — another space is a conflict");
 }

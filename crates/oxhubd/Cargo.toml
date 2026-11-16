@@ -12,6 +12,10 @@ path = "src/lib.rs"
 name = "oxhubd"
 path = "src/main.rs"
 
+[[bin]]
+name = "chat_seed"
+path = "tools/chat_seed.rs"
+
 [dependencies]
 oxsig = { workspace = true }
 common = { workspace = true }

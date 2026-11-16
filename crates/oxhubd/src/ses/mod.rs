@@ -742,8 +742,11 @@ async fn chat_op(ctx: &Arc<Ctx>, s: &Arc<Session>, op: Op, body: serde_json::Val
 }
 
 async fn chat_fanout(ctx: &Ctx, chat: &crate::chat::Chat, d: crate::chat::Deliver) {
-    deliver_chat_local(ctx, chat, &d).await;
-    for node in crate::chat::fanout_others(&ctx.bus, &d).await {
+    let mut failed = crate::chat::fanout_others(&ctx.bus, &d).await;
+    if !deliver_chat_local(ctx, chat, &d).await {
+        failed.push(ctx.bus.node.clone());
+    }
+    for node in failed {
         ctx.counters.chat_fanout_fail.fetch_add(1, Ordering::Relaxed);
         common::log::emit(
             common::log::Line::ev("SV-IMPL-CHAT-FANOUT")
@@ -756,18 +759,16 @@ async fn chat_fanout(ctx: &Ctx, chat: &crate::chat::Chat, d: crate::chat::Delive
 }
 
 pub async fn deliver_chat(ctx: &Ctx, payload: &[u8]) -> Vec<u8> {
-    let Some(chat) = ctx.chat.get().cloned() else { return b"{}".to_vec() };
+    let Some(chat) = ctx.chat.get().cloned() else { return Reply::ok(serde_json::Value::Null).encode() };
     match serde_json::from_slice::<crate::chat::Deliver>(payload) {
-        Ok(d) => {
-            deliver_chat_local(ctx, &chat, &d).await;
-            b"{}".to_vec()
-        }
+        Ok(d) if deliver_chat_local(ctx, &chat, &d).await => Reply::ok(serde_json::Value::Null).encode(),
+        Ok(_) => Reply::fail(Code::InternalError).encode(),
         Err(_) => Reply::fail(Code::InvalidPayload).encode(),
     }
 }
 
-async fn deliver_chat_local(ctx: &Ctx, chat: &crate::chat::Chat, d: &crate::chat::Deliver) {
-    let users = chat.recipients(d).await;
+async fn deliver_chat_local(ctx: &Ctx, chat: &crate::chat::Chat, d: &crate::chat::Deliver) -> bool {
+    let Ok(users) = chat.recipients(d).await else { return false };
     let n = Notice { op: Op::Message.as_u16(), body: serde_json::to_value(&d.message).unwrap_or_default(), exclude: Vec::new(), room_id: None, sfu_id: None };
     for s in ctx.sessions() {
         if s.sid == d.sid || users.binary_search(&s.user_id).is_err() {
@@ -775,6 +776,7 @@ async fn deliver_chat_local(ctx: &Ctx, chat: &crate::chat::Chat, d: &crate::chat
         }
         push_notice(ctx, &s, &n);
     }
+    true
 }
 
 fn push_notice(ctx: &Ctx, s: &Session, n: &Notice) {

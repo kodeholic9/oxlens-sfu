@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.6 · 정:IMPL-CHAT-STORE · 정:IMPL-CHAT-MEMBERSHIP · 정:IMPL-CHAT-READ · 정:CAND-CHAT-STORE-SCHEMA · 연:RULE-CHAT-MSG-ID · 연:RULE-CHAT-ORDER · 연:RULE-CHAT-VISIBLE · 연:RULE-CHAT-UNREAD · 연:RULE-CHAT-VIEW · 연:RULE-CHAT-HISTORY-PAGE · 연:RULE-CHAT-CATCHUP-BASIS · model: claude-opus-5-5
-//! 채팅 저장소 — SQLite 하나 · 쓰기는 `BEGIN IMMEDIATE`(공간 행 잠금을 덮는 잠금) · 공간 시계 `t = max(지금, 앞 t + 1)` · 멤버 입퇴장 구간 · 멤버 판 · 읽음.
+//! 채팅 저장소 — SQLite 하나 · 쓰기는 `BEGIN IMMEDIATE`(공간 행 잠금을 덮는 잠금) · 공간 시계 `t = max(지금, 앞 t + 1)` · 멤버 입퇴장 구간(보이기 시작점 값은 입장 때 구간에 저장) · 멤버 판 · 읽음(보낸 사람은 보낸 순간까지 읽은 것으로).
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS members (
   user_id TEXT NOT NULL,
   join_t INTEGER NOT NULL,
   leave_t INTEGER,
+  vis TEXT NOT NULL,
   PRIMARY KEY (space_id, user_id, join_t)
 );
 CREATE TABLE IF NOT EXISTS messages (
@@ -159,14 +160,20 @@ impl Store {
     }
 
     pub fn join(&self, space: &str, user: &str, now: u64) -> Result<u64, Code> {
+        let default_vis = self.default_vis;
         self.with(|c| {
             let tx = db(c.transaction_with_behavior(TransactionBehavior::Immediate))?;
             let (clock, _) = space_row(&tx, space)?.ok_or(Code::SpaceNotFound)?;
             if open_member(&tx, space, user)? {
                 return Ok(clock);
             }
+            let own = db(tx.query_row("SELECT visibility FROM spaces WHERE space_id = ?1", params![space], |r| r.get::<_, Option<String>>(0)))?;
+            let vis = own.unwrap_or_else(|| default_vis.as_str().to_string());
             let t = stamp(&tx, space, clock, now)?;
-            db(tx.execute("INSERT INTO members (space_id, user_id, join_t) VALUES (?1, ?2, ?3)", params![space, user, n(t)]))?;
+            db(tx.execute(
+                "INSERT INTO members (space_id, user_id, join_t, vis) VALUES (?1, ?2, ?3, ?4)",
+                params![space, user, n(t), vis],
+            ))?;
             db(tx.execute("UPDATE spaces SET ver = ver + 1 WHERE space_id = ?1", params![space]))?;
             db(tx.commit())?;
             Ok(t)
@@ -195,9 +202,6 @@ impl Store {
         self.with(|c| {
             let tx = db(c.transaction_with_behavior(TransactionBehavior::Immediate))?;
             let (clock, ver) = space_row(&tx, space)?.ok_or(Code::SpaceNotFound)?;
-            if !open_member(&tx, space, user)? {
-                return Err(Code::NotSpaceMember);
-            }
             let old = db(tx
                 .query_row(
                     "SELECT msg_id, space_id, user_id, t, content FROM messages WHERE msg_id = ?1",
@@ -211,12 +215,19 @@ impl Store {
                 }
                 return Err(Code::MsgIdConflict);
             }
+            if !open_member(&tx, space, user)? {
+                return Err(Code::NotSpaceMember);
+            }
             let t = stamp(&tx, space, clock, now)?;
             db(tx.execute(
                 "INSERT INTO messages (msg_id, space_id, user_id, t, content) VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![msg_id, space, user, n(t), content],
             ))?;
             db(tx.execute("UPDATE spaces SET last_t = ?2, total = total + 1 WHERE space_id = ?1", params![space, n(t)]))?;
+            db(tx.execute(
+                "INSERT INTO reads (space_id, user_id, read) SELECT ?1, ?2, total FROM spaces WHERE space_id = ?1 ON CONFLICT(space_id, user_id) DO UPDATE SET read = excluded.read",
+                params![space, user],
+            ))?;
             db(tx.commit())?;
             let msg = ChatMessage { space_id: space.into(), msg_id: msg_id.into(), user_id: user.into(), t, content: content.into() };
             Ok(Sent::Fresh { msg, ver })
@@ -242,20 +253,19 @@ impl Store {
     }
 
     pub fn history(&self, user: &str, space: &str, dir: Dir, limit: u32) -> Result<Page, Code> {
-        let default_vis = self.default_vis;
         self.with(|c| {
-            let vis = db(c
-                .query_row("SELECT visibility FROM spaces WHERE space_id = ?1", params![space], |r| r.get::<_, Option<String>>(0))
-                .optional())?
-            .ok_or(Code::SpaceNotFound)?;
-            if !open_member(c, space, user)? {
-                return Err(Code::NotSpaceMember);
+            if !db(c.query_row("SELECT EXISTS(SELECT 1 FROM spaces WHERE space_id = ?1)", params![space], |r| r.get::<_, bool>(0)))? {
+                return Err(Code::SpaceNotFound);
             }
-            let joined = match vis.as_deref() {
-                Some("joined") => true,
-                Some(_) => false,
-                None => default_vis == Visibility::Joined,
-            };
+            let vis = db(c
+                .query_row(
+                    "SELECT vis FROM members WHERE space_id = ?1 AND user_id = ?2 AND leave_t IS NULL",
+                    params![space, user],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional())?
+            .ok_or(Code::NotSpaceMember)?;
+            let joined = vis == Visibility::Joined.as_str();
             let seen = if joined {
                 " AND EXISTS(SELECT 1 FROM members m WHERE m.space_id = x.space_id AND m.user_id = ?2 AND m.join_t <= x.t AND (m.leave_t IS NULL OR x.t < m.leave_t))"
             } else {
