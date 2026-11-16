@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.6 · 정:IMPL-PUB-ADD · 정:IMPL-PUB-REMOVE · 정:IMPL-PUB-TRACK-SET · 정:IMPL-SUB-PIPELINE · 정:IMPL-SUB-TABLE · 정:IMPL-SUB-READY-GATE · 정:IMPL-PUB-RID-SPATIAL · 정:IMPL-AFF-PUB-MOVE · 정:IMPL-LINK-ICE-RESTART · 정:IMPL-ROOM-EMIT · 정:RULE-CONC-SIX · 정:IMPL-GC-PEER-REAP · 정:CAND-PUB-NOT-PUB-ROOM-ORDER · 연:RULE-AFF-PUB-ONLY · 연:RULE-AFF-TWO-ROOMS-ONE-REQ · 연:RULE-AFF-FAIL · 연:RULE-SUB-READY-WHAT · 연:RULE-ROOM-JOIN-ID · 연:RULE-TRN-IDEMPOTENT · 연:RULE-PUB-REMOVE-FORM · 정:IMPL-FWD-ROOM · model: claude-opus-5-5
-//! 미디어 op 조율 — 발행(검사 차례 ①~⑦ · 논리 먼저 물리 나중) · 구독 배관(대상 산출 → 배정표 → 줄 붙이기/떼기 → `MLINE_EVENT`) · `READY` · `SUBSCRIBE_LAYER` · `TRACK_SET` · `ICE_RESTART` · `AFFILIATION` · `MESSAGE`.
+//! 미디어 op 조율 — 발행(검사 차례 ①~⑦ · 논리 먼저 물리 나중) · 구독 배관(대상 산출 → 배정표 → 줄 붙이기/떼기 → `MLINE_EVENT`) · `READY` · `SUBSCRIBE_LAYER` · `TRACK_SET` · `ICE_RESTART` · `AFFILIATION`.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -770,12 +770,4 @@ pub fn affiliation(c: &Ctx, body: &Value) -> Result<Value, Failure> {
 
 pub fn aff_line(user: &str, label: &str, from: Option<&str>, to: Option<&str>, cause: &str) {
     super::transition("AFF", user, label, from.unwrap_or("-"), to.unwrap_or("-"), cause, &[("user", user)]);
-}
-
-pub fn message(c: &Ctx, body: &Value) -> Result<Value, Failure> {
-    let req: MessageReq = parse(body)?;
-    let (_peer, room) = joined(c, &req.room_id)?;
-    let b = crate::aux::message_body(&req.room_id, &c.user, &req.content);
-    crate::bus::room_notice(&room.id, notice(Op::Message, &b, vec![c.user.clone()], &room.id));
-    ok(&MessageRes { msg_id: crate::aux::msg_id() })
 }

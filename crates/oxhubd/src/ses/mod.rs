@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-SES-DATA · 정:IMPL-SES-BIND · 정:IMPL-SES-HANDOVER · 정:IMPL-SES-RESUME · 정:IMPL-SES-ADMISSION · 정:RULE-BUS-REQUEST · 정:RULE-BUS-EVENTS · 연:SES.S.bind_new · 연:SES.S.bind_resume · 연:SES.S.resume_ok · 연:SES.S.leave · 연:SES.S.drop · 연:SES.S.TWindow · 정:RULE-SES-GATEWAY-SCOPE · 정:CAND-AFF-SPLIT-ROUTE · 정:CAND-SES-SUBROOMS-RECONCILE · 연:RULE-ERR-4009-SUPPRESS · 연:RULE-SES-SOCKET-CLOSE-NORMAL · 연:RULE-SES-SERVER-POLICY · model: claude-opus-5-5
+// spec: v1.6 · 정:IMPL-SES-DATA · 정:IMPL-SES-BIND · 정:IMPL-SES-HANDOVER · 정:IMPL-SES-RESUME · 정:IMPL-SES-ADMISSION · 정:RULE-BUS-REQUEST · 정:RULE-BUS-EVENTS · 연:SES.S.bind_new · 연:SES.S.bind_resume · 연:SES.S.resume_ok · 연:SES.S.leave · 연:SES.S.drop · 연:SES.S.TWindow · 정:RULE-SES-GATEWAY-SCOPE · 정:CAND-AFF-SPLIT-ROUTE · 정:CAND-SES-SUBROOMS-RECONCILE · 연:RULE-ERR-4009-SUPPRESS · 연:RULE-SES-SOCKET-CLOSE-NORMAL · 연:RULE-SES-SERVER-POLICY · 정:RULE-CHAT-GATEWAY-MODULE · model: claude-opus-5-5
 //! 게이트웨이의 세션 — 세션 자료 · 인증 두 갈래 · 축출 · 넘겨받기 · RESUME 모으기 · op 라우팅 · 세션 폐기 한 길 · 통지 배달.
 
 pub mod conn;
@@ -100,6 +100,7 @@ pub struct SessionData {
 #[derive(Default)]
 pub struct Counters {
     pub notice_no_socket: AtomicU64,
+    pub chat_fanout_fail: AtomicU64,
     pub codes: Mutex<BTreeMap<u16, u64>>,
 }
 
@@ -123,6 +124,7 @@ pub struct Ctx {
     pub admit: Mutex<(u64, u32)>,
     pub probes: crate::aux::Probes,
     pub shutting_down: AtomicBool,
+    pub chat: std::sync::OnceLock<Arc<crate::chat::Chat>>,
 }
 
 impl Ctx {
@@ -140,6 +142,7 @@ impl Ctx {
             admit: Mutex::new((0, 0)),
             probes: crate::aux::Probes::default(),
             shutting_down: AtomicBool::new(false),
+            chat: std::sync::OnceLock::new(),
         })
     }
 
@@ -645,7 +648,8 @@ async fn route(ctx: &Arc<Ctx>, s: &Arc<Session>, op: Op, body: serde_json::Value
             }
             Ok(v)
         }
-        Op::PublishTracks | Op::Ready | Op::SubscribeLayer | Op::TrackSet | Op::Message => {
+        op if crate::chat::is_chat(op) => chat_op(ctx, s, op, body).await,
+        Op::PublishTracks | Op::Ready | Op::SubscribeLayer | Op::TrackSet => {
             let room = room_of(&body)?;
             if !valid_room_id(&room) {
                 return Err(Code::InvalidPayload.failure().with_message("room_id"));
@@ -724,6 +728,52 @@ async fn apply_affiliation(ctx: &Ctx, s: &Session, sfu: Option<&str>, room: Opti
     });
     if let Some(n) = node {
         set_rooms(ctx, s, &n, &a.sub_rooms, "ROOM_EVENT").await;
+    }
+}
+
+async fn chat_op(ctx: &Arc<Ctx>, s: &Arc<Session>, op: Op, body: serde_json::Value) -> Result<serde_json::Value, Failure> {
+    let Some(chat) = ctx.chat.get().cloned() else { return Err(Code::ChatDisabled.failure()) };
+    let a = chat.handle(&s.user_id, &s.sid, op, body).await?;
+    if let Some(d) = a.deliver {
+        let ctx = ctx.clone();
+        tokio::spawn(async move { chat_fanout(&ctx, &chat, d).await });
+    }
+    Ok(a.body)
+}
+
+async fn chat_fanout(ctx: &Ctx, chat: &crate::chat::Chat, d: crate::chat::Deliver) {
+    deliver_chat_local(ctx, chat, &d).await;
+    for node in crate::chat::fanout_others(&ctx.bus, &d).await {
+        ctx.counters.chat_fanout_fail.fetch_add(1, Ordering::Relaxed);
+        common::log::emit(
+            common::log::Line::ev("SV-IMPL-CHAT-FANOUT")
+                .key("node", &node)
+                .key("space", &d.message.space_id)
+                .key("msg_id", &d.message.msg_id)
+                .msg("chat_fanout_fail"),
+        );
+    }
+}
+
+pub async fn deliver_chat(ctx: &Ctx, payload: &[u8]) -> Vec<u8> {
+    let Some(chat) = ctx.chat.get().cloned() else { return b"{}".to_vec() };
+    match serde_json::from_slice::<crate::chat::Deliver>(payload) {
+        Ok(d) => {
+            deliver_chat_local(ctx, &chat, &d).await;
+            b"{}".to_vec()
+        }
+        Err(_) => Reply::fail(Code::InvalidPayload).encode(),
+    }
+}
+
+async fn deliver_chat_local(ctx: &Ctx, chat: &crate::chat::Chat, d: &crate::chat::Deliver) {
+    let users = chat.recipients(d).await;
+    let n = Notice { op: Op::Message.as_u16(), body: serde_json::to_value(&d.message).unwrap_or_default(), exclude: Vec::new(), room_id: None, sfu_id: None };
+    for s in ctx.sessions() {
+        if s.sid == d.sid || users.binary_search(&s.user_id).is_err() {
+            continue;
+        }
+        push_notice(ctx, &s, &n);
     }
 }
 

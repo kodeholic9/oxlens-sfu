@@ -5,6 +5,7 @@
 pub mod aux;
 pub mod bus;
 pub mod cfg;
+pub mod chat;
 pub mod ops;
 pub mod room;
 pub mod ses;

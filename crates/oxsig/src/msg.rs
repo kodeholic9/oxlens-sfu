@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 연:SES.op · 연:ROOM.op · 연:PUB.op · 연:SUB.op · 연:TRK.op · 연:LINK.op · 연:AFF.op · 연:AUX.op · 연:LINK.type.ServerConfig · 연:SUB.type.MlineTable · 연:TRK.type.TrackEntry · 연:ROOM.type.MemberInfo · 연:ROOM.http.CREATE_ROOM · 연:SES.http.TOKEN · 연:RULE-ROOM-MEMBERINFO-SHAPE · 연:RULE-ROOM-LEAVE-FORM · 연:RULE-ROOM-PARTICIPANT-EVENT-FORM · 연:RULE-ROOM-ROOM-EVENT-NO-VERSION · 연:RULE-AFF-RES-NO-VERSION · 연:RULE-PUB-SET-RES · 연:RULE-PUB-PUBLISH-RES · 연:RULE-TRK-ELEMENT-HAS-ROOM-ID · 연:RULE-TRK-TRACK-STATE-TYPES · 연:RULE-TRK-TRACK-STATE-NO-STALLED · 연:RULE-SUB-LAYER-BY-TRACK-ID · 연:RULE-SUB-ROW-ONE-MLINE · 연:RULE-SUB-ASSIGN-TIER · model: claude-opus-5-5
+// spec: v1.6 · 연:SES.op · 연:ROOM.op · 연:PUB.op · 연:SUB.op · 연:TRK.op · 연:LINK.op · 연:AFF.op · 연:AUX.op · 연:CHAT.op · 연:CHAT.type.ChatMessage · 연:CHAT.type.SpaceEntry ·연:LINK.type.ServerConfig · 연:SUB.type.MlineTable · 연:TRK.type.TrackEntry · 연:ROOM.type.MemberInfo · 연:ROOM.http.CREATE_ROOM · 연:SES.http.TOKEN · 연:RULE-ROOM-MEMBERINFO-SHAPE · 연:RULE-ROOM-LEAVE-FORM · 연:RULE-ROOM-PARTICIPANT-EVENT-FORM · 연:RULE-ROOM-ROOM-EVENT-NO-VERSION · 연:RULE-AFF-RES-NO-VERSION · 연:RULE-PUB-SET-RES · 연:RULE-PUB-PUBLISH-RES · 연:RULE-TRK-ELEMENT-HAS-ROOM-ID · 연:RULE-TRK-TRACK-STATE-TYPES · 연:RULE-TRK-TRACK-STATE-NO-STALLED · 연:RULE-SUB-LAYER-BY-TRACK-ID · 연:RULE-SUB-ROW-ONE-MLINE · 연:RULE-SUB-ASSIGN-TIER · model: claude-opus-5-5
 //! WS · HTTP body 의 형 — 칸 이름 · 필수 · 갈래는 연동규격서 구조 절 그대로.
 
 use serde::{Deserialize, Serialize};
@@ -417,20 +417,64 @@ pub struct AffiliationRes {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MessageReq {
-    pub room_id: String,
+    pub space_id: String,
+    pub msg_id: String,
     pub content: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MessageRes {
+    pub t: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub space_id: String,
     pub msg_id: String,
+    pub user_id: String,
+    pub t: u64,
+    pub content: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MessageBody {
-    pub room_id: String,
-    pub user_id: String,
-    pub content: String,
+pub struct SpaceHistoryReq {
+    pub space_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpaceHistoryRes {
+    pub messages: Vec<ChatMessage>,
+    pub more: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpaceEntry {
+    pub space_id: String,
+    pub total: u64,
+    pub read: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_t: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpaceListRes {
+    pub spaces: Vec<SpaceEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpaceViewReq {
+    pub space_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpaceViewRes {
+    pub read: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-OPS-SURFACE · 정:RULE-BUS-EVENTS · 정:RULE-BUS-REQUEST · 정:IMPL-SES-HANDOVER · 정:CAND-DOC-ORCHESTRATION-ASPECT · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-OPS-SURFACE · 정:RULE-BUS-EVENTS · 정:RULE-BUS-REQUEST · 정:IMPL-SES-HANDOVER · 정:CAND-DOC-ORCHESTRATION-ASPECT · 정:IMPL-CHAT-FANOUT · model: claude-opus-5-5
 //! 운영 · 조율 — hub 상태 묶음 · 버스 사건(통지 · 방 소멸 · node 사이 요청)을 세션 · 방에 잇는다 · HTTP 표면.
 
 pub mod admin;
@@ -90,6 +90,7 @@ async fn answer(hub: &Arc<Hub>, q: oxmesh::Query) {
             let user = String::from_utf8_lossy(&payload).to_string();
             serde_json::to_vec(&admin::probe_local(hub, &user).await).unwrap_or_default()
         }
+        crate::chat::FANOUT_WHAT => ses::deliver_chat(&hub.ses, &payload).await,
         "bus" => serde_json::to_vec(&admin::bus_view(hub).await).unwrap_or_default(),
         "history" => match serde_json::from_slice::<logger::Ask>(&payload) {
             Ok(ask) => serde_json::to_vec(&admin::history_local(hub, ask).await).unwrap_or_default(),

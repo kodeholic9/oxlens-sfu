@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-AUX-DC-SEND · 정:IMPL-AUX-MESSAGE · 연:TRN.frame.DC · 연:AUX.op.MESSAGE · 연:RULE-AUX-MESSAGE-FORM · 연:RULE-AUX-MESSAGE-PROC · model: claude-opus-5-5
-//! 보조 — DC 송신(준비 전 통지는 버퍼 64 · 넘치면 오래된 것부터 버리고 센다 · 실패는 계수이지 종료 사유가 아니다) · `MESSAGE` 중계(`user_id` 는 세션에서 · `msg_id` uuid).
+// spec: v1.6 · 정:IMPL-AUX-DC-SEND · 연:TRN.frame.DC · model: claude-opus-5-5
+//! 보조 — DC 송신(준비 전 통지는 버퍼 64 · 넘치면 오래된 것부터 버리고 센다 · 실패는 계수이지 종료 사유가 아니다).
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -62,14 +62,6 @@ pub fn forget(user: &str) {
     if let Ok(mut g) = pending().lock() {
         g.remove(user);
     }
-}
-
-pub fn message_body(room: &str, user: &str, content: &str) -> oxsig::msg::MessageBody {
-    oxsig::msg::MessageBody { room_id: room.to_string(), user_id: user.to_string(), content: content.to_string() }
-}
-
-pub fn msg_id() -> String {
-    uuid::Uuid::new_v4().to_string()
 }
 
 #[cfg(test)]

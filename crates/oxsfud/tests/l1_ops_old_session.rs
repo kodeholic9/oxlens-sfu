@@ -59,13 +59,14 @@ fn the_same_session_still_leaves() {
 }
 
 #[test]
-fn old_session_message_is_refused() {
+fn old_session_ready_is_refused() {
     let _g = serial();
-    let r = room(&tag("old-msg"));
+    let r = room(&tag("old-ready"));
     let u = subscriber(&tag("u"));
     enter(&u.p, &r);
-    let got = ops::media::message(&old_of(&u.p), &json!({ "room_id": r.id, "content": "late" }));
-    assert_eq!(code(&got), Some(3002), "an old session's message is answered as not in the room");
+    let jid = u.p.join_id(&r.id).expect("stand check — entered with a join id");
+    let got = ops::media::ready(&old_of(&u.p), &json!({ "room_id": r.id, "join_id": jid, "arev": 0 }));
+    assert_eq!(code(&got), Some(3002), "an old session's ready is answered as not in the room");
 }
 
 #[test]

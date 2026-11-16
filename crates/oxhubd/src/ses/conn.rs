@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-SES-READ-AND-PROCESS · 정:IMPL-SES-SOCKET-LIFE · 연:RULE-TRN-CLOSE · 연:RULE-TRN-FLOW-CONTROL · 연:RULE-TRN-WINDOW-PER-DIRECTION · 연:RULE-TRN-LANES · 연:RULE-SES-BIND-PROC · 연:RULE-SES-HEARTBEAT · 연:RULE-SES-LEAVE-CARRIES-REASON · 정:CAND-SES-PREBIND-2001 · model: claude-opus-5-5
-//! WS 연결 하나 — 읽기와 처리를 가른다 · `HEARTBEAT` 는 읽는 즉시 · 방 요청은 연결 순서대로 · 서버 통지는 4단 큐 + ACK 창 · 끊을 때는 `LEAVE` 먼저.
+// spec: v1.6 · 정:RULE-SES-READ-AND-PROCESS · 정:IMPL-SES-SOCKET-LIFE · 연:RULE-TRN-CLOSE · 연:RULE-TRN-FLOW-CONTROL · 연:RULE-TRN-WINDOW-PER-DIRECTION · 연:RULE-TRN-LANES · 연:RULE-SES-BIND-PROC · 연:RULE-SES-HEARTBEAT · 연:RULE-SES-LEAVE-CARRIES-REASON · 정:CAND-SES-PREBIND-2001 · 정:RULE-CHAT-GATEWAY-MODULE · model: claude-opus-5-5
+//! WS 연결 하나 — 읽기와 처리를 가른다 · `HEARTBEAT` 는 읽는 즉시 · 방 요청은 연결 순서대로 · 채팅 요청은 따로 둔 통로에서 연결 순서대로 · 서버 통지는 4단 큐 + ACK 창 · 끊을 때는 `LEAVE` 먼저.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -106,6 +106,7 @@ pub async fn serve(ws: WebSocket, ctx: Arc<Ctx>) {
     let conn = Conn { id, tx: tx.clone(), over: over.clone() };
     let window = ctx.policy.hub.ws_flow_window.clamp(1, 10) as usize;
     let (req_tx, mut req_rx) = mpsc::channel::<(Arc<Session>, Request)>(QUEUE_MAX);
+    let (chat_tx, mut chat_rx) = mpsc::channel::<(Arc<Session>, Request)>(QUEUE_MAX);
     let leave_code = Arc::new(std::sync::Mutex::new(None::<Code>));
 
     let lc = leave_code.clone();
@@ -172,6 +173,13 @@ pub async fn serve(ws: WebSocket, ctx: Arc<Ctx>) {
     let processor = tokio::spawn(async move {
         while let Some((s, r)) = req_rx.recv().await {
             super::handle_request(&pctx, &s, &pconn, r).await;
+        }
+    });
+    let cctx = ctx.clone();
+    let cconn = conn.clone();
+    let chat_processor = tokio::spawn(async move {
+        while let Some((s, r)) = chat_rx.recv().await {
+            super::handle_request(&cctx, &s, &cconn, r).await;
         }
     });
 
@@ -267,7 +275,8 @@ pub async fn serve(ws: WebSocket, ctx: Arc<Ctx>) {
                 break;
             }
             Some(op) => {
-                if let Err(e) = req_tx.try_send((s, Request { op, op_num: h.op, pid: h.pid, flags: h.flags, body: f.body.to_vec() })) {
+                let lane = if crate::chat::is_chat(op) { &chat_tx } else { &req_tx };
+                if let Err(e) = lane.try_send((s, Request { op, op_num: h.op, pid: h.pid, flags: h.flags, body: f.body.to_vec() })) {
                     if matches!(e, mpsc::error::TrySendError::Full(_)) {
                         conn.leave(Code::FlowOverflow, session.as_deref());
                     }
@@ -283,7 +292,9 @@ pub async fn serve(ws: WebSocket, ctx: Arc<Ctx>) {
         }
     }
     drop(req_tx);
+    drop(chat_tx);
     let _ = processor.await;
+    let _ = chat_processor.await;
     let _ = tokio::time::timeout(T_BIND, conn.tx.send(Out::Close)).await;
     let _ = writer.await;
     let code = leave_code.lock().ok().and_then(|g| *g);

@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 연:TRN.oplist · 연:RULE-TRN-LANES · 연:RULE-TRN-FLOW-CONTROL · 연:RULE-TRN-OP-NUMBERS · model: claude-opus-5-5
+// spec: v1.6 · 연:TRN.oplist · 연:RULE-TRN-LANES · 연:RULE-TRN-FLOW-CONTROL · 연:RULE-TRN-OP-NUMBERS · 연:CHAT.op.MESSAGE · 연:CHAT.op.SPACE_HISTORY · 연:CHAT.op.SPACE_LIST · 연:CHAT.op.SPACE_VIEW · model: claude-opus-5-5
 //! WS 메시지 전량 — 번호 · 이름 · 방향 · 우선순위 단 · 윈도우 밖 여부.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -32,6 +32,9 @@ pub enum Op {
     IceRestart,
     Affiliation,
     Message,
+    SpaceHistory,
+    SpaceList,
+    SpaceView,
     Task,
     ParticipantEvent,
     TrackEvent,
@@ -57,6 +60,9 @@ impl Op {
         Op::IceRestart,
         Op::Affiliation,
         Op::Message,
+        Op::SpaceHistory,
+        Op::SpaceList,
+        Op::SpaceView,
         Op::Task,
         Op::ParticipantEvent,
         Op::TrackEvent,
@@ -82,6 +88,9 @@ impl Op {
             Op::IceRestart => 0x0305,
             Op::Affiliation => 0x0401,
             Op::Message => 0x0501,
+            Op::SpaceHistory => 0x0502,
+            Op::SpaceList => 0x0503,
+            Op::SpaceView => 0x0504,
             Op::Task => 0x0601,
             Op::ParticipantEvent => 0x0701,
             Op::TrackEvent => 0x0702,
@@ -112,6 +121,9 @@ impl Op {
             Op::IceRestart => "ICE_RESTART",
             Op::Affiliation => "AFFILIATION",
             Op::Message => "MESSAGE",
+            Op::SpaceHistory => "SPACE_HISTORY",
+            Op::SpaceList => "SPACE_LIST",
+            Op::SpaceView => "SPACE_VIEW",
             Op::Task => "TASK",
             Op::ParticipantEvent => "PARTICIPANT_EVENT",
             Op::TrackEvent => "TRACK_EVENT",
@@ -139,7 +151,7 @@ impl Op {
 
     pub fn lane(self) -> Lane {
         match self {
-            Op::Message => Lane::Data,
+            Op::Message | Op::SpaceHistory | Op::SpaceList | Op::SpaceView => Lane::Data,
             Op::Task => Lane::Diagnostic,
             _ => Lane::Session,
         }
@@ -168,7 +180,7 @@ mod tests {
             assert!(seen.insert(o.as_u16()));
             assert_eq!(Op::from_u16(o.as_u16()), Some(*o));
         }
-        assert_eq!(Op::ALL.len(), 21);
+        assert_eq!(Op::ALL.len(), 24);
         assert_eq!(Op::from_u16(0x0999), None);
     }
 

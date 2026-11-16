@@ -73,6 +73,9 @@ cmd = ["./target/debug/oxsfud", "--grpc-listen", "127.0.0.1:{50061 + i}", "--udp
 listen = ["tcp/127.0.0.1:{7447 + i}"]
 connect = [{", ".join(connect)}]
 namespace = "{NS}"
+
+[chat]
+db = "{LOG_ROOT}/chat.db"
 '''
     out = HERE / f"system.{me}.toml"
     out.write_text(body, encoding="utf-8")

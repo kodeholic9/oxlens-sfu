@@ -131,6 +131,17 @@ async fn run(cfg: HubCfg) -> i32 {
     sup.mark_state(Role::Bus, UnitState::Running, "open");
     let accounts = Accounts { keys: cfg.system.hub.auth.api_keys.clone(), jwt_secret: cfg.system.hub.auth.jwt_secret.clone() };
     let ctx = ses::Ctx::new(cfg.policy.clone(), accounts, bus.clone());
+    if let Some(c) = &cfg.system.chat {
+        match oxhubd::chat::store::Store::open(&c.db, c.history_visibility) {
+            Ok(st) => {
+                let _ = ctx.chat.set(Arc::new(oxhubd::chat::Chat::new(st)));
+            }
+            Err(e) => {
+                eprintln!("oxhubd: {e}");
+                return 2;
+            }
+        }
+    }
     let (shut_tx, mut shut_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let hub = Arc::new(Hub {
         node: cfg.node.clone(),

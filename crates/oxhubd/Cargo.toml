@@ -33,6 +33,7 @@ nix = { workspace = true }
 socket2 = { workspace = true }
 chrono = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
+rusqlite = { workspace = true }
 
 [lints]
 workspace = true

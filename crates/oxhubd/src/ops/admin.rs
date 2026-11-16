@@ -110,6 +110,7 @@ pub async fn drops(hub: &Hub) -> Value {
     let mut mine = json!({
         "unit": "hub",
         "notice_no_socket": hub.ses.counters.notice_no_socket.load(Ordering::Relaxed),
+        "chat_fanout_fail": hub.ses.counters.chat_fanout_fail.load(Ordering::Relaxed),
         "bus_ev_drop": hub.bus.ev_dropped(),
         "log_queue_full": c.queue_full.load(Ordering::Relaxed),
         "log_spool_full": c.spool_full.load(Ordering::Relaxed),

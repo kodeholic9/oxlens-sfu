@@ -109,7 +109,6 @@ fn op(env: &Envelope) -> Result<Value, Failure> {
         Op::TrackSet => super::media::track_set(&c, b),
         Op::IceRestart => super::media::ice_restart(&c, b),
         Op::Affiliation => super::media::affiliation(&c, b),
-        Op::Message => super::media::message(&c, b),
         _ => Err(Code::UnknownOp.failure()),
     }
 }

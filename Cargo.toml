@@ -51,6 +51,7 @@ hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "service", "server"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 rustls-pemfile = "2"
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [profile.dev]
 split-debuginfo = "packed"

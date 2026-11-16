@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-CFG-SYSTEM-FILE · 정:RULE-CFG-THREE-PLACES · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · 정:RULE-MESH-SHAPE · model: claude-opus-5-5
+// spec: v1.6 · 정:IMPL-CFG-SYSTEM-FILE · 정:RULE-CFG-THREE-PLACES · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · 정:RULE-MESH-SHAPE · 정:RULE-CHAT-GATEWAY-MODULE · 정:IMPL-CHAT-MEMBERSHIP · model: claude-opus-5-5
 //! 시스템 파일(hub 전용) — 키 전량 strict(모르는 키 = 기동 실패) · `[bus]` 는 oxmesh router 의 접속 좌표와 배포 이름공간.
 
 use serde::Deserialize;
@@ -26,6 +26,34 @@ pub struct System {
     pub supervisor: Supervisor,
     #[serde(default)]
     pub hook: Option<HookSection>,
+    #[serde(default)]
+    pub chat: Option<ChatSection>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+pub enum Visibility {
+    #[default]
+    #[serde(rename = "shared")]
+    Shared,
+    #[serde(rename = "joined")]
+    Joined,
+}
+
+impl Visibility {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Visibility::Shared => "shared",
+            Visibility::Joined => "joined",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatSection {
+    pub db: String,
+    #[serde(default)]
+    pub history_visibility: Visibility,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -282,6 +310,13 @@ impl System {
                 }
             }
             _ => v.push(("hook.webhooks".into(), "-".into())),
+        }
+        match &self.chat {
+            Some(c) => {
+                v.push(("chat.db".into(), c.db.clone()));
+                v.push(("chat.history_visibility".into(), c.history_visibility.as_str().into()));
+            }
+            None => v.push(("chat".into(), "-".into())),
         }
         v
     }
