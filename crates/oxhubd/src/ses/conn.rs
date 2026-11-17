@@ -25,12 +25,14 @@ pub struct Receipt {
     pub user: String,
     pub msg_ids: Vec<String>,
     pub done: Option<tokio::sync::oneshot::Sender<()>>,
+    pub slot: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 pub enum Out {
     Reply { flags: u8, op: u16, pid: u32, body: Vec<u8> },
     Notice { op: Op, body: Vec<u8>, receipt: Option<Receipt> },
     Ack(u32),
+    Refused(u32),
     Leave { code: Code, details: Option<serde_json::Value> },
     Close,
 }
@@ -165,6 +167,9 @@ pub async fn serve(ws: WebSocket, ctx: Arc<Ctx>) {
                         acked(&wctx, r);
                     }
                 }
+                Out::Refused(pid) => {
+                    w.inflight.remove(&pid);
+                }
                 Out::Leave { code, details } => {
                     let _ = send_leave(&mut sink, &mut w, code, details).await;
                     if let Ok(mut g) = lc.lock() {
@@ -232,8 +237,12 @@ pub async fn serve(ws: WebSocket, ctx: Arc<Ctx>) {
         };
         let h = f.header;
         match h.kind() {
-            FrameKind::Ok | FrameKind::Fail => {
+            FrameKind::Ok => {
                 conn.send(Out::Ack(h.pid));
+                continue;
+            }
+            FrameKind::Fail => {
+                conn.send(Out::Refused(h.pid));
                 continue;
             }
             FrameKind::Request => {}

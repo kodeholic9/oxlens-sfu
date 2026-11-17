@@ -1,11 +1,11 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-CHAT-STORE · 정:IMPL-CHAT-MEMBERSHIP · 정:IMPL-CHAT-FILTER · 정:IMPL-CHAT-READ · 정:IMPL-CHAT-UNDELIVERED · 정:IMPL-CHAT-CATCHUP · 연:RULE-CHAT-MSG-ID · 연:RULE-CHAT-CONTENT · 연:RULE-CHAT-ORDER · 연:RULE-CHAT-VISIBLE · 연:RULE-CHAT-UNREAD · 연:RULE-CHAT-HISTORY-PAGE · 연:RULE-CHAT-UNDELIVERED · 연:RULE-CHAT-CATCHUP · 연:RULE-CHAT-MEMBER-NOTICE · model: claude-opus-5-5
+// spec: v1.6 · 연:RULE-CHAT-KIND · 연:RULE-CHAT-REF-CHECK · 연:RULE-CHAT-DELETE · 연:RULE-CHAT-FOLD · 정:IMPL-CHAT-STORE ·정:IMPL-CHAT-MEMBERSHIP · 정:IMPL-CHAT-FILTER · 정:IMPL-CHAT-READ · 정:IMPL-CHAT-UNDELIVERED · 정:IMPL-CHAT-CATCHUP · 연:RULE-CHAT-MSG-ID · 연:RULE-CHAT-CONTENT · 연:RULE-CHAT-ORDER · 연:RULE-CHAT-VISIBLE · 연:RULE-CHAT-UNREAD · 연:RULE-CHAT-HISTORY-PAGE · 연:RULE-CHAT-UNDELIVERED · 연:RULE-CHAT-CATCHUP · 연:RULE-CHAT-MEMBER-NOTICE · model: claude-opus-5-5
 //! 1층 — 채팅 저장소(저장할 때 찍는 t · 같은 t 를 가르지 않는 쪽 · msg_id 멱등 · 멤버 구간 · 멤버 변경 메시지 · 보이기 시작점 · 안 읽은 수 · 미전송 기록 · 따라잡기 쪽)와 받는 게이트웨이의 멤버 캐시(판이 작을 때만 다시 읽음 · 명단(t_M)) · op 경계(msg_id 64 · content 65535).
 
 use common::system::Visibility;
-use oxhubd::chat::store::{Cursor, Dir, Page, SYS, SYS_HASH, Sent, Store};
-use oxhubd::chat::{Chat, Limits, valid_msg_id};
-use oxsig::msg::{ChatMessage, MemberKind};
+use oxhubd::chat::store::{Cursor, Dir, Outgoing, Page, SYS, SYS_HASH, Sent, Store};
+use oxhubd::chat::{BODY_MAX, Chat, Limits, outgoing, valid_msg_id};
+use oxsig::msg::{ChatKind, ChatMessage};
 use oxsig::{Code, Op};
 
 const ID_A: &str = "e818000001a1e480b5fd7da4c5b6bc0df205";
@@ -90,11 +90,13 @@ async fn message_op_refuses_only_that_request_on_bounds() {
     join(&s, "S", "a", 1);
     let chat = Chat::new(s, Limits::default());
     let ask = |msg_id: String, content: String| serde_json::json!({ "space_id": "S", "msg_id": msg_id, "content": content });
-    let f = chat.handle("a", "s1", Op::Message, ask("a".repeat(65), "x".into())).await.err().expect("refused");
+    let f = chat.handle("a", "s1", Op::Message, ask("a".repeat(65), "x".into()), 100).await.err().expect("refused");
     assert_eq!(f.code, Code::InvalidPayload.num(), "CP-OP-MESSAGE ④ — msg_id over 64 bytes is 1002");
-    let f = chat.handle("a", "s1", Op::Message, ask(ID_A.into(), "가".repeat(21_846))).await.err().expect("refused");
+    let f = chat.handle("a", "s1", Op::Message, ask(ID_A.into(), "가".repeat(21_846)), 70_000).await.err().expect("refused");
     assert_eq!(f.code, Code::InvalidPayload.num(), "CP-OP-MESSAGE ⑧ — content over 65535 bytes is 1002");
-    assert!(chat.handle("a", "s1", Op::Message, ask("not-hex-at-all".into(), "가".repeat(21_845))).await.is_ok(), "CP-OP-MESSAGE ④ — the shape is not checked · 65535 bytes is taken");
+    assert!(chat.handle("a", "s1", Op::Message, ask("not-hex-at-all".into(), "가".repeat(21_845)), 70_000).await.is_ok(), "CP-OP-MESSAGE ④ — the shape is not checked · 65535 bytes is taken");
+    let f = chat.handle("a", "s1", Op::Message, ask(ID_B.into(), "x".into()), BODY_MAX + 1).await.err().expect("refused");
+    assert_eq!(f.code, Code::InvalidPayload.num(), "연:RULE-CHAT-CONTENT — a body over 131072 received bytes is 1002");
 }
 
 #[test]
@@ -239,11 +241,11 @@ fn member_change_is_a_message() {
     let s = store(Visibility::Shared);
     join(&s, "S", "a", 1);
     let (m, _) = s.join("S", "b", Some(SYS), Some(5)).expect("add").expect("new member");
-    assert_eq!((m.kind, m.user_id.as_str(), m.target.as_deref(), m.content.as_str(), m.t), (Some(MemberKind::Add), SYS, Some("b"), "", 5));
+    assert_eq!((m.kind, m.user_id.as_str(), m.target.as_deref(), m.content.as_str(), m.t), (Some(ChatKind::Add), SYS, Some("b"), "", 5));
     assert!(m.msg_id.starts_with(SYS_HASH) && m.msg_id.len() == 36, "연:RULE-CHAT-MSG-ID — the server's own msg_id {}", m.msg_id);
     assert!(s.pending("b").expect("b").contains(&m.msg_id), "연:RULE-CHAT-MEMBER-NOTICE — the added member gets its add message");
     let (l, _) = s.leave("S", "a", None, Some(9)).expect("leave");
-    assert_eq!((l.kind, l.user_id.as_str(), l.target.as_deref()), (Some(MemberKind::Leave), "a", None));
+    assert_eq!((l.kind, l.user_id.as_str(), l.target.as_deref()), (Some(ChatKind::Leave), "a", None));
     assert!(!s.pending("a").expect("a").contains(&l.msg_id), "the one who left is not a member at that t");
     assert!(s.pending("b").expect("b").contains(&l.msg_id));
     assert_eq!(s.list("b").expect("list")[0].total, 0, "member change messages are not counted");
@@ -348,4 +350,214 @@ fn same_msg_id_in_another_space_conflicts() {
     join(&s, "T", "a", 1);
     fresh_t(s.send("a", "S", ID_A, "x", Some(10)));
     assert_eq!(s.send("a", "T", ID_A, "x", Some(10)), Err(Code::MsgIdConflict), "a msg_id is global — another space is a conflict");
+}
+
+fn rel(kind: ChatKind, to: &str) -> Outgoing {
+    Outgoing { kind: Some(kind), r#ref: Some(to.into()), ..Outgoing::default() }
+}
+
+fn edit(to: &str, content: &str) -> Outgoing {
+    Outgoing { content: content.into(), ext: Some(serde_json::json!({ "app": 1 })), ..rel(ChatKind::Edit, to) }
+}
+
+fn react(to: &str, keys: &[&str]) -> Outgoing {
+    Outgoing { keys: Some(keys.iter().map(|k| k.to_string()).collect()), ..rel(ChatKind::React, to) }
+}
+
+#[test]
+fn relations_are_checked_on_the_pointer_only() {
+    let s = store(Visibility::Shared);
+    s.create_space("T", None).expect("space T");
+    for u in ["a", "b"] {
+        join(&s, "S", u, 1);
+    }
+    join(&s, "T", "a", 1);
+    fresh_t(s.send("a", "S", &id(1), "hello", Some(10)));
+    fresh_t(s.send("a", "T", &id(2), "there", Some(10)));
+    assert_eq!(s.post("b", "S", &id(3), &edit(&id(1), "x"), Some(11)), Err(Code::NotRefSender), "연:RULE-CHAT-REF-CHECK — someone else's post cannot be edited");
+    assert_eq!(s.post("b", "S", &id(3), &rel(ChatKind::Delete, &id(1)), Some(11)), Err(Code::NotRefSender), "nor deleted");
+    fresh_t(s.post("b", "S", &id(4), &react(&id(1), &["+1"]), Some(12)));
+    assert_eq!(s.post("a", "S", &id(5), &edit("missing", "x"), Some(13)), Err(Code::RefNotFound), "an unknown msg_id");
+    assert_eq!(s.post("a", "S", &id(5), &edit(&id(2), "x"), Some(13)), Err(Code::RefNotFound), "a post of another space");
+    assert_eq!(s.post("a", "S", &id(5), &react(&id(4), &["x"]), Some(13)), Err(Code::RefNotFound), "a relation is not a post");
+    let reply = Outgoing { r#ref: Some(id(1)), ..Outgoing::text("reply") };
+    fresh_t(s.post("b", "S", &id(6), &reply, Some(14)));
+    assert_eq!(s.list("a").expect("list").iter().find(|e| e.space_id == "S").expect("S").total, 2, "연:RULE-CHAT-UNREAD — posts only (the post and the reply)");
+}
+
+#[test]
+fn delete_clears_the_post_and_what_points_at_it() {
+    let s = store(Visibility::Shared);
+    for u in ["a", "b"] {
+        join(&s, "S", u, 1);
+    }
+    fresh_t(s.send("a", "S", &id(1), "secret", Some(10)));
+    fresh_t(s.post("a", "S", &id(2), &edit(&id(1), "secret v2"), Some(11)));
+    fresh_t(s.post("b", "S", &id(3), &react(&id(1), &["+1"]), Some(12)));
+    fresh_t(s.post("a", "S", &id(4), &rel(ChatKind::Delete, &id(1)), Some(13)));
+    assert_eq!(s.post("a", "S", &id(5), &edit(&id(1), "again"), Some(14)), Err(Code::RefDeleted), "연:RULE-CHAT-DELETE — no edit after delete");
+    assert_eq!(s.post("b", "S", &id(5), &react(&id(1), &["x"]), Some(14)), Err(Code::RefDeleted), "no reaction after delete");
+    assert_eq!(s.post("a", "S", &id(5), &rel(ChatKind::Delete, &id(1)), Some(14)), Err(Code::RefDeleted), "no second delete");
+    fresh_t(s.post("b", "S", &id(6), &Outgoing { r#ref: Some(id(1)), ..Outgoing::text("why?") }, Some(15)));
+    let page = s.history("b", "S", Dir::Latest, 50).expect("history");
+    let orig = page.messages.iter().find(|m| m.msg_id == id(1)).expect("the envelope stays");
+    assert_eq!((orig.content.as_str(), orig.ext.is_none()), ("", true), "S-sym-IMPL-CHAT-STORE-5① — the post is emptied");
+    let ed = page.relations.iter().find(|m| m.kind == Some(ChatKind::Edit)).expect("the edit envelope stays");
+    assert_eq!((ed.content.as_str(), ed.ext.is_none()), ("", true), "S-sym-IMPL-CHAT-STORE-5② — the edited text is gone too");
+    let re = page.relations.iter().find(|m| m.kind == Some(ChatKind::React)).expect("the reaction envelope stays");
+    assert_eq!(re.keys.as_deref(), Some(&[][..]), "S-sym-IMPL-CHAT-STORE-5③ — reaction keys are emptied");
+    assert!(page.relations.iter().any(|m| m.kind == Some(ChatKind::Delete)), "the delete rides with the page");
+    assert!(page.messages.iter().all(|m| !m.content.contains("secret")) && page.relations.iter().all(|m| !m.content.contains("secret")));
+}
+
+#[test]
+fn a_page_counts_visible_messages_and_folds_relations() {
+    let s = store(Visibility::Shared);
+    for u in ["a", "b"] {
+        join(&s, "S", u, 1);
+    }
+    fresh_t(s.send("a", "S", &id(1), "p", Some(10)));
+    fresh_t(s.post("a", "S", &id(2), &edit(&id(1), "p1"), Some(20)));
+    fresh_t(s.post("a", "S", &id(3), &edit(&id(1), "p2"), Some(30)));
+    fresh_t(s.post("b", "S", &id(4), &react(&id(1), &["x"]), Some(21)));
+    fresh_t(s.post("b", "S", &id(5), &react(&id(1), &["y", "z"]), Some(31)));
+    fresh_t(s.post("a", "S", &id(6), &react(&id(1), &["x"]), Some(32)));
+    let page = s.history("a", "S", Dir::Latest, 1).expect("history");
+    assert_eq!(page.messages.iter().map(|m| m.msg_id.clone()).collect::<Vec<_>>(), vec![id(1)], "연:RULE-CHAT-HISTORY-PAGE — relations are not counted in the page");
+    let ed: Vec<&ChatMessage> = page.relations.iter().filter(|m| m.kind == Some(ChatKind::Edit)).collect();
+    assert_eq!((ed.len(), ed[0].content.as_str()), (1, "p2"), "the last edit by (t, msg_id) only");
+    let mut rx: Vec<(String, Vec<String>)> = page.relations.iter().filter(|m| m.kind == Some(ChatKind::React)).map(|m| (m.user_id.clone(), m.keys.clone().unwrap_or_default())).collect();
+    rx.sort();
+    assert_eq!(rx, vec![("a".into(), vec!["x".to_string()]), ("b".into(), vec!["y".to_string(), "z".to_string()])], "the last reaction per sender");
+    let tie = s.history("a", "S", Dir::Latest, 5).expect("again");
+    assert!(posts(&tie).len() == 1 && !tie.more, "no more pages — only one visible post");
+}
+
+#[test]
+fn a_tie_on_t_is_broken_by_msg_id() {
+    let s = store(Visibility::Shared);
+    join(&s, "S", "a", 1);
+    fresh_t(s.send("a", "S", &id(1), "p", Some(10)));
+    fresh_t(s.post("a", "S", &id(9), &edit(&id(1), "later id"), Some(20)));
+    fresh_t(s.post("a", "S", &id(8), &edit(&id(1), "earlier id"), Some(20)));
+    let page = s.history("a", "S", Dir::Latest, 10).expect("history");
+    let ed: Vec<&ChatMessage> = page.relations.iter().filter(|m| m.kind == Some(ChatKind::Edit)).collect();
+    assert_eq!(ed[0].content, "later id", "연:RULE-CHAT-FOLD — same t, the larger msg_id wins");
+}
+
+#[test]
+fn delete_and_edit_racing_on_one_post_leave_no_text() {
+    let path = temp_db("race");
+    let a = Store::open(&path, Visibility::Shared).expect("a");
+    a.create_space("S", None).expect("space");
+    a.join("S", "u", None, Some(1)).expect("join");
+    for round in 0..20usize {
+        let orig = id(1000 + round);
+        fresh_t(a.send("u", "S", &orig, "text", None));
+        let p1 = path.clone();
+        let o1 = orig.clone();
+        let del = std::thread::spawn(move || {
+            let s = Store::open(&p1, Visibility::Shared).expect("s1");
+            s.post("u", "S", &format!("d{round:035}"), &rel(ChatKind::Delete, &o1), None)
+        });
+        let p2 = path.clone();
+        let o2 = orig.clone();
+        let ed = std::thread::spawn(move || {
+            let s = Store::open(&p2, Visibility::Shared).expect("s2");
+            s.post("u", "S", &format!("e{round:035}"), &edit(&o2, "revived"), None)
+        });
+        let (d, e) = (del.join().expect("del"), ed.join().expect("edit"));
+        assert!(d.is_ok(), "the delete goes through");
+        assert!(e.is_ok() || e == Err(Code::RefDeleted), "S-sym-IMPL-CHAT-STORE-4① — the edit either went first or is refused: {e:?}");
+    }
+    let page = a.history("u", "S", Dir::Latest, 200).expect("history");
+    assert!(page.relations.iter().all(|m| m.content.is_empty()), "S-sym-IMPL-CHAT-STORE-4② — no edit text survives a delete");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_retry_after_delete_still_answers_the_first_t() {
+    let s = store(Visibility::Shared);
+    for u in ["a", "b"] {
+        join(&s, "S", u, 1);
+    }
+    let t0 = fresh_t(s.send("a", "S", &id(1), "post", Some(10)));
+    let tr = fresh_t(s.post("b", "S", &id(2), &react(&id(1), &["+1"]), Some(11)));
+    let te = fresh_t(s.post("a", "S", &id(3), &edit(&id(1), "post v2"), Some(12)));
+    fresh_t(s.post("a", "S", &id(4), &rel(ChatKind::Delete, &id(1)), Some(13)));
+    for (who, mid, out, t) in [("b", id(2), react(&id(1), &["+1"]), tr), ("a", id(3), edit(&id(1), "post v2"), te), ("a", id(1), Outgoing::text("post"), t0)] {
+        match s.post(who, "S", &mid, &out, Some(20)).expect("retry after the delete emptied it") {
+            Sent::Again { msg } => assert_eq!(msg.t, t, "연:RULE-CHAT-MSG-ID — an emptied message answers its first t"),
+            Sent::Fresh { .. } => panic!("must not store again"),
+        }
+    }
+    assert!(matches!(s.post("b", "S", &id(2), &react(&id(1), &["x"]), Some(20)), Ok(Sent::Again { .. })), "once emptied only the envelope decides — the stored body is gone");
+    assert_eq!(s.post("a", "S", &id(2), &react(&id(1), &["+1"]), Some(20)), Err(Code::MsgIdConflict), "another sender is still a conflict");
+}
+
+#[test]
+fn relations_follow_the_visibility_start() {
+    let s = store(Visibility::Joined);
+    join(&s, "S", "a", 1);
+    join(&s, "S", "u", 2);
+    fresh_t(s.send("a", "S", &id(1), "p", Some(10)));
+    s.leave("S", "u", None, Some(20)).expect("leave");
+    fresh_t(s.post("a", "S", &id(2), &edit(&id(1), "while away"), Some(25)));
+    s.join("S", "u", None, Some(30)).expect("rejoin");
+    fresh_t(s.post("a", "S", &id(3), &react(&id(1), &["+1"]), Some(35)));
+    let page = s.history("u", "S", Dir::After(0), 50).expect("history");
+    assert!(page.messages.iter().any(|m| m.msg_id == id(1)), "the post from the first interval is visible");
+    assert!(!page.relations.iter().any(|m| m.msg_id == id(2)), "연:RULE-CHAT-VISIBLE — an edit from the gap is not shown");
+    assert!(page.relations.iter().any(|m| m.msg_id == id(3)), "a reaction inside the interval is shown");
+}
+
+#[test]
+fn a_page_stays_within_the_byte_budget() {
+    let s = store(Visibility::Shared);
+    for u in ["a", "b"] {
+        join(&s, "S", u, 1);
+    }
+    let big = "x".repeat(10_000);
+    for i in 0..10u64 {
+        fresh_t(s.send("a", "S", &id(i as usize + 1), &big, Some(100 + i)));
+    }
+    fresh_t(s.post("b", "S", &id(50), &react(&id(10), &["+1"]), Some(200)));
+    let page = s.history_within("b", "S", Dir::Latest, 60, 35_000).expect("latest");
+    let ids: Vec<String> = page.messages.iter().map(|m| m.msg_id.clone()).collect();
+    assert_eq!(ids, vec![id(8), id(9), id(10)], "연:RULE-CHAT-HISTORY-PAGE — the latest side is kept within the budget");
+    assert!(page.more, "more after a byte cut");
+    assert!(page.relations.iter().any(|m| m.msg_id == id(50)), "relations of kept posts ride along");
+    let first = s.history_within("b", "S", Dir::After(0), 60, 35_000).expect("after");
+    assert_eq!(posts(&first).iter().map(|m| m.msg_id.clone()).collect::<Vec<_>>(), vec![id(1), id(2), id(3)], "after keeps the near side (member changes at t=1 ride first)");
+    let one = s.history_within("b", "S", Dir::Latest, 60, 10).expect("tiny");
+    assert_eq!(one.messages.len(), 1, "one message over the budget goes alone");
+}
+
+#[test]
+fn message_shapes_follow_the_kind() {
+    let ok = |v: serde_json::Value| outgoing(&v).is_ok();
+    assert!(ok(serde_json::json!({ "content": "x" })), "a post");
+    assert!(ok(serde_json::json!({ "content": "x", "ref": "m", "ext": { "k": [1] } })), "a reply with app data");
+    assert!(ok(serde_json::json!({ "kind": "edit", "ref": "m", "content": "y" })));
+    assert!(ok(serde_json::json!({ "kind": "react", "ref": "m", "keys": [] })), "an empty set removes all");
+    assert!(ok(serde_json::json!({ "kind": "delete", "ref": "m" })));
+    for bad in [
+        serde_json::json!({ "kind": "join", "content": "" }),
+        serde_json::json!({ "kind": "nope", "content": "" }),
+        serde_json::json!({ "keys": ["x"], "content": "x" }),
+        serde_json::json!({ "kind": "react", "ref": "m", "keys": ["x"], "content": "x" }),
+        serde_json::json!({ "kind": "delete", "ref": "m", "keys": [] }),
+        serde_json::json!({ "content": "x", "ext": "not an object" }),
+        serde_json::json!({ "content": "x", "target": "u" }),
+    ] {
+        assert_eq!(outgoing(&bad).err().map(|f| f.code), Some(Code::InvalidPayload.num()), "연:RULE-CHAT-KIND — a field the kind does not take is 1002: {bad}");
+    }
+    for missing in [
+        serde_json::json!({ "kind": "edit", "ref": "m" }),
+        serde_json::json!({ "kind": "react", "keys": ["x"] }),
+        serde_json::json!({ "kind": "react", "ref": "m" }),
+        serde_json::json!({}),
+    ] {
+        assert_eq!(outgoing(&missing).err().map(|f| f.code), Some(Code::MissingField.num()), "연:RULE-ERR-ONE-NUMBER-ONE-MEANING — a field the kind needs is 1003: {missing}");
+    }
 }

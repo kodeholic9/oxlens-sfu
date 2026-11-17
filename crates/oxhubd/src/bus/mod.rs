@@ -66,7 +66,7 @@ pub struct Bus {
     tx: mpsc::UnboundedSender<BusEvent>,
     node_token: Mutex<Option<Token>>,
     sess_tokens: Mutex<HashMap<String, Token>>,
-    user_nodes: Mutex<HashMap<String, HashMap<String, String>>>,
+    user_nodes: Mutex<HashMap<String, std::collections::HashSet<(String, String)>>>,
     following: AtomicBool,
     room_subs: SubMap,
     user_subs: SubMap,
@@ -123,6 +123,7 @@ impl Bus {
     async fn token_sub(self: &Arc<Self>, key: String) -> Result<Forward, String> {
         let me = Arc::downgrade(self);
         let keys = self.keys.clone();
+        let sess = key == self.keys.sess_all();
         let mut sub = self.session.token_sub(&key, true).await.map_err(|e| format!("token sub: {e}"))?;
         let h = tokio::spawn(async move {
             while let Some(ev) = sub.recv().await {
@@ -130,6 +131,7 @@ impl Bus {
                 match ev {
                     TokenEvent::Put(k) => b.on_token_sample(&keys, &k, true),
                     TokenEvent::Delete(k) => b.on_token_sample(&keys, &k, false),
+                    TokenEvent::BatchEnd if sess => b.following.store(true, Ordering::Release),
                     TokenEvent::BatchEnd => {}
                 }
             }
@@ -196,9 +198,9 @@ impl Bus {
             Some(Parsed::Sess { user, node, sid }) => {
                 if let Ok(mut g) = self.user_nodes.lock() {
                     if put {
-                        g.entry(user).or_default().insert(sid, node);
+                        g.entry(user).or_default().insert((sid, node));
                     } else if let Some(m) = g.get_mut(&user) {
-                        m.remove(&sid);
+                        m.remove(&(sid, node));
                         if m.is_empty() {
                             g.remove(&user);
                         }
@@ -218,7 +220,6 @@ impl Bus {
         if let Ok(mut k) = self.keep.lock() {
             k.push(sub);
         }
-        self.following.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -231,7 +232,7 @@ impl Bus {
             Ok(g) => g,
             Err(_) => return Vec::new(),
         };
-        let mut v: Vec<String> = users.iter().filter_map(|u| g.get(u)).flat_map(|m| m.values().cloned()).collect();
+        let mut v: Vec<String> = users.iter().filter_map(|u| g.get(u)).flat_map(|m| m.iter().map(|(_, node)| node.clone())).collect();
         v.sort();
         v.dedup();
         v

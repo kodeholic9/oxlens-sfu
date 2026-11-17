@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-CHAT-STORE · 정:IMPL-CHAT-MEMBERSHIP · 정:IMPL-CHAT-READ · 정:IMPL-CHAT-UNDELIVERED · 정:IMPL-CHAT-CATCHUP · 정:CAND-CHAT-STORE-SCHEMA · 연:RULE-CHAT-MSG-ID · 연:RULE-CHAT-ORDER · 연:RULE-CHAT-VISIBLE · 연:RULE-CHAT-UNREAD · 연:RULE-CHAT-VIEW · 연:RULE-CHAT-HISTORY-PAGE · 연:RULE-CHAT-UNDELIVERED · 연:RULE-CHAT-CATCHUP · 연:RULE-CHAT-MEMBER-NOTICE · model: claude-opus-5-5
+// spec: v1.6 · 연:RULE-CHAT-REF-CHECK · 연:RULE-CHAT-EDIT · 연:RULE-CHAT-REACT · 연:RULE-CHAT-DELETE · 연:RULE-CHAT-REPLY · 정:IMPL-CHAT-STORE ·정:IMPL-CHAT-MEMBERSHIP · 정:IMPL-CHAT-READ · 정:IMPL-CHAT-UNDELIVERED · 정:IMPL-CHAT-CATCHUP · 정:CAND-CHAT-STORE-SCHEMA · 연:RULE-CHAT-MSG-ID · 연:RULE-CHAT-ORDER · 연:RULE-CHAT-VISIBLE · 연:RULE-CHAT-UNREAD · 연:RULE-CHAT-VIEW · 연:RULE-CHAT-HISTORY-PAGE · 연:RULE-CHAT-UNDELIVERED · 연:RULE-CHAT-CATCHUP · 연:RULE-CHAT-MEMBER-NOTICE · model: claude-opus-5-5
 //! 채팅 저장소 — SQLite 하나 · 쓰기 트랜잭션은 SQLite 의 쓰기 꼴 `BEGIN IMMEDIATE` · `t` 는 저장 트랜잭션 안에서 찍은 ms(공간마다 줄 세우지 않음 · 같은 `t` 는 `msg_id` 차례) · 메시지와 같은 트랜잭션에 받을 사람 전원 몫 미전송 기록 · 멤버 입퇴장 구간과 멤버 변경 메시지 · 멤버 판 · 읽음 · 쪽은 같은 `t` 를 가르지 않음 · 따라잡기 쪽은 미전송 기록과 `t` 이상 메시지를 `msg_id` 로 합침.
 
 use std::sync::Mutex;
@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use common::system::Visibility;
 use oxsig::Code;
-use oxsig::msg::{ChatMessage, MemberKind, SpaceEntry};
+use oxsig::msg::{ChatKind, ChatMessage, SpaceEntry};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter};
 
 pub const HISTORY_DEFAULT: u32 = 60;
@@ -40,7 +40,11 @@ CREATE TABLE IF NOT EXISTS messages (
   t INTEGER NOT NULL,
   content TEXT NOT NULL,
   kind TEXT,
-  target TEXT
+  target TEXT,
+  ref_id TEXT,
+  keys TEXT,
+  ext TEXT,
+  deleted INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS messages_space_t_id ON messages (space_id, t, msg_id);
 CREATE TABLE IF NOT EXISTS reads (
@@ -60,7 +64,8 @@ CREATE INDEX IF NOT EXISTS undelivered_user_t ON undelivered (user_id, t, msg_id
 CREATE INDEX IF NOT EXISTS undelivered_t ON undelivered (t);
 ";
 
-const COLS: &str = "x.msg_id, x.space_id, x.user_id, x.t, x.content, x.kind, x.target";
+const COLS: &str = "x.msg_id, x.space_id, x.user_id, x.t, x.content, x.kind, x.target, x.ref_id, x.keys, x.ext";
+const VISIBLE: &str = " AND (x.kind IS NULL OR x.kind IN ('join', 'leave', 'add', 'remove'))";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Interval {
@@ -98,6 +103,7 @@ pub enum Sent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Page {
     pub messages: Vec<ChatMessage>,
+    pub relations: Vec<ChatMessage>,
     pub more: bool,
 }
 
@@ -145,15 +151,119 @@ fn open_member(c: &Connection, space: &str, user: &str) -> Result<bool, Code> {
 
 fn msg_of(r: &rusqlite::Row) -> rusqlite::Result<ChatMessage> {
     let kind: Option<String> = r.get(5)?;
+    let keys: Option<String> = r.get(8)?;
+    let ext: Option<String> = r.get(9)?;
     Ok(ChatMessage {
         msg_id: r.get(0)?,
         space_id: r.get(1)?,
         user_id: r.get(2)?,
         t: u(r.get(3)?),
         content: r.get(4)?,
-        kind: kind.as_deref().and_then(MemberKind::parse),
+        kind: kind.as_deref().and_then(ChatKind::parse),
+        r#ref: r.get(7)?,
+        keys: keys.and_then(|k| serde_json::from_str(&k).ok()),
+        ext: ext.and_then(|e| serde_json::from_str(&e).ok()),
         target: r.get(6)?,
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Outgoing {
+    pub kind: Option<ChatKind>,
+    pub r#ref: Option<String>,
+    pub content: String,
+    pub keys: Option<Vec<String>>,
+    pub ext: Option<serde_json::Value>,
+}
+
+impl Outgoing {
+    pub fn text(content: &str) -> Outgoing {
+        Outgoing { content: content.into(), ..Outgoing::default() }
+    }
+}
+
+fn check_ref(tx: &Transaction, space: &str, user: &str, out: &Outgoing) -> Result<(), Code> {
+    let Some(r) = out.r#ref.as_deref() else { return Ok(()) };
+    let orig = db(tx
+        .query_row("SELECT space_id, kind, user_id, deleted FROM messages WHERE msg_id = ?1", params![r], |x| {
+            Ok((x.get::<_, String>(0)?, x.get::<_, Option<String>>(1)?, x.get::<_, String>(2)?, x.get::<_, bool>(3)?))
+        })
+        .optional())?;
+    let Some((sp, kind, owner, deleted)) = orig else { return Err(Code::RefNotFound) };
+    if sp != space || kind.is_some() {
+        return Err(Code::RefNotFound);
+    }
+    let Some(k) = out.kind else { return Ok(()) };
+    if matches!(k, ChatKind::Edit | ChatKind::Delete) && owner != user {
+        return Err(Code::NotRefSender);
+    }
+    if deleted {
+        return Err(Code::RefDeleted);
+    }
+    Ok(())
+}
+
+fn erase(tx: &Transaction, orig: &str) -> Result<(), Code> {
+    db(tx.execute("UPDATE messages SET content = '', ext = NULL, deleted = 1 WHERE msg_id = ?1", params![orig]))?;
+    db(tx.execute("UPDATE messages SET content = '', ext = NULL WHERE ref_id = ?1 AND kind = 'edit'", params![orig]))?;
+    db(tx.execute("UPDATE messages SET keys = '[]' WHERE ref_id = ?1 AND kind = 'react'", params![orig]))?;
+    Ok(())
+}
+
+fn within(messages: Vec<ChatMessage>, relations: Vec<ChatMessage>, from_start: bool, max_bytes: usize) -> (Vec<ChatMessage>, Vec<ChatMessage>, bool) {
+    let size = |m: &ChatMessage| serde_json::to_vec(m).map(|v| v.len()).unwrap_or(0);
+    let mut rel_bytes: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for r in &relations {
+        let s = size(r);
+        rel_bytes.entry(r.r#ref.as_deref().unwrap_or_default()).and_modify(|v| *v += s).or_insert(s);
+    }
+    let cost = |m: &ChatMessage| size(m) + rel_bytes.get(m.msg_id.as_str()).copied().unwrap_or(0);
+    let order: Vec<usize> = if from_start { (0..messages.len()).collect() } else { (0..messages.len()).rev().collect() };
+    let mut keep = vec![false; messages.len()];
+    let (mut used, mut i) = (0usize, 0usize);
+    while i < order.len() {
+        let t = messages[order[i]].t;
+        let mut j = i;
+        let mut group = 0usize;
+        while j < order.len() && messages[order[j]].t == t {
+            group += cost(&messages[order[j]]);
+            j += 1;
+        }
+        if used > 0 && used + group > max_bytes {
+            break;
+        }
+        used += group;
+        for k in &order[i..j] {
+            keep[*k] = true;
+        }
+        i = j;
+    }
+    let cut = keep.iter().any(|k| !k);
+    let kept: Vec<ChatMessage> = messages.into_iter().zip(&keep).filter(|(_, k)| **k).map(|(m, _)| m).collect();
+    let ids: std::collections::HashSet<&str> = kept.iter().map(|m| m.msg_id.as_str()).collect();
+    let rel: Vec<ChatMessage> = relations.into_iter().filter(|r| r.r#ref.as_deref().is_some_and(|x| ids.contains(x))).collect();
+    (kept, rel, cut)
+}
+
+fn fold_relations(rel: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    let mut best: std::collections::BTreeMap<(String, u8, String), ChatMessage> = std::collections::BTreeMap::new();
+    for m in rel {
+        let Some(k) = m.kind else { continue };
+        let Some(r) = m.r#ref.clone() else { continue };
+        let key = match k {
+            ChatKind::Delete => (r, 0, String::new()),
+            ChatKind::Edit => (r, 1, String::new()),
+            ChatKind::React => (r, 2, m.user_id.clone()),
+            _ => continue,
+        };
+        let newer = best.get(&key).is_none_or(|b| (m.t, &m.msg_id) > (b.t, &b.msg_id));
+        if newer {
+            best.insert(key, m);
+        }
+    }
+    let mut v: Vec<ChatMessage> = best.into_values().collect();
+    v.sort_by(|a, b| (a.t, &a.msg_id).cmp(&(b.t, &b.msg_id)));
+    v
 }
 
 fn rows(c: &Connection, sql: &str, p: &[&dyn rusqlite::ToSql]) -> Result<Vec<ChatMessage>, Code> {
@@ -178,9 +288,11 @@ pub fn sys_msg_id(t: u64) -> String {
 }
 
 fn insert_msg(tx: &Transaction, m: &ChatMessage) -> Result<(), Code> {
+    let keys = m.keys.as_ref().map(|k| serde_json::to_string(k).unwrap_or_default());
+    let ext = m.ext.as_ref().map(|e| e.to_string());
     db(tx.execute(
-        "INSERT INTO messages (msg_id, space_id, user_id, t, content, kind, target) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![m.msg_id, m.space_id, m.user_id, n(m.t), m.content, m.kind.map(|k| k.as_str()), m.target],
+        "INSERT INTO messages (msg_id, space_id, user_id, t, content, kind, target, ref_id, keys, ext) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![m.msg_id, m.space_id, m.user_id, n(m.t), m.content, m.kind.map(|k| k.as_str()), m.target, m.r#ref, keys, ext],
     ))?;
     Ok(())
 }
@@ -203,9 +315,11 @@ impl Store {
             let _ = c.pragma_update(None, "journal_mode", "WAL");
         }
         c.execute_batch(SCHEMA).map_err(|e| format!("chat db schema: {e}"))?;
-        for col in ["kind", "target"] {
-            let _ = c.execute(&format!("ALTER TABLE messages ADD COLUMN {col} TEXT"), []);
+        for col in ["kind TEXT", "target TEXT", "ref_id TEXT", "keys TEXT", "ext TEXT", "deleted INTEGER NOT NULL DEFAULT 0"] {
+            let _ = c.execute(&format!("ALTER TABLE messages ADD COLUMN {col}"), []);
         }
+        c.execute_batch("CREATE INDEX IF NOT EXISTS messages_ref ON messages (ref_id); CREATE INDEX IF NOT EXISTS messages_t_id ON messages (t, msg_id);")
+            .map_err(|e| format!("chat db schema: {e}"))?;
         Ok(Store { conn: Mutex::new(c), default_vis })
     }
 
@@ -240,7 +354,7 @@ impl Store {
                 params![space, user, n(t), vis],
             ))?;
             let actor = by.unwrap_or(user);
-            let (kind, target) = if actor == user { (MemberKind::Join, None) } else { (MemberKind::Add, Some(user.to_string())) };
+            let (kind, target) = if actor == user { (ChatKind::Join, None) } else { (ChatKind::Add, Some(user.to_string())) };
             let msg = ChatMessage {
                 space_id: space.into(),
                 msg_id: sys_msg_id(t),
@@ -248,6 +362,9 @@ impl Store {
                 t,
                 content: String::new(),
                 kind: Some(kind),
+                r#ref: None,
+                keys: None,
+                ext: None,
                 target,
             };
             insert_msg(&tx, &msg)?;
@@ -271,7 +388,7 @@ impl Store {
                 params![space, user, n(t)],
             ))?;
             let actor = by.unwrap_or(user);
-            let (kind, target) = if actor == user { (MemberKind::Leave, None) } else { (MemberKind::Remove, Some(user.to_string())) };
+            let (kind, target) = if actor == user { (ChatKind::Leave, None) } else { (ChatKind::Remove, Some(user.to_string())) };
             let msg = ChatMessage {
                 space_id: space.into(),
                 msg_id: sys_msg_id(t),
@@ -279,6 +396,9 @@ impl Store {
                 t,
                 content: String::new(),
                 kind: Some(kind),
+                r#ref: None,
+                keys: None,
+                ext: None,
                 target,
             };
             insert_msg(&tx, &msg)?;
@@ -290,6 +410,10 @@ impl Store {
     }
 
     pub fn send(&self, user: &str, space: &str, msg_id: &str, content: &str, at: Option<u64>) -> Result<Sent, Code> {
+        self.post(user, space, msg_id, &Outgoing::text(content), at)
+    }
+
+    pub fn post(&self, user: &str, space: &str, msg_id: &str, out: &Outgoing, at: Option<u64>) -> Result<Sent, Code> {
         self.with(|c| {
             let tx = db(c.transaction_with_behavior(TransactionBehavior::Immediate))?;
             let ver = space_ver(&tx, space)?.ok_or(Code::SpaceNotFound)?;
@@ -297,7 +421,17 @@ impl Store {
                 .query_row(&format!("SELECT {COLS} FROM messages x WHERE x.msg_id = ?1"), params![msg_id], msg_of)
                 .optional())?;
             if let Some(m) = old {
-                if m.space_id == space && m.user_id == user && m.content == content && m.kind.is_none() {
+                let probe = match m.kind {
+                    Some(k) if k.is_relation() => m.r#ref.clone().unwrap_or_default(),
+                    _ => m.msg_id.clone(),
+                };
+                let erased = db(tx
+                    .query_row("SELECT deleted FROM messages WHERE msg_id = ?1", params![probe], |r| r.get::<_, bool>(0))
+                    .optional())?
+                .unwrap_or(false);
+                let envelope = m.space_id == space && m.user_id == user && m.kind == out.kind && m.r#ref == out.r#ref;
+                let body = m.content == out.content && m.keys == out.keys && m.ext == out.ext;
+                if envelope && (erased || body) {
                     return Ok(Sent::Again { msg: m });
                 }
                 return Err(Code::MsgIdConflict);
@@ -305,25 +439,38 @@ impl Store {
             if !open_member(&tx, space, user)? {
                 return Err(Code::NotSpaceMember);
             }
+            check_ref(&tx, space, user, out)?;
             let t = now_or(at);
             let msg = ChatMessage {
                 space_id: space.into(),
                 msg_id: msg_id.into(),
                 user_id: user.into(),
                 t,
-                content: content.into(),
-                kind: None,
+                content: out.content.clone(),
+                kind: out.kind,
+                r#ref: out.r#ref.clone(),
+                keys: out.keys.clone(),
+                ext: out.ext.clone(),
                 target: None,
             };
             insert_msg(&tx, &msg)?;
-            db(tx.execute(
-                "UPDATE spaces SET last_t = MAX(COALESCE(last_t, ?2), ?2), total = total + 1 WHERE space_id = ?1",
-                params![space, n(t)],
-            ))?;
-            db(tx.execute(
-                "INSERT INTO reads (space_id, user_id, read) SELECT ?1, ?2, total FROM spaces WHERE space_id = ?1 ON CONFLICT(space_id, user_id) DO UPDATE SET read = excluded.read",
-                params![space, user],
-            ))?;
+            if out.kind.is_none() {
+                db(tx.execute(
+                    "UPDATE spaces SET last_t = MAX(COALESCE(last_t, ?2), ?2), total = total + 1 WHERE space_id = ?1",
+                    params![space, n(t)],
+                ))?;
+                db(tx.execute(
+                    "INSERT INTO reads (space_id, user_id, read) SELECT ?1, ?2, total FROM spaces WHERE space_id = ?1 ON CONFLICT(space_id, user_id) DO UPDATE SET read = excluded.read",
+                    params![space, user],
+                ))?;
+            } else {
+                db(tx.execute("UPDATE spaces SET last_t = MAX(COALESCE(last_t, ?2), ?2) WHERE space_id = ?1", params![space, n(t)]))?;
+            }
+            if out.kind == Some(ChatKind::Delete)
+                && let Some(r) = out.r#ref.as_deref()
+            {
+                erase(&tx, r)?;
+            }
             record(&tx, &msg, user)?;
             db(tx.commit())?;
             Ok(Sent::Fresh { msg, ver })
@@ -349,6 +496,10 @@ impl Store {
     }
 
     pub fn history(&self, user: &str, space: &str, dir: Dir, limit: u32) -> Result<Page, Code> {
+        self.history_within(user, space, dir, limit, usize::MAX)
+    }
+
+    pub fn history_within(&self, user: &str, space: &str, dir: Dir, limit: u32, max_bytes: usize) -> Result<Page, Code> {
         self.with(|c| {
             if !db(c.query_row("SELECT EXISTS(SELECT 1 FROM spaces WHERE space_id = ?1)", params![space], |r| r.get::<_, bool>(0)))? {
                 return Err(Code::SpaceNotFound);
@@ -372,7 +523,7 @@ impl Store {
                 Dir::Latest => (" AND ?3 = ?3", "DESC", 0),
             };
             let pick = |cond: &str, edge: i64, lim: i64| -> Result<Vec<ChatMessage>, Code> {
-                let sql = format!("SELECT {COLS} FROM messages x WHERE x.space_id = ?1{seen}{cond} ORDER BY x.t {order}, x.msg_id {order} LIMIT ?4");
+                let sql = format!("SELECT {COLS} FROM messages x WHERE x.space_id = ?1{seen}{VISIBLE}{cond} ORDER BY x.t {order}, x.msg_id {order} LIMIT ?4");
                 rows(c, &sql, &[&space, &user, &edge, &lim])
             };
             let mut messages = pick(cond, edge, i64::from(limit) + 1)?;
@@ -390,7 +541,18 @@ impl Store {
             if order == "DESC" {
                 messages.reverse();
             }
-            Ok(Page { messages, more })
+            let ids: Vec<&String> = messages.iter().filter(|m| m.kind.is_none()).map(|m| &m.msg_id).collect();
+            let relations = if ids.is_empty() {
+                Vec::new()
+            } else {
+                let marks = (3..ids.len() + 3).map(|i| format!("?{i}")).collect::<Vec<_>>().join(", ");
+                let sql = format!("SELECT {COLS} FROM messages x WHERE x.space_id = ?1{seen} AND x.kind IN ('edit', 'react', 'delete') AND x.ref_id IN ({marks})");
+                let mut p: Vec<&dyn rusqlite::ToSql> = vec![&space, &user];
+                p.extend(ids.iter().map(|i| *i as &dyn rusqlite::ToSql));
+                fold_relations(rows(c, &sql, &p)?)
+            };
+            let (messages, relations, cut) = within(messages, relations, order == "ASC", max_bytes);
+            Ok(Page { messages, relations, more: more || cut })
         })
     }
 
@@ -453,11 +615,12 @@ impl Store {
         let lim = n(max_msgs.max(1) as u64);
         self.with(|c| {
             let sp = space.unwrap_or("");
+            let (d_space, x_space) = if space.is_some() { ("d.space_id = ?2", "x.space_id = ?2") } else { ("?2 = ?2", "?2 = ?2") };
             let mut all = rows(
                 c,
                 &format!(
                     "SELECT {COLS} FROM undelivered d JOIN messages x ON x.msg_id = d.msg_id
-                     WHERE d.user_id = ?1 AND (?2 = '' OR d.space_id = ?2) AND (d.t, d.msg_id) > (?3, ?4)
+                     WHERE d.user_id = ?1 AND {d_space} AND (d.t, d.msg_id) > (?3, ?4)
                      ORDER BY d.t, d.msg_id LIMIT ?5"
                 ),
                 &[&user, &sp, &n(after.t), &after.msg_id, &lim],
@@ -467,7 +630,7 @@ impl Store {
                     c,
                     &format!(
                         "SELECT {COLS} FROM messages x
-                         WHERE (?2 = '' OR x.space_id = ?2) AND x.t >= ?6 AND (x.t, x.msg_id) > (?3, ?4)
+                         WHERE {x_space} AND x.t >= ?6 AND (x.t, x.msg_id) > (?3, ?4)
                            AND EXISTS(SELECT 1 FROM members mm WHERE mm.space_id = x.space_id AND mm.user_id = ?1 AND mm.leave_t IS NULL
                              AND (mm.vis = 'shared' OR EXISTS(SELECT 1 FROM members m2 WHERE m2.space_id = x.space_id AND m2.user_id = ?1
                                AND m2.join_t <= x.t AND (m2.leave_t IS NULL OR x.t < m2.leave_t))))
@@ -479,9 +642,9 @@ impl Store {
             all.sort_by(|a, b| (a.t, &a.msg_id).cmp(&(b.t, &b.msg_id)));
             all.dedup_by(|a, b| a.msg_id == b.msg_id);
             let mut out = Vec::new();
-            let mut bytes = 0usize;
+            let mut bytes = r#"{"messages":[]}"#.len();
             for m in all {
-                let size = serde_json::to_vec(&m).map(|b| b.len()).unwrap_or(0);
+                let size = serde_json::to_vec(&m).map(|b| b.len()).unwrap_or(0) + usize::from(!out.is_empty());
                 if !out.is_empty() && (out.len() >= max_msgs || bytes + size > max_bytes) {
                     break;
                 }

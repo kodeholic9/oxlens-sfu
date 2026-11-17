@@ -47,6 +47,7 @@ pub struct Session {
     pub source_tag: bool,
     pub created_at: u64,
     pub st: Mutex<SesState>,
+    pub catchup_slot: Arc<tokio::sync::Semaphore>,
 }
 
 impl Session {
@@ -295,6 +296,7 @@ pub async fn bind(ctx: &Arc<Ctx>, conn: &Conn, op: u16, pid: u32, flags: u8, bod
         source_tag: req.source_tag.unwrap_or(false),
         created_at: common::now_ms(),
         st: Mutex::new(SesState { bound: true, live: true, conn: Some(conn.clone()), ..Default::default() }),
+        catchup_slot: Arc::new(tokio::sync::Semaphore::new(1)),
     });
     register(ctx, &s).await;
     let to = s.state_name(ctx.full_flag());
@@ -347,6 +349,7 @@ async fn resume_session(ctx: &Arc<Ctx>, sid: &str) -> Option<Arc<Session>> {
         source_tag: d.source_tag,
         created_at: common::now_ms(),
         st: Mutex::new(SesState { servers: d.servers.clone(), epochs: d.epochs, touched: d.touched, ..Default::default() }),
+        catchup_slot: Arc::new(tokio::sync::Semaphore::new(1)),
     });
     register(ctx, &s).await;
     for rooms in d.servers.values() {
@@ -544,7 +547,7 @@ pub async fn handle_request(ctx: &Arc<Ctx>, s: &Arc<Session>, conn: &Conn, r: Re
     };
     let arev = body.get("arev").and_then(|v| v.as_u64());
     let (res, catchup) = if crate::chat::is_chat(r.op) {
-        match chat_op(ctx, s, r.op, body).await {
+        match chat_op(ctx, s, r.op, body, r.body.len()).await {
             Ok((v, c)) => (Ok(v), c),
             Err(f) => (Err(f), None),
         }
@@ -742,9 +745,9 @@ async fn apply_affiliation(ctx: &Ctx, s: &Session, sfu: Option<&str>, room: Opti
     }
 }
 
-async fn chat_op(ctx: &Arc<Ctx>, s: &Arc<Session>, op: Op, body: serde_json::Value) -> Result<(serde_json::Value, Option<oxsig::msg::CatchupReq>), Failure> {
+async fn chat_op(ctx: &Arc<Ctx>, s: &Arc<Session>, op: Op, body: serde_json::Value, raw: usize) -> Result<(serde_json::Value, Option<oxsig::msg::CatchupReq>), Failure> {
     let Some(chat) = ctx.chat.get().cloned() else { return Err(Code::ChatDisabled.failure()) };
-    let a = chat.handle(&s.user_id, &s.sid, op, body).await?;
+    let a = chat.handle(&s.user_id, &s.sid, op, body, raw).await?;
     if let Some(d) = a.deliver {
         let ctx = ctx.clone();
         tokio::spawn(async move { chat_fanout(&ctx, &chat, d).await });
@@ -769,10 +772,11 @@ async fn catchup_run(s: Arc<Session>, chat: Arc<crate::chat::Chat>, req: oxsig::
         let Some(last) = page.last() else { return };
         after = crate::chat::store::Cursor { t: last.t, msg_id: last.msg_id.clone() };
         let msg_ids = page.iter().map(|m| m.msg_id.clone()).collect();
+        let Ok(slot) = s.catchup_slot.clone().acquire_owned().await else { return };
         let Some(c) = s.conn() else { return };
         let (tx, rx) = tokio::sync::oneshot::channel();
         let body = serde_json::to_vec(&oxsig::msg::MessagesBody { messages: page }).unwrap_or_default();
-        let receipt = conn::Receipt { user: s.user_id.clone(), msg_ids, done: Some(tx) };
+        let receipt = conn::Receipt { user: s.user_id.clone(), msg_ids, done: Some(tx), slot: Some(slot) };
         if !c.send(Out::Notice { op: Op::Messages, body, receipt: Some(receipt) }) {
             return;
         }
@@ -784,7 +788,7 @@ async fn catchup_run(s: Arc<Session>, chat: Arc<crate::chat::Chat>, req: oxsig::
 
 async fn chat_fanout(ctx: &Ctx, chat: &crate::chat::Chat, d: crate::chat::Deliver) {
     let only = match ctx.bus.follows_sessions() {
-        true => Some(ctx.bus.nodes_of(&chat.recipients(&d).await.unwrap_or_default())),
+        true => chat.recipients(&d).await.ok().map(|users| ctx.bus.nodes_of(&users)),
         false => None,
     };
     let mut failed = crate::chat::fanout_others(&ctx.bus, &d, only.as_deref()).await;
@@ -821,7 +825,7 @@ async fn deliver_chat_local(ctx: &Ctx, chat: &crate::chat::Chat, d: &crate::chat
         }
         match s.conn() {
             Some(c) => {
-                let receipt = conn::Receipt { user: s.user_id.clone(), msg_ids: vec![d.message.msg_id.clone()], done: None };
+                let receipt = conn::Receipt { user: s.user_id.clone(), msg_ids: vec![d.message.msg_id.clone()], done: None, slot: None };
                 let _ = c.send(Out::Notice { op: Op::Message, body: body.clone(), receipt: Some(receipt) });
             }
             None => {

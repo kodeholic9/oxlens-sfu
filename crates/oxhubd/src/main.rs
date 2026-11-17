@@ -132,6 +132,7 @@ async fn run(cfg: HubCfg) -> i32 {
     let accounts = Accounts { keys: cfg.system.hub.auth.api_keys.clone(), jwt_secret: cfg.system.hub.auth.jwt_secret.clone() };
     let ctx = ses::Ctx::new(cfg.policy.clone(), accounts, bus.clone());
     if cfg.system.bus.follow_sessions
+        && cfg.system.chat.is_some()
         && let Err(e) = bus.follow_sessions().await
     {
         eprintln!("oxhubd: {e}");

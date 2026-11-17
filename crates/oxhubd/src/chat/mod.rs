@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-CHAT-GATEWAY-MODULE · 정:IMPL-CHAT-STORE · 정:IMPL-CHAT-FANOUT · 정:IMPL-CHAT-FILTER · 정:IMPL-CHAT-READ · 정:IMPL-CHAT-UNDELIVERED · 정:IMPL-CHAT-CATCHUP · 연:CHAT.op.MESSAGE · 연:CHAT.op.SPACE_HISTORY · 연:CHAT.op.SPACE_LIST · 연:CHAT.op.SPACE_VIEW · 연:CHAT.op.CATCHUP · 연:RULE-CHAT-MSG-ID · 연:RULE-CHAT-CONTENT · 연:RULE-CHAT-RECV · 연:RULE-CHAT-DISABLED · 연:RULE-CHAT-LIVE-SOCKET-LOSS · 연:RULE-CHAT-CATCHUP · model: claude-opus-5-5
+// spec: v1.6 · 연:RULE-CHAT-KIND · 연:RULE-CHAT-EXT · 정:RULE-CHAT-GATEWAY-MODULE ·정:IMPL-CHAT-STORE · 정:IMPL-CHAT-FANOUT · 정:IMPL-CHAT-FILTER · 정:IMPL-CHAT-READ · 정:IMPL-CHAT-UNDELIVERED · 정:IMPL-CHAT-CATCHUP · 연:CHAT.op.MESSAGE · 연:CHAT.op.SPACE_HISTORY · 연:CHAT.op.SPACE_LIST · 연:CHAT.op.SPACE_VIEW · 연:CHAT.op.CATCHUP · 연:RULE-CHAT-MSG-ID · 연:RULE-CHAT-CONTENT · 연:RULE-CHAT-RECV · 연:RULE-CHAT-DISABLED · 연:RULE-CHAT-LIVE-SOCKET-LOSS · 연:RULE-CHAT-CATCHUP · model: claude-opus-5-5
 //! 채팅 — 게이트웨이 안 모듈 · op 다섯 · 저장이 낸 `{멤버 판, 보낸 세션, 메시지}` 를 다른 node 에 뿌린다(실패 수를 돌려주고 다시 안 보낸다) · 공간마다 멤버 캐시로 `명단(t_M)` 을 낸다 · 받은 ACK 로 미전송 기록을 지운다 · 보관 기간을 넘긴 미전송 기록을 지운다. 세션은 모른다 — 세션이 이 모듈을 부른다.
 
 pub mod store;
@@ -8,16 +8,17 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use oxsig::msg::{CatchupReq, ChatMessage, MessageRes, SpaceHistoryRes, SpaceListRes, SpaceViewRes};
+use oxsig::msg::{CatchupReq, ChatKind, ChatMessage, MessageRes, SpaceHistoryRes, SpaceListRes, SpaceViewRes};
 use oxsig::{Code, Failure, Op};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::bus::Bus;
 use common::envelope::Reply;
-use store::{CONTENT_MAX, Cursor, Dir, HISTORY_DEFAULT, HISTORY_MAX, MSG_ID_MAX, Roster, Sent, Store};
+use store::{CONTENT_MAX, Cursor, Dir, HISTORY_DEFAULT, HISTORY_MAX, MSG_ID_MAX, Outgoing, Roster, Sent, Store};
 
 pub const FANOUT_WHAT: &str = "chat";
+pub const BODY_MAX: usize = 131_072;
 pub const PURGE_EVERY: Duration = Duration::from_secs(600);
 const DAY_MS: u64 = 86_400_000;
 
@@ -81,22 +82,22 @@ impl Chat {
         self.roster_at_least(&d.message.space_id, d.ver).await.map(|r| r.at(d.message.t))
     }
 
-    pub async fn handle(&self, user: &str, sid: &str, op: Op, body: Value) -> Result<Answer, Failure> {
+    pub async fn handle(&self, user: &str, sid: &str, op: Op, body: Value, raw: usize) -> Result<Answer, Failure> {
         let user = user.to_string();
         let plain = |body: Value| Answer { body, deliver: None, catchup: None };
         match op {
             Op::Message => {
+                if raw > BODY_MAX {
+                    return Err(Code::InvalidPayload.failure().with_message("body"));
+                }
                 let space: String = oxsig::code::need(&body, "space_id")?;
                 let msg_id: String = oxsig::code::need(&body, "msg_id")?;
-                let content: String = oxsig::code::need(&body, "content")?;
                 if !valid_msg_id(&msg_id) {
                     return Err(Code::InvalidPayload.failure().with_message("msg_id"));
                 }
-                if content.len() > CONTENT_MAX {
-                    return Err(Code::InvalidPayload.failure().with_message("content"));
-                }
+                let out = outgoing(&body)?;
                 let st = self.store.clone();
-                let sent = blocking(move || st.send(&user, &space, &msg_id, &content, None)).await.map_err(Code::failure)?;
+                let sent = blocking(move || st.post(&user, &space, &msg_id, &out, None)).await.map_err(Code::failure)?;
                 let (msg, deliver) = match sent {
                     Sent::Fresh { msg, ver } => (msg.clone(), Some(Deliver { ver, sid: sid.to_string(), message: msg })),
                     Sent::Again { msg } => (msg, None),
@@ -119,8 +120,9 @@ impl Chat {
                     (None, None) => Dir::Latest,
                 };
                 let st = self.store.clone();
-                let page = blocking(move || st.history(&user, &space, dir, limit)).await.map_err(Code::failure)?;
-                Ok(plain(json(&SpaceHistoryRes { messages: page.messages, more: page.more })?))
+                let budget = self.limits.bundle_bytes;
+                let page = blocking(move || st.history_within(&user, &space, dir, limit, budget)).await.map_err(Code::failure)?;
+                Ok(plain(json(&SpaceHistoryRes { messages: page.messages, relations: page.relations, more: page.more })?))
             }
             Op::SpaceList => {
                 let st = self.store.clone();
@@ -181,13 +183,66 @@ pub fn valid_msg_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= MSG_ID_MAX
 }
 
+fn bad(what: &str) -> Failure {
+    Code::InvalidPayload.failure().with_message(what)
+}
+
+pub fn outgoing(body: &Value) -> Result<Outgoing, Failure> {
+    let kind = match body.get("kind") {
+        None => None,
+        Some(Value::String(s)) => Some(ChatKind::parse(s).filter(|k| k.is_relation()).ok_or_else(|| bad("kind"))?),
+        Some(_) => return Err(bad("kind")),
+    };
+    let r#ref = match body.get("ref") {
+        None => None,
+        Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
+        Some(_) => return Err(bad("ref")),
+    };
+    let content = match body.get("content") {
+        None => None,
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(_) => return Err(bad("content")),
+    };
+    let keys = match body.get("keys") {
+        None => None,
+        Some(v) => Some(serde_json::from_value::<Vec<String>>(v.clone()).map_err(|_| bad("keys"))?),
+    };
+    let ext = match body.get("ext") {
+        None => None,
+        Some(v) if v.is_object() => Some(v.clone()),
+        Some(_) => return Err(bad("ext")),
+    };
+    if body.get("target").is_some() {
+        return Err(bad("target"));
+    }
+    if content.as_ref().is_some_and(|c| c.len() > CONTENT_MAX) {
+        return Err(bad("content"));
+    }
+    let empty = content.as_deref().is_none_or(str::is_empty);
+    let (need, extra) = match kind {
+        None => (content.is_some(), keys.is_some()),
+        Some(ChatKind::Edit) => (r#ref.is_some() && content.is_some(), keys.is_some()),
+        Some(ChatKind::React) => (r#ref.is_some() && keys.is_some(), !empty || ext.is_some()),
+        Some(ChatKind::Delete) => (r#ref.is_some(), keys.is_some() || !empty || ext.is_some()),
+        Some(_) => (true, true),
+    };
+    if extra {
+        return Err(bad("kind"));
+    }
+    if !need {
+        return Err(Code::MissingField.failure().with_message("kind"));
+    }
+    Ok(Outgoing { kind, r#ref, content: content.unwrap_or_default(), keys, ext })
+}
+
 fn json<T: Serialize>(v: &T) -> Result<Value, Failure> {
     serde_json::to_value(v).map_err(|_| Code::InternalError.failure())
 }
 
 pub async fn fanout_others(bus: &Bus, d: &Deliver, only: Option<&[String]>) -> Vec<String> {
     let payload = serde_json::to_vec(d).unwrap_or_default();
-    let mut failed = Vec::new();
+    let known: Vec<String> = bus.known_nodes().into_iter().map(|(n, _)| n).collect();
+    let mut failed: Vec<String> = only.unwrap_or_default().iter().filter(|n| **n != bus.node && !known.contains(n)).cloned().collect();
     let mut live = Vec::new();
     for (n, up) in bus.known_nodes() {
         if n == bus.node || only.is_some_and(|o| !o.contains(&n)) {

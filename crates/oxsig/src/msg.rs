@@ -419,7 +419,16 @@ pub struct AffiliationRes {
 pub struct MessageReq {
     pub space_id: String,
     pub msg_id: String,
-    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ChatKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keys: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ext: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -429,25 +438,44 @@ pub struct MessageRes {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum MemberKind {
+pub enum ChatKind {
+    Edit,
+    React,
+    Delete,
     Join,
     Leave,
     Add,
     Remove,
+    #[serde(other)]
+    Other,
 }
 
-impl MemberKind {
+impl ChatKind {
+    const KNOWN: [ChatKind; 7] = [ChatKind::Edit, ChatKind::React, ChatKind::Delete, ChatKind::Join, ChatKind::Leave, ChatKind::Add, ChatKind::Remove];
+
     pub fn as_str(self) -> &'static str {
         match self {
-            MemberKind::Join => "join",
-            MemberKind::Leave => "leave",
-            MemberKind::Add => "add",
-            MemberKind::Remove => "remove",
+            ChatKind::Edit => "edit",
+            ChatKind::React => "react",
+            ChatKind::Delete => "delete",
+            ChatKind::Join => "join",
+            ChatKind::Leave => "leave",
+            ChatKind::Add => "add",
+            ChatKind::Remove => "remove",
+            ChatKind::Other => "other",
         }
     }
 
-    pub fn parse(s: &str) -> Option<MemberKind> {
-        [MemberKind::Join, MemberKind::Leave, MemberKind::Add, MemberKind::Remove].into_iter().find(|k| k.as_str() == s)
+    pub fn parse(s: &str) -> Option<ChatKind> {
+        ChatKind::KNOWN.into_iter().find(|k| k.as_str() == s)
+    }
+
+    pub fn is_relation(self) -> bool {
+        matches!(self, ChatKind::Edit | ChatKind::React | ChatKind::Delete)
+    }
+
+    pub fn is_member(self) -> bool {
+        matches!(self, ChatKind::Join | ChatKind::Leave | ChatKind::Add | ChatKind::Remove)
     }
 }
 
@@ -459,7 +487,13 @@ pub struct ChatMessage {
     pub t: u64,
     pub content: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<MemberKind>,
+    pub kind: Option<ChatKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keys: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ext: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
 }
@@ -491,6 +525,8 @@ pub struct SpaceHistoryReq {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpaceHistoryRes {
     pub messages: Vec<ChatMessage>,
+    #[serde(default)]
+    pub relations: Vec<ChatMessage>,
     pub more: bool,
 }
 
