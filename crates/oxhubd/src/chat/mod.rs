@@ -185,12 +185,12 @@ fn json<T: Serialize>(v: &T) -> Result<Value, Failure> {
     serde_json::to_value(v).map_err(|_| Code::InternalError.failure())
 }
 
-pub async fn fanout_others(bus: &Bus, d: &Deliver) -> Vec<String> {
+pub async fn fanout_others(bus: &Bus, d: &Deliver, only: Option<&[String]>) -> Vec<String> {
     let payload = serde_json::to_vec(d).unwrap_or_default();
     let mut failed = Vec::new();
     let mut live = Vec::new();
     for (n, up) in bus.known_nodes() {
-        if n == bus.node {
+        if n == bus.node || only.is_some_and(|o| !o.contains(&n)) {
             continue;
         }
         if up {

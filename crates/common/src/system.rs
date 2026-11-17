@@ -183,6 +183,12 @@ pub struct Bus {
     #[serde(default)]
     pub connect: Vec<String>,
     pub namespace: String,
+    #[serde(default = "default_follow_sessions")]
+    pub follow_sessions: bool,
+}
+
+fn default_follow_sessions() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -314,6 +320,7 @@ impl System {
         v.push(("bus.advertise".into(), if b.advertise.is_empty() { "-".into() } else { b.advertise.join(",") }));
         v.push(("bus.connect".into(), if b.connect.is_empty() { "-".into() } else { b.connect.join(",") }));
         v.push(("bus.namespace".into(), b.namespace.clone()));
+        v.push(("bus.follow_sessions".into(), b.follow_sessions.to_string()));
         let s = &self.supervisor;
         v.push(("supervisor.backoff_ms".into(), s.backoff_ms.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",")));
         v.push(("supervisor.intensity_max".into(), s.intensity_max.to_string()));

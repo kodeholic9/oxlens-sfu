@@ -6,6 +6,7 @@ pub mod placement;
 pub mod view;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -65,6 +66,8 @@ pub struct Bus {
     tx: mpsc::UnboundedSender<BusEvent>,
     node_token: Mutex<Option<Token>>,
     sess_tokens: Mutex<HashMap<String, Token>>,
+    user_nodes: Mutex<HashMap<String, HashMap<String, String>>>,
+    following: AtomicBool,
     room_subs: SubMap,
     user_subs: SubMap,
     local: Mutex<Option<Local>>,
@@ -105,6 +108,8 @@ impl Bus {
             tx,
             node_token: Mutex::new(None),
             sess_tokens: Mutex::new(HashMap::new()),
+            user_nodes: Mutex::new(HashMap::new()),
+            following: AtomicBool::new(false),
             room_subs: Mutex::new(HashMap::new()),
             user_subs: Mutex::new(HashMap::new()),
             local: Mutex::new(None),
@@ -188,11 +193,48 @@ impl Bus {
             Some(Parsed::Node { node, inst }) => TokenEv::NodeDel { node, inst },
             Some(Parsed::Room { room, node, inst }) if put => TokenEv::RoomPut { room, node, inst },
             Some(Parsed::Room { room, node, inst }) => TokenEv::RoomDel { room, node, inst },
+            Some(Parsed::Sess { user, node, sid }) => {
+                if let Ok(mut g) = self.user_nodes.lock() {
+                    if put {
+                        g.entry(user).or_default().insert(sid, node);
+                    } else if let Some(m) = g.get_mut(&user) {
+                        m.remove(&sid);
+                        if m.is_empty() {
+                            g.remove(&user);
+                        }
+                    }
+                }
+                return;
+            }
             _ => return,
         };
         if let Ok(mut v) = self.view.lock() {
             v.on_token(ev, common::now_ms());
         }
+    }
+
+    pub async fn follow_sessions(self: &Arc<Self>) -> Result<(), String> {
+        let sub = self.token_sub(self.keys.sess_all()).await?;
+        if let Ok(mut k) = self.keep.lock() {
+            k.push(sub);
+        }
+        self.following.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    pub fn follows_sessions(&self) -> bool {
+        self.following.load(Ordering::Acquire)
+    }
+
+    pub fn nodes_of(&self, users: &[String]) -> Vec<String> {
+        let g = match self.user_nodes.lock() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        let mut v: Vec<String> = users.iter().filter_map(|u| g.get(u)).flat_map(|m| m.values().cloned()).collect();
+        v.sort();
+        v.dedup();
+        v
     }
 
     pub async fn declare_self(&self) -> Result<(), String> {
