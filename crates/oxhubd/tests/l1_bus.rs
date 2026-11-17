@@ -69,12 +69,12 @@ fn sess_table_removes_the_pair_not_the_session() {
     v.on_token(sess(true, "u", "node-a", "s1"), 0);
     v.on_token(sess(true, "u", "node-b", "s1"), 10);
     v.on_token(sess(false, "u", "node-a", "s1"), 20);
-    assert_eq!(v.fanout_scope(Some(Ok(u.clone()))), Some(vec!["node-b".to_string()]), "S-sym-IMPL-CHAT-FANOUT-1 — 새 node 의 Put 이 옛 node 의 Delete 보다 먼저 와도 표는 U → {{B}}");
+    assert_eq!(v.fanout_scope(Some(Ok(u.clone()))), Some(vec!["node-b".to_string()]), "S-sym-IMPL-CHAT-FANOUT-1① — 새 node 의 Put 이 옛 node 의 Delete 보다 먼저 와도 표는 U → {{B}}");
     let mut w = following("node-c");
     w.on_token(sess(true, "u", "node-a", "s1"), 0);
     w.on_token(sess(false, "u", "node-a", "s1"), 10);
     w.on_token(sess(true, "u", "node-b", "s1"), 20);
-    assert_eq!(w.fanout_scope(Some(Ok(u.clone()))), v.fanout_scope(Some(Ok(u))), "S-sym-IMPL-CHAT-FANOUT-1 — 짝 집합이면 두 사건이 어느 차례로 와도 끝 상태가 같다(정:RULE-BUS-PRESENCE)");
+    assert_eq!(w.fanout_scope(Some(Ok(u.clone()))), v.fanout_scope(Some(Ok(u))), "S-sym-IMPL-CHAT-FANOUT-1① — 짝 집합이면 두 사건이 어느 차례로 와도 끝 상태가 같다(정:RULE-BUS-PRESENCE)");
     assert!(v.last_event.is_none() && !v.settle_due(5_000), "정:RULE-BUS-EVENTS — sess 토큰 사건은 방 · node 판정의 가라앉기를 밀지 않는다");
 }
 
