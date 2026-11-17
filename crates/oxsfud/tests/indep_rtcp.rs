@@ -183,7 +183,6 @@ fn rr_random_jitter_exact_a8_float() {
 }
 
 #[test]
-#[ignore = "spec defect: S-sym-IMPL-RTCP-TERMINATE-6 RR asked before the source is valid (probation) with extended_max < base_seq — RFC 3550 A.3 leaves expected's signedness open, rtcp.json has no case; product reports lost 0x7fffff fraction 255, signed reading gives a small negative loss"]
 fn rr_random_reports_during_probation() {
     rr_random(0x3550_3550_a1a3_a8a8, 0, false, true);
 }
