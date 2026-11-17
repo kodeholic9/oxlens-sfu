@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 연:RULE-CHAT-KIND · 연:RULE-CHAT-EXT · 정:RULE-CHAT-GATEWAY-MODULE ·정:IMPL-CHAT-STORE · 정:IMPL-CHAT-FANOUT · 정:IMPL-CHAT-FILTER · 정:IMPL-CHAT-READ · 정:IMPL-CHAT-UNDELIVERED · 정:IMPL-CHAT-CATCHUP · 연:CHAT.op.MESSAGE · 연:CHAT.op.SPACE_HISTORY · 연:CHAT.op.SPACE_LIST · 연:CHAT.op.SPACE_VIEW · 연:CHAT.op.CATCHUP · 연:RULE-CHAT-MSG-ID · 연:RULE-CHAT-CONTENT · 연:RULE-CHAT-RECV · 연:RULE-CHAT-DISABLED · 연:RULE-CHAT-LIVE-SOCKET-LOSS · 연:RULE-CHAT-CATCHUP · model: claude-opus-5-5
+// spec: v1.6 · 연:RULE-CHAT-KIND · 연:RULE-CHAT-EXT · 정:RULE-CHAT-GATEWAY-MODULE ·정:IMPL-CHAT-STORE · 정:IMPL-CHAT-FANOUT · 정:IMPL-CHAT-FILTER · 정:IMPL-CHAT-READ · 정:IMPL-CHAT-UNDELIVERED · 정:IMPL-CHAT-CATCHUP · 정:IMPL-CHAT-STORE-FAULTS · 연:CHAT.op.MESSAGE · 연:CHAT.op.SPACE_HISTORY · 연:CHAT.op.SPACE_LIST · 연:CHAT.op.SPACE_VIEW · 연:CHAT.op.CATCHUP · 연:RULE-CHAT-MSG-ID · 연:RULE-CHAT-CONTENT · 연:RULE-CHAT-RECV · 연:RULE-CHAT-DISABLED · 연:RULE-CHAT-LIVE-SOCKET-LOSS · 연:RULE-CHAT-CATCHUP · model: claude-opus-5-5
 //! 채팅 — 게이트웨이 안 모듈 · op 다섯 · 저장이 낸 `{멤버 판, 보낸 세션, 메시지}` 를 다른 node 에 뿌린다(실패 수를 돌려주고 다시 안 보낸다) · 공간마다 멤버 캐시로 `명단(t_M)` 을 낸다 · 받은 ACK 로 미전송 기록을 지운다 · 보관 기간을 넘긴 미전송 기록을 지운다. 세션은 모른다 — 세션이 이 모듈을 부른다.
 
 pub mod store;
@@ -160,13 +160,19 @@ impl Chat {
         tokio::task::spawn_blocking(move || st.ack(&user, &msg_ids));
     }
 
+    pub fn purge_once(&self, now: u64) -> Result<usize, Code> {
+        let before = now.saturating_sub(self.limits.undelivered_ttl_days.saturating_mul(DAY_MS));
+        self.store.purge(before).inspect_err(|c| {
+            tracing::warn!(kind = "diag", spec = "SV-IMPL-CHAT-STORE-FAULTS", code = c.num(), "undelivered purge failed — retried next cycle");
+        })
+    }
+
     pub async fn purge_loop(self: Arc<Chat>) {
         let mut tick = tokio::time::interval(PURGE_EVERY);
         loop {
             tick.tick().await;
-            let before = common::now_ms().saturating_sub(self.limits.undelivered_ttl_days.saturating_mul(DAY_MS));
-            let st = self.store.clone();
-            let _ = blocking(move || st.purge(before)).await;
+            let me = self.clone();
+            let _ = blocking(move || me.purge_once(common::now_ms())).await;
         }
     }
 }

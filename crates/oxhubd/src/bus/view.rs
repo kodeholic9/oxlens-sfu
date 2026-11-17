@@ -1,8 +1,10 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-BUS-PRESENCE · 정:RULE-BUS-EVENTS · 정:RULE-BUS-PLACEMENT · 정:IMPL-BUS-FAULTS · 정:RULE-CONC-SIX · model: claude-opus-5-5
-//! hub 가 버스에서 본 것 — node 토큰 · 방 토큰 · 방 → node 맵 · 고립 판정 · 가라앉힌 뒤 몰아 판정(시계는 인자).
+// spec: v1.6 · 정:RULE-BUS-PRESENCE · 정:RULE-BUS-EVENTS · 정:RULE-BUS-PLACEMENT · 정:IMPL-BUS-FAULTS · 정:RULE-CONC-SIX · 정:IMPL-CHAT-FANOUT · model: claude-opus-5-5
+//! hub 가 버스에서 본 것 — node 토큰 · 방 토큰 · 방 → node 맵 · `sess` 표(사용자 → {(세션, node)} 짝 집합) · 뿌리기 범위 · 고립 판정 · 가라앉힌 뒤 몰아 판정(시계는 인자).
 
 use std::collections::{BTreeMap, BTreeSet};
+
+use oxsig::Code;
 
 pub const SETTLE_MS: u64 = 1_000;
 
@@ -12,6 +14,34 @@ pub enum TokenEv {
     NodeDel { node: String, inst: String },
     RoomPut { room: String, node: String, inst: String },
     RoomDel { room: String, node: String, inst: String },
+    SessPut { user: String, node: String, sid: String },
+    SessDel { user: String, node: String, sid: String },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessTable {
+    pub following: bool,
+    by_user: BTreeMap<String, BTreeSet<(String, String)>>,
+}
+
+impl SessTable {
+    pub fn put(&mut self, user: String, node: String, sid: String) {
+        self.by_user.entry(user).or_default().insert((sid, node));
+    }
+
+    pub fn del(&mut self, user: &str, node: String, sid: String) {
+        if let Some(m) = self.by_user.get_mut(user) {
+            m.remove(&(sid, node));
+            if m.is_empty() {
+                self.by_user.remove(user);
+            }
+        }
+    }
+
+    pub fn nodes_of(&self, users: &[String]) -> Vec<String> {
+        let v: BTreeSet<String> = users.iter().filter_map(|u| self.by_user.get(u)).flat_map(|m| m.iter().map(|(_, node)| node.clone())).collect();
+        v.into_iter().collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +80,7 @@ pub struct View {
     pub last_event: Option<LastEvent>,
     pub duplicates: u64,
     pub recovered: bool,
+    pub sess: Option<SessTable>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -76,16 +107,51 @@ impl View {
             last_event: None,
             duplicates: 0,
             recovered: false,
+            sess: None,
+        }
+    }
+
+    pub fn follow_sessions(&mut self) {
+        self.sess.get_or_insert_with(SessTable::default);
+    }
+
+    pub fn sessions_followed(&mut self) {
+        if let Some(t) = self.sess.as_mut() {
+            t.following = true;
+        }
+    }
+
+    pub fn fanout_scope(&self, roster: Option<Result<Vec<String>, Code>>) -> Option<Vec<String>> {
+        let t = self.sess.as_ref().filter(|t| t.following)?;
+        match roster {
+            Some(Ok(users)) => Some(t.nodes_of(&users)),
+            _ => None,
         }
     }
 
     pub fn on_token(&mut self, ev: TokenEv, now: u64) {
+        let ev = match ev {
+            TokenEv::SessPut { user, node, sid } => {
+                if let Some(t) = self.sess.as_mut() {
+                    t.put(user, node, sid);
+                }
+                return;
+            }
+            TokenEv::SessDel { user, node, sid } => {
+                if let Some(t) = self.sess.as_mut() {
+                    t.del(&user, node, sid);
+                }
+                return;
+            }
+            ev => ev,
+        };
         self.last_token_at = now;
         let (kind, key) = match &ev {
             TokenEv::NodePut { node, inst } => ("put", format!("node/{node}/{inst}")),
             TokenEv::NodeDel { node, inst } => ("delete", format!("node/{node}/{inst}")),
             TokenEv::RoomPut { room, node, inst } => ("put", format!("room/{room}/{node}/{inst}")),
             TokenEv::RoomDel { room, node, inst } => ("delete", format!("room/{room}/{node}/{inst}")),
+            TokenEv::SessPut { .. } | TokenEv::SessDel { .. } => return,
         };
         self.last_event = Some(LastEvent { at_ms: now, kind, key });
         match ev {

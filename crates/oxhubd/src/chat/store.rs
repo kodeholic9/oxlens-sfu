@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 연:RULE-CHAT-REF-CHECK · 연:RULE-CHAT-EDIT · 연:RULE-CHAT-REACT · 연:RULE-CHAT-DELETE · 연:RULE-CHAT-REPLY · 정:IMPL-CHAT-STORE ·정:IMPL-CHAT-MEMBERSHIP · 정:IMPL-CHAT-READ · 정:IMPL-CHAT-UNDELIVERED · 정:IMPL-CHAT-CATCHUP · 정:CAND-CHAT-STORE-SCHEMA · 연:RULE-CHAT-MSG-ID · 연:RULE-CHAT-ORDER · 연:RULE-CHAT-VISIBLE · 연:RULE-CHAT-UNREAD · 연:RULE-CHAT-VIEW · 연:RULE-CHAT-HISTORY-PAGE · 연:RULE-CHAT-UNDELIVERED · 연:RULE-CHAT-CATCHUP · 연:RULE-CHAT-MEMBER-NOTICE · model: claude-opus-5-5
-//! 채팅 저장소 — SQLite 하나 · 쓰기 트랜잭션은 SQLite 의 쓰기 꼴 `BEGIN IMMEDIATE` · `t` 는 저장 트랜잭션 안에서 찍은 ms(공간마다 줄 세우지 않음 · 같은 `t` 는 `msg_id` 차례) · 메시지와 같은 트랜잭션에 받을 사람 전원 몫 미전송 기록 · 멤버 입퇴장 구간과 멤버 변경 메시지 · 멤버 판 · 읽음 · 쪽은 같은 `t` 를 가르지 않음 · 따라잡기 쪽은 미전송 기록과 `t` 이상 메시지를 `msg_id` 로 합침.
+// spec: v1.6 · 연:RULE-CHAT-REF-CHECK · 연:RULE-CHAT-EDIT · 연:RULE-CHAT-REACT · 연:RULE-CHAT-DELETE · 연:RULE-CHAT-REPLY · 정:IMPL-CHAT-STORE ·정:IMPL-CHAT-MEMBERSHIP · 정:IMPL-CHAT-READ · 정:IMPL-CHAT-UNDELIVERED · 정:IMPL-CHAT-CATCHUP · 정:IMPL-CHAT-STORE-FAULTS · 정:CAND-CHAT-STORE-SCHEMA · 연:RULE-CHAT-MSG-ID · 연:RULE-CHAT-ORDER · 연:RULE-CHAT-VISIBLE · 연:RULE-CHAT-UNREAD · 연:RULE-CHAT-VIEW · 연:RULE-CHAT-HISTORY-PAGE · 연:RULE-CHAT-UNDELIVERED · 연:RULE-CHAT-CATCHUP · 연:RULE-CHAT-MEMBER-NOTICE · model: claude-opus-5-5
+//! 채팅 저장소 — SQLite 하나 · 쓰기 트랜잭션은 SQLite 의 쓰기 꼴 `BEGIN IMMEDIATE` · `t` 는 저장 트랜잭션 안에서 찍은 ms(공간마다 줄 세우지 않음 · 같은 `t` 는 `msg_id` 차례) · 메시지와 같은 트랜잭션에 받을 사람 전원 몫 미전송 기록 · 멤버 입퇴장 구간과 멤버 변경 메시지 · 멤버 판 · 읽음 · 쪽은 같은 `t` 를 가르지 않음 · 따라잡기 쪽은 미전송 기록과 `t` 이상 메시지를 `msg_id` 로 합침(멤버 쪽에서 출발 · 하한 하나) · 관계는 `ref` 색인 · 저장소 오류는 원인을 진단 줄로 남김.
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -62,10 +62,14 @@ CREATE TABLE IF NOT EXISTS undelivered (
 );
 CREATE INDEX IF NOT EXISTS undelivered_user_t ON undelivered (user_id, t, msg_id);
 CREATE INDEX IF NOT EXISTS undelivered_t ON undelivered (t);
+CREATE INDEX IF NOT EXISTS members_user ON members (user_id, leave_t);
 ";
 
 const COLS: &str = "x.msg_id, x.space_id, x.user_id, x.t, x.content, x.kind, x.target, x.ref_id, x.keys, x.ext";
 const VISIBLE: &str = " AND (x.kind IS NULL OR x.kind IN ('join', 'leave', 'add', 'remove'))";
+const SEEN_JOINED: &str =
+    " AND EXISTS(SELECT 1 FROM members m WHERE m.space_id = x.space_id AND m.user_id = ?2 AND m.join_t <= x.t AND (m.leave_t IS NULL OR x.t < m.leave_t))";
+const SEEN_ALL: &str = " AND ?2 = ?2";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Interval {
@@ -125,8 +129,47 @@ pub struct Store {
     default_vis: Visibility,
 }
 
+fn cause(e: &rusqlite::Error) -> String {
+    match e.sqlite_error_code() {
+        Some(c) => format!("{c:?}"),
+        None => "Other".to_string(),
+    }
+}
+
+#[track_caller]
 fn db<T>(r: rusqlite::Result<T>) -> Result<T, Code> {
-    r.map_err(|_| Code::InternalError)
+    let at = std::panic::Location::caller();
+    r.map_err(|e| {
+        tracing::warn!(kind = "diag", spec = "SV-IMPL-CHAT-STORE-FAULTS", cause = %cause(&e), at = %format!("{}:{}", at.file(), at.line()), "chat store: {e}");
+        Code::InternalError
+    })
+}
+
+fn duplicate_column(e: &rusqlite::Error) -> bool {
+    matches!(e, rusqlite::Error::SqliteFailure(_, Some(m)) if m.starts_with("duplicate column name"))
+}
+
+pub fn relations_sql(joined: bool, refs: usize) -> String {
+    let seen = if joined { SEEN_JOINED } else { SEEN_ALL };
+    let marks = (3..refs + 3).map(|i| format!("?{i}")).collect::<Vec<_>>().join(", ");
+    format!("SELECT {COLS} FROM messages x WHERE +x.space_id = ?1{seen} AND x.kind IN ('edit', 'react', 'delete') AND x.ref_id IN ({marks})")
+}
+
+pub fn catchup_since_sql(space: bool) -> String {
+    let in_space = if space { "mm.space_id = ?2" } else { "?2 = ?2" };
+    format!(
+        "SELECT {COLS} FROM members mm JOIN messages x ON x.space_id = mm.space_id
+         WHERE mm.user_id = ?1 AND mm.leave_t IS NULL AND {in_space} AND (x.t, x.msg_id) > (?3, ?4)
+           AND (mm.vis = 'shared' OR EXISTS(SELECT 1 FROM members m2 WHERE m2.space_id = x.space_id AND m2.user_id = ?1
+             AND m2.join_t <= x.t AND (m2.leave_t IS NULL OR x.t < m2.leave_t)))
+         ORDER BY x.t, x.msg_id LIMIT ?5"
+    )
+}
+
+fn since_floor(since: u64, after: &Cursor) -> (u64, String) {
+    let floor = (since, String::new());
+    let cur = (after.t, after.msg_id.clone());
+    if cur > floor { cur } else { floor }
 }
 
 fn n(v: u64) -> i64 {
@@ -312,11 +355,19 @@ impl Store {
         let c = if path == ":memory:" { Connection::open_in_memory() } else { Connection::open(path) }.map_err(|e| format!("chat db {path}: {e}"))?;
         c.busy_timeout(Duration::from_secs(5)).map_err(|e| e.to_string())?;
         if path != ":memory:" {
-            let _ = c.pragma_update(None, "journal_mode", "WAL");
+            match c.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get::<_, String>(0)) {
+                Ok(m) if m.eq_ignore_ascii_case("wal") => {}
+                Ok(m) => tracing::warn!(kind = "diag", spec = "SV-IMPL-CHAT-STORE-FAULTS", path = %path, "chat store: journal mode stays {m} — WAL not set"),
+                Err(e) => tracing::warn!(kind = "diag", spec = "SV-IMPL-CHAT-STORE-FAULTS", path = %path, cause = %cause(&e), "chat store: WAL not set: {e}"),
+            }
         }
         c.execute_batch(SCHEMA).map_err(|e| format!("chat db schema: {e}"))?;
         for col in ["kind TEXT", "target TEXT", "ref_id TEXT", "keys TEXT", "ext TEXT", "deleted INTEGER NOT NULL DEFAULT 0"] {
-            let _ = c.execute(&format!("ALTER TABLE messages ADD COLUMN {col}"), []);
+            if let Err(e) = c.execute(&format!("ALTER TABLE messages ADD COLUMN {col}"), [])
+                && !duplicate_column(&e)
+            {
+                tracing::warn!(kind = "diag", spec = "SV-IMPL-CHAT-STORE-FAULTS", path = %path, column = %col, cause = %cause(&e), "chat store: add column failed: {e}");
+            }
         }
         c.execute_batch("CREATE INDEX IF NOT EXISTS messages_ref ON messages (ref_id); CREATE INDEX IF NOT EXISTS messages_t_id ON messages (t, msg_id);")
             .map_err(|e| format!("chat db schema: {e}"))?;
@@ -512,11 +563,8 @@ impl Store {
                 )
                 .optional())?
             .ok_or(Code::NotSpaceMember)?;
-            let seen = if vis == Visibility::Joined.as_str() {
-                " AND EXISTS(SELECT 1 FROM members m WHERE m.space_id = x.space_id AND m.user_id = ?2 AND m.join_t <= x.t AND (m.leave_t IS NULL OR x.t < m.leave_t))"
-            } else {
-                " AND ?2 = ?2"
-            };
+            let joined = vis == Visibility::Joined.as_str();
+            let seen = if joined { SEEN_JOINED } else { SEEN_ALL };
             let (cond, order, edge) = match dir {
                 Dir::After(t) => (" AND x.t > ?3", "ASC", n(t)),
                 Dir::Before(t) => (" AND x.t < ?3", "DESC", n(t)),
@@ -545,8 +593,7 @@ impl Store {
             let relations = if ids.is_empty() {
                 Vec::new()
             } else {
-                let marks = (3..ids.len() + 3).map(|i| format!("?{i}")).collect::<Vec<_>>().join(", ");
-                let sql = format!("SELECT {COLS} FROM messages x WHERE x.space_id = ?1{seen} AND x.kind IN ('edit', 'react', 'delete') AND x.ref_id IN ({marks})");
+                let sql = relations_sql(joined, ids.len());
                 let mut p: Vec<&dyn rusqlite::ToSql> = vec![&space, &user];
                 p.extend(ids.iter().map(|i| *i as &dyn rusqlite::ToSql));
                 fold_relations(rows(c, &sql, &p)?)
@@ -615,7 +662,7 @@ impl Store {
         let lim = n(max_msgs.max(1) as u64);
         self.with(|c| {
             let sp = space.unwrap_or("");
-            let (d_space, x_space) = if space.is_some() { ("d.space_id = ?2", "x.space_id = ?2") } else { ("?2 = ?2", "?2 = ?2") };
+            let d_space = if space.is_some() { "d.space_id = ?2" } else { "?2 = ?2" };
             let mut all = rows(
                 c,
                 &format!(
@@ -626,18 +673,8 @@ impl Store {
                 &[&user, &sp, &n(after.t), &after.msg_id, &lim],
             )?;
             if let Some(since) = since {
-                all.extend(rows(
-                    c,
-                    &format!(
-                        "SELECT {COLS} FROM messages x
-                         WHERE {x_space} AND x.t >= ?6 AND (x.t, x.msg_id) > (?3, ?4)
-                           AND EXISTS(SELECT 1 FROM members mm WHERE mm.space_id = x.space_id AND mm.user_id = ?1 AND mm.leave_t IS NULL
-                             AND (mm.vis = 'shared' OR EXISTS(SELECT 1 FROM members m2 WHERE m2.space_id = x.space_id AND m2.user_id = ?1
-                               AND m2.join_t <= x.t AND (m2.leave_t IS NULL OR x.t < m2.leave_t))))
-                         ORDER BY x.t, x.msg_id LIMIT ?5"
-                    ),
-                    &[&user, &sp, &n(after.t), &after.msg_id, &lim, &n(since)],
-                )?);
+                let (ft, fid) = since_floor(since, after);
+                all.extend(rows(c, &catchup_since_sql(space.is_some()), &[&user, &sp, &n(ft), &fid, &lim])?);
             }
             all.sort_by(|a, b| (a.t, &a.msg_id).cmp(&(b.t, &b.msg_id)));
             all.dedup_by(|a, b| a.msg_id == b.msg_id);
@@ -666,6 +703,19 @@ impl Store {
             p.extend(msg_ids.iter().map(|m| m as &dyn rusqlite::ToSql));
             db(c.execute(&sql, params_from_iter(p)))?;
             Ok(())
+        })
+    }
+
+    pub fn plan(&self, sql: &str) -> Result<String, Code> {
+        self.with(|c| {
+            let mut st = db(c.prepare(&format!("EXPLAIN QUERY PLAN {sql}")))?;
+            let unbound = st.parameter_count();
+            let it = db(st.query_map(params_from_iter(std::iter::repeat_n(rusqlite::types::Null, unbound)), |r| r.get::<_, String>(3)))?;
+            let mut v = Vec::new();
+            for d in it {
+                v.push(db(d)?);
+            }
+            Ok(v.join("\n"))
         })
     }
 

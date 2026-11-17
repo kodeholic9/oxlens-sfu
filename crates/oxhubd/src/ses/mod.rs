@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-SES-DATA · 정:IMPL-SES-BIND · 정:IMPL-SES-HANDOVER · 정:IMPL-SES-RESUME · 정:IMPL-SES-ADMISSION · 정:RULE-BUS-REQUEST · 정:RULE-BUS-EVENTS · 연:SES.S.bind_new · 연:SES.S.bind_resume · 연:SES.S.resume_ok · 연:SES.S.leave · 연:SES.S.drop · 연:SES.S.TWindow · 정:RULE-SES-GATEWAY-SCOPE · 정:CAND-AFF-SPLIT-ROUTE · 정:CAND-SES-SUBROOMS-RECONCILE · 연:RULE-ERR-4009-SUPPRESS · 연:RULE-SES-SOCKET-CLOSE-NORMAL · 연:RULE-SES-SERVER-POLICY · 정:RULE-CHAT-GATEWAY-MODULE · 정:IMPL-CHAT-FANOUT · model: claude-opus-5-5
+// spec: v1.6 · 정:IMPL-SES-DATA · 정:IMPL-SES-BIND · 정:IMPL-SES-HANDOVER · 정:IMPL-SES-RESUME · 정:IMPL-SES-ADMISSION · 정:RULE-BUS-REQUEST · 정:RULE-BUS-EVENTS · 연:SES.S.bind_new · 연:SES.S.bind_resume · 연:SES.S.resume_ok · 연:SES.S.leave · 연:SES.S.drop · 연:SES.S.TWindow · 정:RULE-SES-GATEWAY-SCOPE · 정:CAND-AFF-SPLIT-ROUTE · 정:CAND-SES-SUBROOMS-RECONCILE · 연:RULE-ERR-4009-SUPPRESS · 연:RULE-SES-SOCKET-CLOSE-NORMAL · 연:RULE-SES-SERVER-POLICY · 정:RULE-CHAT-GATEWAY-MODULE · 정:IMPL-CHAT-FANOUT · 정:IMPL-CHAT-STORE-FAULTS · 정:RULE-OPS-DROPS · model: claude-opus-5-5
 //! 게이트웨이의 세션 — 세션 자료 · 인증 두 갈래 · 축출 · 넘겨받기 · RESUME 모으기 · op 라우팅 · 세션 폐기 한 길 · 통지 배달.
 
 pub mod conn;
@@ -102,7 +102,9 @@ pub struct SessionData {
 #[derive(Default)]
 pub struct Counters {
     pub notice_no_socket: AtomicU64,
+    pub notice_refused: AtomicU64,
     pub chat_fanout_fail: AtomicU64,
+    pub session_end_fail: AtomicU64,
     pub codes: Mutex<BTreeMap<u16, u64>>,
 }
 
@@ -176,6 +178,11 @@ impl Ctx {
         e.claims = Some(s.claims.clone());
         e
     }
+}
+
+fn end_fail(ctx: &Ctx, req: &str, node: &str, why: &str) {
+    ctx.counters.session_end_fail.fetch_add(1, Ordering::Relaxed);
+    tracing::warn!(kind = "diag", spec = "SV-IMPL-SES-DATA", node = %node, req = %req, "session end request failed: {why}");
 }
 
 fn transition(s: &Session, spec: Option<&str>, from: &str, to: Option<&str>, cause: &str, inputs: &[(&str, String)]) {
@@ -282,8 +289,10 @@ pub async fn bind(ctx: &Arc<Ctx>, conn: &Conn, op: u16, pid: u32, flags: u8, bod
         dispose(ctx, &old, "SES.S.bind_new", "evict").await;
     }
     for (node, sid) in ctx.bus.sessions_of_user(&id.user_id).await {
-        if node != ctx.home.node {
-            let _ = ctx.bus.query(&node, "evict", serde_json::to_vec(&serde_json::json!({ "sid": sid })).unwrap_or_default()).await;
+        if node != ctx.home.node
+            && let Err(c) = ctx.bus.query(&node, "evict", serde_json::to_vec(&serde_json::json!({ "sid": sid })).unwrap_or_default()).await
+        {
+            end_fail(ctx, "evict", &node, c.name());
         }
     }
     let sid = common::random_hex(16);
@@ -338,8 +347,20 @@ async fn resume_session(ctx: &Arc<Ctx>, sid: &str) -> Option<Arc<Session>> {
     if node == ctx.home.node {
         return None;
     }
-    let bytes = ctx.bus.query(&node, "sess", serde_json::to_vec(&serde_json::json!({ "sid": sid })).ok()?).await.ok()?;
-    let d: SessionData = serde_json::from_slice(&bytes).ok()?;
+    let bytes = match ctx.bus.query(&node, "sess", serde_json::to_vec(&serde_json::json!({ "sid": sid })).ok()?).await {
+        Ok(b) => b,
+        Err(c) => {
+            end_fail(ctx, "sess", &node, c.name());
+            return None;
+        }
+    };
+    let d: SessionData = match serde_json::from_slice::<Option<SessionData>>(&bytes) {
+        Ok(d) => d?,
+        Err(e) => {
+            end_fail(ctx, "sess", &node, &format!("reply decode: {e}"));
+            return None;
+        }
+    };
     let s = Arc::new(Session {
         fp: common::log::fingerprint(&d.sid),
         sid: d.sid,
@@ -414,10 +435,14 @@ pub async fn dispose(ctx: &Arc<Ctx>, s: &Arc<Session>, label: &str, cause: &str)
     transition(s, Some(label), &from, Some("-"), cause, &[]);
     let env = ctx.envelope(s, CallKind::SessionGone);
     for n in nodes {
-        let bus = ctx.bus.clone();
+        let ctx = ctx.clone();
         let env = env.clone();
         tokio::spawn(async move {
-            let _ = bus.call(&n, &env).await;
+            match ctx.bus.call(&n, &env).await {
+                Reply::Ok { .. } => {}
+                Reply::Fail { failure } => end_fail(&ctx, "session_gone", &n, &failure.name),
+                Reply::Http { status, .. } => end_fail(&ctx, "session_gone", &n, &format!("http {status}")),
+            }
         });
     }
 }
@@ -619,8 +644,9 @@ async fn route(ctx: &Arc<Ctx>, s: &Arc<Session>, op: Op, body: serde_json::Value
             }
             let loc = ctx.bus.room_route(&room).ok_or_else(|| Code::RoomNotFound.failure())?;
             let v = call_node(ctx, s, &loc.node, op, body).await?;
-            if let Ok(a) = serde_json::from_value::<AffiliationRes>(v.clone()) {
-                set_rooms(ctx, s, &loc.node, &a.sub_rooms, "AFFILIATION").await;
+            match serde_json::from_value::<AffiliationRes>(v.clone()) {
+                Ok(a) => set_rooms(ctx, s, &loc.node, &a.sub_rooms, "AFFILIATION").await,
+                Err(_) => ctx.bus.count_malformed(),
             }
             Ok(v)
         }
@@ -640,13 +666,16 @@ async fn route(ctx: &Arc<Ctx>, s: &Arc<Session>, op: Op, body: serde_json::Value
             let loc = ctx.bus.room_route(&room).ok_or_else(|| Code::RoomNotFound.failure())?;
             ctx.bus.interest_room(&room, 1).await;
             let r = call_node_over(ctx, s, &loc.node, op, body, over).await;
-            if let Ok(v) = &r
-                && let Ok(j) = serde_json::from_value::<RoomJoinRes>(v.clone())
-            {
-                if let Ok(mut st) = s.st.lock() {
-                    st.epochs.insert(loc.node.clone(), j.server_config.sfu_id.clone());
+            if let Ok(v) = &r {
+                match serde_json::from_value::<RoomJoinRes>(v.clone()) {
+                    Ok(j) => {
+                        if let Ok(mut st) = s.st.lock() {
+                            st.epochs.insert(loc.node.clone(), j.server_config.sfu_id.clone());
+                        }
+                        set_rooms(ctx, s, &loc.node, &j.affiliation.sub_rooms, "ROOM_JOIN").await;
+                    }
+                    Err(_) => ctx.bus.count_malformed(),
                 }
-                set_rooms(ctx, s, &loc.node, &j.affiliation.sub_rooms, "ROOM_JOIN").await;
             }
             ctx.bus.interest_room(&room, -1).await;
             r
@@ -658,8 +687,9 @@ async fn route(ctx: &Arc<Ctx>, s: &Arc<Session>, op: Op, body: serde_json::Value
             }
             let loc = ctx.bus.room_route(&room).ok_or_else(|| Code::RoomNotFound.failure())?;
             let v = call_node(ctx, s, &loc.node, op, body).await?;
-            if let Ok(l) = serde_json::from_value::<RoomLeaveRes>(v.clone()) {
-                set_rooms(ctx, s, &loc.node, &l.affiliation.sub_rooms, "ROOM_LEAVE").await;
+            match serde_json::from_value::<RoomLeaveRes>(v.clone()) {
+                Ok(l) => set_rooms(ctx, s, &loc.node, &l.affiliation.sub_rooms, "ROOM_LEAVE").await,
+                Err(_) => ctx.bus.count_malformed(),
             }
             Ok(v)
         }
@@ -727,10 +757,14 @@ pub fn deliver_room(ctx: &Ctx, room: &str, n: &Notice) {
 
 pub async fn deliver_user(ctx: &Ctx, user: &str, n: &Notice) {
     let Some(s) = ctx.session_of_user(user) else { return };
-    if n.op == Op::RoomEvent.as_u16()
-        && let Ok(RoomEventBody::Affiliation { affiliation, .. }) = serde_json::from_value::<RoomEventBody>(n.body.clone())
-    {
-        apply_affiliation(ctx, &s, n.sfu_id.as_deref(), n.room_id.as_deref(), &affiliation).await;
+    if n.op == Op::RoomEvent.as_u16() {
+        match serde_json::from_value::<RoomEventBody>(n.body.clone()) {
+            Ok(RoomEventBody::Affiliation { affiliation, .. }) => {
+                apply_affiliation(ctx, &s, n.sfu_id.as_deref(), n.room_id.as_deref(), &affiliation).await
+            }
+            Ok(_) => {}
+            Err(_) => ctx.bus.count_malformed(),
+        }
     }
     push_notice(ctx, &s, n);
 }
@@ -768,7 +802,13 @@ fn start_catchup(ctx: &Arc<Ctx>, s: &Arc<Session>, req: oxsig::msg::CatchupReq) 
 async fn catchup_run(s: Arc<Session>, chat: Arc<crate::chat::Chat>, req: oxsig::msg::CatchupReq) {
     let mut after = crate::chat::store::Cursor::default();
     loop {
-        let Ok(page) = chat.catchup_page(&s.user_id, &req, &after).await else { return };
+        let page = match chat.catchup_page(&s.user_id, &req, &after).await {
+            Ok(p) => p,
+            Err(c) => {
+                tracing::warn!(kind = "diag", spec = "SV-IMPL-CHAT-STORE-FAULTS", session = %s.fp, user = %s.user_id, code = c.num(), "catchup stopped — store read failed, the rest stays undelivered");
+                return;
+            }
+        };
         let Some(last) = page.last() else { return };
         after = crate::chat::store::Cursor { t: last.t, msg_id: last.msg_id.clone() };
         let msg_ids = page.iter().map(|m| m.msg_id.clone()).collect();
@@ -787,10 +827,11 @@ async fn catchup_run(s: Arc<Session>, chat: Arc<crate::chat::Chat>, req: oxsig::
 }
 
 async fn chat_fanout(ctx: &Ctx, chat: &crate::chat::Chat, d: crate::chat::Deliver) {
-    let only = match ctx.bus.follows_sessions() {
-        true => chat.recipients(&d).await.ok().map(|users| ctx.bus.nodes_of(&users)),
+    let roster = match ctx.bus.follows_sessions() {
+        true => Some(chat.recipients(&d).await),
         false => None,
     };
+    let only = ctx.bus.fanout_scope(roster);
     let mut failed = crate::chat::fanout_others(&ctx.bus, &d, only.as_deref()).await;
     if !deliver_chat_local(ctx, chat, &d).await {
         failed.push(ctx.bus.node.clone());
@@ -808,7 +849,7 @@ async fn chat_fanout(ctx: &Ctx, chat: &crate::chat::Chat, d: crate::chat::Delive
 }
 
 pub async fn deliver_chat(ctx: &Ctx, payload: &[u8]) -> Vec<u8> {
-    let Some(chat) = ctx.chat.get().cloned() else { return Reply::ok(serde_json::Value::Null).encode() };
+    let Some(chat) = ctx.chat.get().cloned() else { return Reply::fail(Code::ChatDisabled).encode() };
     match serde_json::from_slice::<crate::chat::Deliver>(payload) {
         Ok(d) if deliver_chat_local(ctx, &chat, &d).await => Reply::ok(serde_json::Value::Null).encode(),
         Ok(_) => Reply::fail(Code::InternalError).encode(),
@@ -837,7 +878,10 @@ async fn deliver_chat_local(ctx: &Ctx, chat: &crate::chat::Chat, d: &crate::chat
 }
 
 fn push_notice(ctx: &Ctx, s: &Session, n: &Notice) {
-    let Some(op) = Op::from_u16(n.op) else { return };
+    let Some(op) = Op::from_u16(n.op) else {
+        ctx.bus.count_malformed();
+        return;
+    };
     match s.conn() {
         Some(c) => {
             let _ = c.send(Out::Notice { op, body: serde_json::to_vec(&n.body).unwrap_or_default(), receipt: None });

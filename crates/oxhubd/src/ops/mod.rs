@@ -91,7 +91,11 @@ async fn answer(hub: &Arc<Hub>, q: oxmesh::Query) {
             serde_json::to_vec(&admin::probe_local(hub, &user).await).unwrap_or_default()
         }
         crate::chat::FANOUT_WHAT => ses::deliver_chat(&hub.ses, &payload).await,
-        "bus" => serde_json::to_vec(&admin::bus_view(hub).await).unwrap_or_default(),
+        "bus" => {
+            let user = String::from_utf8_lossy(&payload).to_string();
+            let user = Some(user.as_str()).filter(|u| !u.is_empty());
+            serde_json::to_vec(&admin::bus_view(hub, user).await).unwrap_or_default()
+        }
         "history" => match serde_json::from_slice::<logger::Ask>(&payload) {
             Ok(ask) => serde_json::to_vec(&admin::history_local(hub, ask).await).unwrap_or_default(),
             Err(_) => serde_json::to_vec(&serde_json::json!({ "node": hub.node, "error": Code::InvalidPayload.num() })).unwrap_or_default(),

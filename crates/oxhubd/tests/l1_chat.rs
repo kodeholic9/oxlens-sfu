@@ -1,9 +1,9 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 연:RULE-CHAT-KIND · 연:RULE-CHAT-REF-CHECK · 연:RULE-CHAT-DELETE · 연:RULE-CHAT-FOLD · 정:IMPL-CHAT-STORE ·정:IMPL-CHAT-MEMBERSHIP · 정:IMPL-CHAT-FILTER · 정:IMPL-CHAT-READ · 정:IMPL-CHAT-UNDELIVERED · 정:IMPL-CHAT-CATCHUP · 연:RULE-CHAT-MSG-ID · 연:RULE-CHAT-CONTENT · 연:RULE-CHAT-ORDER · 연:RULE-CHAT-VISIBLE · 연:RULE-CHAT-UNREAD · 연:RULE-CHAT-HISTORY-PAGE · 연:RULE-CHAT-UNDELIVERED · 연:RULE-CHAT-CATCHUP · 연:RULE-CHAT-MEMBER-NOTICE · model: claude-opus-5-5
-//! 1층 — 채팅 저장소(저장할 때 찍는 t · 같은 t 를 가르지 않는 쪽 · msg_id 멱등 · 멤버 구간 · 멤버 변경 메시지 · 보이기 시작점 · 안 읽은 수 · 미전송 기록 · 따라잡기 쪽)와 받는 게이트웨이의 멤버 캐시(판이 작을 때만 다시 읽음 · 명단(t_M)) · op 경계(msg_id 64 · content 65535).
+// spec: v1.6 · 연:RULE-CHAT-KIND · 연:RULE-CHAT-REF-CHECK · 연:RULE-CHAT-DELETE · 연:RULE-CHAT-FOLD · 정:IMPL-CHAT-STORE ·정:IMPL-CHAT-MEMBERSHIP · 정:IMPL-CHAT-FILTER · 정:IMPL-CHAT-READ · 정:IMPL-CHAT-UNDELIVERED · 정:IMPL-CHAT-CATCHUP · 정:IMPL-CHAT-STORE-FAULTS · 연:RULE-CHAT-MSG-ID · 연:RULE-CHAT-CONTENT · 연:RULE-CHAT-ORDER · 연:RULE-CHAT-VISIBLE · 연:RULE-CHAT-UNREAD · 연:RULE-CHAT-HISTORY-PAGE · 연:RULE-CHAT-UNDELIVERED · 연:RULE-CHAT-CATCHUP · 연:RULE-CHAT-MEMBER-NOTICE · model: claude-opus-5-5
+//! 1층 — 채팅 저장소(저장할 때 찍는 t · 같은 t 를 가르지 않는 쪽 · msg_id 멱등 · 멤버 구간 · 멤버 변경 메시지 · 보이기 시작점 · 안 읽은 수 · 미전송 기록 · 따라잡기 쪽)와 받는 게이트웨이의 멤버 캐시(판이 작을 때만 다시 읽음 · 명단(t_M)) · op 경계(msg_id 64 · content 65535) · 질의 계획(관계 = `ref` 색인 · 따라잡기 = 멤버 쪽 출발 · 하한 하나) · 저장소 실패의 원인 진단 줄.
 
 use common::system::Visibility;
-use oxhubd::chat::store::{Cursor, Dir, Outgoing, Page, SYS, SYS_HASH, Sent, Store};
+use oxhubd::chat::store::{Cursor, Dir, Outgoing, Page, SYS, SYS_HASH, Sent, Store, catchup_since_sql, relations_sql};
 use oxhubd::chat::{BODY_MAX, Chat, Limits, outgoing, valid_msg_id};
 use oxsig::msg::{ChatKind, ChatMessage};
 use oxsig::{Code, Op};
@@ -560,4 +560,166 @@ fn message_shapes_follow_the_kind() {
     ] {
         assert_eq!(outgoing(&missing).err().map(|f| f.code), Some(Code::MissingField.num()), "연:RULE-ERR-ONE-NUMBER-ONE-MEANING — a field the kind needs is 1003: {missing}");
     }
+}
+
+#[test]
+fn relations_ride_the_ref_index() {
+    let s = store(Visibility::Shared);
+    for joined in [false, true] {
+        let p = s.plan(&relations_sql(joined, 3)).expect("plan");
+        assert!(p.contains("messages_ref"), "정:IMPL-CHAT-READ — 관계는 ref 색인으로 찾는다(공간 전체를 훑지 않는다 · joined={joined}):\n{p}");
+        assert!(!p.contains("messages_space_t_id"), "정:IMPL-CHAT-READ — 관계 질의가 공간 색인으로 공간 전체를 훑는다(joined={joined}):\n{p}");
+    }
+}
+
+#[test]
+fn catchup_since_starts_from_the_members_with_one_floor() {
+    let s = store(Visibility::Shared);
+    let all = s.plan(&catchup_since_sql(false)).expect("plan");
+    assert!(all.lines().next().is_some_and(|l| l.starts_with("SEARCH mm USING INDEX members_user")), "정:IMPL-CHAT-CATCHUP — 공간 없는 따라잡기는 그 사람의 멤버 행에서 출발한다(파일 전체를 훑지 않는다):\n{all}");
+    for (space, p) in [(false, all), (true, s.plan(&catchup_since_sql(true)).expect("plan"))] {
+        assert!(p.contains("messages_space_t_id (space_id=? AND (t,msg_id)>(?,?))"), "정:IMPL-CHAT-CATCHUP — t 이상 질의의 범위는 커서 하나에서 시작한다(space={space}):\n{p}");
+    }
+}
+
+#[test]
+fn catchup_since_floor_is_the_later_of_since_and_cursor() {
+    let s = store(Visibility::Shared);
+    s.create_space("T", None).expect("space T");
+    join(&s, "S", "a", 1);
+    join(&s, "S", "b", 1);
+    join(&s, "T", "a", 1);
+    for (i, at) in [100u64, 200, 200, 300].iter().enumerate() {
+        fresh_t(s.send("a", "S", &id(i), "m", Some(*at)));
+    }
+    fresh_t(s.send("a", "T", &id(9), "not b's", Some(250)));
+    let ids = s.pending("b").expect("b");
+    s.ack("b", &ids).expect("ack all");
+    let got = |since: u64, after: Cursor| s.catchup("b", None, Some(since), &after, 100, 1 << 20).expect("since").iter().map(|m| m.msg_id.clone()).collect::<Vec<_>>();
+    assert_eq!(got(200, Cursor::default()), vec![id(1), id(2), id(3)], "연:RULE-CHAT-CATCHUP — t 는 이상(≥) · 멤버 아닌 공간은 안 온다");
+    assert_eq!(got(200, Cursor { t: 200, msg_id: id(1) }), vec![id(2), id(3)], "커서가 since 뒤면 커서 다음부터");
+    assert_eq!(got(300, Cursor { t: 100, msg_id: id(0) }), vec![id(3)], "since 가 커서 뒤면 since 부터");
+}
+
+mod diag {
+    use std::fmt::Debug;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Metadata};
+
+    #[derive(Default)]
+    struct Lines {
+        got: Mutex<Vec<(String, String)>>,
+        next: AtomicU64,
+    }
+
+    #[derive(Default)]
+    struct Seen {
+        kind: String,
+        spec: String,
+        all: String,
+    }
+
+    impl Visit for Seen {
+        fn record_str(&mut self, f: &Field, v: &str) {
+            self.put(f.name(), v.to_string());
+        }
+        fn record_debug(&mut self, f: &Field, v: &dyn Debug) {
+            self.put(f.name(), format!("{v:?}"));
+        }
+    }
+
+    impl Seen {
+        fn put(&mut self, name: &str, v: String) {
+            match name {
+                "kind" => self.kind = v,
+                "spec" => self.spec = v,
+                _ => self.all.push_str(&format!("{name}={v} ")),
+            }
+        }
+    }
+
+    impl tracing::Subscriber for Lines {
+        fn enabled(&self, _: &Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            Id::from_u64(self.next.fetch_add(1, Ordering::Relaxed) + 1)
+        }
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+        fn event(&self, e: &Event<'_>) {
+            let mut seen = Seen::default();
+            e.record(&mut seen);
+            if seen.kind == "diag"
+                && let Ok(mut g) = self.got.lock()
+            {
+                g.push((seen.spec, seen.all));
+            }
+        }
+        fn enter(&self, _: &Id) {}
+        fn exit(&self, _: &Id) {}
+    }
+
+    pub fn capture<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+        let lines = std::sync::Arc::new(Lines::default());
+        let out = tracing::subscriber::with_default(lines.clone(), f);
+        let got = lines.got.lock().map(|g| g.iter().filter(|(s, _)| s == "SV-IMPL-CHAT-STORE-FAULTS").map(|(_, a)| a.clone()).collect()).unwrap_or_default();
+        (out, got)
+    }
+}
+
+#[test]
+fn a_locked_store_fails_with_its_cause_on_a_diag_line() {
+    let path = temp_db("fault-lock");
+    let s = Store::open(&path, Visibility::Shared).expect("open");
+    s.create_space("S", None).expect("space");
+    join(&s, "S", "a", 1);
+    let other = rusqlite::Connection::open(&path).expect("other");
+    other.execute_batch("BEGIN IMMEDIATE").expect("hold the write lock");
+    let (r, lines) = diag::capture(|| s.view("a", "S"));
+    assert_eq!(r, Err(Code::InternalError), "S-sym-IMPL-CHAT-STORE-FAULTS-1 — 클라에는 코드 하나");
+    assert_eq!(lines.len(), 1, "S-sym-IMPL-CHAT-STORE-FAULTS-1 — 원인을 든 진단 줄 1 {lines:?}");
+    assert!(lines[0].contains("cause=DatabaseBusy"), "S-sym-IMPL-CHAT-STORE-FAULTS-1 — 원인(잠김)이 줄에 있다 {lines:?}");
+    other.execute_batch("ROLLBACK").expect("release");
+    assert!(s.view("a", "S").is_ok(), "잠금이 풀리면 다시 된다");
+}
+
+#[test]
+fn add_column_swallows_only_the_existing_column() {
+    let path = temp_db("fault-alter");
+    drop(Store::open(&path, Visibility::Shared).expect("first open"));
+    let old = rusqlite::Connection::open(&path).expect("old");
+    old.pragma_update(None, "journal_mode", "DELETE").expect("rollback journal");
+    old.execute_batch("ALTER TABLE messages DROP COLUMN ext").expect("an older store without ext");
+    drop(old);
+    let ro = |mode: u32| {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).expect("chmod");
+    };
+    ro(0o444);
+    let (r, lines) = diag::capture(|| Store::open(&path, Visibility::Shared).map(|_| ()));
+    ro(0o644);
+    assert!(r.is_ok(), "S-sym-IMPL-CHAT-STORE-FAULTS-2 — 기동은 계속한다 {r:?}");
+    let alter: Vec<&String> = lines.iter().filter(|l| l.contains("column=")).collect();
+    assert_eq!(alter.len(), 1, "S-sym-IMPL-CHAT-STORE-FAULTS-2 — 「이미 있음」 다섯은 넘기고 ext 하나만 진단 줄 {lines:?}");
+    assert!(alter[0].contains("column=ext") && alter[0].contains("cause=ReadOnly"), "S-sym-IMPL-CHAT-STORE-FAULTS-2 — 칸 · 원인 {alter:?}");
+    assert_eq!(lines.iter().filter(|l| l.contains("WAL")).count(), 1, "정:IMPL-CHAT-STORE-FAULTS — WAL 이 안 들면 기동 때 진단 줄 한 줄 {lines:?}");
+}
+
+#[test]
+fn a_failed_purge_leaves_a_diag_line_and_the_next_cycle_purges() {
+    let path = temp_db("fault-purge");
+    let chat = Chat::new(Store::open(&path, Visibility::Shared).expect("open"), Limits::default());
+    let other = rusqlite::Connection::open(&path).expect("other");
+    other.execute_batch("ALTER TABLE undelivered RENAME TO undelivered_away").expect("hide the table");
+    let (r, lines) = diag::capture(|| chat.purge_once(30 * 86_400_000));
+    assert_eq!(r, Err(Code::InternalError), "S-sym-IMPL-CHAT-STORE-FAULTS-3 — 보관 지우기 실패");
+    assert!(lines.iter().any(|l| l.contains("purge")), "S-sym-IMPL-CHAT-STORE-FAULTS-3 — 진단 줄 1 {lines:?}");
+    assert!(lines.iter().any(|l| l.contains("cause=")), "S-sym-IMPL-CHAT-STORE-FAULTS-3 — 원인 {lines:?}");
+    other.execute_batch("ALTER TABLE undelivered_away RENAME TO undelivered; INSERT INTO undelivered (user_id, msg_id, space_id, t) VALUES ('b', 'old', 'S', 1)").expect("back");
+    assert_eq!(chat.purge_once(30 * 86_400_000), Ok(1), "S-sym-IMPL-CHAT-STORE-FAULTS-3 — 다음 주기에 다시 지운다");
 }

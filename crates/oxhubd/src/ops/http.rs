@@ -280,10 +280,11 @@ async fn a_transit(State(hub): St, ConnectInfo(p): Peer, h: HeaderMap) -> Respon
 }
 async fn a_bus(State(hub): St, ConnectInfo(p): Peer, Query(q): Query<std::collections::HashMap<String, String>>, h: HeaderMap) -> Response {
     guard!(hub, p, h);
+    let user = q.get("user").map(|u| u.as_str()).filter(|u| !u.is_empty());
     if q.get("all").map(|v| v == "1").unwrap_or(false) {
-        return ok(admin::bus_all(&hub).await);
+        return ok(admin::bus_all(&hub, user).await);
     }
-    ok(admin::bus_view(&hub).await)
+    ok(admin::bus_view(&hub, user).await)
 }
 async fn a_history(State(hub): St, ConnectInfo(p): Peer, Query(q): Query<std::collections::HashMap<String, String>>, h: HeaderMap) -> Response {
     guard!(hub, p, h);

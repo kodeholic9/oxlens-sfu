@@ -1,12 +1,12 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · 정:RULE-BUS-PRESENCE · 정:RULE-BUS-EVENTS · 정:RULE-BUS-REQUEST · 정:IMPL-BUS-FAULTS · 정:RULE-BUS-PUBLIC · 정:CAND-BUS-REQUEST-TIMEOUT · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · 정:RULE-BUS-PRESENCE · 정:RULE-BUS-EVENTS · 정:RULE-BUS-REQUEST · 정:IMPL-BUS-FAULTS · 정:RULE-BUS-PUBLIC · 정:CAND-BUS-REQUEST-TIMEOUT · 정:RULE-OPS-DROPS · 정:IMPL-CHAT-FANOUT · model: claude-opus-5-5
 //! hub 의 버스 — oxmesh router(임베드 · 202610/20261031e) · 토큰 선언 · 방 → node 맵 · 관심 구독 · node 안 Handle · node 사이 요청.
 
 pub mod placement;
 pub mod view;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -66,13 +66,12 @@ pub struct Bus {
     tx: mpsc::UnboundedSender<BusEvent>,
     node_token: Mutex<Option<Token>>,
     sess_tokens: Mutex<HashMap<String, Token>>,
-    user_nodes: Mutex<HashMap<String, std::collections::HashSet<(String, String)>>>,
-    following: AtomicBool,
     room_subs: SubMap,
     user_subs: SubMap,
     local: Mutex<Option<Local>>,
     keep: Mutex<Vec<Forward>>,
-    pub ev_drop: std::sync::atomic::AtomicU64,
+    pub ev_drop: AtomicU64,
+    pub malformed: Arc<AtomicU64>,
 }
 
 enum Ev {
@@ -82,7 +81,11 @@ enum Ev {
 
 impl Bus {
     pub fn ev_dropped(&self) -> u64 {
-        self.ev_drop.load(std::sync::atomic::Ordering::Relaxed) + self.session.dropped()
+        self.ev_drop.load(Ordering::Relaxed) + self.session.dropped()
+    }
+
+    pub fn count_malformed(&self) {
+        self.malformed.fetch_add(1, Ordering::Relaxed);
     }
 
     pub async fn open(
@@ -108,13 +111,12 @@ impl Bus {
             tx,
             node_token: Mutex::new(None),
             sess_tokens: Mutex::new(HashMap::new()),
-            user_nodes: Mutex::new(HashMap::new()),
-            following: AtomicBool::new(false),
             room_subs: Mutex::new(HashMap::new()),
             user_subs: Mutex::new(HashMap::new()),
             local: Mutex::new(None),
             keep: Mutex::new(Vec::new()),
-            ev_drop: std::sync::atomic::AtomicU64::new(0),
+            ev_drop: AtomicU64::new(0),
+            malformed: Arc::new(AtomicU64::new(0)),
         });
         bus.start().await?;
         Ok((bus, rx))
@@ -131,7 +133,11 @@ impl Bus {
                 match ev {
                     TokenEvent::Put(k) => b.on_token_sample(&keys, &k, true),
                     TokenEvent::Delete(k) => b.on_token_sample(&keys, &k, false),
-                    TokenEvent::BatchEnd if sess => b.following.store(true, Ordering::Release),
+                    TokenEvent::BatchEnd if sess => {
+                        if let Ok(mut v) = b.view.lock() {
+                            v.sessions_followed();
+                        }
+                    }
                     TokenEvent::BatchEnd => {}
                 }
             }
@@ -195,20 +201,12 @@ impl Bus {
             Some(Parsed::Node { node, inst }) => TokenEv::NodeDel { node, inst },
             Some(Parsed::Room { room, node, inst }) if put => TokenEv::RoomPut { room, node, inst },
             Some(Parsed::Room { room, node, inst }) => TokenEv::RoomDel { room, node, inst },
-            Some(Parsed::Sess { user, node, sid }) => {
-                if let Ok(mut g) = self.user_nodes.lock() {
-                    if put {
-                        g.entry(user).or_default().insert((sid, node));
-                    } else if let Some(m) = g.get_mut(&user) {
-                        m.remove(&(sid, node));
-                        if m.is_empty() {
-                            g.remove(&user);
-                        }
-                    }
-                }
+            Some(Parsed::Sess { user, node, sid }) if put => TokenEv::SessPut { user, node, sid },
+            Some(Parsed::Sess { user, node, sid }) => TokenEv::SessDel { user, node, sid },
+            _ => {
+                self.count_malformed();
                 return;
             }
-            _ => return,
         };
         if let Ok(mut v) = self.view.lock() {
             v.on_token(ev, common::now_ms());
@@ -216,6 +214,9 @@ impl Bus {
     }
 
     pub async fn follow_sessions(self: &Arc<Self>) -> Result<(), String> {
+        if let Ok(mut v) = self.view.lock() {
+            v.follow_sessions();
+        }
         let sub = self.token_sub(self.keys.sess_all()).await?;
         if let Ok(mut k) = self.keep.lock() {
             k.push(sub);
@@ -224,18 +225,11 @@ impl Bus {
     }
 
     pub fn follows_sessions(&self) -> bool {
-        self.following.load(Ordering::Acquire)
+        self.view.lock().map(|v| v.sess.as_ref().is_some_and(|t| t.following)).unwrap_or(false)
     }
 
-    pub fn nodes_of(&self, users: &[String]) -> Vec<String> {
-        let g = match self.user_nodes.lock() {
-            Ok(g) => g,
-            Err(_) => return Vec::new(),
-        };
-        let mut v: Vec<String> = users.iter().filter_map(|u| g.get(u)).flat_map(|m| m.iter().map(|(_, node)| node.clone())).collect();
-        v.sort();
-        v.dedup();
-        v
+    pub fn fanout_scope(&self, roster: Option<Result<Vec<String>, Code>>) -> Option<Vec<String>> {
+        self.view.lock().ok().and_then(|v| v.fanout_scope(roster))
     }
 
     pub async fn declare_self(&self) -> Result<(), String> {
@@ -333,17 +327,20 @@ impl Bus {
         let tx = self.tx.clone();
         let n2 = name.clone();
         let is_room = matches!(which, Ev::Room(_));
+        let bad = self.malformed.clone();
         let sub = self.session.subscribe(&key).await.map(|mut s| {
             let h = tokio::spawn(async move {
                 while let Some(x) = s.recv().await {
-                    if let Ok(n) = serde_json::from_slice::<Notice>(&x.payload) {
-                        let ev = if is_room {
-                            BusEvent::RoomNotice { room: n2.clone(), notice: n }
-                        } else {
-                            BusEvent::UserNotice { user: n2.clone(), notice: n }
-                        };
-                        let _ = tx.send(ev);
-                    }
+                    let Ok(n) = serde_json::from_slice::<Notice>(&x.payload) else {
+                        bad.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    };
+                    let ev = if is_room {
+                        BusEvent::RoomNotice { room: n2.clone(), notice: n }
+                    } else {
+                        BusEvent::UserNotice { user: n2.clone(), notice: n }
+                    };
+                    let _ = tx.send(ev);
                 }
             });
             Forward(h.abort_handle())

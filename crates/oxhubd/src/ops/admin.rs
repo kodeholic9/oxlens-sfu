@@ -110,8 +110,11 @@ pub async fn drops(hub: &Hub) -> Value {
     let mut mine = json!({
         "unit": "hub",
         "notice_no_socket": hub.ses.counters.notice_no_socket.load(Ordering::Relaxed),
+        "notice_refused": hub.ses.counters.notice_refused.load(Ordering::Relaxed),
         "chat_fanout_fail": hub.ses.counters.chat_fanout_fail.load(Ordering::Relaxed),
+        "session_end_fail": hub.ses.counters.session_end_fail.load(Ordering::Relaxed),
         "bus_ev_drop": hub.bus.ev_dropped(),
+        "bus_malformed": hub.bus.malformed.load(Ordering::Relaxed),
         "log_queue_full": c.queue_full.load(Ordering::Relaxed),
         "log_spool_full": c.spool_full.load(Ordering::Relaxed),
     });
@@ -171,7 +174,7 @@ pub async fn sfu_rooms(hub: &Hub, id: &str) -> AdminResult {
     Ok(json!({ "unit": u.id, "sfu_id": epoch, "rooms": rooms, "total": total }))
 }
 
-pub async fn bus_view(hub: &Hub) -> Value {
+pub async fn bus_view(hub: &Hub, user: Option<&str>) -> Value {
     let peers: Vec<Value> = hub.bus.peers().await.into_iter().map(|(z, w, l)| json!({ "node": z, "role": w, "links": l })).collect();
     let v = match hub.bus.view.lock() {
         Ok(v) => v.clone(),
@@ -200,6 +203,14 @@ pub async fn bus_view(hub: &Hub) -> Value {
         .collect();
     let isolated = v.isolated.map(|since| json!({ "since_ms": since, "held_rooms": v.held.iter().collect::<Vec<_>>() }));
     let last = v.last_event.as_ref().map(|e| json!({ "at_ms": e.at_ms, "kind": e.kind, "key": e.key }));
+    let sess = v.sess.as_ref().map(|t| {
+        let mut o = json!({ "following": t.following });
+        if let Some(u) = user {
+            o["user"] = json!(u);
+            o["nodes"] = json!(t.nodes_of(&[u.to_string()]));
+        }
+        o
+    });
     json!({
         "node": hub.node,
         "inst": hub.inst,
@@ -211,16 +222,17 @@ pub async fn bus_view(hub: &Hub) -> Value {
         "rooms_seen": rooms_seen,
         "isolated": isolated,
         "last_event": last,
+        "sess": sess,
     })
 }
 
-pub async fn bus_all(hub: &Hub) -> Value {
-    let mut rows = vec![json!({ "node": hub.node, "bus": bus_view(hub).await })];
+pub async fn bus_all(hub: &Hub, user: Option<&str>) -> Value {
+    let mut rows = vec![json!({ "node": hub.node, "bus": bus_view(hub, user).await })];
     for (n, _) in hub.bus.live_nodes() {
         if n == hub.node {
             continue;
         }
-        match hub.bus.query(&n, "bus", Vec::new()).await {
+        match hub.bus.query(&n, "bus", user.unwrap_or_default().as_bytes().to_vec()).await {
             Ok(b) => match serde_json::from_slice::<Value>(&b) {
                 Ok(v) => rows.push(json!({ "node": n, "bus": v })),
                 Err(_) => rows.push(json!({ "node": n, "error": Code::SfuError.num() })),
