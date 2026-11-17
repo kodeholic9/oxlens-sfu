@@ -35,6 +35,7 @@ pub struct SesState {
     pub servers: BTreeMap<String, BTreeSet<String>>,
     pub epochs: BTreeMap<String, String>,
     pub touched: BTreeSet<String>,
+    pub catchup: Option<tokio::task::AbortHandle>,
 }
 
 pub struct Session {
@@ -542,7 +543,15 @@ pub async fn handle_request(ctx: &Arc<Ctx>, s: &Arc<Session>, conn: &Conn, r: Re
         }
     };
     let arev = body.get("arev").and_then(|v| v.as_u64());
-    match route(ctx, s, r.op, body).await {
+    let (res, catchup) = if crate::chat::is_chat(r.op) {
+        match chat_op(ctx, s, r.op, body).await {
+            Ok((v, c)) => (Ok(v), c),
+            Err(f) => (Err(f), None),
+        }
+    } else {
+        (route(ctx, s, r.op, body).await, None)
+    };
+    match res {
         Ok(v) => {
             let mut l = common::log::Line::ev(&format!("CP-OP-{}", r.op.name().replace('_', "-"))).key("session", &s.fp).key("user", &s.user_id);
             if let Some(a) = arev {
@@ -551,6 +560,9 @@ pub async fn handle_request(ctx: &Arc<Ctx>, s: &Arc<Session>, conn: &Conn, r: Re
             common::log::emit(l.msg("ok"));
             let bytes = if v.is_null() { Vec::new() } else { serde_json::to_vec(&v).unwrap_or_default() };
             conn.reply_ok(r.op_num, r.pid, r.flags, bytes);
+            if let Some(req) = catchup {
+                start_catchup(ctx, s, req);
+            }
         }
         Err(f) => {
             ctx.counters.code(f.code);
@@ -648,7 +660,6 @@ async fn route(ctx: &Arc<Ctx>, s: &Arc<Session>, op: Op, body: serde_json::Value
             }
             Ok(v)
         }
-        op if crate::chat::is_chat(op) => chat_op(ctx, s, op, body).await,
         Op::PublishTracks | Op::Ready | Op::SubscribeLayer | Op::TrackSet => {
             let room = room_of(&body)?;
             if !valid_room_id(&room) {
@@ -731,14 +742,44 @@ async fn apply_affiliation(ctx: &Ctx, s: &Session, sfu: Option<&str>, room: Opti
     }
 }
 
-async fn chat_op(ctx: &Arc<Ctx>, s: &Arc<Session>, op: Op, body: serde_json::Value) -> Result<serde_json::Value, Failure> {
+async fn chat_op(ctx: &Arc<Ctx>, s: &Arc<Session>, op: Op, body: serde_json::Value) -> Result<(serde_json::Value, Option<oxsig::msg::CatchupReq>), Failure> {
     let Some(chat) = ctx.chat.get().cloned() else { return Err(Code::ChatDisabled.failure()) };
     let a = chat.handle(&s.user_id, &s.sid, op, body).await?;
     if let Some(d) = a.deliver {
         let ctx = ctx.clone();
         tokio::spawn(async move { chat_fanout(&ctx, &chat, d).await });
     }
-    Ok(a.body)
+    Ok((a.body, a.catchup))
+}
+
+fn start_catchup(ctx: &Arc<Ctx>, s: &Arc<Session>, req: oxsig::msg::CatchupReq) {
+    let Some(chat) = ctx.chat.get().cloned() else { return };
+    let task = tokio::spawn(catchup_run(s.clone(), chat, req));
+    if let Ok(mut st) = s.st.lock()
+        && let Some(old) = st.catchup.replace(task.abort_handle())
+    {
+        old.abort();
+    }
+}
+
+async fn catchup_run(s: Arc<Session>, chat: Arc<crate::chat::Chat>, req: oxsig::msg::CatchupReq) {
+    let mut after = crate::chat::store::Cursor::default();
+    loop {
+        let Ok(page) = chat.catchup_page(&s.user_id, &req, &after).await else { return };
+        let Some(last) = page.last() else { return };
+        after = crate::chat::store::Cursor { t: last.t, msg_id: last.msg_id.clone() };
+        let msg_ids = page.iter().map(|m| m.msg_id.clone()).collect();
+        let Some(c) = s.conn() else { return };
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let body = serde_json::to_vec(&oxsig::msg::MessagesBody { messages: page }).unwrap_or_default();
+        let receipt = conn::Receipt { user: s.user_id.clone(), msg_ids, done: Some(tx) };
+        if !c.send(Out::Notice { op: Op::Messages, body, receipt: Some(receipt) }) {
+            return;
+        }
+        if rx.await.is_err() {
+            return;
+        }
+    }
 }
 
 async fn chat_fanout(ctx: &Ctx, chat: &crate::chat::Chat, d: crate::chat::Deliver) {
@@ -769,12 +810,20 @@ pub async fn deliver_chat(ctx: &Ctx, payload: &[u8]) -> Vec<u8> {
 
 async fn deliver_chat_local(ctx: &Ctx, chat: &crate::chat::Chat, d: &crate::chat::Deliver) -> bool {
     let Ok(users) = chat.recipients(d).await else { return false };
-    let n = Notice { op: Op::Message.as_u16(), body: serde_json::to_value(&d.message).unwrap_or_default(), exclude: Vec::new(), room_id: None, sfu_id: None };
+    let body = serde_json::to_vec(&d.message).unwrap_or_default();
     for s in ctx.sessions() {
         if s.sid == d.sid || users.binary_search(&s.user_id).is_err() {
             continue;
         }
-        push_notice(ctx, &s, &n);
+        match s.conn() {
+            Some(c) => {
+                let receipt = conn::Receipt { user: s.user_id.clone(), msg_ids: vec![d.message.msg_id.clone()], done: None };
+                let _ = c.send(Out::Notice { op: Op::Message, body: body.clone(), receipt: Some(receipt) });
+            }
+            None => {
+                ctx.counters.notice_no_socket.fetch_add(1, Ordering::Relaxed);
+            }
+        }
     }
     true
 }
@@ -783,7 +832,7 @@ fn push_notice(ctx: &Ctx, s: &Session, n: &Notice) {
     let Some(op) = Op::from_u16(n.op) else { return };
     match s.conn() {
         Some(c) => {
-            let _ = c.send(Out::Notice { op, body: serde_json::to_vec(&n.body).unwrap_or_default() });
+            let _ = c.send(Out::Notice { op, body: serde_json::to_vec(&n.body).unwrap_or_default(), receipt: None });
         }
         None => {
             ctx.counters.notice_no_socket.fetch_add(1, Ordering::Relaxed);

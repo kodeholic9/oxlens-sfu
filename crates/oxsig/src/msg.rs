@@ -427,6 +427,30 @@ pub struct MessageRes {
     pub t: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemberKind {
+    Join,
+    Leave,
+    Add,
+    Remove,
+}
+
+impl MemberKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MemberKind::Join => "join",
+            MemberKind::Leave => "leave",
+            MemberKind::Add => "add",
+            MemberKind::Remove => "remove",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<MemberKind> {
+        [MemberKind::Join, MemberKind::Leave, MemberKind::Add, MemberKind::Remove].into_iter().find(|k| k.as_str() == s)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub space_id: String,
@@ -434,6 +458,23 @@ pub struct ChatMessage {
     pub user_id: String,
     pub t: u64,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<MemberKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct CatchupReq {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub t: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessagesBody {
+    pub messages: Vec<ChatMessage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

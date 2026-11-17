@@ -21,9 +21,15 @@ pub const QUEUE_MAX: usize = 1_000;
 
 static CONN_SEQ: AtomicU64 = AtomicU64::new(1);
 
+pub struct Receipt {
+    pub user: String,
+    pub msg_ids: Vec<String>,
+    pub done: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
 pub enum Out {
     Reply { flags: u8, op: u16, pid: u32, body: Vec<u8> },
-    Notice { op: Op, body: Vec<u8> },
+    Notice { op: Op, body: Vec<u8>, receipt: Option<Receipt> },
     Ack(u32),
     Leave { code: Code, details: Option<serde_json::Value> },
     Close,
@@ -72,11 +78,22 @@ pub struct Request {
     pub body: Vec<u8>,
 }
 
+type Queued = (Op, Vec<u8>, Option<Receipt>);
+
 struct Writer {
-    lanes: [VecDeque<(Op, Vec<u8>)>; 4],
-    inflight: HashMap<u32, Instant>,
+    lanes: [VecDeque<Queued>; 4],
+    inflight: HashMap<u32, (Instant, Option<Receipt>)>,
     next_pid: u32,
     window: usize,
+}
+
+fn acked(ctx: &Ctx, r: Receipt) {
+    if let Some(chat) = ctx.chat.get() {
+        chat.acked(&r.user, r.msg_ids);
+    }
+    if let Some(d) = r.done {
+        let _ = d.send(());
+    }
 }
 
 impl Writer {
@@ -84,7 +101,7 @@ impl Writer {
         self.lanes.iter().map(|l| l.len()).sum()
     }
 
-    fn next(&mut self) -> Option<(Op, Vec<u8>)> {
+    fn next(&mut self) -> Option<Queued> {
         if self.inflight.len() >= self.window {
             return None;
         }
@@ -110,6 +127,7 @@ pub async fn serve(ws: WebSocket, ctx: Arc<Ctx>) {
     let leave_code = Arc::new(std::sync::Mutex::new(None::<Code>));
 
     let lc = leave_code.clone();
+    let wctx = ctx.clone();
     let writer = tokio::spawn(async move {
         let mut w = Writer { lanes: Default::default(), inflight: HashMap::new(), next_pid: 1, window };
         let mut tick = tokio::time::interval(Duration::from_millis(500));
@@ -118,7 +136,7 @@ pub async fn serve(ws: WebSocket, ctx: Arc<Ctx>) {
                 _ = over.notified() => Some(Out::Leave { code: Code::FlowOverflow, details: None }),
                 o = rx.recv() => o,
                 _ = tick.tick() => {
-                    if w.inflight.values().any(|t| t.elapsed() > T_ACK) {
+                    if w.inflight.values().any(|(t, _)| t.elapsed() > T_ACK) {
                         Some(Out::Leave { code: Code::FlowTimeout, details: None })
                     } else {
                         continue;
@@ -132,8 +150,8 @@ pub async fn serve(ws: WebSocket, ctx: Arc<Ctx>) {
                         break;
                     }
                 }
-                Out::Notice { op, body } => {
-                    w.lanes[op.lane() as usize].push_back((op, body));
+                Out::Notice { op, body, receipt } => {
+                    w.lanes[op.lane() as usize].push_back((op, body, receipt));
                     if w.queued() > QUEUE_MAX {
                         let _ = send_leave(&mut sink, &mut w, Code::FlowOverflow, None).await;
                         if let Ok(mut g) = lc.lock() {
@@ -143,7 +161,9 @@ pub async fn serve(ws: WebSocket, ctx: Arc<Ctx>) {
                     }
                 }
                 Out::Ack(pid) => {
-                    w.inflight.remove(&pid);
+                    if let Some((_, Some(r))) = w.inflight.remove(&pid) {
+                        acked(&wctx, r);
+                    }
                 }
                 Out::Leave { code, details } => {
                     let _ = send_leave(&mut sink, &mut w, code, details).await;
@@ -157,9 +177,9 @@ pub async fn serve(ws: WebSocket, ctx: Arc<Ctx>) {
                     break;
                 }
             }
-            while let Some((op, body)) = w.next() {
+            while let Some((op, body, receipt)) = w.next() {
                 let pid = w.pid();
-                w.inflight.insert(pid, Instant::now());
+                w.inflight.insert(pid, (Instant::now(), receipt));
                 if sink.send(Message::Binary(frame::encode(FrameKind::Request, op.as_u16(), pid, &body))).await.is_err() {
                     return;
                 }

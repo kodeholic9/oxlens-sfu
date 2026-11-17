@@ -54,6 +54,24 @@ pub struct ChatSection {
     pub db: String,
     #[serde(default)]
     pub history_visibility: Visibility,
+    #[serde(default = "default_undelivered_ttl_days")]
+    pub undelivered_ttl_days: u64,
+    #[serde(default = "default_catchup_bundle_max_msgs")]
+    pub catchup_bundle_max_msgs: usize,
+    #[serde(default = "default_catchup_bundle_max_bytes")]
+    pub catchup_bundle_max_bytes: usize,
+}
+
+fn default_undelivered_ttl_days() -> u64 {
+    7
+}
+
+fn default_catchup_bundle_max_msgs() -> usize {
+    100
+}
+
+fn default_catchup_bundle_max_bytes() -> usize {
+    524_288
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -315,6 +333,9 @@ impl System {
             Some(c) => {
                 v.push(("chat.db".into(), c.db.clone()));
                 v.push(("chat.history_visibility".into(), c.history_visibility.as_str().into()));
+                v.push(("chat.undelivered_ttl_days".into(), c.undelivered_ttl_days.to_string()));
+                v.push(("chat.catchup_bundle_max_msgs".into(), c.catchup_bundle_max_msgs.to_string()));
+                v.push(("chat.catchup_bundle_max_bytes".into(), c.catchup_bundle_max_bytes.to_string()));
             }
             None => v.push(("chat".into(), "-".into())),
         }

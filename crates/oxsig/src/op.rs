@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 연:TRN.oplist · 연:RULE-TRN-LANES · 연:RULE-TRN-FLOW-CONTROL · 연:RULE-TRN-OP-NUMBERS · 연:CHAT.op.MESSAGE · 연:CHAT.op.SPACE_HISTORY · 연:CHAT.op.SPACE_LIST · 연:CHAT.op.SPACE_VIEW · model: claude-opus-5-5
+// spec: v1.6 · 연:TRN.oplist · 연:RULE-TRN-LANES · 연:RULE-TRN-FLOW-CONTROL · 연:RULE-TRN-OP-NUMBERS · 연:CHAT.op.MESSAGE · 연:CHAT.op.SPACE_HISTORY · 연:CHAT.op.SPACE_LIST · 연:CHAT.op.SPACE_VIEW · 연:CHAT.op.CATCHUP · 연:CHAT.op.MESSAGES · model: claude-opus-5-5
 //! WS 메시지 전량 — 번호 · 이름 · 방향 · 우선순위 단 · 윈도우 밖 여부.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -35,6 +35,8 @@ pub enum Op {
     SpaceHistory,
     SpaceList,
     SpaceView,
+    Catchup,
+    Messages,
     Task,
     ParticipantEvent,
     TrackEvent,
@@ -63,6 +65,8 @@ impl Op {
         Op::SpaceHistory,
         Op::SpaceList,
         Op::SpaceView,
+        Op::Catchup,
+        Op::Messages,
         Op::Task,
         Op::ParticipantEvent,
         Op::TrackEvent,
@@ -91,6 +95,8 @@ impl Op {
             Op::SpaceHistory => 0x0502,
             Op::SpaceList => 0x0503,
             Op::SpaceView => 0x0504,
+            Op::Catchup => 0x0505,
+            Op::Messages => 0x0506,
             Op::Task => 0x0601,
             Op::ParticipantEvent => 0x0701,
             Op::TrackEvent => 0x0702,
@@ -124,6 +130,8 @@ impl Op {
             Op::SpaceHistory => "SPACE_HISTORY",
             Op::SpaceList => "SPACE_LIST",
             Op::SpaceView => "SPACE_VIEW",
+            Op::Catchup => "CATCHUP",
+            Op::Messages => "MESSAGES",
             Op::Task => "TASK",
             Op::ParticipantEvent => "PARTICIPANT_EVENT",
             Op::TrackEvent => "TRACK_EVENT",
@@ -144,14 +152,15 @@ impl Op {
             | Op::RoomEvent
             | Op::ParticipantState
             | Op::LinkEvent
-            | Op::MlineEvent => Dir::S2C,
+            | Op::MlineEvent
+            | Op::Messages => Dir::S2C,
             _ => Dir::C2S,
         }
     }
 
     pub fn lane(self) -> Lane {
         match self {
-            Op::Message | Op::SpaceHistory | Op::SpaceList | Op::SpaceView => Lane::Data,
+            Op::Message | Op::SpaceHistory | Op::SpaceList | Op::SpaceView | Op::Catchup | Op::Messages => Lane::Data,
             Op::Task => Lane::Diagnostic,
             _ => Lane::Session,
         }
@@ -180,7 +189,7 @@ mod tests {
             assert!(seen.insert(o.as_u16()));
             assert_eq!(Op::from_u16(o.as_u16()), Some(*o));
         }
-        assert_eq!(Op::ALL.len(), 24);
+        assert_eq!(Op::ALL.len(), 26);
         assert_eq!(Op::from_u16(0x0999), None);
     }
 

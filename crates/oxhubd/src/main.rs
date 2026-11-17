@@ -134,7 +134,14 @@ async fn run(cfg: HubCfg) -> i32 {
     if let Some(c) = &cfg.system.chat {
         match oxhubd::chat::store::Store::open(&c.db, c.history_visibility) {
             Ok(st) => {
-                let _ = ctx.chat.set(Arc::new(oxhubd::chat::Chat::new(st)));
+                let limits = oxhubd::chat::Limits {
+                    undelivered_ttl_days: c.undelivered_ttl_days,
+                    bundle_msgs: c.catchup_bundle_max_msgs,
+                    bundle_bytes: c.catchup_bundle_max_bytes,
+                };
+                let chat = Arc::new(oxhubd::chat::Chat::new(st, limits));
+                tokio::spawn(chat.clone().purge_loop());
+                let _ = ctx.chat.set(chat);
             }
             Err(e) => {
                 eprintln!("oxhubd: {e}");

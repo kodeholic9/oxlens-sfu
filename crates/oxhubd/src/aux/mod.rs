@@ -57,7 +57,7 @@ pub fn task_from_client(p: &Probes, _session: &str, body: &serde_json::Value) ->
 pub async fn probe(p: &Probes, conn: &crate::ses::Conn) -> Option<ProbeResult> {
     let (id, rx) = p.open();
     let req = TaskReq::Request { req_id: id, type_: TaskType::Probe, params: serde_json::json!({}) };
-    let sent = conn.send(crate::ses::Out::Notice { op: Op::Task, body: serde_json::to_vec(&req).unwrap_or_default() });
+    let sent = conn.send(crate::ses::Out::Notice { op: Op::Task, body: serde_json::to_vec(&req).unwrap_or_default(), receipt: None });
     if !sent {
         p.close(id);
         return None;

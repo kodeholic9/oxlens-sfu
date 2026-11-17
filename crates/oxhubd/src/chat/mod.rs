@@ -1,25 +1,42 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-CHAT-GATEWAY-MODULE · 정:IMPL-CHAT-STORE · 정:IMPL-CHAT-FANOUT · 정:IMPL-CHAT-FILTER · 정:IMPL-CHAT-READ · 연:CHAT.op.MESSAGE · 연:CHAT.op.SPACE_HISTORY · 연:CHAT.op.SPACE_LIST · 연:CHAT.op.SPACE_VIEW · 연:RULE-CHAT-MSG-ID · 연:RULE-CHAT-RECV · 연:RULE-CHAT-DISABLED · 연:RULE-CHAT-LIVE-SOCKET-LOSS · model: claude-opus-5-5
-//! 채팅 — 게이트웨이 안 모듈 · op 넷 · 저장이 낸 `{멤버 판, 보낸 세션, 메시지}` 를 다른 node 에 뿌린다(실패 수를 돌려주고 다시 안 보낸다) · 공간마다 멤버 캐시로 `명단(t_M)` 을 낸다. 세션은 모른다 — 세션이 이 모듈을 부른다.
+// spec: v1.6 · 정:RULE-CHAT-GATEWAY-MODULE · 정:IMPL-CHAT-STORE · 정:IMPL-CHAT-FANOUT · 정:IMPL-CHAT-FILTER · 정:IMPL-CHAT-READ · 정:IMPL-CHAT-UNDELIVERED · 정:IMPL-CHAT-CATCHUP · 연:CHAT.op.MESSAGE · 연:CHAT.op.SPACE_HISTORY · 연:CHAT.op.SPACE_LIST · 연:CHAT.op.SPACE_VIEW · 연:CHAT.op.CATCHUP · 연:RULE-CHAT-MSG-ID · 연:RULE-CHAT-CONTENT · 연:RULE-CHAT-RECV · 연:RULE-CHAT-DISABLED · 연:RULE-CHAT-LIVE-SOCKET-LOSS · 연:RULE-CHAT-CATCHUP · model: claude-opus-5-5
+//! 채팅 — 게이트웨이 안 모듈 · op 다섯 · 저장이 낸 `{멤버 판, 보낸 세션, 메시지}` 를 다른 node 에 뿌린다(실패 수를 돌려주고 다시 안 보낸다) · 공간마다 멤버 캐시로 `명단(t_M)` 을 낸다 · 받은 ACK 로 미전송 기록을 지운다 · 보관 기간을 넘긴 미전송 기록을 지운다. 세션은 모른다 — 세션이 이 모듈을 부른다.
 
 pub mod store;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use oxsig::msg::{ChatMessage, MessageRes, SpaceHistoryRes, SpaceListRes, SpaceViewRes};
+use oxsig::msg::{CatchupReq, ChatMessage, MessageRes, SpaceHistoryRes, SpaceListRes, SpaceViewRes};
 use oxsig::{Code, Failure, Op};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::bus::Bus;
 use common::envelope::Reply;
-use store::{Dir, HISTORY_DEFAULT, HISTORY_MAX, Roster, Sent, Store};
+use store::{CONTENT_MAX, Cursor, Dir, HISTORY_DEFAULT, HISTORY_MAX, MSG_ID_MAX, Roster, Sent, Store};
 
 pub const FANOUT_WHAT: &str = "chat";
+pub const PURGE_EVERY: Duration = Duration::from_secs(600);
+const DAY_MS: u64 = 86_400_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    pub undelivered_ttl_days: u64,
+    pub bundle_msgs: usize,
+    pub bundle_bytes: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Limits {
+        Limits { undelivered_ttl_days: 7, bundle_msgs: 100, bundle_bytes: 524_288 }
+    }
+}
 
 pub struct Chat {
     pub store: Arc<Store>,
+    pub limits: Limits,
     cache: Mutex<HashMap<String, Roster>>,
 }
 
@@ -33,11 +50,12 @@ pub struct Deliver {
 pub struct Answer {
     pub body: Value,
     pub deliver: Option<Deliver>,
+    pub catchup: Option<CatchupReq>,
 }
 
 impl Chat {
-    pub fn new(store: Store) -> Chat {
-        Chat { store: Arc::new(store), cache: Mutex::new(HashMap::new()) }
+    pub fn new(store: Store, limits: Limits) -> Chat {
+        Chat { store: Arc::new(store), limits, cache: Mutex::new(HashMap::new()) }
     }
 
     pub async fn roster_at_least(&self, space: &str, ver: u64) -> Result<Roster, Code> {
@@ -65,22 +83,25 @@ impl Chat {
 
     pub async fn handle(&self, user: &str, sid: &str, op: Op, body: Value) -> Result<Answer, Failure> {
         let user = user.to_string();
+        let plain = |body: Value| Answer { body, deliver: None, catchup: None };
         match op {
             Op::Message => {
                 let space: String = oxsig::code::need(&body, "space_id")?;
                 let msg_id: String = oxsig::code::need(&body, "msg_id")?;
                 let content: String = oxsig::code::need(&body, "content")?;
-                if !valid_msg_id(&msg_id, &user) {
+                if !valid_msg_id(&msg_id) {
                     return Err(Code::InvalidPayload.failure().with_message("msg_id"));
                 }
+                if content.len() > CONTENT_MAX {
+                    return Err(Code::InvalidPayload.failure().with_message("content"));
+                }
                 let st = self.store.clone();
-                let now = common::now_ms();
-                let sent = blocking(move || st.send(&user, &space, &msg_id, &content, now)).await.map_err(Code::failure)?;
+                let sent = blocking(move || st.send(&user, &space, &msg_id, &content, None)).await.map_err(Code::failure)?;
                 let (msg, deliver) = match sent {
                     Sent::Fresh { msg, ver } => (msg.clone(), Some(Deliver { ver, sid: sid.to_string(), message: msg })),
                     Sent::Again { msg } => (msg, None),
                 };
-                Ok(Answer { body: json(&MessageRes { t: msg.t })?, deliver })
+                Ok(Answer { body: json(&MessageRes { t: msg.t })?, deliver, catchup: None })
             }
             Op::SpaceHistory => {
                 let space: String = oxsig::code::need(&body, "space_id")?;
@@ -99,35 +120,65 @@ impl Chat {
                 };
                 let st = self.store.clone();
                 let page = blocking(move || st.history(&user, &space, dir, limit)).await.map_err(Code::failure)?;
-                Ok(Answer { body: json(&SpaceHistoryRes { messages: page.messages, more: page.more })?, deliver: None })
+                Ok(plain(json(&SpaceHistoryRes { messages: page.messages, more: page.more })?))
             }
             Op::SpaceList => {
                 let st = self.store.clone();
                 let spaces = blocking(move || st.list(&user)).await.map_err(Code::failure)?;
-                Ok(Answer { body: json(&SpaceListRes { spaces })?, deliver: None })
+                Ok(plain(json(&SpaceListRes { spaces })?))
             }
             Op::SpaceView => {
                 let space: String = oxsig::code::need(&body, "space_id")?;
                 let st = self.store.clone();
                 let read = blocking(move || st.view(&user, &space)).await.map_err(Code::failure)?;
-                Ok(Answer { body: json(&SpaceViewRes { read })?, deliver: None })
+                Ok(plain(json(&SpaceViewRes { read })?))
+            }
+            Op::Catchup => {
+                let space_id: Option<String> = oxsig::code::field(&body, "space_id")?;
+                let t: Option<u64> = oxsig::code::field(&body, "t")?;
+                if let Some(sp) = space_id.clone() {
+                    let st = self.store.clone();
+                    blocking(move || st.catchup_check(&user, &sp)).await.map_err(Code::failure)?;
+                }
+                Ok(Answer { body: Value::Null, deliver: None, catchup: Some(CatchupReq { space_id, t }) })
             }
             _ => Err(Code::UnknownOp.failure()),
+        }
+    }
+
+    pub async fn catchup_page(&self, user: &str, req: &CatchupReq, after: &Cursor) -> Result<Vec<ChatMessage>, Code> {
+        let st = self.store.clone();
+        let (user, space, since, after, lim) = (user.to_string(), req.space_id.clone(), req.t, after.clone(), self.limits);
+        blocking(move || st.catchup(&user, space.as_deref(), since, &after, lim.bundle_msgs, lim.bundle_bytes)).await
+    }
+
+    pub fn acked(&self, user: &str, msg_ids: Vec<String>) {
+        let st = self.store.clone();
+        let user = user.to_string();
+        tokio::task::spawn_blocking(move || st.ack(&user, &msg_ids));
+    }
+
+    pub async fn purge_loop(self: Arc<Chat>) {
+        let mut tick = tokio::time::interval(PURGE_EVERY);
+        loop {
+            tick.tick().await;
+            let before = common::now_ms().saturating_sub(self.limits.undelivered_ttl_days.saturating_mul(DAY_MS));
+            let st = self.store.clone();
+            let _ = blocking(move || st.purge(before)).await;
         }
     }
 }
 
 pub fn is_chat(op: Op) -> bool {
-    matches!(op, Op::Message | Op::SpaceHistory | Op::SpaceList | Op::SpaceView)
+    matches!(op, Op::Message | Op::SpaceHistory | Op::SpaceList | Op::SpaceView | Op::Catchup)
 }
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, Code> + Send + 'static) -> Result<T, Code> {
     tokio::task::spawn_blocking(f).await.unwrap_or(Err(Code::InternalError))
 }
 
-pub fn valid_msg_id(id: &str, user: &str) -> bool {
-    let Some((who, rest)) = id.split_once('/') else { return false };
-    who == user && rest.len() == 36 && uuid::Uuid::parse_str(rest).is_ok_and(|u| u.get_version_num() == 4)
+pub fn valid_msg_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= MSG_ID_MAX
 }
 
 fn json<T: Serialize>(v: &T) -> Result<Value, Failure> {
