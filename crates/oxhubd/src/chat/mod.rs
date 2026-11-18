@@ -1,10 +1,12 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.6 · 연:RULE-CHAT-KIND · 연:RULE-CHAT-EXT · 정:RULE-CHAT-GATEWAY-MODULE ·정:IMPL-CHAT-STORE · 정:IMPL-CHAT-FANOUT · 정:IMPL-CHAT-FILTER · 정:IMPL-CHAT-READ · 정:IMPL-CHAT-UNDELIVERED · 정:IMPL-CHAT-CATCHUP · 정:IMPL-CHAT-STORE-FAULTS · 연:CHAT.op.MESSAGE · 연:CHAT.op.SPACE_HISTORY · 연:CHAT.op.SPACE_LIST · 연:CHAT.op.SPACE_VIEW · 연:CHAT.op.CATCHUP · 연:RULE-CHAT-MSG-ID · 연:RULE-CHAT-CONTENT · 연:RULE-CHAT-RECV · 연:RULE-CHAT-DISABLED · 연:RULE-CHAT-LIVE-SOCKET-LOSS · 연:RULE-CHAT-CATCHUP · model: claude-opus-5-5
-//! 채팅 — 게이트웨이 안 모듈 · op 다섯 · 저장이 낸 `{멤버 판, 보낸 세션, 메시지}` 를 다른 node 에 뿌린다(실패 수를 돌려주고 다시 안 보낸다) · 공간마다 멤버 캐시로 `명단(t_M)` 을 낸다 · 받은 ACK 로 미전송 기록을 지운다 · 보관 기간을 넘긴 미전송 기록을 지운다. 세션은 모른다 — 세션이 이 모듈을 부른다.
+//! 채팅 — 게이트웨이 안 모듈 · op 다섯 · 저장이 낸 `{멤버 판, 보낸 세션, 메시지}` 를 다른 node 에 뿌린다(실패 수를 돌려주고 다시 안 보낸다) · 공간마다 멤버 캐시로 `명단(t_M)` 을 낸다 · 받은 ACK 는 채널에 넣기만 하고 지우는 스레드 하나가 모아 한 트랜잭션에 지운다 · 보관 기간을 넘긴 미전송 기록을 지운다. 세션은 모른다 — 세션이 이 모듈을 부른다.
 
 pub mod store;
 
 use std::collections::HashMap;
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -15,12 +17,14 @@ use serde_json::Value;
 
 use crate::bus::Bus;
 use common::envelope::Reply;
-use store::{CONTENT_MAX, Cursor, Dir, HISTORY_DEFAULT, HISTORY_MAX, MSG_ID_MAX, Outgoing, Roster, Sent, Store};
+use store::{Ack, CONTENT_MAX, Cursor, Dir, HISTORY_DEFAULT, HISTORY_MAX, MSG_ID_MAX, Outgoing, Roster, Sent, Store};
 
 pub const FANOUT_WHAT: &str = "chat";
 pub const BODY_MAX: usize = 131_072;
 pub const PURGE_EVERY: Duration = Duration::from_secs(600);
 const DAY_MS: u64 = 86_400_000;
+pub const ACK_QUEUE: usize = 65_536;
+pub const ACK_BATCH: usize = 1_024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
@@ -39,6 +43,8 @@ pub struct Chat {
     pub store: Arc<Store>,
     pub limits: Limits,
     cache: Mutex<HashMap<String, Roster>>,
+    acks: SyncSender<Ack>,
+    ack_dropped: AtomicU64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -56,7 +62,13 @@ pub struct Answer {
 
 impl Chat {
     pub fn new(store: Store, limits: Limits) -> Chat {
-        Chat { store: Arc::new(store), limits, cache: Mutex::new(HashMap::new()) }
+        let store = Arc::new(store);
+        let (acks, rx) = std::sync::mpsc::sync_channel(ACK_QUEUE);
+        let st = store.clone();
+        if let Err(e) = std::thread::Builder::new().name("chat-ack".into()).spawn(move || ack_writer(&st, &rx)) {
+            tracing::warn!(kind = "diag", spec = "SV-IMPL-CHAT-STORE-FAULTS", "ack writer did not start: {e} — records stay, catchup sends them again");
+        }
+        Chat { store, limits, cache: Mutex::new(HashMap::new()), acks, ack_dropped: AtomicU64::new(0) }
     }
 
     pub async fn roster_at_least(&self, space: &str, ver: u64) -> Result<Roster, Code> {
@@ -155,9 +167,18 @@ impl Chat {
     }
 
     pub fn acked(&self, user: &str, msg_ids: Vec<String>) {
-        let st = self.store.clone();
-        let user = user.to_string();
-        tokio::task::spawn_blocking(move || st.ack(&user, &msg_ids));
+        if msg_ids.is_empty() {
+            return;
+        }
+        let why = match self.acks.try_send((user.to_string(), msg_ids)) {
+            Ok(()) => return,
+            Err(TrySendError::Full(_)) => "ack queue full",
+            Err(TrySendError::Disconnected(_)) => "ack writer gone",
+        };
+        let n = self.ack_dropped.fetch_add(1, Ordering::Relaxed) + 1;
+        if n.is_power_of_two() {
+            tracing::warn!(kind = "diag", spec = "SV-IMPL-CHAT-STORE-FAULTS", user = %user, dropped = n, "{why} — records stay, catchup sends them again");
+        }
     }
 
     pub fn purge_once(&self, now: u64) -> Result<usize, Code> {
@@ -173,6 +194,14 @@ impl Chat {
             tick.tick().await;
             let me = self.clone();
             let _ = blocking(move || me.purge_once(common::now_ms())).await;
+        }
+    }
+}
+
+fn ack_writer(store: &Store, rx: &Receiver<Ack>) {
+    while let Ok(first) = rx.recv() {
+        if let Err(c) = store.ack_drain(first, rx, ACK_BATCH) {
+            tracing::warn!(kind = "diag", spec = "SV-IMPL-CHAT-STORE-FAULTS", code = c.num(), "ack batch not deleted — records stay, catchup sends them again");
         }
     }
 }

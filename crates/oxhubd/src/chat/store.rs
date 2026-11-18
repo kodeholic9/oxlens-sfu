@@ -3,6 +3,8 @@
 //! 채팅 저장소 — SQLite 하나 · 쓰기 트랜잭션은 SQLite 의 쓰기 꼴 `BEGIN IMMEDIATE` · `t` 는 저장 트랜잭션 안에서 찍은 ms(공간마다 줄 세우지 않음 · 같은 `t` 는 `msg_id` 차례) · 메시지와 같은 트랜잭션에 받을 사람 전원 몫 미전송 기록 · 멤버 입퇴장 구간과 멤버 변경 메시지 · 멤버 판 · 읽음 · 쪽은 같은 `t` 를 가르지 않음 · 따라잡기 쪽은 미전송 기록과 `t` 이상 메시지를 `msg_id` 로 합침(멤버 쪽에서 출발 · 하한 하나) · 관계는 `ref` 색인 · 저장소 오류는 원인을 진단 줄로 남김.
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use common::system::Visibility;
@@ -127,7 +129,13 @@ pub struct Cursor {
 pub struct Store {
     conn: Mutex<Connection>,
     default_vis: Visibility,
+    ack_tx: AtomicU64,
+    queued: AtomicUsize,
 }
+
+pub type Ack = (String, Vec<String>);
+
+const YIELD: Duration = Duration::from_micros(200);
 
 fn cause(e: &rusqlite::Error) -> String {
     match e.sqlite_error_code() {
@@ -143,6 +151,16 @@ fn db<T>(r: rusqlite::Result<T>) -> Result<T, Code> {
         tracing::warn!(kind = "diag", spec = "SV-IMPL-CHAT-STORE-FAULTS", cause = %cause(&e), at = %format!("{}:{}", at.file(), at.line()), "chat store: {e}");
         Code::InternalError
     })
+}
+
+fn delete_acks(tx: &Transaction, batch: &[Ack]) -> Result<(), Code> {
+    let mut st = db(tx.prepare_cached("DELETE FROM undelivered WHERE user_id = ?1 AND msg_id = ?2"))?;
+    for (user, ids) in batch {
+        for id in ids {
+            db(st.execute(params![user, id]))?;
+        }
+    }
+    Ok(())
 }
 
 fn duplicate_column(e: &rusqlite::Error) -> bool {
@@ -371,11 +389,14 @@ impl Store {
         }
         c.execute_batch("CREATE INDEX IF NOT EXISTS messages_ref ON messages (ref_id); CREATE INDEX IF NOT EXISTS messages_t_id ON messages (t, msg_id);")
             .map_err(|e| format!("chat db schema: {e}"))?;
-        Ok(Store { conn: Mutex::new(c), default_vis })
+        Ok(Store { conn: Mutex::new(c), default_vis, ack_tx: AtomicU64::new(0), queued: AtomicUsize::new(0) })
     }
 
     fn with<T>(&self, f: impl FnOnce(&mut Connection) -> Result<T, Code>) -> Result<T, Code> {
-        let mut g = self.conn.lock().map_err(|_| Code::InternalError)?;
+        self.queued.fetch_add(1, Ordering::AcqRel);
+        let g = self.conn.lock();
+        self.queued.fetch_sub(1, Ordering::AcqRel);
+        let mut g = g.map_err(|_| Code::InternalError)?;
         f(&mut g)
     }
 
@@ -697,13 +718,36 @@ impl Store {
             return Ok(());
         }
         self.with(|c| {
-            let marks = vec!["?"; msg_ids.len()].join(", ");
-            let sql = format!("DELETE FROM undelivered WHERE user_id = ? AND msg_id IN ({marks})");
-            let mut p: Vec<&dyn rusqlite::ToSql> = vec![&user];
-            p.extend(msg_ids.iter().map(|m| m as &dyn rusqlite::ToSql));
-            db(c.execute(&sql, params_from_iter(p)))?;
+            let tx = db(c.transaction_with_behavior(TransactionBehavior::Immediate))?;
+            delete_acks(&tx, &[(user.to_string(), msg_ids.to_vec())])?;
+            db(tx.commit())?;
+            self.ack_tx.fetch_add(1, Ordering::Relaxed);
             Ok(())
         })
+    }
+
+    pub fn ack_drain(&self, first: Ack, more: &Receiver<Ack>, cap: usize) -> Result<usize, Code> {
+        if self.queued.load(Ordering::Acquire) > 0 {
+            std::thread::sleep(YIELD);
+        }
+        self.with(|c| {
+            let tx = db(c.transaction_with_behavior(TransactionBehavior::Immediate))?;
+            let mut rows = first.1.len();
+            let mut batch = vec![first];
+            while rows < cap {
+                let Ok(a) = more.try_recv() else { break };
+                rows += a.1.len();
+                batch.push(a);
+            }
+            delete_acks(&tx, &batch)?;
+            db(tx.commit())?;
+            self.ack_tx.fetch_add(1, Ordering::Relaxed);
+            Ok(rows)
+        })
+    }
+
+    pub fn ack_transactions(&self) -> u64 {
+        self.ack_tx.load(Ordering::Relaxed)
     }
 
     pub fn plan(&self, sql: &str) -> Result<String, Code> {

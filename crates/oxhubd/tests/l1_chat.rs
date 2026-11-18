@@ -688,6 +688,82 @@ fn a_locked_store_fails_with_its_cause_on_a_diag_line() {
     assert!(s.view("a", "S").is_ok(), "잠금이 풀리면 다시 된다");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn acks_are_cleared_in_fewer_transactions_than_acks() {
+    let path = temp_db("ack-batch");
+    let chat = Chat::new(Store::open(&path, Visibility::Shared).expect("open"), Limits::default());
+    let s = chat.store.clone();
+    s.create_space("S", None).expect("space");
+    join(&s, "S", "a", 1);
+    join(&s, "S", "b", 1);
+    for i in 0..40 {
+        fresh_t(s.send("a", "S", &id(i), "m", Some(100 + i as u64)));
+    }
+    let ids = s.pending("b").expect("b");
+    assert!(ids.len() >= 40, "형상 — b 몫 기록 {}", ids.len());
+    let before = s.ack_transactions();
+    let other = rusqlite::Connection::open(&path).expect("other");
+    other.execute_batch("BEGIN IMMEDIATE").expect("hold the write lock while the acks arrive");
+    for m in &ids {
+        chat.acked("b", vec![m.clone()]);
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    other.execute_batch("ROLLBACK").expect("release");
+    let mut left = ids.len();
+    for _ in 0..100 {
+        left = s.pending("b").expect("b").len();
+        if left == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let tx = s.ack_transactions() - before;
+    assert_eq!(left, 0, "S-sym-IMPL-CHAT-UNDELIVERED-2① — ACK {} 건이 기록을 모두 지운다", ids.len());
+    assert!(tx >= 1 && tx < ids.len() as u64, "S-sym-IMPL-CHAT-UNDELIVERED-2② — 지운 트랜잭션 {tx} < ACK {}(묶음마다 하나)", ids.len());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ack_deletes_give_way_to_a_queued_store_call() {
+    let path = temp_db("ack-yield");
+    let chat = Chat::new(Store::open(&path, Visibility::Shared).expect("open"), Limits::default());
+    let s = chat.store.clone();
+    s.create_space("S", None).expect("space");
+    join(&s, "S", "a", 1);
+    join(&s, "S", "b", 1);
+    let full = oxhubd::chat::ACK_BATCH;
+    for i in 0..full + 10 {
+        fresh_t(s.send("a", "S", &id(i), "m", Some(100 + i as u64)));
+    }
+    let ids: Vec<String> = (0..full + 10).map(id).collect();
+    let (first, second) = ids.split_at(full);
+    s.ack("b", &s.pending("b").expect("b").into_iter().filter(|m| !ids.contains(m)).collect::<Vec<_>>()).expect("member notices");
+    let other = rusqlite::Connection::open(&path).expect("other");
+    other.execute_batch("BEGIN IMMEDIATE").expect("hold the write lock");
+    chat.acked("b", first.to_vec());
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let queued = {
+        let s = s.clone();
+        std::thread::spawn(move || s.pending("b"))
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    for m in second {
+        chat.acked("b", vec![m.clone()]);
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    other.execute_batch("ROLLBACK").expect("release");
+    let seen = queued.join().expect("queued").expect("pending");
+    assert_eq!(seen, second.to_vec(), "S-sym-IMPL-CHAT-UNDELIVERED-3① — 첫 묶음 뒤 줄 선 일이 다음 묶음보다 먼저 잠금을 얻는다(본 기록 = 둘째 묶음 지우기 전)");
+    let mut left = ids.len();
+    for _ in 0..100 {
+        left = s.pending("b").expect("b").len();
+        if left == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(left, 0, "S-sym-IMPL-CHAT-UNDELIVERED-3② — 그 뒤 기록이 모두 지워진다");
+}
+
 #[test]
 fn add_column_swallows_only_the_existing_column() {
     let path = temp_db("fault-alter");
