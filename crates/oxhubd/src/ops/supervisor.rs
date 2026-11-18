@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.6 · 정:RULE-OPS-SUPERVISOR · 정:RULE-OPS-SURFACE · 정:RULE-BUS-FATE · 정:IMPL-CFG-SYSTEM-FILE · 정:IMPL-BUS-FAULTS · 운영:RULE-CTL-SUPERVISOR · 정:CAND-OPS-SUPERVISOR-DEFAULTS · 정:CAND-OPS-SHUTDOWN-NO-RESTART · 정:CAND-OPS-SUPERVISOR-EXTRA-TRANSITIONS · 정:CAND-OPS-ZENOH-UNIT-DOWN · 정:CAND-OPS-UNIT-STATE-LINE · 정:IMPL-OPS-REC-UNIT · model: claude-opus-5-5
-//! supervisor — `UnitState` 여덟 · 못 띄운 것도 기동 시도로 센다 · `Stopped` 뒤 기동은 창에 안 쌓는다 · 준비 = Hello 성공(녹음 유닛은 띄움 성공 · ready 에 세지 않는다 · 띄울 때마다 녹화 참가자 토큰) · 부모 생존 채널(stdin) · 종료 중엔 되살리지 않는다.
+//! supervisor — `UnitState` 여덟 · 못 띄운 것도 기동 시도로 센다 · `Stopped` 뒤 기동은 창에 안 쌓는다 · 준비 = Hello 성공(녹음 유닛도 같다 — 그 Handle 은 유닛이 쥐고 로컬 미디어 서버 길과 섞지 않는다 · ready 에 세지 않는다 · 띄울 때마다 녹화 참가자 토큰) · 부모 생존 채널(stdin) · 종료 중엔 되살리지 않는다.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -76,6 +76,7 @@ pub struct UnitHandle {
     pub addr: Option<String>,
     pub cfg: Unit,
     pub rec: Mutex<UnitRec>,
+    pub handle: Mutex<Option<Local>>,
     pub tx: mpsc::UnboundedSender<Cmd>,
     rx: Mutex<Option<mpsc::UnboundedReceiver<Cmd>>>,
 }
@@ -161,6 +162,7 @@ impl Supervisor {
                     build: None,
                     attempts: VecDeque::new(),
                 }),
+                handle: Mutex::new(None),
                 cfg: u,
                 tx,
                 rx: Mutex::new(Some(rx)),
@@ -200,6 +202,10 @@ impl Supervisor {
 
     pub fn sfu_units(&self) -> Vec<Arc<UnitHandle>> {
         self.units.iter().filter(|u| u.role == Role::Sfu).cloned().collect()
+    }
+
+    pub fn rec_units(&self) -> Vec<Arc<UnitHandle>> {
+        self.units.iter().filter(|u| u.role == Role::Rec).cloned().collect()
     }
 
     pub fn process_units(&self) -> Vec<Arc<UnitHandle>> {
@@ -392,8 +398,29 @@ impl Supervisor {
                 _ => None,
             };
             if u.role == Role::Rec {
-                u.set(UnitState::Running, "spawn");
+                let Some((local, build)) = self.hello(&u).await else {
+                    if let Some(mut c) = child {
+                        let _ = c.start_kill();
+                        let _ = c.wait().await;
+                    }
+                    self.go_down(&u, "hello timeout");
+                    continue;
+                };
+                if let Ok(mut r) = u.rec.lock() {
+                    r.epoch = Some(local.epoch.clone());
+                    r.build = Some(build);
+                }
+                if let Ok(mut h) = u.handle.lock() {
+                    let _ = h.replace(local);
+                }
+                u.set(UnitState::Running, "hello");
                 let outcome = self.supervise(&u, child, &mut rx).await;
+                if let Ok(mut h) = u.handle.lock() {
+                    let _ = h.take();
+                }
+                if let Ok(mut r) = u.rec.lock() {
+                    r.epoch = None;
+                }
                 match outcome {
                     Outcome::Exited | Outcome::Killed => {
                         if self.stopping.load(Ordering::SeqCst) {

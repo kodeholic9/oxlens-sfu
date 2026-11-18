@@ -19,10 +19,13 @@ oxmesh = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+tonic = { workspace = true }
+tokio-rustls = { workspace = true }
 oxpeer = { path = "../../../oxlens-sdk-peer/crates/oxpeer", features = ["record"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+rcgen = { workspace = true }
 
 [lints]
 workspace = true

@@ -19,7 +19,7 @@ use tokio_postgres::{Config, NoTls, Row};
 use common::talk::Report;
 
 use super::{
-    Ack, COLS, Cursor, Dir, Interval, Outgoing, Page, RELATION_KINDS, Roster, Sent, VISIBLE, again, fold_relations, fresh, member_msg, n, now_or, probe_of, ref_ok, since_floor, talk_merged, talk_msg,
+    Ack, COLS, Cursor, Dir, Interval, Outgoing, Page, RELATION_KINDS, Roster, Sent, VISIBLE, again, fold_relations, fresh, member_msg, n, now_or, probe_of, ref_ok, since_floor, talk_merged, talk_missing, talk_msg,
     talk_started, talk_update_ok, u, within,
 };
 
@@ -537,7 +537,7 @@ impl Pg {
             }
             let lock = format!("SELECT {COLS} FROM messages x WHERE x.msg_id = $1 FOR UPDATE");
             let talk_id = r.talk_id().to_string();
-            let Some(row) = one(&tx, &lock, &[&talk_id]).await? else { return Err(Code::PreconditionFailed) };
+            let Some(row) = one(&tx, &lock, &[&talk_id]).await? else { return Err(talk_missing(&r)) };
             let orig = pg(msg_of(&row))?;
             talk_update_ok(&orig, &r)?;
             if let Some(m) = stored(&tx, &id).await? {

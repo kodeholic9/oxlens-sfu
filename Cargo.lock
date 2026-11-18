@@ -1770,8 +1770,11 @@ dependencies = [
  "oxmesh",
  "oxpeer",
  "oxsig",
+ "rcgen",
  "serde_json",
  "tokio",
+ "tokio-rustls",
+ "tonic",
  "tracing",
 ]
 

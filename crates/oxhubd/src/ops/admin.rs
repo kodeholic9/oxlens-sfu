@@ -125,7 +125,40 @@ pub async fn drops(hub: &Hub) -> Value {
     }
     let mut units = vec![mine];
     units.extend(per_sfu_unit(hub, "/admin/drops").await);
+    units.extend(per_rec_unit(hub, "/admin/drops").await);
     json!({ "units": units })
+}
+
+async fn per_rec_unit(hub: &Hub, path: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    for u in hub.sup.rec_units() {
+        if u.state() == UnitState::Disabled {
+            continue;
+        }
+        let client = u.handle.lock().ok().and_then(|h| h.as_ref().map(|l| l.client.clone()));
+        let Some(mut c) = client else {
+            out.push(json!({ "unit": u.id, "error": Code::SfuUnavailable.num() }));
+            continue;
+        };
+        let req = common::envelope::handle::CallReq { envelope: admin_env("GET", path, Value::Null).encode() };
+        let reply = match tokio::time::timeout(crate::bus::LOCAL_CALL_TIMEOUT, c.call(req)).await {
+            Ok(Ok(r)) => Reply::decode(&r.into_inner().reply).unwrap_or_else(|_| Reply::fail(Code::SfuError)),
+            Ok(Err(_)) => Reply::fail(Code::SfuUnavailable),
+            Err(_) => Reply::fail(Code::SfuError),
+        };
+        match reply {
+            Reply::Ok { body: Value::Object(mut o) } => {
+                o.insert("unit".into(), json!(u.id));
+                if let Some(e) = u.epoch() {
+                    o.insert("epoch".into(), json!(e));
+                }
+                out.push(Value::Object(o));
+            }
+            Reply::Fail { failure } => out.push(json!({ "unit": u.id, "error": failure.code })),
+            _ => out.push(json!({ "unit": u.id, "error": Code::SfuError.num() })),
+        }
+    }
+    out
 }
 
 async fn per_sfu_unit(hub: &Hub, path: &str) -> Vec<Value> {

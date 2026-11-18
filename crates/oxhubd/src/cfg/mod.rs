@@ -86,6 +86,22 @@ impl HubCfg {
         }
         a.push("--rec-keep-days".into());
         a.push(self.system.rec_keep_days().to_string());
+        a.push("--hub-base".into());
+        a.push(hub_base(&self.system.hub.listen, &self.system.hub.base_path, self.system.hub.tls.is_some()));
+        if let Some(t) = &self.system.hub.tls {
+            a.push("--hub-ca".into());
+            a.push(t.cert.clone());
+        }
         a
     }
+}
+
+pub fn hub_base(listen: &str, base_path: &str, tls: bool) -> String {
+    let scheme = if tls { "https" } else { "http" };
+    let at = match listen.rsplit_once(':') {
+        Some(("0.0.0.0", port)) => format!("127.0.0.1:{port}"),
+        Some(("[::]" | "::", port)) => format!("[::1]:{port}"),
+        _ => listen.to_string(),
+    };
+    format!("{scheme}://{at}{}", base_path.trim_end_matches('/'))
 }

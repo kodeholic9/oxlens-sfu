@@ -1439,7 +1439,8 @@ all_forms!(a_talk_update_carries_the_whole_state |db| {
     let ups: Vec<_> = page.relations.iter().filter(|m| m.kind == Some(ChatKind::TalkUpdate)).collect();
     assert_eq!(ups.len(), 1, "연:RULE-CHAT-HISTORY-PAGE — one update per talk in relations");
     assert_eq!(ups[0].msg_id, e.msg_id, "the last by (t, msg_id)");
-    assert_eq!(s.talk(&talk_end(&talk_id(11), TalkState::Ok, None, 1), None), Err(Code::PreconditionFailed), "정:IMPL-CHAT-TALK 2 — no talk yet is a passing failure");
+    assert_eq!(s.talk(&talk_end(&talk_id(11), TalkState::Ok, None, 1), None), Err(Code::InternalError), "정:IMPL-CHAT-TALK 2 — no talk yet is a passing failure (5003 · not permanent)");
+    assert_eq!(common::talk::judge(Some(&common::envelope::Reply::fail(Code::InternalError).encode())), None, "정:IMPL-FLR-TALK-REPORT 4 — the caller sends it again");
     let other = talk_id(12);
     sent_msg(s.talk(&talk_start(&other, "S", "a"), Some(2_000)));
     assert_eq!(s.talk(&talk_rec(&other, "rec/T/x.ogg"), None), Err(Code::InvalidPayload), "정:IMPL-CHAT-TALK 2 — a path outside rec/{{space}}/ is refused");

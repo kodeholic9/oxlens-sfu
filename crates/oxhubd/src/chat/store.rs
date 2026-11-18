@@ -347,6 +347,11 @@ pub(crate) fn talk_merged(prev: TalkInfo, r: &Report) -> TalkInfo {
     v
 }
 
+pub(crate) fn talk_missing(r: &Report) -> Code {
+    tracing::warn!(kind = "diag", spec = "SV-IMPL-CHAT-TALK", talk = %r.talk_id(), report = r.name(), "talk record not yet stored — passing failure, the caller sends again");
+    Code::InternalError
+}
+
 pub(crate) fn talk_update_ok(orig: &ChatMessage, r: &Report) -> Result<(), Code> {
     if orig.kind != Some(ChatKind::Talk) {
         return Err(Code::InvalidPayload);
@@ -727,7 +732,7 @@ impl Store {
             if let Some(m) = stored(&id)? {
                 return Ok(Sent::Again { msg: m });
             }
-            let Some(orig) = stored(r.talk_id())? else { return Err(Code::PreconditionFailed) };
+            let Some(orig) = stored(r.talk_id())? else { return Err(talk_missing(r)) };
             talk_update_ok(&orig, r)?;
             let ver = space_ver(&tx, &orig.space_id)?.ok_or(Code::SpaceNotFound)?;
             let last = db(tx

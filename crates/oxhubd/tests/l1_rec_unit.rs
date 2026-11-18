@@ -41,6 +41,14 @@ fn a_rec_unit_that_is_not_running_does_not_fail_ready() {
 }
 
 #[test]
+fn the_hub_base_is_the_listen_and_base_path_with_loopback_for_any() {
+    use oxhubd::cfg::hub_base;
+    assert_eq!(hub_base("0.0.0.0:1974", "/media", false), "http://127.0.0.1:1974/media", "정:IMPL-CFG-SYSTEM-FILE --hub-base — 모든 주소면 같은 갈래의 루프백");
+    assert_eq!(hub_base("[::]:1974", "/media", true), "https://[::1]:1974/media", "[hub.tls] 면 https");
+    assert_eq!(hub_base("10.0.0.5:8443", "/", true), "https://10.0.0.5:8443", "listen · base_path 그대로");
+}
+
+#[test]
 fn the_gateway_signs_a_hidden_recorder_token_for_the_unit() {
     let acc = Accounts { keys: vec![ApiKey { key: "k".into(), secret: "s".into(), name: None, participant_types: vec![0, 1], hidden_allowed: true, ops_allowed: false, hook_allowed: false }], jwt_secret: None };
     let tok = acc.sign_unit(&rec_user("n1"), 3_600).expect("signed");

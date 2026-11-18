@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.6 · 정:IMPL-OPS-REC-UNIT · 정:IMPL-CFG-SYSTEM-FILE · 정:RULE-OPS-SUPERVISOR · 정:RULE-BUS-FATE · 정:RULE-BUS-KEYSPACE · 정:RULE-BUS-SHAPE · 정:IMPL-FLR-TALK-REPORT · 운영:RULE-BOOT-ARGS · model: claude-opus-5-5
-//! 녹음 유닛 실행 파일 — 슈퍼바이저가 띄운다(`--id` · `--build` · `--bus-namespace` · `--bus-connect` · `--log-dir`? · `--log-socket`? · `--data-root` · `--rec-keep-days` · `--token` · 유닛 명령의 `--hub`) · 버스로 그 node 의 방 토큰을 보고 `record` 방에 녹화 참가자로 든다 · 발언마다 Ogg 를 다 쓰고 이름을 바꿔 닫은 뒤 `rec` 알림 · 하루 한 번 보관 지우기 · 부모 생존 채널(stdin)이 닫히면 끝 · 토큰을 다시 요구받거나 세션이 끝나면 끝(슈퍼바이저가 새 토큰으로 되살린다).
+//! 녹음 유닛 실행 파일 — 슈퍼바이저가 띄운다(`--id` · `--build` · `--bus-namespace` · `--bus-connect` · `--log-dir`? · `--log-socket`? · `--data-root` · `--rec-keep-days` · `--token` · `--hub-base` · `--hub-ca`? · 유닛 명령의 `--grpc-listen`) · Handle(`Hello` 준비 신호 · `Call` 은 `/admin/drops`) · 버스로 그 node 의 방 토큰을 보고 `record` 방에 녹화 참가자로 든다 · 발언마다 파일 하나(영상 트랙이 든 발언은 mkv · 아니면 ogg)를 다 쓰고 이름을 바꿔 닫은 뒤 `rec` 알림 · 영상 키프레임 요청은 SDK 에 · 하루 한 번 보관 지우기 · 부모 생존 채널(stdin)이 닫히면 끝 · 토큰을 다시 요구받거나 세션이 끝나면 끝(슈퍼바이저가 새 토큰으로 되살린다).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
@@ -12,7 +12,7 @@ use common::keyspace::{Keys, Parsed};
 use common::log::{Setup, Sink};
 use common::talk::Report;
 use oxmesh::{Mesh, TokenEvent};
-use oxpeer::record::{OggSink, Output, Pipeline, Policy, RecordConfig, SegmentKind};
+use oxpeer::record::{Pipeline, Policy, RecordConfig};
 use oxpeer::{Client, Config, Event};
 use oxrecd::{Hub, Layout};
 use tokio::sync::mpsc;
@@ -27,7 +27,9 @@ struct Args {
     root: PathBuf,
     keep_days: u32,
     token: String,
-    hub: String,
+    hub_base: String,
+    hub_ca: Option<PathBuf>,
+    grpc: std::net::SocketAddr,
 }
 
 fn args() -> Result<Args, String> {
@@ -40,7 +42,7 @@ fn args() -> Result<Args, String> {
     }
     let need = |k: &str| m.get(k).cloned().ok_or_else(|| format!("--{k} missing"));
     for k in m.keys() {
-        if !["id", "build", "bus-namespace", "bus-connect", "log-dir", "log-socket", "data-root", "rec-keep-days", "token", "hub"].contains(&k.as_str()) {
+        if !["id", "build", "bus-namespace", "bus-connect", "log-dir", "log-socket", "data-root", "rec-keep-days", "token", "hub-base", "hub-ca", "grpc-listen"].contains(&k.as_str()) {
             return Err(format!("unknown argument --{k}"));
         }
     }
@@ -54,7 +56,9 @@ fn args() -> Result<Args, String> {
         root: PathBuf::from(need("data-root")?),
         keep_days: m.get("rec-keep-days").map(|v| v.parse().map_err(|_| "--rec-keep-days".to_string())).transpose()?.unwrap_or(common::system::REC_KEEP_DAYS_DEFAULT),
         token: need("token")?,
-        hub: need("hub")?,
+        hub_base: need("hub-base")?,
+        hub_ca: m.get("hub-ca").map(PathBuf::from),
+        grpc: need("grpc-listen")?.parse().map_err(|e| format!("--grpc-listen: {e}"))?,
     })
 }
 
@@ -83,10 +87,30 @@ async fn run(a: Args) -> i32 {
     };
     let _sender = common::log::init(Setup { node: a.node.clone(), proc_name: "rec", epoch: None, sink, log_dir: a.log_dir.clone() }, &policy);
     tracing::info!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", node = %a.node, build = %a.build, root = %a.root.display(), keep_days = a.keep_days, "rec unit boot");
-    let Some(hub) = oxrecd::hub_of(&a.hub) else {
-        eprintln!("oxrecd: --hub must be http://host:port/base");
+    let ca = match &a.hub_ca {
+        Some(p) => match std::fs::read(p) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                eprintln!("oxrecd: --hub-ca {}: {e}", p.display());
+                return 2;
+            }
+        },
+        None => None,
+    };
+    let Some(hub) = oxrecd::hub_of(&a.hub_base, ca.as_deref()) else {
+        eprintln!("oxrecd: --hub-base must be http(s)://host:port/base (https needs --hub-ca)");
         return 2;
     };
+    let drops = Arc::new(AtomicU64::new(0));
+    let svc = oxrecd::Svc { epoch: common::ident::new_epoch(), build: common::ident::build_id(common::ident::COMPILED, Some(&a.build)), drops: drops.clone() };
+    let addr = a.grpc;
+    tokio::spawn(async move {
+        if let Err(e) = tonic::transport::Server::builder().add_service(common::envelope::handle::handle_server::HandleServer::new(svc)).serve(addr).await {
+            eprintln!("oxrecd: --grpc-listen {addr}: {e}");
+            common::log::drain(Duration::from_millis(200));
+            std::process::exit(2);
+        }
+    });
     let layout = Arc::new(Layout::new(&a.root));
     if let Err(e) = layout.clear_staging() {
         eprintln!("oxrecd: staging {}: {e}", layout.staging().display());
@@ -118,7 +142,6 @@ async fn run(a: Args) -> i32 {
             }
         }
     });
-    let drops = Arc::new(AtomicU64::new(0));
     let (rep_tx, rep_rx) = mpsc::unbounded_channel::<Report>();
     let (m2, key, d2) = (mesh.clone(), keys.q_node(&a.node, common::talk::WHAT), drops.clone());
     tokio::spawn(async move {
@@ -135,7 +158,8 @@ async fn run(a: Args) -> i32 {
         eprintln!("oxrecd: bus watch: {e}");
         return 2;
     }
-    let mut cfg = Config::new(&a.hub, &a.token);
+    let mut cfg = Config::new(&a.hub_base, &a.token);
+    cfg.tls_pin_pem = ca;
     cfg.record = Some(RecordConfig::live(format!("rec-{}", a.node)));
     let (client, mut events, mut media, _frames) = match Client::open(cfg).await {
         Ok(x) => x,
@@ -146,15 +170,13 @@ async fn run(a: Args) -> i32 {
     };
     let mut records = client.records(1 << 16);
     let mut pipe = Pipeline::new(Policy::Utterance);
-    let mut sink = match OggSink::new(layout.staging()) {
+    let mut talks = match oxrecd::Talks::new(Layout::new(&a.root)) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("oxrecd: staging: {e}");
             return 2;
         }
     };
-    let mut settled = 0usize;
-    let mut seg_rooms: HashMap<u64, String> = HashMap::new();
     let mut joined: BTreeSet<String> = BTreeSet::new();
     loop {
         tokio::select! {
@@ -185,37 +207,16 @@ async fn run(a: Args) -> i32 {
             r = records.next() => {
                 let Some(r) = r else { return 1 };
                 for o in pipe.push(&r) {
-                    if let Output::Segment(s) = &o
-                        && s.event == SegmentKind::Opened
-                    {
-                        seg_rooms.insert(s.id, s.room.clone());
+                    for rep in talks.feed(&o) {
+                        let _ = rep_tx.send(rep);
                     }
-                    let closed = matches!(&o, Output::Segment(s) if s.event == SegmentKind::Closed);
-                    if let Err(e) = sink.write(&o) {
-                        tracing::warn!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", "rec write: {e}");
-                    }
-                    if closed {
-                        settled = settle_new(&layout, &sink, settled, &mut seg_rooms, &rep_tx);
-                    }
+                }
+                for tid in talks.keyframe_requests() {
+                    let _ = client.request_keyframe(tid);
                 }
             }
         }
     }
-}
-
-fn settle_new(layout: &Layout, sink: &OggSink, from: usize, rooms: &mut HashMap<u64, String>, rep: &mpsc::UnboundedSender<Report>) -> usize {
-    let files = sink.files();
-    for f in files.iter().skip(from) {
-        let space = rooms.remove(&f.segment).unwrap_or_default();
-        match layout.settle(&space, f) {
-            Ok(Some(r)) => {
-                let _ = rep.send(r);
-            }
-            Ok(None) => {}
-            Err(e) => tracing::warn!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", file = %f.path.display(), "rec settle: {e}"),
-        }
-    }
-    files.len()
 }
 
 async fn discover(mesh: &Mesh, keys: &Keys, node: &str, hub: Hub, token: String, tx: mpsc::UnboundedSender<RoomCmd>) -> Result<(), String> {
