@@ -1,24 +1,28 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-CHAT-MEMBERSHIP · 연:RULE-CHAT-MEMBER-NOTICE · 연:CAND-CHAT-SPACE-ADMIN · 정:CAND-CHAT-STORE-SCHEMA · model: claude-opus-5-5
-//! 개발 · 시험 도구 — 채팅 저장소에 공간을 만들고 멤버를 넣고 뺀다(행위자는 사용자가 아니라 `$sys` — 멤버 변경 메시지는 추가 · 뺌). 공간 관리 입구는 아직 정하지 않았다(연:CAND-CHAT-SPACE-ADMIN) — 그때까지 2층 · 3층이 이것으로 공간을 준비한다. 쓰기는 게이트웨이와 같은 저장소 코드를 지난다.
+// spec: v1.6 · 정:IMPL-CHAT-MEMBERSHIP · 정:IMPL-CHAT-STORE-FORMS · 연:RULE-CHAT-MEMBER-NOTICE · 연:CAND-CHAT-SPACE-ADMIN · model: claude-opus-5-5
+//! 개발 · 시험 도구 — 채팅 저장소에 공간을 만들고 멤버를 넣고 뺀다(행위자는 사용자가 아니라 `$sys` — 멤버 변경 메시지는 추가 · 뺌). 공간 관리 입구는 아직 정하지 않았다(연:CAND-CHAT-SPACE-ADMIN) — 그때까지 2층 · 3층이 이것으로 공간을 준비한다. 쓰기는 게이트웨이와 같은 저장소 코드를 지난다. `<db>` 는 `[chat] db` 와 같은 꼴(`sqlite:<경로>` · `postgres://…`) · `memory:` 는 그 프로세스 안에만 있어 이 도구가 닿지 않는다.
 //!
 //! chat_seed <db> space <space_id> [shared|joined]
 //! chat_seed <db> join <space_id> <user_id>...
 //! chat_seed <db> leave <space_id> <user_id>...
 
-use common::system::Visibility;
+use common::system::{ChatDb, Visibility};
 use oxhubd::chat::store::Store;
 
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
     let usage = || -> ! {
-        eprintln!("chat_seed <db> space <space_id> [shared|joined] | join <space_id> <user_id>... | leave <space_id> <user_id>...");
+        eprintln!("chat_seed <sqlite:<path>|postgres://…> space <space_id> [shared|joined] | join <space_id> <user_id>... | leave <space_id> <user_id>...");
         std::process::exit(2)
     };
     if a.len() < 3 {
         usage();
     }
-    let st = match Store::open(&a[0], Visibility::Shared) {
+    if ChatDb::parse(&a[0]) == Ok(ChatDb::Memory) {
+        eprintln!("chat_seed: memory: is inside the gateway process only — seed it through the op or the space admin entry");
+        std::process::exit(2)
+    }
+    let st = match Store::open_pool(&a[0], 1, Visibility::Shared) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("chat_seed: {e}");

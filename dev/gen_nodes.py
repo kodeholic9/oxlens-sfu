@@ -75,7 +75,7 @@ connect = [{", ".join(connect)}]
 namespace = "{NS}"
 
 [chat]
-db = "{LOG_ROOT}/chat.db"
+db = "sqlite:{LOG_ROOT}/chat.db"
 '''
     out = HERE / f"system.{me}.toml"
     out.write_text(body, encoding="utf-8")

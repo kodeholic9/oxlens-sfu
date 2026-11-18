@@ -139,7 +139,7 @@ async fn run(cfg: HubCfg) -> i32 {
         return 2;
     }
     if let Some(c) = &cfg.system.chat {
-        match oxhubd::chat::store::Store::open(&c.db, c.history_visibility) {
+        match oxhubd::chat::store::Store::open_pool(&c.db, c.pool(), c.history_visibility) {
             Ok(st) => {
                 let limits = oxhubd::chat::Limits {
                     undelivered_ttl_days: c.undelivered_ttl_days,

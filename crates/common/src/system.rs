@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-CFG-SYSTEM-FILE · 정:RULE-CFG-THREE-PLACES · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · 정:RULE-MESH-SHAPE · 정:RULE-CHAT-GATEWAY-MODULE · 정:IMPL-CHAT-MEMBERSHIP · model: claude-opus-5-5
-//! 시스템 파일(hub 전용) — 키 전량 strict(모르는 키 = 기동 실패) · `[bus]` 는 oxmesh router 의 접속 좌표와 배포 이름공간.
+// spec: v1.6 · 정:IMPL-CFG-SYSTEM-FILE · 정:RULE-CFG-THREE-PLACES · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · 정:RULE-MESH-SHAPE · 정:RULE-CHAT-GATEWAY-MODULE · 정:IMPL-CHAT-MEMBERSHIP · 정:IMPL-CHAT-STORE-FORMS · model: claude-opus-5-5
+//! 시스템 파일(hub 전용) — 키 전량 strict(모르는 키 = 기동 실패) · `[bus]` 는 oxmesh router 의 접속 좌표와 배포 이름공간 · `[chat] db` 값의 꼴이 채팅 저장소를 고른다(모르는 꼴 = 기동 실패 · 배너는 비밀번호를 가린다).
 
 use serde::Deserialize;
 
@@ -48,10 +48,48 @@ impl Visibility {
     }
 }
 
+pub const DB_POOL_DEFAULT: usize = 16;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatDb {
+    Memory,
+    Sqlite(String),
+    Postgres(String),
+}
+
+impl ChatDb {
+    pub fn parse(v: &str) -> Result<ChatDb, String> {
+        if v == "memory:" {
+            Ok(ChatDb::Memory)
+        } else if let Some(p) = v.strip_prefix("sqlite:")
+            && !p.is_empty()
+        {
+            Ok(ChatDb::Sqlite(p.to_string()))
+        } else if v.starts_with("postgres://") {
+            Ok(ChatDb::Postgres(v.to_string()))
+        } else {
+            Err(format!("chat.db {:?} — memory: · sqlite:<경로> · postgres://… 중 하나여야 한다", ChatDb::shown_of(v)))
+        }
+    }
+
+    pub fn shown_of(v: &str) -> String {
+        let Some((scheme, rest)) = v.split_once("://") else { return v.to_string() };
+        let end = rest.find(['/', '?']).unwrap_or(rest.len());
+        let (auth, tail) = rest.split_at(end);
+        let Some((info, host)) = auth.rsplit_once('@') else { return v.to_string() };
+        match info.split_once(':') {
+            Some((user, _)) => format!("{scheme}://{user}:***@{host}{tail}"),
+            None => v.to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChatSection {
     pub db: String,
+    #[serde(default)]
+    pub db_pool: Option<usize>,
     #[serde(default)]
     pub history_visibility: Visibility,
     #[serde(default = "default_undelivered_ttl_days")]
@@ -62,6 +100,16 @@ pub struct ChatSection {
     pub catchup_bundle_max_bytes: usize,
     #[serde(default = "default_live_bundle_max_bytes")]
     pub live_bundle_max_bytes: usize,
+}
+
+impl ChatSection {
+    pub fn form(&self) -> Result<ChatDb, String> {
+        ChatDb::parse(&self.db)
+    }
+
+    pub fn pool(&self) -> usize {
+        self.db_pool.unwrap_or(DB_POOL_DEFAULT)
+    }
 }
 
 fn default_live_bundle_max_bytes() -> usize {
@@ -285,6 +333,14 @@ impl System {
                 return Err(SystemError(format!("unit {} process 인데 cmd 가 없다", u.id)));
             }
         }
+        if let Some(c) = &self.chat {
+            let form = c.form().map_err(SystemError)?;
+            match (c.db_pool, &form) {
+                (Some(_), ChatDb::Memory | ChatDb::Sqlite(_)) => return Err(SystemError("chat.db_pool 은 postgres:// 꼴에서만 읽는다".into())),
+                (Some(0), _) => return Err(SystemError("chat.db_pool 은 1 이상".into())),
+                _ => {}
+            }
+        }
         Ok(())
     }
 
@@ -351,7 +407,9 @@ impl System {
         }
         match &self.chat {
             Some(c) => {
-                v.push(("chat.db".into(), c.db.clone()));
+                v.push(("chat.db".into(), ChatDb::shown_of(&c.db)));
+                let pg = matches!(c.form(), Ok(ChatDb::Postgres(_)));
+                v.push(("chat.db_pool".into(), if pg { c.pool().to_string() } else { "-".into() }));
                 v.push(("chat.history_visibility".into(), c.history_visibility.as_str().into()));
                 v.push(("chat.undelivered_ttl_days".into(), c.undelivered_ttl_days.to_string()));
                 v.push(("chat.catchup_bundle_max_msgs".into(), c.catchup_bundle_max_msgs.to_string()));
@@ -381,7 +439,12 @@ mod tests {
         assert!(System::parse(&MIN.replace("\"ox\"", "\"o/x\"")).is_err());
         assert!(s.banner_fields().iter().any(|(k, v)| k == "hub.auth.jwt_secret" && v == "-"));
         assert!(s.banner_fields().iter().any(|(k, v)| k == "hub.send_queue_max_bytes" && v == "4194304"));
-        let c = System::parse(&format!("{MIN}[chat]\ndb = \"x\"\n")).unwrap();
+        let c = System::parse(&format!("{MIN}[chat]\ndb = \"memory:\"\n")).unwrap();
         assert!(c.banner_fields().iter().any(|(k, v)| k == "chat.live_bundle_max_bytes" && v == "65536"));
+        assert!(c.banner_fields().iter().any(|(k, v)| k == "chat.db_pool" && v == "-"));
+        let p = System::parse(&format!("{MIN}[chat]\ndb = \"postgres://u@h/d\"\n")).unwrap();
+        assert!(p.banner_fields().iter().any(|(k, v)| k == "chat.db_pool" && v == "16"));
+        assert!(System::parse(&format!("{MIN}[chat]\ndb = \"x\"\n")).is_err());
+        assert!(System::parse(&format!("{MIN}[chat]\ndb = \"sqlite:/x\"\ndb_pool = 4\n")).is_err());
     }
 }

@@ -38,6 +38,8 @@ socket2 = { workspace = true }
 chrono = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
 rusqlite = { workspace = true }
+tokio-postgres = { workspace = true }
+deadpool-postgres = { workspace = true }
 
 [lints]
 workspace = true

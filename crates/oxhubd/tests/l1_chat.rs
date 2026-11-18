@@ -1,8 +1,10 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 연:RULE-CHAT-KIND · 연:RULE-CHAT-REF-CHECK · 연:RULE-CHAT-DELETE · 연:RULE-CHAT-FOLD · 정:IMPL-CHAT-STORE ·정:IMPL-CHAT-MEMBERSHIP · 정:IMPL-CHAT-FILTER · 정:IMPL-CHAT-READ · 정:IMPL-CHAT-UNDELIVERED · 정:IMPL-CHAT-CATCHUP · 정:IMPL-CHAT-STORE-FAULTS · 정:IMPL-CHAT-LIVE-BUNDLE · 정:IMPL-SES-SOCKET-LIFE · 연:RULE-CHAT-MSG-ID · 연:RULE-CHAT-CONTENT · 연:RULE-CHAT-ORDER · 연:RULE-CHAT-VISIBLE · 연:RULE-CHAT-UNREAD · 연:RULE-CHAT-HISTORY-PAGE · 연:RULE-CHAT-UNDELIVERED · 연:RULE-CHAT-CATCHUP · 연:RULE-CHAT-MEMBER-NOTICE · model: claude-opus-5-5
-//! 1층 — 송신 줄의 실시간 채팅 묶기(창이 찼을 때만 · 줄 끝 · 1단 제외 · 영수증 이어 붙이기 · 바이트 상한) · 채팅 저장소(저장할 때 찍는 t · 같은 t 를 가르지 않는 쪽 · msg_id 멱등 · 멤버 구간 · 멤버 변경 메시지 · 보이기 시작점 · 안 읽은 수 · 미전송 기록 · 따라잡기 쪽)와 받는 게이트웨이의 멤버 캐시(판이 작을 때만 다시 읽음 · 명단(t_M)) · op 경계(msg_id 64 · content 65535) · 질의 계획(관계 = `ref` 색인 · 따라잡기 = 멤버 쪽 출발 · 하한 하나) · 저장소 실패의 원인 진단 줄.
+// spec: v1.6 · 연:RULE-CHAT-KIND · 연:RULE-CHAT-REF-CHECK · 연:RULE-CHAT-DELETE · 연:RULE-CHAT-FOLD · 정:IMPL-CHAT-STORE ·정:IMPL-CHAT-MEMBERSHIP · 정:IMPL-CHAT-FILTER · 정:IMPL-CHAT-READ · 정:IMPL-CHAT-UNDELIVERED · 정:IMPL-CHAT-CATCHUP · 정:IMPL-CHAT-STORE-FAULTS · 정:IMPL-CHAT-STORE-FORMS · 정:IMPL-CFG-SYSTEM-FILE · 정:IMPL-CHAT-LIVE-BUNDLE · 정:IMPL-SES-SOCKET-LIFE · 연:RULE-CHAT-MSG-ID · 연:RULE-CHAT-CONTENT · 연:RULE-CHAT-ORDER · 연:RULE-CHAT-VISIBLE · 연:RULE-CHAT-UNREAD · 연:RULE-CHAT-HISTORY-PAGE · 연:RULE-CHAT-UNDELIVERED · 연:RULE-CHAT-CATCHUP · 연:RULE-CHAT-MEMBER-NOTICE · model: claude-opus-5-5
+//! 1층 — 채팅 저장소 시험은 `[chat] db` 꼴 셋(`memory:` · `sqlite:<경로>` · `postgres://…`)에서 같은 몸으로 돈다(꼴마다 시험 하나 · PostgreSQL 은 시험마다 따로 된 스키마 · 접속 `OXLENS_TEST_PG` · 못 닿으면 「못 잼」 빨강) · 바깥 연결로 잠그는 시험은 바깥이 있는 꼴(sqlite · postgres)에서 · 질의 계획은 SQLite 엔진 꼴(memory · sqlite)에서 · 옛 파일 칸 더하기는 sqlite 꼴에서. 저장소(저장할 때 찍는 t · 같은 t 를 가르지 않는 쪽 · msg_id 멱등 · 멤버 구간 · 멤버 변경 메시지 · 보이기 시작점 · 안 읽은 수 · 미전송 기록 · 따라잡기 쪽)와 받는 게이트웨이의 멤버 캐시 · op 경계 · 저장소 실패의 원인 진단 줄 · 송신 줄의 실시간 채팅 묶기(창이 찼을 때만 · 줄 끝 · 1단 제외 · 영수증 이어 붙이기 · 바이트 상한) · 설정 배너의 비밀번호 가림.
 
-use common::system::Visibility;
+use std::sync::Arc;
+
+use common::system::{ChatDb, System, Visibility};
 use oxhubd::chat::store::{Cursor, Dir, Outgoing, Page, SYS, SYS_HASH, Sent, Store, catchup_since_sql, relations_sql};
 use oxhubd::chat::{BODY_MAX, Chat, Limits, outgoing, valid_msg_id};
 use oxhubd::ses::conn::QUEUE_MAX;
@@ -13,8 +15,225 @@ const ID_A: &str = "e818000001a1e480b5fd7da4c5b6bc0df205";
 const ID_B: &str = "e818000001a1e480b5fe0b1c2d3e4f506a7b";
 const ID_C: &str = "3f0a9b1201a1e480b600aa11bb22cc33dd44";
 
-fn store(vis: Visibility) -> Store {
-    let s = Store::open(":memory:", vis).expect("open");
+mod pgx {
+    use std::sync::mpsc;
+
+    type Job = (String, mpsc::Sender<Result<(), String>>);
+
+    pub struct Conn {
+        tx: Option<tokio::sync::mpsc::UnboundedSender<Job>>,
+        h: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Conn {
+        pub fn open(url: &str) -> Result<Conn, String> {
+            let cfg = oxhubd::chat::store::pg_config(url)?;
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+            let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
+            let h = std::thread::spawn(move || {
+                let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+                    let _ = ready_tx.send(Err("runtime".into()));
+                    return;
+                };
+                rt.block_on(async move {
+                    let (client, conn) = match cfg.connect(tokio_postgres::NoTls).await {
+                        Ok(x) => x,
+                        Err(e) => {
+                            let _ = ready_tx.send(Err(e.to_string()));
+                            return;
+                        }
+                    };
+                    tokio::spawn(conn);
+                    let _ = ready_tx.send(Ok(()));
+                    while let Some((sql, back)) = rx.recv().await {
+                        let r = client.batch_execute(&sql).await.map_err(|e| e.as_db_error().map(|d| d.message().to_string()).unwrap_or_else(|| e.to_string()));
+                        let _ = back.send(r);
+                    }
+                });
+            });
+            ready_rx.recv().map_err(|e| e.to_string())??;
+            Ok(Conn { tx: Some(tx), h: Some(h) })
+        }
+
+        pub fn exec(&self, sql: &str) -> Result<(), String> {
+            let (back, got) = mpsc::channel();
+            self.tx.as_ref().ok_or("closed")?.send((sql.to_string(), back)).map_err(|e| e.to_string())?;
+            got.recv().map_err(|e| e.to_string())?
+        }
+    }
+
+    impl Drop for Conn {
+        fn drop(&mut self) {
+            self.tx.take();
+            if let Some(h) = self.h.take() {
+                let _ = h.join();
+            }
+        }
+    }
+
+    pub fn run(url: &str, sql: &str) -> Result<(), String> {
+        Conn::open(url)?.exec(sql)
+    }
+}
+
+mod form {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use common::system::{ChatDb, Visibility};
+    use oxhubd::chat::store::Store;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Kind {
+        Memory,
+        Sqlite,
+        Postgres,
+    }
+
+    pub struct Db {
+        pub kind: Kind,
+        pub url: String,
+        pub file: Option<String>,
+        schema: Option<(String, String)>,
+    }
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    pub fn pg_base() -> String {
+        std::env::var("OXLENS_TEST_PG").unwrap_or_else(|_| "postgres://oxlens@localhost/oxlens_chat".into())
+    }
+
+    fn uniq() -> String {
+        format!("{}_{}_{}", std::process::id(), common::now_ms(), NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+
+    impl Db {
+        pub fn new(kind: Kind) -> Db {
+            match kind {
+                Kind::Memory => Db { kind, url: "memory:".into(), file: None, schema: None },
+                Kind::Sqlite => {
+                    let p = std::env::temp_dir().join(format!("oxchat-{}.db", uniq())).to_string_lossy().into_owned();
+                    Db { kind, url: format!("sqlite:{p}"), file: Some(p), schema: None }
+                }
+                Kind::Postgres => Db::pg_at(&pg_base()),
+            }
+        }
+
+        pub fn pg_at(base: &str) -> Db {
+            let schema = format!("t_{}", uniq());
+            if let Err(e) = super::pgx::run(base, &format!("CREATE SCHEMA {schema}")) {
+                panic!("S-sym-IMPL-CHAT-STORE-FORMS-2 — 못 잼: PostgreSQL {} 에 닿지 못한다(OXLENS_TEST_PG) — {e}", ChatDb::shown_of(base));
+            }
+            let sep = if base.contains('?') { '&' } else { '?' };
+            Db { kind: Kind::Postgres, url: format!("{base}{sep}options=-c%20search_path%3D{schema}"), file: None, schema: Some((base.to_string(), schema)) }
+        }
+
+        pub fn open(&self, vis: Visibility) -> Store {
+            Store::open(&self.url, vis).unwrap_or_else(|e| panic!("open {:?}: {e}", self.kind))
+        }
+
+        pub fn open_pool(&self, pool: usize, vis: Visibility) -> Store {
+            Store::open_pool(&self.url, pool, vis).unwrap_or_else(|e| panic!("open {:?}: {e}", self.kind))
+        }
+
+        pub fn shared(&self) -> bool {
+            self.kind != Kind::Memory
+        }
+    }
+
+    impl Drop for Db {
+        fn drop(&mut self) {
+            if let Some(f) = &self.file {
+                for x in ["", "-wal", "-shm"] {
+                    let _ = std::fs::remove_file(format!("{f}{x}"));
+                }
+            }
+            if let Some((base, s)) = &self.schema {
+                let _ = super::pgx::run(base, &format!("DROP SCHEMA IF EXISTS {s} CASCADE"));
+            }
+        }
+    }
+}
+
+enum Outside {
+    Lite(rusqlite::Connection),
+    Pg(pgx::Conn),
+}
+
+impl Outside {
+    fn of(db: &form::Db) -> Outside {
+        match db.kind {
+            form::Kind::Sqlite => Outside::Lite(rusqlite::Connection::open(db.file.as_deref().expect("file")).expect("outside")),
+            form::Kind::Postgres => Outside::Pg(pgx::Conn::open(&db.url).expect("outside")),
+            form::Kind::Memory => panic!("memory: 은 바깥 연결이 없다"),
+        }
+    }
+
+    fn exec(&self, lite: &str, pg: &str) {
+        match self {
+            Outside::Lite(c) => c.execute_batch(lite).expect(lite),
+            Outside::Pg(c) => c.exec(pg).expect(pg),
+        }
+    }
+
+    fn hold(&self) {
+        self.exec("BEGIN IMMEDIATE", "BEGIN; LOCK TABLE spaces, members, messages, reads, undelivered IN EXCLUSIVE MODE");
+    }
+
+    fn release(&self) {
+        self.exec("ROLLBACK", "ROLLBACK");
+    }
+}
+
+macro_rules! forms {
+    ($name:ident [$($f:ident = $k:ident),+] |$db:ident| $body:block) => {
+        mod $name {
+            use super::*;
+            fn run($db: &form::Db) $body
+            $(
+                #[test]
+                fn $f() {
+                    run(&form::Db::new(form::Kind::$k))
+                }
+            )+
+        }
+    };
+}
+
+macro_rules! all_forms {
+    ($name:ident |$db:ident| $body:block) => {
+        forms!($name [memory = Memory, sqlite = Sqlite, postgres = Postgres] |$db| $body);
+    };
+}
+
+macro_rules! shared_forms {
+    ($name:ident |$db:ident| $body:block) => {
+        forms!($name [sqlite = Sqlite, postgres = Postgres] |$db| $body);
+    };
+}
+
+macro_rules! lite_forms {
+    ($name:ident |$db:ident| $body:block) => {
+        forms!($name [memory = Memory, sqlite = Sqlite] |$db| $body);
+    };
+}
+
+macro_rules! async_forms {
+    ($name:ident [$($f:ident = $k:ident),+] |$db:ident| $body:block) => {
+        mod $name {
+            use super::*;
+            async fn run($db: &form::Db) $body
+            $(
+                #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+                async fn $f() {
+                    run(&form::Db::new(form::Kind::$k)).await
+                }
+            )+
+        }
+    };
+}
+
+fn store(db: &form::Db, vis: Visibility) -> Store {
+    let s = db.open(vis);
     s.create_space("S", None).expect("space");
     s
 }
@@ -38,9 +257,8 @@ fn id(i: usize) -> String {
     format!("{:036x}", i + 1)
 }
 
-#[test]
-fn t_is_the_store_time_as_is() {
-    let s = store(Visibility::Shared);
+all_forms!(t_is_the_store_time_as_is |db| {
+    let s = store(db, Visibility::Shared);
     join(&s, "S", "a", 1000);
     let t1 = fresh_t(s.send("a", "S", ID_A, "x", Some(5000)));
     let t2 = fresh_t(s.send("a", "S", ID_B, "y", Some(5000)));
@@ -49,21 +267,19 @@ fn t_is_the_store_time_as_is() {
     assert_eq!(t3, 10, "S-sym-IMPL-CHAT-STORE-1 — an earlier store time is not pushed up");
     let e = s.list("a").expect("list").remove(0);
     assert_eq!((e.total, e.last_t), (3, Some(5000)), "S-sym-IMPL-CHAT-STORE-1 — total counts posts · last t is the largest");
-}
+});
 
-#[test]
-fn t_is_stamped_inside_the_store() {
-    let s = store(Visibility::Shared);
+all_forms!(t_is_stamped_inside_the_store |db| {
+    let s = store(db, Visibility::Shared);
     join(&s, "S", "a", 1);
     let before = common::now_ms();
     let t = fresh_t(s.send("a", "S", ID_A, "x", None));
     let after = common::now_ms();
     assert!(before <= t && t <= after, "S-sym-IMPL-CHAT-STORE-1 — t is the ms taken in the store transaction ({before} ≤ {t} ≤ {after})");
-}
+});
 
-#[test]
-fn same_msg_id_same_content_answers_the_first_t() {
-    let s = store(Visibility::Shared);
+all_forms!(same_msg_id_same_content_answers_the_first_t |db| {
+    let s = store(db, Visibility::Shared);
     join(&s, "S", "a", 1);
     join(&s, "S", "b", 1);
     let t1 = fresh_t(s.send("a", "S", ID_A, "hello", Some(800)));
@@ -75,7 +291,7 @@ fn same_msg_id_same_content_answers_the_first_t() {
     assert_eq!(s.pending("b").expect("pending").len(), before, "S-sym-IMPL-CHAT-STORE-3 — a retry adds no undelivered record");
     assert_eq!(s.send("a", "S", ID_A, "other", Some(900)), Err(Code::MsgIdConflict), "same msg_id with other content is 3015");
     assert_eq!(s.list("a").expect("list")[0].total, 1, "one message stored");
-}
+});
 
 #[test]
 fn msg_id_is_opaque_and_only_bounded() {
@@ -85,9 +301,8 @@ fn msg_id_is_opaque_and_only_bounded() {
     assert!(!valid_msg_id(&"a".repeat(65)), "65 bytes is refused");
 }
 
-#[tokio::test]
-async fn message_op_refuses_only_that_request_on_bounds() {
-    let s = store(Visibility::Shared);
+async_forms!(message_op_refuses_only_that_request_on_bounds [memory = Memory, sqlite = Sqlite, postgres = Postgres] |db| {
+    let s = store(db, Visibility::Shared);
     join(&s, "S", "a", 1);
     let chat = Chat::new(s, Limits::default());
     let ask = |msg_id: String, content: String| serde_json::json!({ "space_id": "S", "msg_id": msg_id, "content": content });
@@ -98,11 +313,10 @@ async fn message_op_refuses_only_that_request_on_bounds() {
     assert!(chat.handle("a", "s1", Op::Message, ask("not-hex-at-all".into(), "가".repeat(21_845)), 70_000).await.is_ok(), "CP-OP-MESSAGE ④ — the shape is not checked · 65535 bytes is taken");
     let f = chat.handle("a", "s1", Op::Message, ask(ID_B.into(), "x".into()), BODY_MAX + 1).await.err().expect("refused");
     assert_eq!(f.code, Code::InvalidPayload.num(), "연:RULE-CHAT-CONTENT — a body over 131072 received bytes is 1002");
-}
+});
 
-#[test]
-fn space_and_membership_checks() {
-    let s = store(Visibility::Shared);
+all_forms!(space_and_membership_checks |db| {
+    let s = store(db, Visibility::Shared);
     assert_eq!(s.send("a", "nope", ID_A, "x", Some(1)), Err(Code::SpaceNotFound));
     assert_eq!(s.send("a", "S", ID_A, "x", Some(1)), Err(Code::NotSpaceMember));
     join(&s, "S", "a", 1);
@@ -111,11 +325,10 @@ fn space_and_membership_checks() {
     assert_eq!(s.history("a", "S", Dir::Latest, 60), Err(Code::NotSpaceMember));
     assert_eq!(s.catchup_check("a", "S"), Err(Code::NotSpaceMember), "CP-OP-CATCHUP ④ — not a member is 3013");
     assert_eq!(s.catchup_check("a", "nope"), Err(Code::SpaceNotFound), "CP-OP-CATCHUP ④ — no such space is 3012");
-}
+});
 
-#[test]
-fn roster_at_message_time() {
-    let s = store(Visibility::Shared);
+all_forms!(roster_at_message_time |db| {
+    let s = store(db, Visibility::Shared);
     join(&s, "S", "a", 10);
     join(&s, "S", "c", 10);
     let t = fresh_t(s.send("a", "S", ID_A, "m", Some(20)));
@@ -124,11 +337,10 @@ fn roster_at_message_time() {
     let at = s.roster("S").expect("roster").at(t);
     assert!(!at.contains(&"b".to_string()), "S-sym-IMPL-CHAT-FILTER-1 — a member who joined after M does not get M");
     assert!(at.contains(&"c".to_string()), "S-sym-IMPL-CHAT-FILTER-1 — a member who left after M still gets M");
-}
+});
 
-#[tokio::test]
-async fn cache_reloads_only_when_older_than_the_message() {
-    let s = store(Visibility::Shared);
+async_forms!(cache_reloads_only_when_older_than_the_message [memory = Memory, sqlite = Sqlite, postgres = Postgres] |db| {
+    let s = store(db, Visibility::Shared);
     join(&s, "S", "a", 10);
     let v1 = s.roster("S").expect("roster").ver;
     let chat = Chat::new(s, Limits::default());
@@ -139,11 +351,10 @@ async fn cache_reloads_only_when_older_than_the_message() {
     let got = chat.roster_at_least("S", v1 + 1).await.expect("reload");
     assert_eq!(got.ver, v1 + 1, "an older cache is reread");
     assert!(got.at(25).contains(&"b".to_string()));
-}
+});
 
-#[test]
-fn history_pages_after_before_and_latest() {
-    let s = store(Visibility::Shared);
+all_forms!(history_pages_after_before_and_latest |db| {
+    let s = store(db, Visibility::Shared);
     join(&s, "S", "a", 1);
     let ids: Vec<String> = (0..5).map(id).collect();
     let ts: Vec<u64> = ids.iter().zip(100u64..).map(|(m, at)| fresh_t(s.send("a", "S", m, "m", Some(at)))).collect();
@@ -156,11 +367,10 @@ fn history_pages_after_before_and_latest() {
     let p = s.history("a", "S", Dir::After(ts[1]), 10).expect("after");
     assert_eq!(p.messages.iter().map(|m| m.t).collect::<Vec<_>>(), ts[2..].to_vec(), "after is ascending with no gap");
     assert!(!p.more);
-}
+});
 
-#[test]
-fn a_page_never_splits_one_t() {
-    let s = store(Visibility::Shared);
+all_forms!(a_page_never_splits_one_t |db| {
+    let s = store(db, Visibility::Shared);
     join(&s, "S", "a", 1);
     for (i, at) in [100u64, 200, 200, 200, 300].iter().enumerate() {
         fresh_t(s.send("a", "S", &id(i), "m", Some(*at)));
@@ -179,12 +389,10 @@ fn a_page_never_splits_one_t() {
     assert_eq!((ts(&p), p.more), (vec![200, 200, 200], true), "CP-OP-SPACE-HISTORY ⑤ — after keeps one t whole too");
     let p = s.history("a", "S", Dir::After(200), 1).expect("after");
     assert_eq!((ts(&p), p.more), (vec![300], false), "continuing from the edge t loses nothing and repeats nothing");
-}
+});
 
-#[test]
-fn joined_visibility_hides_what_came_before_the_interval() {
-    let s = Store::open(":memory:", Visibility::Joined).expect("open");
-    s.create_space("S", None).expect("space");
+all_forms!(joined_visibility_hides_what_came_before_the_interval |db| {
+    let s = store(db, Visibility::Joined);
     join(&s, "S", "a", 1);
     let t_before = fresh_t(s.send("a", "S", ID_A, "before", Some(10)));
     join(&s, "S", "b", 20);
@@ -196,11 +404,10 @@ fn joined_visibility_hides_what_came_before_the_interval() {
     fresh_t(s.send("a", "P", ID_C, "old", Some(40)));
     join(&s, "P", "b", 50);
     assert_eq!(posts(&s.history("b", "P", Dir::Latest, 60).expect("history")).len(), 1, "a space value overrides the default");
-}
+});
 
-#[test]
-fn unread_is_total_minus_read() {
-    let s = store(Visibility::Shared);
+all_forms!(unread_is_total_minus_read |db| {
+    let s = store(db, Visibility::Shared);
     join(&s, "S", "a", 1);
     join(&s, "S", "b", 1);
     fresh_t(s.send("a", "S", ID_A, "1", Some(10)));
@@ -214,11 +421,10 @@ fn unread_is_total_minus_read() {
     assert_eq!(e.total - e.read, 0, "after view nothing is unread");
     let a = s.list("a").expect("list").remove(0);
     assert_eq!(a.total - a.read, 0, "the sender has read up to what it sent");
-}
+});
 
-#[test]
-fn undelivered_is_written_with_the_message_and_cleared_by_ack() {
-    let s = store(Visibility::Shared);
+all_forms!(undelivered_is_written_with_the_message_and_cleared_by_ack |db| {
+    let s = store(db, Visibility::Shared);
     join(&s, "S", "a", 1);
     join(&s, "S", "b", 1);
     join(&s, "S", "c", 1);
@@ -235,11 +441,10 @@ fn undelivered_is_written_with_the_message_and_cleared_by_ack() {
     assert_eq!(s.pending("c").expect("c"), vec![ID_A.to_string()], "another member's record stays");
     s.purge(11).expect("purge");
     assert!(s.pending("c").expect("c").is_empty(), "records older than the keep window are removed");
-}
+});
 
-#[test]
-fn member_change_is_a_message() {
-    let s = store(Visibility::Shared);
+all_forms!(member_change_is_a_message |db| {
+    let s = store(db, Visibility::Shared);
     join(&s, "S", "a", 1);
     let (m, _) = s.join("S", "b", Some(SYS), Some(5)).expect("add").expect("new member");
     assert_eq!((m.kind, m.user_id.as_str(), m.target.as_deref(), m.content.as_str(), m.t), (Some(ChatKind::Add), SYS, Some("b"), "", 5));
@@ -250,11 +455,10 @@ fn member_change_is_a_message() {
     assert!(!s.pending("a").expect("a").contains(&l.msg_id), "the one who left is not a member at that t");
     assert!(s.pending("b").expect("b").contains(&l.msg_id));
     assert_eq!(s.list("b").expect("list")[0].total, 0, "member change messages are not counted");
-}
+});
 
-#[test]
-fn catchup_merges_records_and_since_in_t_order() {
-    let s = store(Visibility::Shared);
+all_forms!(catchup_merges_records_and_since_in_t_order |db| {
+    let s = store(db, Visibility::Shared);
     s.create_space("T", None).expect("space T");
     join(&s, "S", "a", 1);
     join(&s, "S", "b", 1);
@@ -282,20 +486,13 @@ fn catchup_merges_records_and_since_in_t_order() {
     s.leave("S", "b", None, Some(400)).expect("leave S");
     let page = s.catchup("b", None, Some(0), &Cursor::default(), 100, 1 << 20).expect("since after leaving");
     assert!(page.iter().filter(|m| m.space_id == "S").all(|m| m.msg_id == id(0)), "a space left is not read by t — only its records come");
-}
+});
 
-fn temp_db(tag: &str) -> String {
-    let p = std::env::temp_dir().join(format!("oxchat-{tag}-{}-{}.db", std::process::id(), common::now_ms()));
-    p.to_string_lossy().into_owned()
-}
-
-#[test]
-fn two_stores_on_one_file_count_every_message() {
-    let path = temp_db("two");
-    let a = Store::open(&path, Visibility::Shared).expect("open a");
+shared_forms!(two_stores_on_one_file_count_every_message |db| {
+    let a = db.open(Visibility::Shared);
     a.create_space("S", None).expect("space");
     join(&a, "S", "a", 1);
-    let b = Store::open(&path, Visibility::Shared).expect("open b");
+    let b = db.open(Visibility::Shared);
     let run = |st: Store, k: u32| {
         std::thread::spawn(move || {
             (0..40u32)
@@ -309,31 +506,26 @@ fn two_stores_on_one_file_count_every_message() {
     let (ha, hb) = (run(a, 1), run(b, 2));
     let ts: Vec<u64> = ha.join().expect("a").into_iter().chain(hb.join().expect("b")).collect();
     assert!(ts.iter().all(|t| *t == 5000), "every message keeps its store t");
-    let c = Store::open(&path, Visibility::Shared).expect("open c");
+    let c = db.open(Visibility::Shared);
     let e = c.list("a").expect("list").remove(0);
-    assert_eq!((e.total, e.last_t), (80, Some(5000)), "two gateways on one file — total counts every message");
-    let _ = std::fs::remove_file(&path);
-}
+    assert_eq!((e.total, e.last_t), (80, Some(5000)), "two gateways on one store — total counts every message");
+});
 
-#[test]
-fn visibility_is_fixed_at_join() {
-    let path = temp_db("vis");
-    let s = Store::open(&path, Visibility::Joined).expect("open");
+shared_forms!(visibility_is_fixed_at_join |db| {
+    let s = db.open(Visibility::Joined);
     s.create_space("S", None).expect("space");
     join(&s, "S", "a", 1);
     fresh_t(s.send("a", "S", ID_A, "before", Some(10)));
     join(&s, "S", "b", 20);
     drop(s);
-    let s = Store::open(&path, Visibility::Shared).expect("reopen with another default");
+    let s = db.open(Visibility::Shared);
     assert!(posts(&s.history("b", "S", Dir::Latest, 60).expect("history")).is_empty(), "a later policy change does not reach a member who already joined");
     join(&s, "S", "c", 30);
     assert_eq!(posts(&s.history("c", "S", Dir::Latest, 60).expect("history")).len(), 1, "a new member gets the policy of its own join");
-    let _ = std::fs::remove_file(&path);
-}
+});
 
-#[test]
-fn a_retry_after_leaving_still_gets_the_first_t() {
-    let s = store(Visibility::Shared);
+all_forms!(a_retry_after_leaving_still_gets_the_first_t |db| {
+    let s = store(db, Visibility::Shared);
     join(&s, "S", "a", 1);
     let t = fresh_t(s.send("a", "S", ID_A, "x", Some(10)));
     s.leave("S", "a", None, Some(20)).expect("leave");
@@ -341,17 +533,16 @@ fn a_retry_after_leaving_still_gets_the_first_t() {
         Sent::Again { msg } => assert_eq!(msg.t, t, "the stored message answers the retry even after leaving"),
         Sent::Fresh { .. } => panic!("must not store again"),
     }
-}
+});
 
-#[test]
-fn same_msg_id_in_another_space_conflicts() {
-    let s = store(Visibility::Shared);
+all_forms!(same_msg_id_in_another_space_conflicts |db| {
+    let s = store(db, Visibility::Shared);
     s.create_space("T", None).expect("space T");
     join(&s, "S", "a", 1);
     join(&s, "T", "a", 1);
     fresh_t(s.send("a", "S", ID_A, "x", Some(10)));
     assert_eq!(s.send("a", "T", ID_A, "x", Some(10)), Err(Code::MsgIdConflict), "a msg_id is global — another space is a conflict");
-}
+});
 
 fn rel(kind: ChatKind, to: &str) -> Outgoing {
     Outgoing { kind: Some(kind), r#ref: Some(to.into()), ..Outgoing::default() }
@@ -365,9 +556,8 @@ fn react(to: &str, keys: &[&str]) -> Outgoing {
     Outgoing { keys: Some(keys.iter().map(|k| k.to_string()).collect()), ..rel(ChatKind::React, to) }
 }
 
-#[test]
-fn relations_are_checked_on_the_pointer_only() {
-    let s = store(Visibility::Shared);
+all_forms!(relations_are_checked_on_the_pointer_only |db| {
+    let s = store(db, Visibility::Shared);
     s.create_space("T", None).expect("space T");
     for u in ["a", "b"] {
         join(&s, "S", u, 1);
@@ -384,11 +574,10 @@ fn relations_are_checked_on_the_pointer_only() {
     let reply = Outgoing { r#ref: Some(id(1)), ..Outgoing::text("reply") };
     fresh_t(s.post("b", "S", &id(6), &reply, Some(14)));
     assert_eq!(s.list("a").expect("list").iter().find(|e| e.space_id == "S").expect("S").total, 2, "연:RULE-CHAT-UNREAD — posts only (the post and the reply)");
-}
+});
 
-#[test]
-fn delete_clears_the_post_and_what_points_at_it() {
-    let s = store(Visibility::Shared);
+all_forms!(delete_clears_the_post_and_what_points_at_it |db| {
+    let s = store(db, Visibility::Shared);
     for u in ["a", "b"] {
         join(&s, "S", u, 1);
     }
@@ -409,11 +598,10 @@ fn delete_clears_the_post_and_what_points_at_it() {
     assert_eq!(re.keys.as_deref(), Some(&[][..]), "S-sym-IMPL-CHAT-STORE-5③ — reaction keys are emptied");
     assert!(page.relations.iter().any(|m| m.kind == Some(ChatKind::Delete)), "the delete rides with the page");
     assert!(page.messages.iter().all(|m| !m.content.contains("secret")) && page.relations.iter().all(|m| !m.content.contains("secret")));
-}
+});
 
-#[test]
-fn a_page_counts_visible_messages_and_folds_relations() {
-    let s = store(Visibility::Shared);
+all_forms!(a_page_counts_visible_messages_and_folds_relations |db| {
+    let s = store(db, Visibility::Shared);
     for u in ["a", "b"] {
         join(&s, "S", u, 1);
     }
@@ -432,11 +620,10 @@ fn a_page_counts_visible_messages_and_folds_relations() {
     assert_eq!(rx, vec![("a".into(), vec!["x".to_string()]), ("b".into(), vec!["y".to_string(), "z".to_string()])], "the last reaction per sender");
     let tie = s.history("a", "S", Dir::Latest, 5).expect("again");
     assert!(posts(&tie).len() == 1 && !tie.more, "no more pages — only one visible post");
-}
+});
 
-#[test]
-fn a_tie_on_t_is_broken_by_msg_id() {
-    let s = store(Visibility::Shared);
+all_forms!(a_tie_on_t_is_broken_by_msg_id |db| {
+    let s = store(db, Visibility::Shared);
     join(&s, "S", "a", 1);
     fresh_t(s.send("a", "S", &id(1), "p", Some(10)));
     fresh_t(s.post("a", "S", &id(9), &edit(&id(1), "later id"), Some(20)));
@@ -444,41 +631,73 @@ fn a_tie_on_t_is_broken_by_msg_id() {
     let page = s.history("a", "S", Dir::Latest, 10).expect("history");
     let ed: Vec<&ChatMessage> = page.relations.iter().filter(|m| m.kind == Some(ChatKind::Edit)).collect();
     assert_eq!(ed[0].content, "later id", "연:RULE-CHAT-FOLD — same t, the larger msg_id wins");
+});
+
+fn side(db: &form::Db, a: &Arc<Store>) -> Arc<Store> {
+    if db.shared() { Arc::new(db.open(Visibility::Shared)) } else { a.clone() }
 }
 
-#[test]
-fn delete_and_edit_racing_on_one_post_leave_no_text() {
-    let path = temp_db("race");
-    let a = Store::open(&path, Visibility::Shared).expect("a");
+all_forms!(delete_and_edit_racing_on_one_post_leave_no_text |db| {
+    let a = Arc::new(db.open(Visibility::Shared));
     a.create_space("S", None).expect("space");
     a.join("S", "u", None, Some(1)).expect("join");
-    for round in 0..20usize {
+    let (s1, s2) = (side(db, &a), side(db, &a));
+    for round in 0..50usize {
         let orig = id(1000 + round);
         fresh_t(a.send("u", "S", &orig, "text", None));
-        let p1 = path.clone();
-        let o1 = orig.clone();
+        let gate = Arc::new(std::sync::Barrier::new(2));
+        let (st, g, o) = (s1.clone(), gate.clone(), orig.clone());
         let del = std::thread::spawn(move || {
-            let s = Store::open(&p1, Visibility::Shared).expect("s1");
-            s.post("u", "S", &format!("d{round:035}"), &rel(ChatKind::Delete, &o1), None)
+            g.wait();
+            st.post("u", "S", &format!("d{round:035}"), &rel(ChatKind::Delete, &o), None)
         });
-        let p2 = path.clone();
-        let o2 = orig.clone();
+        let (st, g, o) = (s2.clone(), gate.clone(), orig.clone());
         let ed = std::thread::spawn(move || {
-            let s = Store::open(&p2, Visibility::Shared).expect("s2");
-            s.post("u", "S", &format!("e{round:035}"), &edit(&o2, "revived"), None)
+            g.wait();
+            st.post("u", "S", &format!("e{round:035}"), &edit(&o, "revived"), None)
         });
         let (d, e) = (del.join().expect("del"), ed.join().expect("edit"));
-        assert!(d.is_ok(), "the delete goes through");
+        assert!(d.is_ok(), "the delete goes through {d:?}");
         assert!(e.is_ok() || e == Err(Code::RefDeleted), "S-sym-IMPL-CHAT-STORE-4① — the edit either went first or is refused: {e:?}");
     }
     let page = a.history("u", "S", Dir::Latest, 200).expect("history");
     assert!(page.relations.iter().all(|m| m.content.is_empty()), "S-sym-IMPL-CHAT-STORE-4② — no edit text survives a delete");
-    let _ = std::fs::remove_file(&path);
-}
+});
 
-#[test]
-fn a_retry_after_delete_still_answers_the_first_t() {
-    let s = store(Visibility::Shared);
+all_forms!(the_same_msg_id_on_two_connections_is_one_message |db| {
+    let a = Arc::new(store(db, Visibility::Shared));
+    join(&a, "S", "u", 1);
+    join(&a, "S", "v", 1);
+    let (s1, s2) = (side(db, &a), side(db, &a));
+    let rounds = 50usize;
+    for round in 0..rounds {
+        let mid = id(5000 + round);
+        let gate = Arc::new(std::sync::Barrier::new(2));
+        let go = |st: Arc<Store>, g: Arc<std::sync::Barrier>, m: String| {
+            std::thread::spawn(move || {
+                g.wait();
+                st.send("u", "S", &m, "same", None)
+            })
+        };
+        let (h1, h2) = (go(s1.clone(), gate.clone(), mid.clone()), go(s2.clone(), gate.clone(), mid.clone()));
+        let (r1, r2) = (h1.join().expect("one"), h2.join().expect("two"));
+        let t = |r: &Result<Sent, Code>| match r {
+            Ok(Sent::Fresh { msg, .. }) | Ok(Sent::Again { msg }) => Some(msg.t),
+            Err(_) => None,
+        };
+        assert!(r1.is_ok() && r2.is_ok(), "S-sym-IMPL-CHAT-STORE-FORMS-3 — 둘 다 성공 · 원인 없는 INTERNAL_ERROR 0 (round {round}: {r1:?} {r2:?})");
+        assert_eq!(t(&r1), t(&r2), "S-sym-IMPL-CHAT-STORE-FORMS-3 — 같은 t");
+        let fresh = [&r1, &r2].iter().filter(|r| matches!(r, Ok(Sent::Fresh { .. }))).count();
+        assert_eq!(fresh, 1, "S-sym-IMPL-CHAT-STORE-FORMS-3 — 받는 사람 통지 1(새로 저장은 하나)");
+    }
+    assert_eq!(a.list("u").expect("list")[0].total, rounds as u64, "S-sym-IMPL-CHAT-STORE-FORMS-3 — 메시지 행 1 씩");
+    let mids: Vec<String> = (0..rounds).map(|r| id(5000 + r)).collect();
+    let pend = a.pending("v").expect("v");
+    assert_eq!(pend.iter().filter(|m| mids.contains(m)).count(), rounds, "S-sym-IMPL-CHAT-STORE-FORMS-3 — 미전송 기록도 한 건씩");
+});
+
+all_forms!(a_retry_after_delete_still_answers_the_first_t |db| {
+    let s = store(db, Visibility::Shared);
     for u in ["a", "b"] {
         join(&s, "S", u, 1);
     }
@@ -494,11 +713,10 @@ fn a_retry_after_delete_still_answers_the_first_t() {
     }
     assert!(matches!(s.post("b", "S", &id(2), &react(&id(1), &["x"]), Some(20)), Ok(Sent::Again { .. })), "once emptied only the envelope decides — the stored body is gone");
     assert_eq!(s.post("a", "S", &id(2), &react(&id(1), &["+1"]), Some(20)), Err(Code::MsgIdConflict), "another sender is still a conflict");
-}
+});
 
-#[test]
-fn relations_follow_the_visibility_start() {
-    let s = store(Visibility::Joined);
+all_forms!(relations_follow_the_visibility_start |db| {
+    let s = store(db, Visibility::Joined);
     join(&s, "S", "a", 1);
     join(&s, "S", "u", 2);
     fresh_t(s.send("a", "S", &id(1), "p", Some(10)));
@@ -510,11 +728,10 @@ fn relations_follow_the_visibility_start() {
     assert!(page.messages.iter().any(|m| m.msg_id == id(1)), "the post from the first interval is visible");
     assert!(!page.relations.iter().any(|m| m.msg_id == id(2)), "연:RULE-CHAT-VISIBLE — an edit from the gap is not shown");
     assert!(page.relations.iter().any(|m| m.msg_id == id(3)), "a reaction inside the interval is shown");
-}
+});
 
-#[test]
-fn a_page_stays_within_the_byte_budget() {
-    let s = store(Visibility::Shared);
+all_forms!(a_page_stays_within_the_byte_budget |db| {
+    let s = store(db, Visibility::Shared);
     for u in ["a", "b"] {
         join(&s, "S", u, 1);
     }
@@ -532,7 +749,7 @@ fn a_page_stays_within_the_byte_budget() {
     assert_eq!(posts(&first).iter().map(|m| m.msg_id.clone()).collect::<Vec<_>>(), vec![id(1), id(2), id(3)], "after keeps the near side (member changes at t=1 ride first)");
     let one = s.history_within("b", "S", Dir::Latest, 60, 10).expect("tiny");
     assert_eq!(one.messages.len(), 1, "one message over the budget goes alone");
-}
+});
 
 #[test]
 fn message_shapes_follow_the_kind() {
@@ -563,29 +780,26 @@ fn message_shapes_follow_the_kind() {
     }
 }
 
-#[test]
-fn relations_ride_the_ref_index() {
-    let s = store(Visibility::Shared);
+lite_forms!(relations_ride_the_ref_index |db| {
+    let s = store(db, Visibility::Shared);
     for joined in [false, true] {
         let p = s.plan(&relations_sql(joined, 3)).expect("plan");
         assert!(p.contains("messages_ref"), "정:IMPL-CHAT-READ — 관계는 ref 색인으로 찾는다(공간 전체를 훑지 않는다 · joined={joined}):\n{p}");
         assert!(!p.contains("messages_space_t_id"), "정:IMPL-CHAT-READ — 관계 질의가 공간 색인으로 공간 전체를 훑는다(joined={joined}):\n{p}");
     }
-}
+});
 
-#[test]
-fn catchup_since_starts_from_the_members_with_one_floor() {
-    let s = store(Visibility::Shared);
+lite_forms!(catchup_since_starts_from_the_members_with_one_floor |db| {
+    let s = store(db, Visibility::Shared);
     let all = s.plan(&catchup_since_sql(false)).expect("plan");
     assert!(all.lines().next().is_some_and(|l| l.starts_with("SEARCH mm USING INDEX members_user")), "정:IMPL-CHAT-CATCHUP — 공간 없는 따라잡기는 그 사람의 멤버 행에서 출발한다(파일 전체를 훑지 않는다):\n{all}");
     for (space, p) in [(false, all), (true, s.plan(&catchup_since_sql(true)).expect("plan"))] {
         assert!(p.contains("messages_space_t_id (space_id=? AND (t,msg_id)>(?,?))"), "정:IMPL-CHAT-CATCHUP — t 이상 질의의 범위는 커서 하나에서 시작한다(space={space}):\n{p}");
     }
-}
+});
 
-#[test]
-fn catchup_since_floor_is_the_later_of_since_and_cursor() {
-    let s = store(Visibility::Shared);
+all_forms!(catchup_since_floor_is_the_later_of_since_and_cursor |db| {
+    let s = store(db, Visibility::Shared);
     s.create_space("T", None).expect("space T");
     join(&s, "S", "a", 1);
     join(&s, "S", "b", 1);
@@ -600,7 +814,7 @@ fn catchup_since_floor_is_the_later_of_since_and_cursor() {
     assert_eq!(got(200, Cursor::default()), vec![id(1), id(2), id(3)], "연:RULE-CHAT-CATCHUP — t 는 이상(≥) · 멤버 아닌 공간은 안 온다");
     assert_eq!(got(200, Cursor { t: 200, msg_id: id(1) }), vec![id(2), id(3)], "커서가 since 뒤면 커서 다음부터");
     assert_eq!(got(300, Cursor { t: 100, msg_id: id(0) }), vec![id(3)], "since 가 커서 뒤면 since 부터");
-}
+});
 
 mod diag {
     use std::fmt::Debug;
@@ -673,26 +887,42 @@ mod diag {
     }
 }
 
-#[test]
-fn a_locked_store_fails_with_its_cause_on_a_diag_line() {
-    let path = temp_db("fault-lock");
-    let s = Store::open(&path, Visibility::Shared).expect("open");
-    s.create_space("S", None).expect("space");
+shared_forms!(a_locked_store_fails_with_its_cause_on_a_diag_line |db| {
+    let s = store(db, Visibility::Shared);
     join(&s, "S", "a", 1);
-    let other = rusqlite::Connection::open(&path).expect("other");
-    other.execute_batch("BEGIN IMMEDIATE").expect("hold the write lock");
+    let other = Outside::of(db);
+    other.hold();
     let (r, lines) = diag::capture(|| s.view("a", "S"));
+    let want = if db.kind == form::Kind::Postgres { "cause=55P03" } else { "cause=DatabaseBusy" };
     assert_eq!(r, Err(Code::InternalError), "S-sym-IMPL-CHAT-STORE-FAULTS-1 — 클라에는 코드 하나");
     assert_eq!(lines.len(), 1, "S-sym-IMPL-CHAT-STORE-FAULTS-1 — 원인을 든 진단 줄 1 {lines:?}");
-    assert!(lines[0].contains("cause=DatabaseBusy"), "S-sym-IMPL-CHAT-STORE-FAULTS-1 — 원인(잠김)이 줄에 있다 {lines:?}");
-    other.execute_batch("ROLLBACK").expect("release");
+    assert!(lines[0].contains(want), "S-sym-IMPL-CHAT-STORE-FAULTS-1 — 원인(잠김 {want})이 줄에 있다 {lines:?}");
+    other.release();
     assert!(s.view("a", "S").is_ok(), "잠금이 풀리면 다시 된다");
-}
+});
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn acks_are_cleared_in_fewer_transactions_than_acks() {
-    let path = temp_db("ack-batch");
-    let chat = Chat::new(Store::open(&path, Visibility::Shared).expect("open"), Limits::default());
+all_forms!(acks_in_one_drain_are_one_transaction |db| {
+    let s = store(db, Visibility::Shared);
+    join(&s, "S", "a", 1);
+    join(&s, "S", "b", 1);
+    for i in 0..40 {
+        fresh_t(s.send("a", "S", &id(i), "m", Some(100 + i as u64)));
+    }
+    let ids = s.pending("b").expect("b");
+    assert!(ids.len() >= 40, "형상 — b 몫 기록 {}", ids.len());
+    let (tx, rx) = std::sync::mpsc::sync_channel(ids.len());
+    for m in &ids[1..] {
+        tx.send(("b".to_string(), vec![m.clone()])).expect("queue");
+    }
+    let before = s.ack_transactions();
+    let rows = s.ack_drain(("b".to_string(), vec![ids[0].clone()]), &rx, oxhubd::chat::ACK_BATCH).expect("drain");
+    assert_eq!(rows, ids.len(), "형상 — 줄 선 ACK 를 한 번에 거뒀다");
+    assert!(s.pending("b").expect("b").is_empty(), "S-sym-IMPL-CHAT-UNDELIVERED-2① — ACK {} 건이 기록을 모두 지운다", ids.len());
+    assert_eq!(s.ack_transactions() - before, 1, "S-sym-IMPL-CHAT-UNDELIVERED-2② — 묶음 하나 = 트랜잭션 하나(ACK {} 건)", ids.len());
+});
+
+async_forms!(acks_are_cleared_in_fewer_transactions_than_acks [sqlite = Sqlite, postgres = Postgres] |db| {
+    let chat = Chat::new(db.open(Visibility::Shared), Limits::default());
     let s = chat.store.clone();
     s.create_space("S", None).expect("space");
     join(&s, "S", "a", 1);
@@ -703,13 +933,13 @@ async fn acks_are_cleared_in_fewer_transactions_than_acks() {
     let ids = s.pending("b").expect("b");
     assert!(ids.len() >= 40, "형상 — b 몫 기록 {}", ids.len());
     let before = s.ack_transactions();
-    let other = rusqlite::Connection::open(&path).expect("other");
-    other.execute_batch("BEGIN IMMEDIATE").expect("hold the write lock while the acks arrive");
+    let other = Outside::of(db);
+    other.hold();
     for m in &ids {
         chat.acked("b", vec![m.clone()]);
     }
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    other.execute_batch("ROLLBACK").expect("release");
+    other.release();
     let mut left = ids.len();
     for _ in 0..100 {
         left = s.pending("b").expect("b").len();
@@ -721,12 +951,10 @@ async fn acks_are_cleared_in_fewer_transactions_than_acks() {
     let tx = s.ack_transactions() - before;
     assert_eq!(left, 0, "S-sym-IMPL-CHAT-UNDELIVERED-2① — ACK {} 건이 기록을 모두 지운다", ids.len());
     assert!(tx >= 1 && tx < ids.len() as u64, "S-sym-IMPL-CHAT-UNDELIVERED-2② — 지운 트랜잭션 {tx} < ACK {}(묶음마다 하나)", ids.len());
-}
+});
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ack_deletes_give_way_to_a_queued_store_call() {
-    let path = temp_db("ack-yield");
-    let chat = Chat::new(Store::open(&path, Visibility::Shared).expect("open"), Limits::default());
+async_forms!(ack_deletes_give_way_to_a_queued_store_call [sqlite = Sqlite, postgres = Postgres] |db| {
+    let chat = Chat::new(db.open_pool(1, Visibility::Shared), Limits::default());
     let s = chat.store.clone();
     s.create_space("S", None).expect("space");
     join(&s, "S", "a", 1);
@@ -738,8 +966,8 @@ async fn ack_deletes_give_way_to_a_queued_store_call() {
     let ids: Vec<String> = (0..full + 10).map(id).collect();
     let (first, second) = ids.split_at(full);
     s.ack("b", &s.pending("b").expect("b").into_iter().filter(|m| !ids.contains(m)).collect::<Vec<_>>()).expect("member notices");
-    let other = rusqlite::Connection::open(&path).expect("other");
-    other.execute_batch("BEGIN IMMEDIATE").expect("hold the write lock");
+    let other = Outside::of(db);
+    other.hold();
     chat.acked("b", first.to_vec());
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     let queued = {
@@ -751,7 +979,7 @@ async fn ack_deletes_give_way_to_a_queued_store_call() {
         chat.acked("b", vec![m.clone()]);
     }
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    other.execute_batch("ROLLBACK").expect("release");
+    other.release();
     let seen = queued.join().expect("queued").expect("pending");
     assert_eq!(seen, second.to_vec(), "S-sym-IMPL-CHAT-UNDELIVERED-3① — 첫 묶음 뒤 줄 선 일이 다음 묶음보다 먼저 잠금을 얻는다(본 기록 = 둘째 묶음 지우기 전)");
     let mut left = ids.len();
@@ -763,12 +991,11 @@ async fn ack_deletes_give_way_to_a_queued_store_call() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     assert_eq!(left, 0, "S-sym-IMPL-CHAT-UNDELIVERED-3② — 그 뒤 기록이 모두 지워진다");
-}
+});
 
-#[test]
-fn add_column_swallows_only_the_existing_column() {
-    let path = temp_db("fault-alter");
-    drop(Store::open(&path, Visibility::Shared).expect("first open"));
+forms!(add_column_swallows_only_the_existing_column [sqlite = Sqlite] |db| {
+    let path = db.file.clone().expect("file");
+    drop(db.open(Visibility::Shared));
     let old = rusqlite::Connection::open(&path).expect("old");
     old.pragma_update(None, "journal_mode", "DELETE").expect("rollback journal");
     old.execute_batch("ALTER TABLE messages DROP COLUMN ext").expect("an older store without ext");
@@ -778,27 +1005,84 @@ fn add_column_swallows_only_the_existing_column() {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).expect("chmod");
     };
     ro(0o444);
-    let (r, lines) = diag::capture(|| Store::open(&path, Visibility::Shared).map(|_| ()));
+    let (r, lines) = diag::capture(|| Store::open(&db.url, Visibility::Shared).map(|_| ()));
     ro(0o644);
     assert!(r.is_ok(), "S-sym-IMPL-CHAT-STORE-FAULTS-2 — 기동은 계속한다 {r:?}");
     let alter: Vec<&String> = lines.iter().filter(|l| l.contains("column=")).collect();
     assert_eq!(alter.len(), 1, "S-sym-IMPL-CHAT-STORE-FAULTS-2 — 「이미 있음」 다섯은 넘기고 ext 하나만 진단 줄 {lines:?}");
     assert!(alter[0].contains("column=ext") && alter[0].contains("cause=ReadOnly"), "S-sym-IMPL-CHAT-STORE-FAULTS-2 — 칸 · 원인 {alter:?}");
     assert_eq!(lines.iter().filter(|l| l.contains("WAL")).count(), 1, "정:IMPL-CHAT-STORE-FAULTS — WAL 이 안 들면 기동 때 진단 줄 한 줄 {lines:?}");
-}
+});
 
-#[test]
-fn a_failed_purge_leaves_a_diag_line_and_the_next_cycle_purges() {
-    let path = temp_db("fault-purge");
-    let chat = Chat::new(Store::open(&path, Visibility::Shared).expect("open"), Limits::default());
-    let other = rusqlite::Connection::open(&path).expect("other");
-    other.execute_batch("ALTER TABLE undelivered RENAME TO undelivered_away").expect("hide the table");
+shared_forms!(a_failed_purge_leaves_a_diag_line_and_the_next_cycle_purges |db| {
+    let chat = Chat::new(db.open(Visibility::Shared), Limits::default());
+    let other = Outside::of(db);
+    other.exec("ALTER TABLE undelivered RENAME TO undelivered_away", "ALTER TABLE undelivered RENAME TO undelivered_away");
     let (r, lines) = diag::capture(|| chat.purge_once(30 * 86_400_000));
     assert_eq!(r, Err(Code::InternalError), "S-sym-IMPL-CHAT-STORE-FAULTS-3 — 보관 지우기 실패");
     assert!(lines.iter().any(|l| l.contains("purge")), "S-sym-IMPL-CHAT-STORE-FAULTS-3 — 진단 줄 1 {lines:?}");
     assert!(lines.iter().any(|l| l.contains("cause=")), "S-sym-IMPL-CHAT-STORE-FAULTS-3 — 원인 {lines:?}");
-    other.execute_batch("ALTER TABLE undelivered_away RENAME TO undelivered; INSERT INTO undelivered (user_id, msg_id, space_id, t) VALUES ('b', 'old', 'S', 1)").expect("back");
+    let back = "ALTER TABLE undelivered_away RENAME TO undelivered; INSERT INTO undelivered (user_id, msg_id, space_id, t) VALUES ('b', 'old', 'S', 1)";
+    other.exec(back, back);
     assert_eq!(chat.purge_once(30 * 86_400_000), Ok(1), "S-sym-IMPL-CHAT-STORE-FAULTS-3 — 다음 주기에 다시 지운다");
+});
+
+#[test]
+fn chat_store_tests_run_on_every_form_they_can_reach() {
+    let src = include_str!("l1_chat.rs");
+    let mut single = Vec::new();
+    let mut spread = 0;
+    for l in src.lines() {
+        let Some(r) = ["forms!(", "all_forms!(", "shared_forms!(", "lite_forms!(", "async_forms!("].iter().find_map(|p| l.strip_prefix(p)) else { continue };
+        spread += 1;
+        let name = r.split_whitespace().next().unwrap_or_default();
+        let forms = match r.split_once('[').and_then(|(_, x)| x.split_once(']')) {
+            Some((list, _)) => list.matches('=').count(),
+            None if l.starts_with("all_forms!(") => 3,
+            None => 2,
+        };
+        if forms < 2 {
+            single.push(name);
+        }
+    }
+    let plain: Vec<&str> = src
+        .split("\n#[test]\nfn ")
+        .skip(1)
+        .filter(|b| !b.starts_with("chat_store_tests_run_on_every_form_they_can_reach("))
+        .filter_map(|b| {
+            let body = b.split("\n}\n").next().unwrap_or_default();
+            (body.contains("Store::open") || body.contains("store(db") || body.contains("db.open")).then(|| body.split('(').next().unwrap_or_default())
+        })
+        .collect();
+    assert!(spread >= 30, "형상 — 꼴로 펼친 시험 {spread}");
+    assert!(plain.is_empty(), "S-sym-IMPL-CHAT-STORE-FORMS-1 — 꼴을 고르지 않고 저장소를 여는 시험 0: {plain:?}");
+    assert_eq!(single, vec!["add_column_swallows_only_the_existing_column"], "S-sym-IMPL-CHAT-STORE-FORMS-1 — 꼴 하나에서만 도는 채팅 시험 0 — 하나뿐인 것은 옛 SQLite 파일의 칸 더하기(그 꼴만의 이행 · 계약 시험 아님)");
+}
+
+#[test]
+fn a_missing_postgres_is_red_not_skipped() {
+    let r = std::panic::catch_unwind(|| form::Db::pg_at("postgres://oxlens@127.0.0.1:1/none"));
+    let why = match r {
+        Ok(_) => panic!("S-sym-IMPL-CHAT-STORE-FORMS-2 — 닿지 않는 PostgreSQL 에서 시험 준비가 지나갔다"),
+        Err(e) => e.downcast_ref::<String>().cloned().unwrap_or_default(),
+    };
+    assert!(why.contains("못 잼"), "S-sym-IMPL-CHAT-STORE-FORMS-2 — PostgreSQL 이 없으면 「못 잼」 빨강(조용히 건너뛴 초록 0): {why}");
+}
+
+#[test]
+fn the_banner_hides_the_password_in_chat_db() {
+    let min = "[hub]\nlisten = \"0.0.0.0:1974\"\n[bus]\nnamespace = \"ox\"\n";
+    let s = System::parse(&format!("{min}[chat]\ndb = \"postgres://oxlens:s3cret@db.example:5433/oxlens_chat\"\n")).expect("parse");
+    let shown = s.banner_fields().into_iter().find(|(k, _)| k == "chat.db").map(|(_, v)| v).expect("chat.db");
+    assert_eq!(shown, "postgres://oxlens:***@db.example:5433/oxlens_chat", "S-sym-IMPL-CHAT-STORE-FORMS-4 — 비밀번호만 *** · 꼴 · 사용자 · 호스트 · DB 이름은 그대로");
+    assert!(s.banner_fields().iter().all(|(_, v)| !v.contains("s3cret")), "S-sym-IMPL-CHAT-STORE-FORMS-4 — 배너 어디에도 비밀번호 0");
+    let plain = System::parse(&format!("{min}[chat]\ndb = \"postgres://oxlens@localhost/oxlens_chat\"\n")).expect("parse");
+    assert!(plain.banner_fields().iter().any(|(k, v)| k == "chat.db" && v == "postgres://oxlens@localhost/oxlens_chat"), "비밀번호 없는 값은 그대로");
+    for bad in ["/tmp/chat.db", ":memory:", "memory", "sqlite:", "mysql://x"] {
+        assert!(System::parse(&format!("{min}[chat]\ndb = \"{bad}\"\n")).is_err(), "정:IMPL-CHAT-STORE-FORMS — 그 밖의 꼴은 기동 실패: {bad}");
+    }
+    assert_eq!(ChatDb::parse("memory:"), Ok(ChatDb::Memory));
+    assert_eq!(ChatDb::parse("sqlite:/x/y.db"), Ok(ChatDb::Sqlite("/x/y.db".into())));
 }
 
 mod lane {
@@ -963,10 +1247,8 @@ fn bundling_stays_at_the_data_lane_end() {
     assert_eq!(rest[5].messages()[0].msg_id, id(302), "S-sym-IMPL-CHAT-LIVE-BUNDLE-3② — 차례 그대로");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn one_ack_for_a_live_bundle_clears_every_record_in_it() {
-    let path = temp_db("live-bundle");
-    let chat = Chat::new(Store::open(&path, Visibility::Shared).expect("open"), Limits::default());
+async_forms!(one_ack_for_a_live_bundle_clears_every_record_in_it [memory = Memory, sqlite = Sqlite, postgres = Postgres] |db| {
+    let chat = Chat::new(db.open(Visibility::Shared), Limits::default());
     let s = chat.store.clone();
     s.create_space("S", None).expect("space");
     join(&s, "S", "a", 1);
@@ -1016,7 +1298,7 @@ async fn one_ack_for_a_live_bundle_clears_every_record_in_it() {
     let pend = s.pending("b").expect("pending");
     assert!(ids(refused).iter().all(|m| pend.contains(m)), "S-sym-IMPL-CHAT-LIVE-BUNDLE-4② — 양성 대조: 실패로 답한 묶음 몫은 모두 남는다");
     assert!(ids(refused).iter().all(|m| back.contains(m)), "S-sym-IMPL-CHAT-LIVE-BUNDLE-4② — 남은 몫은 따라잡기로 간다");
-}
+});
 
 #[test]
 fn live_bundles_stay_under_their_byte_cap_and_carry_live() {

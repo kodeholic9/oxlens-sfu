@@ -45,4 +45,4 @@ connect = ["tcp/127.0.0.1:7448", "tcp/127.0.0.1:7449"]
 namespace = "oxdev"
 
 [chat]
-db = "/tmp/oxlens/chat.db"
+db = "sqlite:/tmp/oxlens/chat.db"

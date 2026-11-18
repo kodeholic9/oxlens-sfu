@@ -1,13 +1,17 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 연:RULE-CHAT-REF-CHECK · 연:RULE-CHAT-EDIT · 연:RULE-CHAT-REACT · 연:RULE-CHAT-DELETE · 연:RULE-CHAT-REPLY · 정:IMPL-CHAT-STORE ·정:IMPL-CHAT-MEMBERSHIP · 정:IMPL-CHAT-READ · 정:IMPL-CHAT-UNDELIVERED · 정:IMPL-CHAT-CATCHUP · 정:IMPL-CHAT-STORE-FAULTS · 정:CAND-CHAT-STORE-SCHEMA · 연:RULE-CHAT-MSG-ID · 연:RULE-CHAT-ORDER · 연:RULE-CHAT-VISIBLE · 연:RULE-CHAT-UNREAD · 연:RULE-CHAT-VIEW · 연:RULE-CHAT-HISTORY-PAGE · 연:RULE-CHAT-UNDELIVERED · 연:RULE-CHAT-CATCHUP · 연:RULE-CHAT-MEMBER-NOTICE · model: claude-opus-5-5
-//! 채팅 저장소 — SQLite 하나 · 쓰기 트랜잭션은 SQLite 의 쓰기 꼴 `BEGIN IMMEDIATE` · `t` 는 저장 트랜잭션 안에서 찍은 ms(공간마다 줄 세우지 않음 · 같은 `t` 는 `msg_id` 차례) · 메시지와 같은 트랜잭션에 받을 사람 전원 몫 미전송 기록 · 멤버 입퇴장 구간과 멤버 변경 메시지 · 멤버 판 · 읽음 · 쪽은 같은 `t` 를 가르지 않음 · 따라잡기 쪽은 미전송 기록과 `t` 이상 메시지를 `msg_id` 로 합침(멤버 쪽에서 출발 · 하한 하나) · 관계는 `ref` 색인 · 저장소 오류는 원인을 진단 줄로 남김.
+// spec: v1.6 · 연:RULE-CHAT-REF-CHECK · 연:RULE-CHAT-EDIT · 연:RULE-CHAT-REACT · 연:RULE-CHAT-DELETE · 연:RULE-CHAT-REPLY · 정:IMPL-CHAT-STORE ·정:IMPL-CHAT-MEMBERSHIP · 정:IMPL-CHAT-READ · 정:IMPL-CHAT-UNDELIVERED · 정:IMPL-CHAT-CATCHUP · 정:IMPL-CHAT-STORE-FAULTS · 정:IMPL-CHAT-STORE-FORMS · 연:RULE-CHAT-MSG-ID · 연:RULE-CHAT-ORDER · 연:RULE-CHAT-VISIBLE · 연:RULE-CHAT-UNREAD · 연:RULE-CHAT-VIEW · 연:RULE-CHAT-HISTORY-PAGE · 연:RULE-CHAT-UNDELIVERED · 연:RULE-CHAT-CATCHUP · 연:RULE-CHAT-MEMBER-NOTICE · model: claude-opus-5-5
+//! 채팅 저장소 — `[chat] db` 꼴 셋 중 하나를 직접 쥔다: `memory:` · `sqlite:<경로>` 는 SQLite 연결 하나(메모리 · 파일 — 저장소 전체 잠금 하나 · 쓰기 트랜잭션은 `BEGIN IMMEDIATE`) · `postgres://…` 는 연결 풀(`pg`) · 꼴마다 같은 계약 · `t` 는 저장 트랜잭션 안에서 찍은 ms(공간마다 줄 세우지 않음 · 같은 `t` 는 `msg_id` 차례) · 메시지와 같은 트랜잭션에 받을 사람 전원 몫 미전송 기록 · 멤버 입퇴장 구간과 멤버 변경 메시지 · 멤버 판 · 읽음 · 쪽은 같은 `t` 를 가르지 않음 · 따라잡기 쪽은 미전송 기록과 `t` 이상 메시지를 `msg_id` 로 합침(멤버 쪽에서 출발 · 하한 하나) · 관계는 `ref` 색인 · 저장소 오류는 원인을 진단 줄로 남김.
 
-use std::sync::Mutex;
+mod pg;
+
+pub use pg::pg_config;
+
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common::system::Visibility;
+use common::system::{ChatDb, DB_POOL_DEFAULT, Visibility};
 use oxsig::Code;
 use oxsig::msg::{ChatKind, ChatMessage, SpaceEntry};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter};
@@ -67,8 +71,8 @@ CREATE INDEX IF NOT EXISTS undelivered_t ON undelivered (t);
 CREATE INDEX IF NOT EXISTS members_user ON members (user_id, leave_t);
 ";
 
-const COLS: &str = "x.msg_id, x.space_id, x.user_id, x.t, x.content, x.kind, x.target, x.ref_id, x.keys, x.ext";
-const VISIBLE: &str = " AND (x.kind IS NULL OR x.kind IN ('join', 'leave', 'add', 'remove'))";
+pub(crate) const COLS: &str ="x.msg_id, x.space_id, x.user_id, x.t, x.content, x.kind, x.target, x.ref_id, x.keys, x.ext";
+pub(crate) const VISIBLE: &str =" AND (x.kind IS NULL OR x.kind IN ('join', 'leave', 'add', 'remove'))";
 const SEEN_JOINED: &str =
     " AND EXISTS(SELECT 1 FROM members m WHERE m.space_id = x.space_id AND m.user_id = ?2 AND m.join_t <= x.t AND (m.leave_t IS NULL OR x.t < m.leave_t))";
 const SEEN_ALL: &str = " AND ?2 = ?2";
@@ -127,15 +131,20 @@ pub struct Cursor {
 }
 
 pub struct Store {
-    conn: Mutex<Connection>,
+    form: Form,
     default_vis: Visibility,
     ack_tx: AtomicU64,
-    queued: AtomicUsize,
+    queued: Arc<AtomicUsize>,
+}
+
+enum Form {
+    Lite(Mutex<Connection>),
+    Pg(pg::Pg),
 }
 
 pub type Ack = (String, Vec<String>);
 
-const YIELD: Duration = Duration::from_micros(200);
+pub(crate) const YIELD: Duration =Duration::from_micros(200);
 
 fn cause(e: &rusqlite::Error) -> String {
     match e.sqlite_error_code() {
@@ -184,17 +193,17 @@ pub fn catchup_since_sql(space: bool) -> String {
     )
 }
 
-fn since_floor(since: u64, after: &Cursor) -> (u64, String) {
+pub(crate) fn since_floor(since: u64, after: &Cursor) -> (u64, String) {
     let floor = (since, String::new());
     let cur = (after.t, after.msg_id.clone());
     if cur > floor { cur } else { floor }
 }
 
-fn n(v: u64) -> i64 {
+pub(crate) fn n(v: u64) -> i64 {
     i64::try_from(v).unwrap_or(i64::MAX)
 }
 
-fn u(v: i64) -> u64 {
+pub(crate) fn u(v: i64) -> u64 {
     u64::try_from(v).unwrap_or(0)
 }
 
@@ -243,13 +252,7 @@ impl Outgoing {
     }
 }
 
-fn check_ref(tx: &Transaction, space: &str, user: &str, out: &Outgoing) -> Result<(), Code> {
-    let Some(r) = out.r#ref.as_deref() else { return Ok(()) };
-    let orig = db(tx
-        .query_row("SELECT space_id, kind, user_id, deleted FROM messages WHERE msg_id = ?1", params![r], |x| {
-            Ok((x.get::<_, String>(0)?, x.get::<_, Option<String>>(1)?, x.get::<_, String>(2)?, x.get::<_, bool>(3)?))
-        })
-        .optional())?;
+pub(crate) fn ref_ok(orig: Option<(String, Option<String>, String, bool)>, space: &str, user: &str, out: &Outgoing) -> Result<(), Code> {
     let Some((sp, kind, owner, deleted)) = orig else { return Err(Code::RefNotFound) };
     if sp != space || kind.is_some() {
         return Err(Code::RefNotFound);
@@ -264,6 +267,85 @@ fn check_ref(tx: &Transaction, space: &str, user: &str, out: &Outgoing) -> Resul
     Ok(())
 }
 
+pub(crate) fn probe_of(m: &ChatMessage) -> String {
+    match m.kind {
+        Some(k) if k.is_relation() => m.r#ref.clone().unwrap_or_default(),
+        _ => m.msg_id.clone(),
+    }
+}
+
+pub(crate) fn again(m: ChatMessage, erased: bool, space: &str, user: &str, out: &Outgoing) -> Result<Sent, Code> {
+    let envelope = m.space_id == space && m.user_id == user && m.kind == out.kind && m.r#ref == out.r#ref;
+    let body = m.content == out.content && m.keys == out.keys && m.ext == out.ext;
+    if envelope && (erased || body) {
+        return Ok(Sent::Again { msg: m });
+    }
+    Err(Code::MsgIdConflict)
+}
+
+pub(crate) fn fresh(space: &str, msg_id: &str, user: &str, t: u64, out: &Outgoing) -> ChatMessage {
+    ChatMessage {
+        space_id: space.into(),
+        msg_id: msg_id.into(),
+        user_id: user.into(),
+        t,
+        content: out.content.clone(),
+        kind: out.kind,
+        r#ref: out.r#ref.clone(),
+        keys: out.keys.clone(),
+        ext: out.ext.clone(),
+        target: None,
+    }
+}
+
+pub(crate) fn member_msg(space: &str, actor: &str, user: &str, t: u64, joining: bool) -> ChatMessage {
+    let (kind, target) = match (actor == user, joining) {
+        (true, true) => (ChatKind::Join, None),
+        (false, true) => (ChatKind::Add, Some(user.to_string())),
+        (true, false) => (ChatKind::Leave, None),
+        (false, false) => (ChatKind::Remove, Some(user.to_string())),
+    };
+    ChatMessage {
+        space_id: space.into(),
+        msg_id: sys_msg_id(t),
+        user_id: actor.into(),
+        t,
+        content: String::new(),
+        kind: Some(kind),
+        r#ref: None,
+        keys: None,
+        ext: None,
+        target,
+    }
+}
+
+pub(crate) fn bundle(all: Vec<ChatMessage>, max_msgs: usize, max_bytes: usize) -> Vec<ChatMessage> {
+    let mut all = all;
+    all.sort_by(|a, b| (a.t, &a.msg_id).cmp(&(b.t, &b.msg_id)));
+    all.dedup_by(|a, b| a.msg_id == b.msg_id);
+    let mut out = Vec::new();
+    let mut bytes = r#"{"messages":[]}"#.len();
+    for m in all {
+        let size = serde_json::to_vec(&m).map(|b| b.len()).unwrap_or(0) + usize::from(!out.is_empty());
+        if !out.is_empty() && (out.len() >= max_msgs || bytes + size > max_bytes) {
+            break;
+        }
+        bytes += size;
+        out.push(m);
+    }
+    out
+}
+
+fn check_ref(tx: &Transaction, space: &str, user: &str, out: &Outgoing) -> Result<(), Code> {
+    let Some(r) = out.r#ref.as_deref() else { return Ok(()) };
+    let orig = db(tx
+        .query_row("SELECT space_id, kind, user_id, deleted FROM messages WHERE msg_id = ?1", params![r], |x| {
+            Ok((x.get::<_, String>(0)?, x.get::<_, Option<String>>(1)?, x.get::<_, String>(2)?, x.get::<_, bool>(3)?))
+        })
+        .optional())?;
+    ref_ok(orig, space, user, out)
+}
+
 fn erase(tx: &Transaction, orig: &str) -> Result<(), Code> {
     db(tx.execute("UPDATE messages SET content = '', ext = NULL, deleted = 1 WHERE msg_id = ?1", params![orig]))?;
     db(tx.execute("UPDATE messages SET content = '', ext = NULL WHERE ref_id = ?1 AND kind = 'edit'", params![orig]))?;
@@ -271,7 +353,7 @@ fn erase(tx: &Transaction, orig: &str) -> Result<(), Code> {
     Ok(())
 }
 
-fn within(messages: Vec<ChatMessage>, relations: Vec<ChatMessage>, from_start: bool, max_bytes: usize) -> (Vec<ChatMessage>, Vec<ChatMessage>, bool) {
+pub(crate) fn within(messages: Vec<ChatMessage>, relations: Vec<ChatMessage>, from_start: bool, max_bytes: usize) -> (Vec<ChatMessage>, Vec<ChatMessage>, bool) {
     let size = |m: &ChatMessage| serde_json::to_vec(m).map(|v| v.len()).unwrap_or(0);
     let mut rel_bytes: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for r in &relations {
@@ -306,7 +388,7 @@ fn within(messages: Vec<ChatMessage>, relations: Vec<ChatMessage>, from_start: b
     (kept, rel, cut)
 }
 
-fn fold_relations(rel: Vec<ChatMessage>) -> Vec<ChatMessage> {
+pub(crate) fn fold_relations(rel: Vec<ChatMessage>) -> Vec<ChatMessage> {
     let mut best: std::collections::BTreeMap<(String, u8, String), ChatMessage> = std::collections::BTreeMap::new();
     for m in rel {
         let Some(k) = m.kind else { continue };
@@ -337,7 +419,7 @@ fn rows(c: &Connection, sql: &str, p: &[&dyn rusqlite::ToSql]) -> Result<Vec<Cha
     Ok(v)
 }
 
-fn now_or(at: Option<u64>) -> u64 {
+pub(crate) fn now_or(at: Option<u64>) -> u64 {
     at.unwrap_or_else(common::now_ms)
 }
 
@@ -369,10 +451,36 @@ fn record(tx: &Transaction, m: &ChatMessage, exclude: &str) -> Result<(), Code> 
 }
 
 impl Store {
-    pub fn open(path: &str, default_vis: Visibility) -> Result<Store, String> {
-        let c = if path == ":memory:" { Connection::open_in_memory() } else { Connection::open(path) }.map_err(|e| format!("chat db {path}: {e}"))?;
+    pub fn open(db: &str, default_vis: Visibility) -> Result<Store, String> {
+        Store::open_pool(db, DB_POOL_DEFAULT, default_vis)
+    }
+
+    pub fn open_pool(db: &str, pool: usize, default_vis: Visibility) -> Result<Store, String> {
+        let queued = Arc::new(AtomicUsize::new(0));
+        let form = match ChatDb::parse(db)? {
+            ChatDb::Memory => Form::Lite(Mutex::new(Store::lite(None)?)),
+            ChatDb::Sqlite(path) => Form::Lite(Mutex::new(Store::lite(Some(&path))?)),
+            ChatDb::Postgres(url) => Form::Pg(pg::Pg::open(&url, pool, queued.clone())?),
+        };
+        Ok(Store { form, default_vis, ack_tx: AtomicU64::new(0), queued })
+    }
+
+    pub fn form(&self) -> &'static str {
+        match &self.form {
+            Form::Lite(_) => "sqlite",
+            Form::Pg(_) => "postgres",
+        }
+    }
+
+    fn lite(file: Option<&str>) -> Result<Connection, String> {
+        let path = file.unwrap_or(":memory:");
+        let c = match file {
+            Some(p) => Connection::open(p),
+            None => Connection::open_in_memory(),
+        }
+        .map_err(|e| format!("chat db {path}: {e}"))?;
         c.busy_timeout(Duration::from_secs(5)).map_err(|e| e.to_string())?;
-        if path != ":memory:" {
+        if file.is_some() {
             match c.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get::<_, String>(0)) {
                 Ok(m) if m.eq_ignore_ascii_case("wal") => {}
                 Ok(m) => tracing::warn!(kind = "diag", spec = "SV-IMPL-CHAT-STORE-FAULTS", path = %path, "chat store: journal mode stays {m} — WAL not set"),
@@ -389,18 +497,22 @@ impl Store {
         }
         c.execute_batch("CREATE INDEX IF NOT EXISTS messages_ref ON messages (ref_id); CREATE INDEX IF NOT EXISTS messages_t_id ON messages (t, msg_id);")
             .map_err(|e| format!("chat db schema: {e}"))?;
-        Ok(Store { conn: Mutex::new(c), default_vis, ack_tx: AtomicU64::new(0), queued: AtomicUsize::new(0) })
+        Ok(c)
     }
 
     fn with<T>(&self, f: impl FnOnce(&mut Connection) -> Result<T, Code>) -> Result<T, Code> {
+        let Form::Lite(m) = &self.form else { return Err(Code::InternalError) };
         self.queued.fetch_add(1, Ordering::AcqRel);
-        let g = self.conn.lock();
+        let g = m.lock();
         self.queued.fetch_sub(1, Ordering::AcqRel);
         let mut g = g.map_err(|_| Code::InternalError)?;
         f(&mut g)
     }
 
     pub fn create_space(&self, space: &str, vis: Option<Visibility>) -> Result<(), Code> {
+        if let Form::Pg(p) = &self.form {
+            return p.create_space(space, vis);
+        }
         self.with(|c| {
             db(c.execute(
                 "INSERT OR IGNORE INTO spaces (space_id, visibility) VALUES (?1, ?2)",
@@ -412,6 +524,9 @@ impl Store {
 
     pub fn join(&self, space: &str, user: &str, by: Option<&str>, at: Option<u64>) -> Result<Option<(ChatMessage, u64)>, Code> {
         let default_vis = self.default_vis;
+        if let Form::Pg(p) = &self.form {
+            return p.join(space, user, by, at, default_vis);
+        }
         self.with(|c| {
             let tx = db(c.transaction_with_behavior(TransactionBehavior::Immediate))?;
             let ver = space_ver(&tx, space)?.ok_or(Code::SpaceNotFound)?;
@@ -425,20 +540,7 @@ impl Store {
                 "INSERT INTO members (space_id, user_id, join_t, vis) VALUES (?1, ?2, ?3, ?4)",
                 params![space, user, n(t), vis],
             ))?;
-            let actor = by.unwrap_or(user);
-            let (kind, target) = if actor == user { (ChatKind::Join, None) } else { (ChatKind::Add, Some(user.to_string())) };
-            let msg = ChatMessage {
-                space_id: space.into(),
-                msg_id: sys_msg_id(t),
-                user_id: actor.into(),
-                t,
-                content: String::new(),
-                kind: Some(kind),
-                r#ref: None,
-                keys: None,
-                ext: None,
-                target,
-            };
+            let msg = member_msg(space, by.unwrap_or(user), user, t, true);
             insert_msg(&tx, &msg)?;
             record(&tx, &msg, "")?;
             db(tx.execute("UPDATE spaces SET ver = ver + 1 WHERE space_id = ?1", params![space]))?;
@@ -448,6 +550,9 @@ impl Store {
     }
 
     pub fn leave(&self, space: &str, user: &str, by: Option<&str>, at: Option<u64>) -> Result<(ChatMessage, u64), Code> {
+        if let Form::Pg(p) = &self.form {
+            return p.leave(space, user, by, at);
+        }
         self.with(|c| {
             let tx = db(c.transaction_with_behavior(TransactionBehavior::Immediate))?;
             let ver = space_ver(&tx, space)?.ok_or(Code::SpaceNotFound)?;
@@ -459,20 +564,7 @@ impl Store {
                 "UPDATE members SET leave_t = ?3 WHERE space_id = ?1 AND user_id = ?2 AND leave_t IS NULL",
                 params![space, user, n(t)],
             ))?;
-            let actor = by.unwrap_or(user);
-            let (kind, target) = if actor == user { (ChatKind::Leave, None) } else { (ChatKind::Remove, Some(user.to_string())) };
-            let msg = ChatMessage {
-                space_id: space.into(),
-                msg_id: sys_msg_id(t),
-                user_id: actor.into(),
-                t,
-                content: String::new(),
-                kind: Some(kind),
-                r#ref: None,
-                keys: None,
-                ext: None,
-                target,
-            };
+            let msg = member_msg(space, by.unwrap_or(user), user, t, false);
             insert_msg(&tx, &msg)?;
             record(&tx, &msg, "")?;
             db(tx.execute("UPDATE spaces SET ver = ver + 1 WHERE space_id = ?1", params![space]))?;
@@ -486,6 +578,9 @@ impl Store {
     }
 
     pub fn post(&self, user: &str, space: &str, msg_id: &str, out: &Outgoing, at: Option<u64>) -> Result<Sent, Code> {
+        if let Form::Pg(p) = &self.form {
+            return p.post(user, space, msg_id, out, at);
+        }
         self.with(|c| {
             let tx = db(c.transaction_with_behavior(TransactionBehavior::Immediate))?;
             let ver = space_ver(&tx, space)?.ok_or(Code::SpaceNotFound)?;
@@ -493,38 +588,18 @@ impl Store {
                 .query_row(&format!("SELECT {COLS} FROM messages x WHERE x.msg_id = ?1"), params![msg_id], msg_of)
                 .optional())?;
             if let Some(m) = old {
-                let probe = match m.kind {
-                    Some(k) if k.is_relation() => m.r#ref.clone().unwrap_or_default(),
-                    _ => m.msg_id.clone(),
-                };
                 let erased = db(tx
-                    .query_row("SELECT deleted FROM messages WHERE msg_id = ?1", params![probe], |r| r.get::<_, bool>(0))
+                    .query_row("SELECT deleted FROM messages WHERE msg_id = ?1", params![probe_of(&m)], |r| r.get::<_, bool>(0))
                     .optional())?
                 .unwrap_or(false);
-                let envelope = m.space_id == space && m.user_id == user && m.kind == out.kind && m.r#ref == out.r#ref;
-                let body = m.content == out.content && m.keys == out.keys && m.ext == out.ext;
-                if envelope && (erased || body) {
-                    return Ok(Sent::Again { msg: m });
-                }
-                return Err(Code::MsgIdConflict);
+                return again(m, erased, space, user, out);
             }
             if !open_member(&tx, space, user)? {
                 return Err(Code::NotSpaceMember);
             }
             check_ref(&tx, space, user, out)?;
             let t = now_or(at);
-            let msg = ChatMessage {
-                space_id: space.into(),
-                msg_id: msg_id.into(),
-                user_id: user.into(),
-                t,
-                content: out.content.clone(),
-                kind: out.kind,
-                r#ref: out.r#ref.clone(),
-                keys: out.keys.clone(),
-                ext: out.ext.clone(),
-                target: None,
-            };
+            let msg = fresh(space, msg_id, user, t, out);
             insert_msg(&tx, &msg)?;
             if out.kind.is_none() {
                 db(tx.execute(
@@ -550,6 +625,9 @@ impl Store {
     }
 
     pub fn roster(&self, space: &str) -> Result<Roster, Code> {
+        if let Form::Pg(p) = &self.form {
+            return p.roster(space);
+        }
         self.with(|c| {
             let ver = db(c
                 .query_row("SELECT ver FROM spaces WHERE space_id = ?1", params![space], |r| r.get::<_, i64>(0))
@@ -572,6 +650,9 @@ impl Store {
     }
 
     pub fn history_within(&self, user: &str, space: &str, dir: Dir, limit: u32, max_bytes: usize) -> Result<Page, Code> {
+        if let Form::Pg(p) = &self.form {
+            return p.history_within(user, space, dir, limit, max_bytes);
+        }
         self.with(|c| {
             if !db(c.query_row("SELECT EXISTS(SELECT 1 FROM spaces WHERE space_id = ?1)", params![space], |r| r.get::<_, bool>(0)))? {
                 return Err(Code::SpaceNotFound);
@@ -625,6 +706,9 @@ impl Store {
     }
 
     pub fn list(&self, user: &str) -> Result<Vec<SpaceEntry>, Code> {
+        if let Form::Pg(p) = &self.form {
+            return p.list(user);
+        }
         self.with(|c| {
             let mut st = db(c.prepare(
                 "SELECT s.space_id, s.total, s.last_t, COALESCE(r.read, 0) FROM spaces s
@@ -649,6 +733,9 @@ impl Store {
     }
 
     pub fn view(&self, user: &str, space: &str) -> Result<u64, Code> {
+        if let Form::Pg(p) = &self.form {
+            return p.view(user, space);
+        }
         self.with(|c| {
             let tx = db(c.transaction_with_behavior(TransactionBehavior::Immediate))?;
             let total = db(tx
@@ -668,6 +755,9 @@ impl Store {
     }
 
     pub fn catchup_check(&self, user: &str, space: &str) -> Result<(), Code> {
+        if let Form::Pg(p) = &self.form {
+            return p.catchup_check(user, space);
+        }
         self.with(|c| {
             if !db(c.query_row("SELECT EXISTS(SELECT 1 FROM spaces WHERE space_id = ?1)", params![space], |r| r.get::<_, bool>(0)))? {
                 return Err(Code::SpaceNotFound);
@@ -681,6 +771,9 @@ impl Store {
 
     pub fn catchup(&self, user: &str, space: Option<&str>, since: Option<u64>, after: &Cursor, max_msgs: usize, max_bytes: usize) -> Result<Vec<ChatMessage>, Code> {
         let lim = n(max_msgs.max(1) as u64);
+        if let Form::Pg(p) = &self.form {
+            return p.catchup(user, space, since, after, lim).map(|all| bundle(all, max_msgs, max_bytes));
+        }
         self.with(|c| {
             let sp = space.unwrap_or("");
             let d_space = if space.is_some() { "d.space_id = ?2" } else { "?2 = ?2" };
@@ -697,24 +790,17 @@ impl Store {
                 let (ft, fid) = since_floor(since, after);
                 all.extend(rows(c, &catchup_since_sql(space.is_some()), &[&user, &sp, &n(ft), &fid, &lim])?);
             }
-            all.sort_by(|a, b| (a.t, &a.msg_id).cmp(&(b.t, &b.msg_id)));
-            all.dedup_by(|a, b| a.msg_id == b.msg_id);
-            let mut out = Vec::new();
-            let mut bytes = r#"{"messages":[]}"#.len();
-            for m in all {
-                let size = serde_json::to_vec(&m).map(|b| b.len()).unwrap_or(0) + usize::from(!out.is_empty());
-                if !out.is_empty() && (out.len() >= max_msgs || bytes + size > max_bytes) {
-                    break;
-                }
-                bytes += size;
-                out.push(m);
-            }
-            Ok(out)
+            Ok(bundle(all, max_msgs, max_bytes))
         })
     }
 
     pub fn ack(&self, user: &str, msg_ids: &[String]) -> Result<(), Code> {
         if msg_ids.is_empty() {
+            return Ok(());
+        }
+        if let Form::Pg(p) = &self.form {
+            p.ack_batch(None, vec![(user.to_string(), msg_ids.to_vec())])?;
+            self.ack_tx.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
         self.with(|c| {
@@ -729,6 +815,19 @@ impl Store {
     pub fn ack_drain(&self, first: Ack, more: &Receiver<Ack>, cap: usize) -> Result<usize, Code> {
         if self.queued.load(Ordering::Acquire) > 0 {
             std::thread::sleep(YIELD);
+        }
+        if let Form::Pg(p) = &self.form {
+            let conn = p.take()?;
+            let mut rows = first.1.len();
+            let mut batch = vec![first];
+            while rows < cap {
+                let Ok(a) = more.try_recv() else { break };
+                rows += a.1.len();
+                batch.push(a);
+            }
+            p.ack_batch(Some(conn), batch)?;
+            self.ack_tx.fetch_add(1, Ordering::Relaxed);
+            return Ok(rows);
         }
         self.with(|c| {
             let tx = db(c.transaction_with_behavior(TransactionBehavior::Immediate))?;
@@ -751,6 +850,9 @@ impl Store {
     }
 
     pub fn plan(&self, sql: &str) -> Result<String, Code> {
+        if let Form::Pg(p) = &self.form {
+            return p.plan(sql);
+        }
         self.with(|c| {
             let mut st = db(c.prepare(&format!("EXPLAIN QUERY PLAN {sql}")))?;
             let unbound = st.parameter_count();
@@ -764,10 +866,16 @@ impl Store {
     }
 
     pub fn purge(&self, before_t: u64) -> Result<usize, Code> {
+        if let Form::Pg(p) = &self.form {
+            return p.purge(before_t);
+        }
         self.with(|c| db(c.execute("DELETE FROM undelivered WHERE t < ?1", params![n(before_t)])))
     }
 
     pub fn pending(&self, user: &str) -> Result<Vec<String>, Code> {
+        if let Form::Pg(p) = &self.form {
+            return p.pending(user);
+        }
         self.with(|c| {
             let mut st = db(c.prepare("SELECT msg_id FROM undelivered WHERE user_id = ?1 ORDER BY t, msg_id"))?;
             let it = db(st.query_map(params![user], |r| r.get::<_, String>(0)))?;
