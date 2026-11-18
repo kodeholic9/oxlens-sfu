@@ -31,11 +31,12 @@ pub struct Limits {
     pub undelivered_ttl_days: u64,
     pub bundle_msgs: usize,
     pub bundle_bytes: usize,
+    pub live_bundle_bytes: usize,
 }
 
 impl Default for Limits {
     fn default() -> Limits {
-        Limits { undelivered_ttl_days: 7, bundle_msgs: 100, bundle_bytes: 524_288 }
+        Limits { undelivered_ttl_days: 7, bundle_msgs: 100, bundle_bytes: 524_288, live_bundle_bytes: 65_536 }
     }
 }
 

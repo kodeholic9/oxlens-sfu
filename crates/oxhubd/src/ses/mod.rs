@@ -129,10 +129,11 @@ pub struct Ctx {
     pub probes: crate::aux::Probes,
     pub shutting_down: AtomicBool,
     pub chat: std::sync::OnceLock<Arc<crate::chat::Chat>>,
+    pub send_queue_max_bytes: usize,
 }
 
 impl Ctx {
-    pub fn new(policy: Policy, accounts: Accounts, bus: Arc<Bus>) -> Arc<Ctx> {
+    pub fn new(policy: Policy, accounts: Accounts, bus: Arc<Bus>, send_queue_max_bytes: usize) -> Arc<Ctx> {
         let home = Home { node: bus.node.clone(), inst: bus.inst.clone() };
         Arc::new(Ctx {
             policy,
@@ -147,6 +148,7 @@ impl Ctx {
             probes: crate::aux::Probes::default(),
             shutting_down: AtomicBool::new(false),
             chat: std::sync::OnceLock::new(),
+            send_queue_max_bytes,
         })
     }
 
@@ -815,7 +817,7 @@ async fn catchup_run(s: Arc<Session>, chat: Arc<crate::chat::Chat>, req: oxsig::
         let Ok(slot) = s.catchup_slot.clone().acquire_owned().await else { return };
         let Some(c) = s.conn() else { return };
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let body = serde_json::to_vec(&oxsig::msg::MessagesBody { messages: page }).unwrap_or_default();
+        let body = serde_json::to_vec(&oxsig::msg::MessagesBody { messages: page, live: None }).unwrap_or_default();
         let receipt = conn::Receipt { user: s.user_id.clone(), msg_ids, done: Some(tx), slot: Some(slot) };
         if !c.send(Out::Notice { op: Op::Messages, body, receipt: Some(receipt) }) {
             return;

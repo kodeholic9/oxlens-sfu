@@ -1,11 +1,12 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 연:RULE-CHAT-KIND · 연:RULE-CHAT-REF-CHECK · 연:RULE-CHAT-DELETE · 연:RULE-CHAT-FOLD · 정:IMPL-CHAT-STORE ·정:IMPL-CHAT-MEMBERSHIP · 정:IMPL-CHAT-FILTER · 정:IMPL-CHAT-READ · 정:IMPL-CHAT-UNDELIVERED · 정:IMPL-CHAT-CATCHUP · 정:IMPL-CHAT-STORE-FAULTS · 연:RULE-CHAT-MSG-ID · 연:RULE-CHAT-CONTENT · 연:RULE-CHAT-ORDER · 연:RULE-CHAT-VISIBLE · 연:RULE-CHAT-UNREAD · 연:RULE-CHAT-HISTORY-PAGE · 연:RULE-CHAT-UNDELIVERED · 연:RULE-CHAT-CATCHUP · 연:RULE-CHAT-MEMBER-NOTICE · model: claude-opus-5-5
-//! 1층 — 채팅 저장소(저장할 때 찍는 t · 같은 t 를 가르지 않는 쪽 · msg_id 멱등 · 멤버 구간 · 멤버 변경 메시지 · 보이기 시작점 · 안 읽은 수 · 미전송 기록 · 따라잡기 쪽)와 받는 게이트웨이의 멤버 캐시(판이 작을 때만 다시 읽음 · 명단(t_M)) · op 경계(msg_id 64 · content 65535) · 질의 계획(관계 = `ref` 색인 · 따라잡기 = 멤버 쪽 출발 · 하한 하나) · 저장소 실패의 원인 진단 줄.
+// spec: v1.6 · 연:RULE-CHAT-KIND · 연:RULE-CHAT-REF-CHECK · 연:RULE-CHAT-DELETE · 연:RULE-CHAT-FOLD · 정:IMPL-CHAT-STORE ·정:IMPL-CHAT-MEMBERSHIP · 정:IMPL-CHAT-FILTER · 정:IMPL-CHAT-READ · 정:IMPL-CHAT-UNDELIVERED · 정:IMPL-CHAT-CATCHUP · 정:IMPL-CHAT-STORE-FAULTS · 정:IMPL-CHAT-LIVE-BUNDLE · 정:IMPL-SES-SOCKET-LIFE · 연:RULE-CHAT-MSG-ID · 연:RULE-CHAT-CONTENT · 연:RULE-CHAT-ORDER · 연:RULE-CHAT-VISIBLE · 연:RULE-CHAT-UNREAD · 연:RULE-CHAT-HISTORY-PAGE · 연:RULE-CHAT-UNDELIVERED · 연:RULE-CHAT-CATCHUP · 연:RULE-CHAT-MEMBER-NOTICE · model: claude-opus-5-5
+//! 1층 — 송신 줄의 실시간 채팅 묶기(창이 찼을 때만 · 줄 끝 · 1단 제외 · 영수증 이어 붙이기 · 바이트 상한) · 채팅 저장소(저장할 때 찍는 t · 같은 t 를 가르지 않는 쪽 · msg_id 멱등 · 멤버 구간 · 멤버 변경 메시지 · 보이기 시작점 · 안 읽은 수 · 미전송 기록 · 따라잡기 쪽)와 받는 게이트웨이의 멤버 캐시(판이 작을 때만 다시 읽음 · 명단(t_M)) · op 경계(msg_id 64 · content 65535) · 질의 계획(관계 = `ref` 색인 · 따라잡기 = 멤버 쪽 출발 · 하한 하나) · 저장소 실패의 원인 진단 줄.
 
 use common::system::Visibility;
 use oxhubd::chat::store::{Cursor, Dir, Outgoing, Page, SYS, SYS_HASH, Sent, Store, catchup_since_sql, relations_sql};
 use oxhubd::chat::{BODY_MAX, Chat, Limits, outgoing, valid_msg_id};
-use oxsig::msg::{ChatKind, ChatMessage};
+use oxhubd::ses::conn::QUEUE_MAX;
+use oxsig::msg::{ChatKind, ChatMessage, MessagesBody};
 use oxsig::{Code, Op};
 
 const ID_A: &str = "e818000001a1e480b5fd7da4c5b6bc0df205";
@@ -798,4 +799,286 @@ fn a_failed_purge_leaves_a_diag_line_and_the_next_cycle_purges() {
     assert!(lines.iter().any(|l| l.contains("cause=")), "S-sym-IMPL-CHAT-STORE-FAULTS-3 — 원인 {lines:?}");
     other.execute_batch("ALTER TABLE undelivered_away RENAME TO undelivered; INSERT INTO undelivered (user_id, msg_id, space_id, t) VALUES ('b', 'old', 'S', 1)").expect("back");
     assert_eq!(chat.purge_once(30 * 86_400_000), Ok(1), "S-sym-IMPL-CHAT-STORE-FAULTS-3 — 다음 주기에 다시 지운다");
+}
+
+mod lane {
+    use std::sync::Arc;
+
+    use oxhubd::ses::conn::{Conn, Held, Out, QUEUE_MAX, Receipt, Writer};
+    use oxsig::msg::{ChatMessage, MessagesBody};
+    use oxsig::{Code, Op};
+    use tokio::sync::mpsc;
+
+    pub const WINDOW: usize = 8;
+
+    pub struct Pipe {
+        pub conn: Conn,
+        rx: mpsc::Receiver<Out>,
+        pub w: Writer,
+    }
+
+    pub struct Frame {
+        pub pid: u32,
+        pub op: Op,
+        pub body: Vec<u8>,
+    }
+
+    impl Frame {
+        pub fn messages(&self) -> Vec<ChatMessage> {
+            match self.op {
+                Op::Message => vec![serde_json::from_slice(&self.body).expect("MESSAGE body")],
+                Op::Messages => serde_json::from_slice::<MessagesBody>(&self.body).expect("MESSAGES body").messages,
+                _ => Vec::new(),
+            }
+        }
+
+        pub fn live(&self) -> Option<bool> {
+            match self.op {
+                Op::Messages => serde_json::from_slice::<MessagesBody>(&self.body).expect("MESSAGES body").live,
+                _ => None,
+            }
+        }
+    }
+
+    impl Pipe {
+        pub fn new(bundle_max: usize, queue_bytes: usize) -> Pipe {
+            let (tx, rx) = mpsc::channel(QUEUE_MAX);
+            let held = Held::new(queue_bytes);
+            let conn = Conn { id: 1, tx, over: Arc::new(tokio::sync::Notify::new()), held: held.clone() };
+            Pipe { conn, rx, w: Writer::new(WINDOW, bundle_max, held) }
+        }
+
+        pub fn put(&mut self, op: Op, body: Vec<u8>, receipt: Option<Receipt>) -> Result<(), Code> {
+            if !self.conn.send(Out::Notice { op, body, receipt }) {
+                return Err(Code::FlowOverflow);
+            }
+            match self.rx.try_recv() {
+                Ok(Out::Notice { op, body, receipt }) => self.w.push(op, body, receipt),
+                _ => panic!("the notice must be in the channel"),
+            }
+        }
+
+        pub fn live(&mut self, m: &ChatMessage) -> Result<(), Code> {
+            let r = Receipt { user: "b".into(), msg_ids: vec![m.msg_id.clone()], done: None, slot: None };
+            self.put(Op::Message, serde_json::to_vec(m).expect("json"), Some(r))
+        }
+
+        pub fn out(&mut self) -> Vec<Frame> {
+            let mut v = Vec::new();
+            while let Some((pid, op, body)) = self.w.pop() {
+                v.push(Frame { pid, op, body });
+            }
+            v
+        }
+
+        pub fn ack_all(&mut self, mut sent: Vec<Frame>) -> Vec<Frame> {
+            let mut got = Vec::new();
+            while !sent.is_empty() {
+                let f = sent.remove(0);
+                let _ = self.w.acked(f.pid);
+                got.push(f);
+                sent.extend(self.out());
+            }
+            got
+        }
+    }
+
+    pub fn msg(i: usize, t: u64, content: &str) -> ChatMessage {
+        ChatMessage { space_id: "S".into(), msg_id: super::id(i), user_id: "a".into(), t, content: content.into(), kind: None, r#ref: None, keys: None, ext: None, target: None }
+    }
+}
+
+#[test]
+fn a_full_window_bundles_live_notices_instead_of_overflowing() {
+    let run = |bundle_max: usize| {
+        let mut p = lane::Pipe::new(bundle_max, 4_194_304);
+        let mut first = Vec::new();
+        let mut cut = None;
+        for i in 0..2_000 {
+            if let Err(c) = p.live(&lane::msg(i, 1_000 + i as u64, "hello there")) {
+                cut = Some((i, c));
+                break;
+            }
+            first.extend(p.out());
+        }
+        (p, first, cut)
+    };
+    let (mut p, first, cut) = run(65_536);
+    assert_eq!(cut, None, "S-sym-IMPL-CHAT-LIVE-BUNDLE-1① — ACK 가 늦어 윈도우가 찬 동안 실시간 2,000 건이 FLOW_OVERFLOW 0");
+    assert_eq!(first.len(), lane::WINDOW, "형상 — 윈도우 {} 칸이 찬 뒤로는 줄에 머문다", lane::WINDOW);
+    assert!(p.w.queued() < 100, "S-sym-IMPL-CHAT-LIVE-BUNDLE-1① — 줄에 머문 것은 묶음 {} 개", p.w.queued());
+    let got = p.ack_all(first);
+    let bundles: Vec<&lane::Frame> = got.iter().filter(|f| f.op == Op::Messages).collect();
+    assert!(!bundles.is_empty() && bundles.iter().all(|f| f.live() == Some(true)), "S-sym-IMPL-CHAT-LIVE-BUNDLE-1① — `MESSAGES{{live:true}}` 로 묶여 온다");
+    let all: Vec<String> = got.iter().flat_map(|f| f.messages()).map(|m| m.msg_id).collect();
+    assert_eq!(all, (0..2_000).map(id).collect::<Vec<_>>(), "S-sym-IMPL-CHAT-LIVE-BUNDLE-1① — 2,000 건이 빠짐없이 넣은 차례로 간다");
+    let (_, _, cut) = run(0);
+    assert_eq!(cut.map(|(_, c)| c), Some(Code::FlowOverflow), "S-sym-IMPL-CHAT-LIVE-BUNDLE-1② — 양성 대조: 합치기를 끄면 4007");
+    assert!(cut.is_some_and(|(i, _)| i > QUEUE_MAX), "S-sym-IMPL-CHAT-LIVE-BUNDLE-1② — 끊긴 자리 = 밀린 프레임 {QUEUE_MAX} 초과 {cut:?}");
+}
+
+#[test]
+fn an_open_window_sends_live_notices_one_by_one_at_once() {
+    let mut p = lane::Pipe::new(65_536, 4_194_304);
+    for i in 0..50 {
+        let m = lane::msg(i, 1_000 + i as u64, "hi");
+        p.live(&m).expect("put");
+        let sent = p.out();
+        assert_eq!(sent.len(), 1, "S-sym-IMPL-CHAT-LIVE-BUNDLE-2① — 넣자마자 나간다(타이머 기다림 0)");
+        assert_eq!(sent[0].op, Op::Message, "S-sym-IMPL-CHAT-LIVE-BUNDLE-2① — 빈 칸이 있으면 `MESSAGE` 한 건");
+        assert_eq!(sent[0].body, serde_json::to_vec(&m).expect("json"), "S-sym-IMPL-CHAT-LIVE-BUNDLE-2② — 몸이 합치기 전과 같다");
+        assert!(p.w.acked(sent[0].pid).is_some(), "영수증이 돌아온다");
+    }
+    assert_eq!(p.w.queued(), 0, "S-sym-IMPL-CHAT-LIVE-BUNDLE-2① — 줄에 남은 것 0");
+}
+
+#[test]
+fn bundling_stays_at_the_data_lane_end() {
+    let mut p = lane::Pipe::new(65_536, 4_194_304);
+    let mut first = Vec::new();
+    for i in 0..lane::WINDOW {
+        p.live(&lane::msg(i, 10 + i as u64, "w")).expect("put");
+        first.extend(p.out());
+    }
+    assert_eq!(first.len(), lane::WINDOW, "형상 — 윈도우가 찼다");
+    let catchup = |a: usize, b: usize| serde_json::to_vec(&MessagesBody { messages: (a..b).map(|i| lane::msg(i, 1 + i as u64, "c")).collect(), live: None }).expect("json");
+    let c1 = catchup(100, 103);
+    let c2 = catchup(200, 202);
+    p.put(Op::Messages, c1.clone(), None).expect("catchup 1");
+    p.live(&lane::msg(300, 50, "m1")).expect("m1");
+    p.put(Op::RoomEvent, b"{\"room_id\":\"r\"}".to_vec(), None).expect("room");
+    p.live(&lane::msg(301, 51, "m2")).expect("m2");
+    p.put(Op::TrackEvent, b"{\"room_id\":\"r\"}".to_vec(), None).expect("track");
+    p.put(Op::Messages, c2.clone(), None).expect("catchup 2");
+    p.live(&lane::msg(302, 52, "m3")).expect("m3");
+    let got = p.ack_all(first);
+    let rest: Vec<&lane::Frame> = got[lane::WINDOW..].iter().collect();
+    let ops: Vec<Op> = rest.iter().map(|f| f.op).collect();
+    assert_eq!(ops, vec![Op::RoomEvent, Op::TrackEvent, Op::Messages, Op::Messages, Op::Messages, Op::Message], "S-sym-IMPL-CHAT-LIVE-BUNDLE-3① — 1단 통지가 채팅 묶음보다 먼저 · 데이터 단은 넣은 차례");
+    assert_eq!(rest[0].body, b"{\"room_id\":\"r\"}".to_vec(), "S-sym-IMPL-CHAT-LIVE-BUNDLE-3① — 1단 통지는 묶음에 들지 않는다");
+    assert_eq!((rest[2].body.clone(), rest[2].live()), (c1, None), "S-sym-IMPL-CHAT-LIVE-BUNDLE-3② — 따라잡기 묶음에 실시간이 섞이지 않는다");
+    assert_eq!(rest[3].messages().iter().map(|m| m.msg_id.clone()).collect::<Vec<_>>(), vec![id(300), id(301)], "S-sym-IMPL-CHAT-LIVE-BUNDLE-3② — 줄 끝의 실시간끼리만 합친다");
+    assert_eq!(rest[3].live(), Some(true), "S-sym-IMPL-CHAT-LIVE-BUNDLE-3② — 실시간 묶음");
+    assert_eq!((rest[4].body.clone(), rest[4].live()), (c2, None), "S-sym-IMPL-CHAT-LIVE-BUNDLE-3② — 따라잡기 뒤의 실시간은 새 항목(줄 중간을 찾지 않는다)");
+    assert_eq!(rest[5].messages()[0].msg_id, id(302), "S-sym-IMPL-CHAT-LIVE-BUNDLE-3② — 차례 그대로");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_ack_for_a_live_bundle_clears_every_record_in_it() {
+    let path = temp_db("live-bundle");
+    let chat = Chat::new(Store::open(&path, Visibility::Shared).expect("open"), Limits::default());
+    let s = chat.store.clone();
+    s.create_space("S", None).expect("space");
+    join(&s, "S", "a", 1);
+    join(&s, "S", "b", 1);
+    let mut sent = Vec::new();
+    for i in 0..40 {
+        match s.send("a", "S", &id(i), "m", Some(100 + i as u64)).expect("send") {
+            Sent::Fresh { msg, .. } => sent.push(msg),
+            Sent::Again { .. } => panic!("fresh"),
+        }
+    }
+    let (acked, refused) = sent.split_at(20);
+    let mut p = lane::Pipe::new(Limits::default().live_bundle_bytes, 4_194_304);
+    for _ in 0..lane::WINDOW {
+        p.put(Op::RoomEvent, b"{}".to_vec(), None).expect("fill");
+    }
+    let first = p.out();
+    for m in acked {
+        p.live(m).expect("live");
+    }
+    assert!(p.w.acked(first[0].pid).is_none(), "형상 — 1단 통지에는 영수증 없음");
+    let bundle = p.out();
+    assert_eq!((bundle.len(), bundle[0].op), (1, Op::Messages), "형상 — 20 건이 묶음 하나");
+    let r = p.w.acked(bundle[0].pid).expect("receipt");
+    assert_eq!(r.msg_ids.len(), 20, "S-sym-IMPL-CHAT-LIVE-BUNDLE-4① — 영수증이 묶음 몫 전부를 든다");
+    chat.acked(&r.user, r.msg_ids);
+    for m in refused {
+        p.live(m).expect("live");
+    }
+    assert!(p.w.acked(first[1].pid).is_none(), "형상");
+    let second = p.out();
+    assert!(p.w.refused(second[0].pid), "실패 답");
+    let ids = |v: &[ChatMessage]| v.iter().map(|m| m.msg_id.clone()).collect::<Vec<_>>();
+    let mut left = ids(acked);
+    for _ in 0..100 {
+        let pend = s.pending("b").expect("pending");
+        left.retain(|m| pend.contains(m));
+        if left.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(left.is_empty(), "S-sym-IMPL-CHAT-LIVE-BUNDLE-4① — ACK 하나로 묶음 몫 기록이 모두 0 · 남은 {left:?}");
+    let page = chat.catchup_page("b", &oxsig::msg::CatchupReq::default(), &Cursor::default()).await.expect("catchup");
+    let back = ids(&page);
+    assert!(ids(acked).iter().all(|m| !back.contains(m)), "S-sym-IMPL-CHAT-LIVE-BUNDLE-4① — 뒤의 CATCHUP{{}} 에 그 몫 0");
+    let pend = s.pending("b").expect("pending");
+    assert!(ids(refused).iter().all(|m| pend.contains(m)), "S-sym-IMPL-CHAT-LIVE-BUNDLE-4② — 양성 대조: 실패로 답한 묶음 몫은 모두 남는다");
+    assert!(ids(refused).iter().all(|m| back.contains(m)), "S-sym-IMPL-CHAT-LIVE-BUNDLE-4② — 남은 몫은 따라잡기로 간다");
+}
+
+#[test]
+fn live_bundles_stay_under_their_byte_cap_and_carry_live() {
+    let cap = 2_000;
+    let mut p = lane::Pipe::new(cap, 4_194_304);
+    let mut first = Vec::new();
+    for i in 0..lane::WINDOW {
+        p.live(&lane::msg(i, 10 + i as u64, "w")).expect("put");
+        first.extend(p.out());
+    }
+    assert_eq!(first.len(), lane::WINDOW, "형상 — 윈도우가 찼다");
+    let mut want = Vec::new();
+    for i in 100..160 {
+        let content = if i == 130 { "x".repeat(3_000) } else { "y".repeat(150) };
+        p.live(&lane::msg(i, 1_000 + i as u64, &content)).expect("put");
+        want.push(id(i));
+    }
+    let got = p.ack_all(first);
+    let rest = &got[lane::WINDOW..];
+    for f in rest {
+        match f.op {
+            Op::Messages => {
+                assert_eq!(f.live(), Some(true), "S-sym-IMPL-CHAT-LIVE-BUNDLE-5① — 실시간 묶음에만 live:true");
+                assert!(f.body.len() <= cap, "S-sym-IMPL-CHAT-LIVE-BUNDLE-5② — 묶음 몸 {} ≤ live_bundle_max_bytes {cap}", f.body.len());
+            }
+            Op::Message => {}
+            o => panic!("unexpected {o:?}"),
+        }
+    }
+    let alone: Vec<&lane::Frame> = rest.iter().filter(|f| f.messages().iter().any(|m| m.msg_id == id(130))).collect();
+    assert_eq!((alone.len(), alone[0].op, alone[0].messages().len()), (1, Op::Message, 1), "S-sym-IMPL-CHAT-LIVE-BUNDLE-5② — 상한을 넘는 한 건은 혼자 간다");
+    assert_eq!(rest.iter().flat_map(|f| f.messages()).map(|m| m.msg_id).collect::<Vec<_>>(), want, "S-sym-IMPL-CHAT-LIVE-BUNDLE-5② — 빠짐 · 순서 바뀜 없음");
+    assert!(rest.iter().filter(|f| f.op == Op::Messages).count() >= 2, "S-sym-IMPL-CHAT-LIVE-BUNDLE-5② — 묶음이 상한에서 나뉜다");
+    let c = serde_json::to_vec(&MessagesBody { messages: vec![lane::msg(1, 1, "c")], live: None }).expect("json");
+    assert!(!String::from_utf8_lossy(&c).contains("\"live\""), "S-sym-IMPL-CHAT-LIVE-BUNDLE-5① — 따라잡기 묶음에는 live 칸 없음");
+    assert_eq!(p.conn.held.bytes(), 0, "다 나가면 쥔 바이트 0 — 합칠 때 늘린 만큼 나갈 때 덜었다");
+}
+
+#[test]
+fn the_send_lane_closes_on_bytes_before_the_frame_count() {
+    let max = 4_194_304;
+    let mut p = lane::Pipe::new(65_536, max);
+    let mut cut = (0, None);
+    for i in 0..2 * QUEUE_MAX {
+        let m = lane::msg(i, 1 + i as u64, &"가".repeat(21_845));
+        if let Err(c) = p.put(Op::Messages, serde_json::to_vec(&MessagesBody { messages: vec![m], live: None }).expect("json"), None) {
+            cut = (i, Some(c));
+            break;
+        }
+    }
+    let frame = 65_535 + 200;
+    assert_eq!(cut.1, Some(Code::FlowOverflow), "S-sym-IMPL-SES-SOCKET-LIFE-1① — 바이트 상한을 넘으면 FLOW_OVERFLOW");
+    assert!(cut.0 < QUEUE_MAX, "S-sym-IMPL-SES-SOCKET-LIFE-1① — 건수 {} 는 {QUEUE_MAX} 아래", cut.0);
+    assert!(p.conn.held.bytes() <= max + frame, "S-sym-IMPL-SES-SOCKET-LIFE-1② — 쥔 바이트 {} ≤ 상한 + 프레임 하나", p.conn.held.bytes());
+    let mut q = lane::Pipe::new(65_536, max);
+    let mut n = 0;
+    let cut = loop {
+        if let Err(c) = q.put(Op::RoomEvent, b"{}".to_vec(), None) {
+            break c;
+        }
+        n += 1;
+        assert!(n <= QUEUE_MAX + lane::WINDOW + 1, "형상 — 건수 상한에서 끊겨야 한다");
+    };
+    assert_eq!((cut, n), (Code::FlowOverflow, QUEUE_MAX), "S-sym-IMPL-SES-SOCKET-LIFE-1③ — 양성 대조: 건수 {QUEUE_MAX} 초과도 같은 사유");
 }

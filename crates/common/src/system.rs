@@ -60,6 +60,12 @@ pub struct ChatSection {
     pub catchup_bundle_max_msgs: usize,
     #[serde(default = "default_catchup_bundle_max_bytes")]
     pub catchup_bundle_max_bytes: usize,
+    #[serde(default = "default_live_bundle_max_bytes")]
+    pub live_bundle_max_bytes: usize,
+}
+
+fn default_live_bundle_max_bytes() -> usize {
+    65_536
 }
 
 fn default_undelivered_ttl_days() -> u64 {
@@ -88,6 +94,12 @@ pub struct HubSection {
     pub tls: Option<Tls>,
     #[serde(default)]
     pub auth: Auth,
+    #[serde(default = "default_send_queue_max_bytes")]
+    pub send_queue_max_bytes: usize,
+}
+
+fn default_send_queue_max_bytes() -> usize {
+    4_194_304
 }
 
 fn default_base_path() -> String {
@@ -291,6 +303,7 @@ impl System {
             ("hub.tls.cert".into(), h.tls.as_ref().map(|t| t.cert.clone()).unwrap_or_else(|| "-".into())),
             ("hub.tls.key".into(), h.tls.as_ref().map(|t| t.key.clone()).unwrap_or_else(|| "-".into())),
             ("hub.auth.jwt_secret".into(), if h.auth.jwt_secret.is_some() { "***".into() } else { "-".into() }),
+            ("hub.send_queue_max_bytes".into(), h.send_queue_max_bytes.to_string()),
         ];
         for (i, k) in h.auth.api_keys.iter().enumerate() {
             let p = format!("hub.auth.api_keys[{i}]");
@@ -343,6 +356,7 @@ impl System {
                 v.push(("chat.undelivered_ttl_days".into(), c.undelivered_ttl_days.to_string()));
                 v.push(("chat.catchup_bundle_max_msgs".into(), c.catchup_bundle_max_msgs.to_string()));
                 v.push(("chat.catchup_bundle_max_bytes".into(), c.catchup_bundle_max_bytes.to_string()));
+                v.push(("chat.live_bundle_max_bytes".into(), c.live_bundle_max_bytes.to_string()));
             }
             None => v.push(("chat".into(), "-".into())),
         }
@@ -366,5 +380,8 @@ mod tests {
         assert!(System::parse(&format!("{MIN}mode = \"router\"\n")).is_err());
         assert!(System::parse(&MIN.replace("\"ox\"", "\"o/x\"")).is_err());
         assert!(s.banner_fields().iter().any(|(k, v)| k == "hub.auth.jwt_secret" && v == "-"));
+        assert!(s.banner_fields().iter().any(|(k, v)| k == "hub.send_queue_max_bytes" && v == "4194304"));
+        let c = System::parse(&format!("{MIN}[chat]\ndb = \"x\"\n")).unwrap();
+        assert!(c.banner_fields().iter().any(|(k, v)| k == "chat.live_bundle_max_bytes" && v == "65536"));
     }
 }

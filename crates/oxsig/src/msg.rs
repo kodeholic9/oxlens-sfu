@@ -509,6 +509,8 @@ pub struct CatchupReq {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MessagesBody {
     pub messages: Vec<ChatMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

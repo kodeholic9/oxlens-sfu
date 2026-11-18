@@ -1,15 +1,16 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-SES-READ-AND-PROCESS · 정:IMPL-SES-SOCKET-LIFE · 연:RULE-TRN-CLOSE · 연:RULE-TRN-FLOW-CONTROL · 연:RULE-TRN-WINDOW-PER-DIRECTION · 연:RULE-TRN-LANES · 연:RULE-SES-BIND-PROC · 연:RULE-SES-HEARTBEAT · 연:RULE-SES-LEAVE-CARRIES-REASON · 정:CAND-SES-PREBIND-2001 · 정:RULE-CHAT-GATEWAY-MODULE · 정:IMPL-SES-DATA · 정:RULE-OPS-DROPS · model: claude-opus-5-5
-//! WS 연결 하나 — 읽기와 처리를 가른다 · `HEARTBEAT` 는 읽는 즉시 · 방 요청은 연결 순서대로 · 채팅 요청은 따로 둔 통로에서 연결 순서대로 · 서버 통지는 4단 큐 + ACK 창 · 끊을 때는 `LEAVE` 먼저.
+// spec: v1.6 · 정:RULE-SES-READ-AND-PROCESS · 정:IMPL-SES-SOCKET-LIFE · 연:RULE-TRN-CLOSE · 연:RULE-TRN-FLOW-CONTROL · 연:RULE-TRN-WINDOW-PER-DIRECTION · 연:RULE-TRN-LANES · 연:RULE-SES-BIND-PROC · 연:RULE-SES-HEARTBEAT · 연:RULE-SES-LEAVE-CARRIES-REASON · 정:CAND-SES-PREBIND-2001 · 정:RULE-CHAT-GATEWAY-MODULE · 정:IMPL-SES-DATA · 정:RULE-OPS-DROPS · 정:IMPL-CHAT-LIVE-BUNDLE · 연:RULE-CHAT-CATCHUP-BUNDLE · model: claude-opus-5-5
+//! WS 연결 하나 — 읽기와 처리를 가른다 · `HEARTBEAT` 는 읽는 즉시 · 방 요청은 연결 순서대로 · 채팅 요청은 따로 둔 통로에서 연결 순서대로 · 서버 통지는 4단 큐 + ACK 창 · 창이 찼을 때만 데이터 단 줄 끝의 실시간 채팅 통지에 합친다 · 송신 통로는 건수와 바이트로 묶는다 · 끊을 때는 `LEAVE` 먼저.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use oxsig::frame::{self, FrameKind};
+use oxsig::msg::{ChatMessage, MessagesBody};
 use oxsig::{Code, Op};
 use tokio::sync::mpsc;
 
@@ -37,22 +38,76 @@ pub enum Out {
     Close,
 }
 
+impl Out {
+    fn bytes(&self) -> usize {
+        match self {
+            Out::Reply { body, .. } | Out::Notice { body, .. } => body.len(),
+            _ => 0,
+        }
+    }
+}
+
+pub struct Held {
+    bytes: AtomicUsize,
+    max: usize,
+}
+
+impl Held {
+    pub fn new(max: usize) -> Arc<Held> {
+        Arc::new(Held { bytes: AtomicUsize::new(0), max })
+    }
+
+    pub fn bytes(&self) -> usize {
+        self.bytes.load(Ordering::Acquire)
+    }
+
+    fn take(&self, n: usize) -> bool {
+        if self.bytes.fetch_add(n, Ordering::AcqRel) + n > self.max {
+            self.give(n);
+            return false;
+        }
+        true
+    }
+
+    fn grow(&self, n: usize) {
+        self.bytes.fetch_add(n, Ordering::AcqRel);
+    }
+
+    fn give(&self, n: usize) {
+        self.bytes.fetch_sub(n, Ordering::AcqRel);
+    }
+
+    fn over(&self) -> bool {
+        self.bytes() > self.max
+    }
+}
+
 #[derive(Clone)]
 pub struct Conn {
     pub id: u64,
     pub tx: mpsc::Sender<Out>,
     pub over: Arc<tokio::sync::Notify>,
+    pub held: Arc<Held>,
 }
 
 impl Conn {
     pub fn send(&self, o: Out) -> bool {
+        let n = o.bytes();
+        if !self.held.take(n) {
+            self.over.notify_one();
+            return false;
+        }
         match self.tx.try_send(o) {
             Ok(()) => true,
             Err(mpsc::error::TrySendError::Full(_)) => {
+                self.held.give(n);
                 self.over.notify_one();
                 false
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => false,
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.held.give(n);
+                false
+            }
         }
     }
 
@@ -80,13 +135,58 @@ pub struct Request {
     pub body: Vec<u8>,
 }
 
-type Queued = (Op, Vec<u8>, Option<Receipt>);
+enum Body {
+    Bytes(Vec<u8>),
+    Live(Vec<ChatMessage>),
+}
 
-struct Writer {
-    lanes: [VecDeque<Queued>; 4],
+struct Item {
+    op: Op,
+    body: Body,
+    receipt: Option<Receipt>,
+    size: usize,
+}
+
+impl Item {
+    fn join(&mut self, body: &[u8], receipt: Option<Receipt>, wrap: usize, max: usize) -> Result<usize, Option<Receipt>> {
+        let grown = match &self.body {
+            Body::Live(_) => self.size + 1 + body.len(),
+            Body::Bytes(_) if self.op == Op::Message => wrap + self.size + 1 + body.len(),
+            Body::Bytes(_) => return Err(receipt),
+        };
+        if grown > max {
+            return Err(receipt);
+        }
+        let Ok(m) = serde_json::from_slice::<ChatMessage>(body) else { return Err(receipt) };
+        if let Body::Bytes(b) = &self.body {
+            let Ok(first) = serde_json::from_slice::<ChatMessage>(b) else { return Err(receipt) };
+            self.body = Body::Live(vec![first]);
+            self.op = Op::Messages;
+        }
+        if let Body::Live(v) = &mut self.body {
+            let at = v.partition_point(|x| (x.t, x.msg_id.as_str()) <= (m.t, m.msg_id.as_str()));
+            v.insert(at, m);
+        }
+        if let Some(n) = receipt {
+            match &mut self.receipt {
+                Some(r) => r.msg_ids.extend(n.msg_ids),
+                slot => *slot = Some(n),
+            }
+        }
+        let added = grown - self.size - body.len();
+        self.size = grown;
+        Ok(added)
+    }
+}
+
+pub struct Writer {
+    lanes: [VecDeque<Item>; 4],
     inflight: HashMap<u32, (Instant, Option<Receipt>)>,
     next_pid: u32,
     window: usize,
+    bundle_max: usize,
+    wrap: usize,
+    held: Arc<Held>,
 }
 
 fn acked(ctx: &Ctx, r: Receipt) {
@@ -99,15 +199,62 @@ fn acked(ctx: &Ctx, r: Receipt) {
 }
 
 impl Writer {
-    fn queued(&self) -> usize {
+    pub fn new(window: usize, bundle_max: usize, held: Arc<Held>) -> Writer {
+        let wrap = serde_json::to_vec(&MessagesBody { messages: Vec::new(), live: Some(true) }).map(|v| v.len()).unwrap_or(0);
+        Writer { lanes: Default::default(), inflight: HashMap::new(), next_pid: 1, window, bundle_max, wrap, held }
+    }
+
+    pub fn queued(&self) -> usize {
         self.lanes.iter().map(|l| l.len()).sum()
     }
 
-    fn next(&mut self) -> Option<Queued> {
+    pub fn push(&mut self, op: Op, body: Vec<u8>, receipt: Option<Receipt>) -> Result<(), Code> {
+        let lane = &mut self.lanes[op.lane() as usize];
+        let receipt = match lane.back_mut() {
+            Some(back) if op == Op::Message => match back.join(&body, receipt, self.wrap, self.bundle_max) {
+                Ok(added) => {
+                    self.held.grow(added);
+                    None
+                }
+                Err(r) => Some(r),
+            },
+            _ => Some(receipt),
+        };
+        if let Some(receipt) = receipt {
+            let size = body.len();
+            lane.push_back(Item { op, body: Body::Bytes(body), receipt, size });
+        }
+        if self.queued() > QUEUE_MAX || self.held.over() {
+            return Err(Code::FlowOverflow);
+        }
+        Ok(())
+    }
+
+    pub fn pop(&mut self) -> Option<(u32, Op, Vec<u8>)> {
         if self.inflight.len() >= self.window {
             return None;
         }
-        self.lanes.iter_mut().find_map(|l| l.pop_front())
+        let it = self.lanes.iter_mut().find_map(|l| l.pop_front())?;
+        self.held.give(it.size);
+        let body = match it.body {
+            Body::Bytes(b) => b,
+            Body::Live(messages) => serde_json::to_vec(&MessagesBody { messages, live: Some(true) }).unwrap_or_default(),
+        };
+        let pid = self.pid();
+        self.inflight.insert(pid, (Instant::now(), it.receipt));
+        Some((pid, it.op, body))
+    }
+
+    pub fn acked(&mut self, pid: u32) -> Option<Receipt> {
+        self.inflight.remove(&pid).and_then(|(_, r)| r)
+    }
+
+    pub fn refused(&mut self, pid: u32) -> bool {
+        self.inflight.remove(&pid).is_some()
+    }
+
+    fn expired(&self) -> bool {
+        self.inflight.values().any(|(t, _)| t.elapsed() > T_ACK)
     }
 
     fn pid(&mut self) -> u32 {
@@ -122,8 +269,10 @@ pub async fn serve(ws: WebSocket, ctx: Arc<Ctx>) {
     let (mut sink, mut stream) = ws.split();
     let (tx, mut rx) = mpsc::channel::<Out>(QUEUE_MAX);
     let over = Arc::new(tokio::sync::Notify::new());
-    let conn = Conn { id, tx: tx.clone(), over: over.clone() };
+    let held = Held::new(ctx.send_queue_max_bytes);
+    let conn = Conn { id, tx: tx.clone(), over: over.clone(), held: held.clone() };
     let window = ctx.policy.hub.ws_flow_window.clamp(1, 10) as usize;
+    let bundle_max = ctx.chat.get().map(|c| c.limits.live_bundle_bytes).unwrap_or(0);
     let (req_tx, mut req_rx) = mpsc::channel::<(Arc<Session>, Request)>(QUEUE_MAX);
     let (chat_tx, mut chat_rx) = mpsc::channel::<(Arc<Session>, Request)>(QUEUE_MAX);
     let leave_code = Arc::new(std::sync::Mutex::new(None::<Code>));
@@ -131,14 +280,14 @@ pub async fn serve(ws: WebSocket, ctx: Arc<Ctx>) {
     let lc = leave_code.clone();
     let wctx = ctx.clone();
     let writer = tokio::spawn(async move {
-        let mut w = Writer { lanes: Default::default(), inflight: HashMap::new(), next_pid: 1, window };
+        let mut w = Writer::new(window, bundle_max, held);
         let mut tick = tokio::time::interval(Duration::from_millis(500));
         loop {
             let ev = tokio::select! {
                 _ = over.notified() => Some(Out::Leave { code: Code::FlowOverflow, details: None }),
                 o = rx.recv() => o,
                 _ = tick.tick() => {
-                    if w.inflight.values().any(|(t, _)| t.elapsed() > T_ACK) {
+                    if w.expired() {
                         Some(Out::Leave { code: Code::FlowTimeout, details: None })
                     } else {
                         continue;
@@ -148,27 +297,27 @@ pub async fn serve(ws: WebSocket, ctx: Arc<Ctx>) {
             let Some(o) = ev else { break };
             match o {
                 Out::Reply { flags, op, pid, body } => {
+                    w.held.give(body.len());
                     if sink.send(Message::Binary(frame::encode_flags(flags, op, pid, &body))).await.is_err() {
                         break;
                     }
                 }
                 Out::Notice { op, body, receipt } => {
-                    w.lanes[op.lane() as usize].push_back((op, body, receipt));
-                    if w.queued() > QUEUE_MAX {
-                        let _ = send_leave(&mut sink, &mut w, Code::FlowOverflow, None).await;
+                    if let Err(code) = w.push(op, body, receipt) {
+                        let _ = send_leave(&mut sink, &mut w, code, None).await;
                         if let Ok(mut g) = lc.lock() {
-                            g.replace(Code::FlowOverflow);
+                            g.replace(code);
                         }
                         break;
                     }
                 }
                 Out::Ack(pid) => {
-                    if let Some((_, Some(r))) = w.inflight.remove(&pid) {
+                    if let Some(r) = w.acked(pid) {
                         acked(&wctx, r);
                     }
                 }
                 Out::Refused(pid) => {
-                    if w.inflight.remove(&pid).is_some() {
+                    if w.refused(pid) {
                         wctx.counters.notice_refused.fetch_add(1, Ordering::Relaxed);
                     }
                 }
@@ -184,9 +333,7 @@ pub async fn serve(ws: WebSocket, ctx: Arc<Ctx>) {
                     break;
                 }
             }
-            while let Some((op, body, receipt)) = w.next() {
-                let pid = w.pid();
-                w.inflight.insert(pid, (Instant::now(), receipt));
+            while let Some((pid, op, body)) = w.pop() {
                 if sink.send(Message::Binary(frame::encode(FrameKind::Request, op.as_u16(), pid, &body))).await.is_err() {
                     return;
                 }
@@ -356,7 +503,7 @@ mod tests {
     async fn full_send_queue_raises_overflow_instead_of_growing() {
         let (tx, mut rx) = mpsc::channel::<Out>(2);
         let over = Arc::new(tokio::sync::Notify::new());
-        let c = Conn { id: 1, tx, over: over.clone() };
+        let c = Conn { id: 1, tx, over: over.clone(), held: Held::new(usize::MAX) };
         assert!(c.send(Out::Ack(1)));
         assert!(c.send(Out::Ack(2)));
         assert!(!c.send(Out::Ack(3)), "연:RULE-TRN-FLOW-CONTROL 상한을 넘으면 넣지 않는다");

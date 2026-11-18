@@ -130,7 +130,7 @@ async fn run(cfg: HubCfg) -> i32 {
     };
     sup.mark_state(Role::Bus, UnitState::Running, "open");
     let accounts = Accounts { keys: cfg.system.hub.auth.api_keys.clone(), jwt_secret: cfg.system.hub.auth.jwt_secret.clone() };
-    let ctx = ses::Ctx::new(cfg.policy.clone(), accounts, bus.clone());
+    let ctx = ses::Ctx::new(cfg.policy.clone(), accounts, bus.clone(), cfg.system.hub.send_queue_max_bytes);
     if cfg.system.bus.follow_sessions
         && cfg.system.chat.is_some()
         && let Err(e) = bus.follow_sessions().await
@@ -145,6 +145,7 @@ async fn run(cfg: HubCfg) -> i32 {
                     undelivered_ttl_days: c.undelivered_ttl_days,
                     bundle_msgs: c.catchup_bundle_max_msgs,
                     bundle_bytes: c.catchup_bundle_max_bytes,
+                    live_bundle_bytes: c.live_bundle_max_bytes,
                 };
                 let chat = Arc::new(oxhubd::chat::Chat::new(st, limits));
                 tokio::spawn(chat.clone().purge_loop());
