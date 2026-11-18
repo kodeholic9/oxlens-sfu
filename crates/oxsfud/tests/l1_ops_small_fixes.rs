@@ -498,6 +498,7 @@ fn t61_4_expiry_closes_in_the_same_step() {
         media_codecs: MediaCodecs::default(),
         epoch: "e".into(),
         floor: oxsfud::flr::core::Floor::new(10, 30),
+        record: false,
     });
     assert!(r.ttl_due(common::now_ms(), 5_000), "stand check — the empty room is due");
     assert!(r.join(member("a"), None).is_err(), "정:IMPL-ROOM-LIFE 정:IMPL-ROOM-JOIN a closed room refuses the registration");
@@ -542,6 +543,7 @@ fn t62_3_rejoin_flag_does_not_skip_capacity_for_one_not_in_the_roster() {
         media_codecs: MediaCodecs::default(),
         epoch: "e".into(),
         floor: oxsfud::flr::core::Floor::new(10, 30),
+        record: false,
     });
     r.join(member("x"), None).expect("x registered");
     assert!(r.join(member("u"), None).is_err(), "정:IMPL-ROOM-JOIN S-sym-IMPL-ROOM-JOIN-3 the registration of one not in the roster sees the full room");
@@ -564,6 +566,7 @@ fn t62_4_one_in_the_roster_and_hidden_are_not_counted() {
             media_codecs: MediaCodecs::default(),
             epoch: "e".into(),
             floor: oxsfud::flr::core::Floor::new(10, 30),
+            record: false,
         })
     };
     let r = mk("t624");
@@ -587,6 +590,7 @@ fn t62_5_registration_after_a_kick_announces_joined() {
         media_codecs: MediaCodecs::default(),
         epoch: "e".into(),
         floor: oxsfud::flr::core::Floor::new(10, 30),
+        record: false,
     });
     r.join(member("u"), None).expect("registered");
     let again = r.version().seq;

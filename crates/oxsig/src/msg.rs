@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 연:SES.op · 연:ROOM.op · 연:PUB.op · 연:SUB.op · 연:TRK.op · 연:LINK.op · 연:AFF.op · 연:AUX.op · 연:CHAT.op · 연:CHAT.type.ChatMessage · 연:CHAT.type.SpaceEntry ·연:LINK.type.ServerConfig · 연:SUB.type.MlineTable · 연:TRK.type.TrackEntry · 연:ROOM.type.MemberInfo · 연:ROOM.http.CREATE_ROOM · 연:SES.http.TOKEN · 연:RULE-ROOM-MEMBERINFO-SHAPE · 연:RULE-ROOM-LEAVE-FORM · 연:RULE-ROOM-PARTICIPANT-EVENT-FORM · 연:RULE-ROOM-ROOM-EVENT-NO-VERSION · 연:RULE-AFF-RES-NO-VERSION · 연:RULE-PUB-SET-RES · 연:RULE-PUB-PUBLISH-RES · 연:RULE-TRK-ELEMENT-HAS-ROOM-ID · 연:RULE-TRK-TRACK-STATE-TYPES · 연:RULE-TRK-TRACK-STATE-NO-STALLED · 연:RULE-SUB-LAYER-BY-TRACK-ID · 연:RULE-SUB-ROW-ONE-MLINE · 연:RULE-SUB-ASSIGN-TIER · model: claude-opus-5-5
+// spec: v1.6 · 연:SES.op · 연:ROOM.op · 연:PUB.op · 연:SUB.op · 연:TRK.op · 연:LINK.op · 연:AFF.op · 연:AUX.op · 연:CHAT.op · 연:CHAT.type.ChatMessage · 연:CHAT.type.TalkInfo · 연:CHAT.type.TalkRec · 연:RULE-CHAT-KIND · 연:CHAT.type.SpaceEntry ·연:LINK.type.ServerConfig · 연:SUB.type.MlineTable · 연:TRK.type.TrackEntry · 연:ROOM.type.MemberInfo · 연:ROOM.http.CREATE_ROOM · 연:SES.http.TOKEN · 연:RULE-ROOM-MEMBERINFO-SHAPE · 연:RULE-ROOM-LEAVE-FORM · 연:RULE-ROOM-PARTICIPANT-EVENT-FORM · 연:RULE-ROOM-ROOM-EVENT-NO-VERSION · 연:RULE-AFF-RES-NO-VERSION · 연:RULE-PUB-SET-RES · 연:RULE-PUB-PUBLISH-RES · 연:RULE-TRK-ELEMENT-HAS-ROOM-ID · 연:RULE-TRK-TRACK-STATE-TYPES · 연:RULE-TRK-TRACK-STATE-NO-STALLED · 연:RULE-SUB-LAYER-BY-TRACK-ID · 연:RULE-SUB-ROW-ONE-MLINE · 연:RULE-SUB-ASSIGN-TIER · model: claude-opus-5-5
 //! WS · HTTP body 의 형 — 칸 이름 · 필수 · 갈래는 연동규격서 구조 절 그대로.
 
 use serde::{Deserialize, Serialize};
@@ -200,6 +200,7 @@ pub struct RoomSummary {
     pub user_count: u32,
     pub created_at: u64,
     pub rec: bool,
+    pub record: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -332,6 +333,8 @@ pub struct CreateRoomReq {
     pub departure_ttl_secs: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_codecs: Option<MediaCodecs>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -340,6 +343,7 @@ pub struct CreateRoomRes {
     pub name: String,
     pub capacity: u32,
     pub created_at: u64,
+    pub record: bool,
     pub media_codecs: MediaCodecs,
 }
 
@@ -359,6 +363,7 @@ pub struct GetRoomRes {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub me: Option<MemberInfo>,
     pub created_at: u64,
+    pub record: bool,
     pub media_codecs: MediaCodecs,
     pub version: Version,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -446,12 +451,15 @@ pub enum ChatKind {
     Leave,
     Add,
     Remove,
+    Talk,
+    #[serde(rename = "talk_update")]
+    TalkUpdate,
     #[serde(other)]
     Other,
 }
 
 impl ChatKind {
-    const KNOWN: [ChatKind; 7] = [ChatKind::Edit, ChatKind::React, ChatKind::Delete, ChatKind::Join, ChatKind::Leave, ChatKind::Add, ChatKind::Remove];
+    const KNOWN: [ChatKind; 9] = [ChatKind::Edit, ChatKind::React, ChatKind::Delete, ChatKind::Join, ChatKind::Leave, ChatKind::Add, ChatKind::Remove, ChatKind::Talk, ChatKind::TalkUpdate];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -462,6 +470,8 @@ impl ChatKind {
             ChatKind::Leave => "leave",
             ChatKind::Add => "add",
             ChatKind::Remove => "remove",
+            ChatKind::Talk => "talk",
+            ChatKind::TalkUpdate => "talk_update",
             ChatKind::Other => "other",
         }
     }
@@ -476,6 +486,10 @@ impl ChatKind {
 
     pub fn is_member(self) -> bool {
         matches!(self, ChatKind::Join | ChatKind::Leave | ChatKind::Add | ChatKind::Remove)
+    }
+
+    pub fn by_server(self) -> bool {
+        self.is_member() || matches!(self, ChatKind::Talk | ChatKind::TalkUpdate)
     }
 }
 
@@ -496,6 +510,54 @@ pub struct ChatMessage {
     pub ext: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub talk: Option<TalkInfo>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TalkState {
+    Talking,
+    Ok,
+    Short,
+    Cut,
+    Silent,
+    Lost,
+}
+
+impl TalkState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TalkState::Talking => "talking",
+            TalkState::Ok => "ok",
+            TalkState::Short => "short",
+            TalkState::Cut => "cut",
+            TalkState::Silent => "silent",
+            TalkState::Lost => "lost",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TalkRec {
+    pub path: String,
+    pub size: u64,
+    pub mime: String,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TalkInfo {
+    pub state: TalkState,
+    pub room_id: String,
+    pub start: u64,
+    pub deadline: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rec: Option<TalkRec>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

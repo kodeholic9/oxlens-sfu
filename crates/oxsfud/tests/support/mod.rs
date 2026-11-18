@@ -84,6 +84,7 @@ pub fn room_with(id: &str, capacity: u32) -> Arc<Room> {
         media_codecs: MediaCodecs::default(),
         epoch: s.epoch.clone(),
         floor: Floor::new(10, 30),
+        record: false,
     }));
     assert!(fresh, "stand check — room {id} is new in the room set");
     r

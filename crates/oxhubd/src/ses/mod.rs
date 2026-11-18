@@ -850,6 +850,21 @@ async fn chat_fanout(ctx: &Ctx, chat: &crate::chat::Chat, d: crate::chat::Delive
     }
 }
 
+pub async fn talk(ctx: &Arc<Ctx>, payload: &[u8]) -> Vec<u8> {
+    let Some(chat) = ctx.chat.get().cloned() else { return Reply::fail(Code::ChatDisabled).encode() };
+    let Ok(r) = serde_json::from_slice::<common::talk::Report>(payload) else { return Reply::fail(Code::InvalidPayload).encode() };
+    match chat.talk(r).await {
+        Ok((t, deliver)) => {
+            if let Some(d) = deliver {
+                let ctx = ctx.clone();
+                tokio::spawn(async move { chat_fanout(&ctx, &chat, d).await });
+            }
+            Reply::ok(serde_json::json!({ "t": t })).encode()
+        }
+        Err(c) => Reply::fail(c).encode(),
+    }
+}
+
 pub async fn deliver_chat(ctx: &Ctx, payload: &[u8]) -> Vec<u8> {
     let Some(chat) = ctx.chat.get().cloned() else { return Reply::fail(Code::ChatDisabled).encode() };
     match serde_json::from_slice::<crate::chat::Deliver>(payload) {

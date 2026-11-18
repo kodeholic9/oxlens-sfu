@@ -12,8 +12,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::system::{ChatDb, DB_POOL_DEFAULT, Visibility};
+use common::talk::Report;
 use oxsig::Code;
-use oxsig::msg::{ChatKind, ChatMessage, SpaceEntry};
+use oxsig::msg::{ChatKind, ChatMessage, SpaceEntry, TalkInfo, TalkRec, TalkState};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter};
 
 pub const HISTORY_DEFAULT: u32 = 60;
@@ -50,7 +51,8 @@ CREATE TABLE IF NOT EXISTS messages (
   ref_id TEXT,
   keys TEXT,
   ext TEXT,
-  deleted INTEGER NOT NULL DEFAULT 0
+  deleted INTEGER NOT NULL DEFAULT 0,
+  talk TEXT
 );
 CREATE INDEX IF NOT EXISTS messages_space_t_id ON messages (space_id, t, msg_id);
 CREATE TABLE IF NOT EXISTS reads (
@@ -71,8 +73,9 @@ CREATE INDEX IF NOT EXISTS undelivered_t ON undelivered (t);
 CREATE INDEX IF NOT EXISTS members_user ON members (user_id, leave_t);
 ";
 
-pub(crate) const COLS: &str ="x.msg_id, x.space_id, x.user_id, x.t, x.content, x.kind, x.target, x.ref_id, x.keys, x.ext";
-pub(crate) const VISIBLE: &str =" AND (x.kind IS NULL OR x.kind IN ('join', 'leave', 'add', 'remove'))";
+pub(crate) const COLS: &str ="x.msg_id, x.space_id, x.user_id, x.t, x.content, x.kind, x.target, x.ref_id, x.keys, x.ext, x.talk";
+pub(crate) const VISIBLE: &str =" AND (x.kind IS NULL OR x.kind IN ('join', 'leave', 'add', 'remove', 'talk'))";
+pub(crate) const RELATION_KINDS: &str = "('edit', 'react', 'delete', 'talk_update')";
 const SEEN_JOINED: &str =
     " AND EXISTS(SELECT 1 FROM members m WHERE m.space_id = x.space_id AND m.user_id = ?2 AND m.join_t <= x.t AND (m.leave_t IS NULL OR x.t < m.leave_t))";
 const SEEN_ALL: &str = " AND ?2 = ?2";
@@ -179,7 +182,7 @@ fn duplicate_column(e: &rusqlite::Error) -> bool {
 pub fn relations_sql(joined: bool, refs: usize) -> String {
     let seen = if joined { SEEN_JOINED } else { SEEN_ALL };
     let marks = (3..refs + 3).map(|i| format!("?{i}")).collect::<Vec<_>>().join(", ");
-    format!("SELECT {COLS} FROM messages x WHERE +x.space_id = ?1{seen} AND x.kind IN ('edit', 'react', 'delete') AND x.ref_id IN ({marks})")
+    format!("SELECT {COLS} FROM messages x WHERE +x.space_id = ?1{seen} AND x.kind IN {RELATION_KINDS} AND x.ref_id IN ({marks})")
 }
 
 pub fn catchup_since_sql(space: bool) -> String {
@@ -223,6 +226,7 @@ fn msg_of(r: &rusqlite::Row) -> rusqlite::Result<ChatMessage> {
     let kind: Option<String> = r.get(5)?;
     let keys: Option<String> = r.get(8)?;
     let ext: Option<String> = r.get(9)?;
+    let talk: Option<String> = r.get(10)?;
     Ok(ChatMessage {
         msg_id: r.get(0)?,
         space_id: r.get(1)?,
@@ -234,6 +238,7 @@ fn msg_of(r: &rusqlite::Row) -> rusqlite::Result<ChatMessage> {
         keys: keys.and_then(|k| serde_json::from_str(&k).ok()),
         ext: ext.and_then(|e| serde_json::from_str(&e).ok()),
         target: r.get(6)?,
+        talk: talk.and_then(|x| serde_json::from_str(&x).ok()),
     })
 }
 
@@ -254,10 +259,14 @@ impl Outgoing {
 
 pub(crate) fn ref_ok(orig: Option<(String, Option<String>, String, bool)>, space: &str, user: &str, out: &Outgoing) -> Result<(), Code> {
     let Some((sp, kind, owner, deleted)) = orig else { return Err(Code::RefNotFound) };
-    if sp != space || kind.is_some() {
+    let talk = kind.as_deref() == Some(ChatKind::Talk.as_str());
+    if sp != space || (kind.is_some() && !talk) {
         return Err(Code::RefNotFound);
     }
     let Some(k) = out.kind else { return Ok(()) };
+    if talk && matches!(k, ChatKind::Edit | ChatKind::Delete) {
+        return Err(Code::RefNotFound);
+    }
     if matches!(k, ChatKind::Edit | ChatKind::Delete) && owner != user {
         return Err(Code::NotRefSender);
     }
@@ -295,7 +304,67 @@ pub(crate) fn fresh(space: &str, msg_id: &str, user: &str, t: u64, out: &Outgoin
         keys: out.keys.clone(),
         ext: out.ext.clone(),
         target: None,
+        talk: None,
     }
+}
+
+pub(crate) fn talk_msg(space: &str, msg_id: &str, user: &str, t: u64, kind: ChatKind, r#ref: Option<&str>, info: TalkInfo) -> ChatMessage {
+    ChatMessage {
+        space_id: space.into(),
+        msg_id: msg_id.into(),
+        user_id: user.into(),
+        t,
+        content: String::new(),
+        kind: Some(kind),
+        r#ref: r#ref.map(str::to_string),
+        keys: None,
+        ext: None,
+        target: None,
+        talk: Some(info),
+    }
+}
+
+pub(crate) fn talk_started(r: &Report) -> Option<(&str, &str, &str, TalkInfo)> {
+    let Report::Start { talk_id, room_id, user_id, start, deadline, .. } = r else { return None };
+    let info = TalkInfo { state: TalkState::Talking, room_id: room_id.clone(), start: *start, deadline: *deadline, duration_ms: None, reason: None, rec: None };
+    Some((talk_id, room_id, user_id, info))
+}
+
+pub(crate) fn talk_merged(prev: TalkInfo, r: &Report) -> TalkInfo {
+    let mut v = prev;
+    match r {
+        Report::End { state, reason, duration_ms, .. } => {
+            v.state = *state;
+            v.reason = reason.filter(|_| *state == TalkState::Cut);
+            v.duration_ms = Some(*duration_ms);
+        }
+        Report::Regrant { deadline, .. } => v.deadline = *deadline,
+        Report::Rec { path, size, mime, duration_ms, .. } => {
+            v.rec = Some(TalkRec { path: path.clone(), size: *size, mime: mime.clone(), duration_ms: *duration_ms });
+        }
+        Report::Start { .. } => {}
+    }
+    v
+}
+
+pub(crate) fn talk_update_ok(orig: &ChatMessage, r: &Report) -> Result<(), Code> {
+    if orig.kind != Some(ChatKind::Talk) {
+        return Err(Code::InvalidPayload);
+    }
+    if let Report::Rec { path, .. } = r
+        && !rec_path_ok(&orig.space_id, path)
+    {
+        return Err(Code::InvalidPayload);
+    }
+    Ok(())
+}
+
+pub fn rec_path_ok(space: &str, path: &str) -> bool {
+    path.strip_prefix("rec/").and_then(|p| p.strip_prefix(space)).and_then(|p| p.strip_prefix('/')).is_some_and(rec_file_ok)
+}
+
+pub fn rec_file_ok(file: &str) -> bool {
+    !file.is_empty() && !file.contains('/') && !file.contains("..") && !file.contains('\\')
 }
 
 pub(crate) fn member_msg(space: &str, actor: &str, user: &str, t: u64, joining: bool) -> ChatMessage {
@@ -316,6 +385,7 @@ pub(crate) fn member_msg(space: &str, actor: &str, user: &str, t: u64, joining: 
         keys: None,
         ext: None,
         target,
+        talk: None,
     }
 }
 
@@ -397,6 +467,7 @@ pub(crate) fn fold_relations(rel: Vec<ChatMessage>) -> Vec<ChatMessage> {
             ChatKind::Delete => (r, 0, String::new()),
             ChatKind::Edit => (r, 1, String::new()),
             ChatKind::React => (r, 2, m.user_id.clone()),
+            ChatKind::TalkUpdate => (r, 3, String::new()),
             _ => continue,
         };
         let newer = best.get(&key).is_none_or(|b| (m.t, &m.msg_id) > (b.t, &b.msg_id));
@@ -433,9 +504,10 @@ pub fn sys_msg_id(t: u64) -> String {
 fn insert_msg(tx: &Transaction, m: &ChatMessage) -> Result<(), Code> {
     let keys = m.keys.as_ref().map(|k| serde_json::to_string(k).unwrap_or_default());
     let ext = m.ext.as_ref().map(|e| e.to_string());
+    let talk = m.talk.as_ref().map(|x| serde_json::to_string(x).unwrap_or_default());
     db(tx.execute(
-        "INSERT INTO messages (msg_id, space_id, user_id, t, content, kind, target, ref_id, keys, ext) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-        params![m.msg_id, m.space_id, m.user_id, n(m.t), m.content, m.kind.map(|k| k.as_str()), m.target, m.r#ref, keys, ext],
+        "INSERT INTO messages (msg_id, space_id, user_id, t, content, kind, target, ref_id, keys, ext, talk) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![m.msg_id, m.space_id, m.user_id, n(m.t), m.content, m.kind.map(|k| k.as_str()), m.target, m.r#ref, keys, ext, talk],
     ))?;
     Ok(())
 }
@@ -488,7 +560,7 @@ impl Store {
             }
         }
         c.execute_batch(SCHEMA).map_err(|e| format!("chat db schema: {e}"))?;
-        for col in ["kind TEXT", "target TEXT", "ref_id TEXT", "keys TEXT", "ext TEXT", "deleted INTEGER NOT NULL DEFAULT 0"] {
+        for col in ["kind TEXT", "target TEXT", "ref_id TEXT", "keys TEXT", "ext TEXT", "deleted INTEGER NOT NULL DEFAULT 0", "talk TEXT"] {
             if let Err(e) = c.execute(&format!("ALTER TABLE messages ADD COLUMN {col}"), [])
                 && !duplicate_column(&e)
             {
@@ -624,6 +696,78 @@ impl Store {
         })
     }
 
+    pub fn talk(&self, r: &Report, at: Option<u64>) -> Result<Sent, Code> {
+        if let Form::Pg(p) = &self.form {
+            return p.talk(r, at);
+        }
+        self.with(|c| {
+            let tx = db(c.transaction_with_behavior(TransactionBehavior::Immediate))?;
+            let stored = |id: &str| db(tx.query_row(&format!("SELECT {COLS} FROM messages x WHERE x.msg_id = ?1"), params![id], msg_of).optional());
+            if let Some((talk_id, space, user, info)) = talk_started(r) {
+                let ver = space_ver(&tx, space)?.ok_or(Code::SpaceNotFound)?;
+                if let Some(m) = stored(talk_id)? {
+                    return Ok(Sent::Again { msg: m });
+                }
+                let t = now_or(at);
+                let msg = talk_msg(space, talk_id, user, t, ChatKind::Talk, None, info);
+                insert_msg(&tx, &msg)?;
+                db(tx.execute(
+                    "UPDATE spaces SET last_t = MAX(COALESCE(last_t, ?2), ?2), total = total + 1 WHERE space_id = ?1",
+                    params![space, n(t)],
+                ))?;
+                db(tx.execute(
+                    "INSERT INTO reads (space_id, user_id, read) SELECT ?1, ?2, total FROM spaces WHERE space_id = ?1 ON CONFLICT(space_id, user_id) DO UPDATE SET read = excluded.read",
+                    params![space, user],
+                ))?;
+                record(&tx, &msg, "")?;
+                db(tx.commit())?;
+                return Ok(Sent::Fresh { msg, ver });
+            }
+            let id = common::talk::update_msg_id(r.talk_id(), &r.tail());
+            if let Some(m) = stored(&id)? {
+                return Ok(Sent::Again { msg: m });
+            }
+            let Some(orig) = stored(r.talk_id())? else { return Err(Code::PreconditionFailed) };
+            talk_update_ok(&orig, r)?;
+            let ver = space_ver(&tx, &orig.space_id)?.ok_or(Code::SpaceNotFound)?;
+            let last = db(tx
+                .query_row(
+                    &format!("SELECT {COLS} FROM messages x WHERE x.ref_id = ?1 AND x.kind = 'talk_update' ORDER BY x.t DESC, x.msg_id DESC LIMIT 1"),
+                    params![orig.msg_id],
+                    msg_of,
+                )
+                .optional())?;
+            let Some(prev) = last.and_then(|m| m.talk).or(orig.talk.clone()) else { return Err(Code::InternalError) };
+            let t = now_or(at);
+            let msg = talk_msg(&orig.space_id, &id, &orig.user_id, t, ChatKind::TalkUpdate, Some(&orig.msg_id), talk_merged(prev, r));
+            insert_msg(&tx, &msg)?;
+            db(tx.execute("UPDATE spaces SET last_t = MAX(COALESCE(last_t, ?2), ?2) WHERE space_id = ?1", params![orig.space_id, n(t)]))?;
+            record(&tx, &msg, "")?;
+            db(tx.commit())?;
+            Ok(Sent::Fresh { msg, ver })
+        })
+    }
+
+    pub fn rec_seen(&self, user: &str, space: &str, talk_id: &str) -> Result<(), Code> {
+        if let Form::Pg(p) = &self.form {
+            return p.rec_seen(user, space, talk_id);
+        }
+        self.with(|c| {
+            let vis = db(c
+                .query_row("SELECT vis FROM members WHERE space_id = ?1 AND user_id = ?2 AND leave_t IS NULL", params![space, user], |r| r.get::<_, String>(0))
+                .optional())?
+            .ok_or(Code::NotSpaceMember)?;
+            let seen = if vis == Visibility::Joined.as_str() { SEEN_JOINED } else { SEEN_ALL };
+            let sql = format!("SELECT EXISTS(SELECT 1 FROM messages x WHERE x.msg_id = ?3 AND x.space_id = ?1 AND x.kind = 'talk'{seen}), EXISTS(SELECT 1 FROM messages WHERE msg_id = ?3 AND space_id = ?1 AND kind = 'talk')");
+            let (visible, there) = db(c.query_row(&sql, params![space, user, talk_id], |r| Ok((r.get::<_, bool>(0)?, r.get::<_, bool>(1)?))))?;
+            match (there, visible) {
+                (false, _) => Err(Code::RecNotFound),
+                (true, false) => Err(Code::NotSpaceMember),
+                (true, true) => Ok(()),
+            }
+        })
+    }
+
     pub fn roster(&self, space: &str) -> Result<Roster, Code> {
         if let Form::Pg(p) = &self.form {
             return p.roster(space);
@@ -691,7 +835,7 @@ impl Store {
             if order == "DESC" {
                 messages.reverse();
             }
-            let ids: Vec<&String> = messages.iter().filter(|m| m.kind.is_none()).map(|m| &m.msg_id).collect();
+            let ids: Vec<&String> = messages.iter().filter(|m| m.kind.is_none() || m.kind == Some(ChatKind::Talk)).map(|m| &m.msg_id).collect();
             let relations = if ids.is_empty() {
                 Vec::new()
             } else {

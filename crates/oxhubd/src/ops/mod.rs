@@ -32,6 +32,7 @@ pub struct Hub {
     pub namespace: String,
     pub shutdown: mpsc::UnboundedSender<String>,
     pub log_files: Option<std::path::PathBuf>,
+    pub data_root: Option<std::path::PathBuf>,
 }
 
 impl Hub {
@@ -91,6 +92,7 @@ async fn answer(hub: &Arc<Hub>, q: oxmesh::Query) {
             serde_json::to_vec(&admin::probe_local(hub, &user).await).unwrap_or_default()
         }
         crate::chat::FANOUT_WHAT => ses::deliver_chat(&hub.ses, &payload).await,
+        common::talk::WHAT => ses::talk(&hub.ses, &payload).await,
         "bus" => {
             let user = String::from_utf8_lossy(&payload).to_string();
             let user = Some(user.as_str()).filter(|u| !u.is_empty());

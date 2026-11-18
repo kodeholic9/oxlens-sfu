@@ -153,10 +153,11 @@ impl Default for Media {
 pub struct Floor {
     pub queue_max: u8,
     pub t2_stop_talking_secs: u16,
+    pub talk_min_ms: u16,
 }
 impl Default for Floor {
     fn default() -> Self {
-        Self { queue_max: 10, t2_stop_talking_secs: 30 }
+        Self { queue_max: 10, t2_stop_talking_secs: 30, talk_min_ms: 500 }
     }
 }
 
@@ -294,6 +295,9 @@ impl Policy {
         if !(5..=600).contains(&self.floor.t2_stop_talking_secs) {
             return bad(format!("floor.t2_stop_talking_secs {} 는 5~600 밖", self.floor.t2_stop_talking_secs));
         }
+        if self.floor.talk_min_ms > 10_000 {
+            return bad(format!("floor.talk_min_ms {} 는 0~10000 밖", self.floor.talk_min_ms));
+        }
         if self.hook.queue_max < 1 {
             return bad(format!("hook.queue_max {} 는 1 미만", self.hook.queue_max));
         }
@@ -323,6 +327,7 @@ impl Policy {
         v.extend(self.media_fields());
         v.push(("floor.queue_max".into(), self.floor.queue_max.to_string()));
         v.push(("floor.t2_stop_talking_secs".into(), self.floor.t2_stop_talking_secs.to_string()));
+        v.push(("floor.talk_min_ms".into(), self.floor.talk_min_ms.to_string()));
         v
     }
 

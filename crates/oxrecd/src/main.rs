@@ -1,0 +1,266 @@
+// author: kodeholic (powered by Claude)
+// spec: v1.6 · 정:IMPL-OPS-REC-UNIT · 정:IMPL-CFG-SYSTEM-FILE · 정:RULE-OPS-SUPERVISOR · 정:RULE-BUS-FATE · 정:RULE-BUS-KEYSPACE · 정:RULE-BUS-SHAPE · 정:IMPL-FLR-TALK-REPORT · 운영:RULE-BOOT-ARGS · model: claude-opus-5-5
+//! 녹음 유닛 실행 파일 — 슈퍼바이저가 띄운다(`--id` · `--build` · `--bus-namespace` · `--bus-connect` · `--log-dir`? · `--log-socket`? · `--data-root` · `--rec-keep-days` · `--token` · 유닛 명령의 `--hub`) · 버스로 그 node 의 방 토큰을 보고 `record` 방에 녹화 참가자로 든다 · 발언마다 Ogg 를 다 쓰고 이름을 바꿔 닫은 뒤 `rec` 알림 · 하루 한 번 보관 지우기 · 부모 생존 채널(stdin)이 닫히면 끝 · 토큰을 다시 요구받거나 세션이 끝나면 끝(슈퍼바이저가 새 토큰으로 되살린다).
+
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::time::Duration;
+
+use common::keyspace::{Keys, Parsed};
+use common::log::{Setup, Sink};
+use common::talk::Report;
+use oxmesh::{Mesh, TokenEvent};
+use oxpeer::record::{OggSink, Output, Pipeline, Policy, RecordConfig, SegmentKind};
+use oxpeer::{Client, Config, Event};
+use oxrecd::{Hub, Layout};
+use tokio::sync::mpsc;
+
+struct Args {
+    node: String,
+    build: String,
+    ns: String,
+    connect: String,
+    log_dir: Option<PathBuf>,
+    log_socket: Option<PathBuf>,
+    root: PathBuf,
+    keep_days: u32,
+    token: String,
+    hub: String,
+}
+
+fn args() -> Result<Args, String> {
+    let mut m: HashMap<String, String> = HashMap::new();
+    let mut it = std::env::args().skip(1);
+    while let Some(k) = it.next() {
+        let Some(name) = k.strip_prefix("--") else { return Err(format!("unknown argument {k}")) };
+        let v = it.next().ok_or_else(|| format!("--{name} needs a value"))?;
+        m.insert(name.to_string(), v);
+    }
+    let need = |k: &str| m.get(k).cloned().ok_or_else(|| format!("--{k} missing"));
+    for k in m.keys() {
+        if !["id", "build", "bus-namespace", "bus-connect", "log-dir", "log-socket", "data-root", "rec-keep-days", "token", "hub"].contains(&k.as_str()) {
+            return Err(format!("unknown argument --{k}"));
+        }
+    }
+    Ok(Args {
+        node: need("id")?,
+        build: m.get("build").cloned().unwrap_or_default(),
+        ns: need("bus-namespace")?,
+        connect: need("bus-connect")?,
+        log_dir: m.get("log-dir").map(PathBuf::from),
+        log_socket: m.get("log-socket").map(PathBuf::from),
+        root: PathBuf::from(need("data-root")?),
+        keep_days: m.get("rec-keep-days").map(|v| v.parse().map_err(|_| "--rec-keep-days".to_string())).transpose()?.unwrap_or(common::system::REC_KEEP_DAYS_DEFAULT),
+        token: need("token")?,
+        hub: need("hub")?,
+    })
+}
+
+enum RoomCmd {
+    Join(String),
+    Leave(String),
+}
+
+#[tokio::main]
+async fn main() {
+    let a = match args() {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("oxrecd: {e}");
+            std::process::exit(2);
+        }
+    };
+    std::process::exit(run(a).await);
+}
+
+async fn run(a: Args) -> i32 {
+    let policy = common::policy::Policy::default();
+    let sink = match &a.log_socket {
+        Some(p) => Sink::Socket(p.clone()),
+        None => Sink::Stdout,
+    };
+    let _sender = common::log::init(Setup { node: a.node.clone(), proc_name: "rec", epoch: None, sink, log_dir: a.log_dir.clone() }, &policy);
+    tracing::info!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", node = %a.node, build = %a.build, root = %a.root.display(), keep_days = a.keep_days, "rec unit boot");
+    let Some(hub) = oxrecd::hub_of(&a.hub) else {
+        eprintln!("oxrecd: --hub must be http://host:port/base");
+        return 2;
+    };
+    let layout = Arc::new(Layout::new(&a.root));
+    if let Err(e) = layout.clear_staging() {
+        eprintln!("oxrecd: staging {}: {e}", layout.staging().display());
+        return 2;
+    }
+    let mesh = match Mesh::open(oxmesh::Config::client(&format!("{}.rec", a.node), oxmesh::endpoint(&a.connect))).await {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("oxrecd: bus: {e}");
+            return 2;
+        }
+    };
+    let keys = Keys::new(&a.ns);
+    std::thread::spawn(|| {
+        let mut sink = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut std::io::stdin(), &mut sink);
+        common::log::drain(Duration::from_millis(200));
+        std::process::exit(0);
+    });
+    let (sweep_root, keep) = (a.root.clone(), a.keep_days);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(oxrecd::DAY);
+        loop {
+            tick.tick().await;
+            match oxrecd::sweep(&sweep_root, keep, std::time::SystemTime::now()) {
+                Ok(n) if n > 0 => tracing::info!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", removed = n, "rec files past keep days removed"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", "rec sweep: {e}"),
+            }
+        }
+    });
+    let drops = Arc::new(AtomicU64::new(0));
+    let (rep_tx, rep_rx) = mpsc::unbounded_channel::<Report>();
+    let (m2, key, d2) = (mesh.clone(), keys.q_node(&a.node, common::talk::WHAT), drops.clone());
+    tokio::spawn(async move {
+        oxrecd::report_line(
+            rep_rx,
+            common::talk::RETRY_FOR,
+            |p| oxrecd::ask_bus(m2.clone(), key.clone(), p),
+            &d2,
+        )
+        .await
+    });
+    let (room_tx, mut room_rx) = mpsc::unbounded_channel::<RoomCmd>();
+    if let Err(e) = discover(&mesh, &keys, &a.node, hub, a.token.clone(), room_tx).await {
+        eprintln!("oxrecd: bus watch: {e}");
+        return 2;
+    }
+    let mut cfg = Config::new(&a.hub, &a.token);
+    cfg.record = Some(RecordConfig::live(format!("rec-{}", a.node)));
+    let (client, mut events, mut media, _frames) = match Client::open(cfg).await {
+        Ok(x) => x,
+        Err(e) => {
+            tracing::warn!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", "rec unit connect failed: {e}");
+            return 1;
+        }
+    };
+    let mut records = client.records(1 << 16);
+    let mut pipe = Pipeline::new(Policy::Utterance);
+    let mut sink = match OggSink::new(layout.staging()) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("oxrecd: staging: {e}");
+            return 2;
+        }
+    };
+    let mut settled = 0usize;
+    let mut seg_rooms: HashMap<u64, String> = HashMap::new();
+    let mut joined: BTreeSet<String> = BTreeSet::new();
+    loop {
+        tokio::select! {
+            c = room_rx.recv() => match c {
+                Some(RoomCmd::Join(r)) if joined.insert(r.clone()) => {
+                    if let Err(e) = client.join(&r).await {
+                        joined.remove(&r);
+                        tracing::warn!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", room = %r, "rec join failed: {e}");
+                    }
+                }
+                Some(RoomCmd::Leave(r)) if joined.remove(&r) => {
+                    let _ = client.leave(&r).await;
+                }
+                Some(_) => {}
+                None => return 1,
+            },
+            e = events.next() => match e {
+                Some(Event::TokenRequired) | Some(Event::Closed { .. }) | None => {
+                    tracing::warn!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", "rec unit session ended — supervisor restarts with a new token");
+                    return 1;
+                }
+                Some(Event::Forced { room, .. }) | Some(Event::Left { room }) => {
+                    joined.remove(&room);
+                }
+                Some(_) => {}
+            },
+            p = media.next() => if p.is_none() { return 1 },
+            r = records.next() => {
+                let Some(r) = r else { return 1 };
+                for o in pipe.push(&r) {
+                    if let Output::Segment(s) = &o
+                        && s.event == SegmentKind::Opened
+                    {
+                        seg_rooms.insert(s.id, s.room.clone());
+                    }
+                    let closed = matches!(&o, Output::Segment(s) if s.event == SegmentKind::Closed);
+                    if let Err(e) = sink.write(&o) {
+                        tracing::warn!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", "rec write: {e}");
+                    }
+                    if closed {
+                        settled = settle_new(&layout, &sink, settled, &mut seg_rooms, &rep_tx);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn settle_new(layout: &Layout, sink: &OggSink, from: usize, rooms: &mut HashMap<u64, String>, rep: &mpsc::UnboundedSender<Report>) -> usize {
+    let files = sink.files();
+    for f in files.iter().skip(from) {
+        let space = rooms.remove(&f.segment).unwrap_or_default();
+        match layout.settle(&space, f) {
+            Ok(Some(r)) => {
+                let _ = rep.send(r);
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", file = %f.path.display(), "rec settle: {e}"),
+        }
+    }
+    files.len()
+}
+
+async fn discover(mesh: &Mesh, keys: &Keys, node: &str, hub: Hub, token: String, tx: mpsc::UnboundedSender<RoomCmd>) -> Result<(), String> {
+    let mut sub = mesh.token_sub(&keys.rooms_of_node(node), true).await.map_err(|e| e.to_string())?;
+    let keys = keys.clone();
+    let hub = Arc::new(hub);
+    tokio::spawn(async move {
+        let mut live: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        while let Some(ev) = sub.recv().await {
+            let (k, put) = match ev {
+                TokenEvent::Put(k) => (k, true),
+                TokenEvent::Delete(k) => (k, false),
+                TokenEvent::BatchEnd => continue,
+            };
+            let Some(Parsed::Room { room, inst, .. }) = keys.parse(&k) else { continue };
+            let insts = live.entry(room.clone()).or_default();
+            let was = !insts.is_empty();
+            if put {
+                insts.insert(inst);
+            } else {
+                insts.remove(&inst);
+            }
+            let now = !insts.is_empty();
+            if !now {
+                live.remove(&room);
+            }
+            match (was, now) {
+                (false, true) => {
+                    let (hub, token, tx) = (hub.clone(), token.clone(), tx.clone());
+                    tokio::spawn(async move {
+                        match oxrecd::get_json(&hub, &format!("/rooms/{room}"), &token).await {
+                            Some((200, body)) if oxrecd::recorded(&body) => {
+                                let _ = tx.send(RoomCmd::Join(room));
+                            }
+                            Some(_) => {}
+                            None => tracing::warn!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", room = %room, "room detail not read from the local gateway"),
+                        }
+                    });
+                }
+                (true, false) => {
+                    let _ = tx.send(RoomCmd::Leave(room));
+                }
+                _ => {}
+            }
+        }
+    });
+    Ok(())
+}

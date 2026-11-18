@@ -20,6 +20,7 @@ auto_layer = "v2"
 [floor]
 queue_max = 10
 t2_stop_talking_secs = 30
+talk_min_ms = 500
 
 [hub]
 token_ttl_secs = 3600

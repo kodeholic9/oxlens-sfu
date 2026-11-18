@@ -16,8 +16,11 @@ use tokio_postgres::config::Host;
 use tokio_postgres::types::ToSql;
 use tokio_postgres::{Config, NoTls, Row};
 
+use common::talk::Report;
+
 use super::{
-    Ack, COLS, Cursor, Dir, Interval, Outgoing, Page, Roster, Sent, VISIBLE, again, fold_relations, fresh, member_msg, n, now_or, probe_of, ref_ok, since_floor, u, within,
+    Ack, COLS, Cursor, Dir, Interval, Outgoing, Page, RELATION_KINDS, Roster, Sent, VISIBLE, again, fold_relations, fresh, member_msg, n, now_or, probe_of, ref_ok, since_floor, talk_merged, talk_msg,
+    talk_started, talk_update_ok, u, within,
 };
 
 const LOCK_TIMEOUT_MS: u64 = 5_000;
@@ -49,8 +52,10 @@ CREATE TABLE IF NOT EXISTS messages (
   ref_id TEXT COLLATE "C",
   keys TEXT,
   ext TEXT,
-  deleted BOOLEAN NOT NULL DEFAULT FALSE
+  deleted BOOLEAN NOT NULL DEFAULT FALSE,
+  talk TEXT
 );
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS talk TEXT;
 CREATE INDEX IF NOT EXISTS messages_space_t_id ON messages (space_id, t, msg_id);
 CREATE INDEX IF NOT EXISTS messages_ref ON messages (ref_id);
 CREATE INDEX IF NOT EXISTS messages_t_id ON messages (t, msg_id);
@@ -160,6 +165,7 @@ fn msg_of(r: &Row) -> Result<ChatMessage, tokio_postgres::Error> {
     let kind: Option<String> = r.try_get(5)?;
     let keys: Option<String> = r.try_get(8)?;
     let ext: Option<String> = r.try_get(9)?;
+    let talk: Option<String> = r.try_get(10)?;
     Ok(ChatMessage {
         msg_id: r.try_get(0)?,
         space_id: r.try_get(1)?,
@@ -171,6 +177,7 @@ fn msg_of(r: &Row) -> Result<ChatMessage, tokio_postgres::Error> {
         keys: keys.and_then(|k| serde_json::from_str(&k).ok()),
         ext: ext.and_then(|e| serde_json::from_str(&e).ok()),
         target: r.try_get(6)?,
+        talk: talk.and_then(|x| serde_json::from_str(&x).ok()),
     })
 }
 
@@ -207,11 +214,12 @@ async fn insert_msg(c: &impl GenericClient, m: &ChatMessage) -> Result<bool, Cod
     let keys = m.keys.as_ref().map(|k| serde_json::to_string(k).unwrap_or_default());
     let ext = m.ext.as_ref().map(|e| e.to_string());
     let kind = m.kind.map(|k| k.as_str());
+    let talk = m.talk.as_ref().map(|x| serde_json::to_string(x).unwrap_or_default());
     let t = n(m.t);
     let made = exec(
         c,
-        "INSERT INTO messages (msg_id, space_id, user_id, t, content, kind, target, ref_id, keys, ext) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (msg_id) DO NOTHING",
-        &[&m.msg_id, &m.space_id, &m.user_id, &t, &m.content, &kind, &m.target, &m.r#ref, &keys, &ext],
+        "INSERT INTO messages (msg_id, space_id, user_id, t, content, kind, target, ref_id, keys, ext, talk) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT (msg_id) DO NOTHING",
+        &[&m.msg_id, &m.space_id, &m.user_id, &t, &m.content, &kind, &m.target, &m.r#ref, &keys, &ext, &talk],
     )
     .await?;
     Ok(made == 1)
@@ -492,6 +500,94 @@ impl Pg {
         })
     }
 
+    pub(super) fn talk(&self, r: &Report, at: Option<u64>) -> Result<Sent, Code> {
+        let (conn, r) = (self.conn(), r.clone());
+        self.call(async move {
+            let mut c = conn.await?;
+            let tx = pg(c.transaction().await)?;
+            if let Some((talk_id, space, user, info)) = talk_started(&r) {
+                let Some(row) = one(&tx, "SELECT ver FROM spaces WHERE space_id = $1", &[&space]).await? else {
+                    return Err(Code::SpaceNotFound);
+                };
+                let ver: i64 = get(&row, 0)?;
+                if let Some(m) = stored(&tx, talk_id).await? {
+                    return Ok(Sent::Again { msg: m });
+                }
+                let t = now_or(at);
+                let tn = n(t);
+                let msg = talk_msg(space, talk_id, user, t, ChatKind::Talk, None, info);
+                if !insert_msg(&tx, &msg).await? {
+                    let Some(m) = stored(&tx, talk_id).await? else { return Err(Code::InternalError) };
+                    return Ok(Sent::Again { msg: m });
+                }
+                exec(&tx, "UPDATE spaces SET last_t = GREATEST(COALESCE(last_t, $2), $2), total = total + 1 WHERE space_id = $1", &[&space, &tn]).await?;
+                exec(
+                    &tx,
+                    "INSERT INTO reads (space_id, user_id, read) SELECT $1::text, $2::text, total FROM spaces WHERE space_id = $1 ON CONFLICT (space_id, user_id) DO UPDATE SET read = excluded.read",
+                    &[&space, &user],
+                )
+                .await?;
+                record(&tx, &msg, "").await?;
+                pg(tx.commit().await)?;
+                return Ok(Sent::Fresh { msg, ver: u(ver) });
+            }
+            let id = common::talk::update_msg_id(r.talk_id(), &r.tail());
+            if let Some(m) = stored(&tx, &id).await? {
+                return Ok(Sent::Again { msg: m });
+            }
+            let lock = format!("SELECT {COLS} FROM messages x WHERE x.msg_id = $1 FOR UPDATE");
+            let talk_id = r.talk_id().to_string();
+            let Some(row) = one(&tx, &lock, &[&talk_id]).await? else { return Err(Code::PreconditionFailed) };
+            let orig = pg(msg_of(&row))?;
+            talk_update_ok(&orig, &r)?;
+            if let Some(m) = stored(&tx, &id).await? {
+                return Ok(Sent::Again { msg: m });
+            }
+            let Some(row) = one(&tx, "SELECT ver FROM spaces WHERE space_id = $1", &[&orig.space_id]).await? else {
+                return Err(Code::SpaceNotFound);
+            };
+            let ver: i64 = get(&row, 0)?;
+            let sql = format!("SELECT {COLS} FROM messages x WHERE x.ref_id = $1 AND x.kind = 'talk_update' ORDER BY x.t DESC, x.msg_id DESC LIMIT 1");
+            let last = match one(&tx, &sql, &[&orig.msg_id]).await? {
+                Some(row) => Some(pg(msg_of(&row))?),
+                None => None,
+            };
+            let Some(prev) = last.and_then(|m| m.talk).or(orig.talk.clone()) else { return Err(Code::InternalError) };
+            let t = now_or(at);
+            let tn = n(t);
+            let msg = talk_msg(&orig.space_id, &id, &orig.user_id, t, ChatKind::TalkUpdate, Some(&orig.msg_id), talk_merged(prev, &r));
+            if !insert_msg(&tx, &msg).await? {
+                let Some(m) = stored(&tx, &id).await? else { return Err(Code::InternalError) };
+                return Ok(Sent::Again { msg: m });
+            }
+            exec(&tx, "UPDATE spaces SET last_t = GREATEST(COALESCE(last_t, $2), $2) WHERE space_id = $1", &[&orig.space_id, &tn]).await?;
+            record(&tx, &msg, "").await?;
+            pg(tx.commit().await)?;
+            Ok(Sent::Fresh { msg, ver: u(ver) })
+        })
+    }
+
+    pub(super) fn rec_seen(&self, user: &str, space: &str, talk_id: &str) -> Result<(), Code> {
+        let (conn, user, space, talk_id) = (self.conn(), user.to_string(), space.to_string(), talk_id.to_string());
+        self.call(async move {
+            let c = conn.await?;
+            let Some(v) = one(&c, "SELECT vis FROM members WHERE space_id = $1 AND user_id = $2 AND leave_t IS NULL LIMIT 1", &[&space, &user]).await? else {
+                return Err(Code::NotSpaceMember);
+            };
+            let vis: String = get(&v, 0)?;
+            let seen = if vis == Visibility::Joined.as_str() { SEEN_JOINED } else { SEEN_ALL };
+            let sql = format!(
+                "SELECT EXISTS(SELECT 1 FROM messages x WHERE x.msg_id = $3 AND x.space_id = $1 AND x.kind = 'talk'{seen}), EXISTS(SELECT 1 FROM messages WHERE msg_id = $3 AND space_id = $1 AND kind = 'talk')"
+            );
+            let Some(row) = one(&c, &sql, &[&space, &user, &talk_id]).await? else { return Err(Code::InternalError) };
+            match (get::<bool>(&row, 1)?, get::<bool>(&row, 0)?) {
+                (false, _) => Err(Code::RecNotFound),
+                (true, false) => Err(Code::NotSpaceMember),
+                (true, true) => Ok(()),
+            }
+        })
+    }
+
     pub(super) fn roster(&self, space: &str) -> Result<Roster, Code> {
         let (conn, space) = (self.conn(), space.to_string());
         self.call(async move {
@@ -542,11 +638,11 @@ impl Pg {
             if order == "DESC" {
                 messages.reverse();
             }
-            let ids: Vec<String> = messages.iter().filter(|m| m.kind.is_none()).map(|m| m.msg_id.clone()).collect();
+            let ids: Vec<String> = messages.iter().filter(|m| m.kind.is_none() || m.kind == Some(ChatKind::Talk)).map(|m| m.msg_id.clone()).collect();
             let relations = if ids.is_empty() {
                 Vec::new()
             } else {
-                let sql = format!("SELECT {COLS} FROM messages x WHERE x.space_id = $1{seen} AND x.kind IN ('edit', 'react', 'delete') AND x.ref_id = ANY($3)");
+                let sql = format!("SELECT {COLS} FROM messages x WHERE x.space_id = $1{seen} AND x.kind IN {RELATION_KINDS} AND x.ref_id = ANY($3)");
                 fold_relations(msgs(all(c, &sql, &[&space, &user, &ids]).await?)?)
             };
             let (messages, relations, cut) = within(messages, relations, order == "ASC", max_bytes);

@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 연:RULE-TRN-ENDPOINTS · 연:RULE-TRN-HTTP-AUTH-TWO · 연:RULE-TRN-CORS · 연:DEV-TRN-WS-ORIGIN · 연:RULE-TRN-SESSION-HEADER-SCOPE · 정:IMPL-ERR-ISSUERS · 정:RULE-OPS-SURFACE · 정:RULE-OPS-TOKEN · 운영:BOOT.http.HEALTH_READY · 정:CAND-ERR-HTTP-MAP · 정:CAND-ROOM-CORS-MAX-AGE · model: claude-opus-5-5
-//! HTTP 표면 — `{base}/ws` · `{base}/auth/token` · `{base}/rooms` 셋(CORS) · `/healthz` · `/admin`(운영 토큰 또는 loopback) · HTTP 상태 번호는 일반 사상 하나.
+// spec: v1.6 · 연:RULE-TRN-ENDPOINTS · 연:RULE-TRN-HTTP-AUTH-TWO · 연:RULE-TRN-CORS · 연:DEV-TRN-WS-ORIGIN · 연:RULE-TRN-SESSION-HEADER-SCOPE · 정:IMPL-ERR-ISSUERS · 정:RULE-OPS-SURFACE · 정:RULE-OPS-TOKEN · 운영:BOOT.http.HEALTH_READY · 정:CAND-ERR-HTTP-MAP · 정:CAND-ROOM-CORS-MAX-AGE · 정:IMPL-CHAT-TALK · 연:CHAT.http.REC_FILE · 연:RULE-CHAT-REC-FILE · model: claude-opus-5-5
+//! HTTP 표면 — `{base}/ws` · `{base}/auth/token` · `{base}/rooms` 셋(CORS) · `{base}/rec/{space_id}/{file}`(녹취 내려받기 — Bearer · 멤버 · 보이기 시작점 · `Range`) · `/healthz` · `/admin`(운영 토큰 또는 loopback) · HTTP 상태 번호는 일반 사상 하나.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -82,7 +82,8 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .route("/ws", get(ws))
         .route("/auth/token", post(token))
         .route("/rooms", any(rooms))
-        .route("/rooms/:room", any(room));
+        .route("/rooms/:room", any(room))
+        .route("/rec/:space/:file", any(rec_file));
     let r = if base.is_empty() { ops.merge(client) } else { Router::new().merge(ops.clone()).nest(&base, client.merge(ops)) };
     r.with_state(hub)
 }
@@ -223,6 +224,96 @@ async fn room(
         }
     };
     cors(&hub, &headers, r)
+}
+
+async fn rec_file(State(hub): St, method: Method, Path((space, file)): Path<(String, String)>, headers: HeaderMap) -> Response {
+    if method == Method::OPTIONS {
+        return cors(&hub, &headers, StatusCode::NO_CONTENT.into_response());
+    }
+    if method != Method::GET {
+        return cors(&hub, &headers, StatusCode::METHOD_NOT_ALLOWED.into_response());
+    }
+    let r = rec_answer(&hub, &space, &file, &headers).await;
+    cors(&hub, &headers, r)
+}
+
+pub fn rec_talk_id<'a>(space: &str, file: &'a str) -> Option<&'a str> {
+    let rest = file.strip_prefix(space)?.strip_prefix('-')?;
+    rest.split_once('-').map(|(id, _)| id).filter(|id| !id.is_empty())
+}
+
+fn rec_fail(f: Failure) -> Response {
+    match Code::from_num(f.code) {
+        Some(Code::NotSpaceMember) => fail_status(403, f),
+        Some(Code::RecNotFound) => fail_status(404, f),
+        _ => fail(f),
+    }
+}
+
+async fn rec_answer(hub: &Hub, space: &str, file: &str, headers: &HeaderMap) -> Response {
+    let Some(tok) = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")) else {
+        return fail(Code::TokenInvalid.failure());
+    };
+    let user = match hub.ses.accounts.verify_user(tok) {
+        Ok(id) => id.user_id,
+        Err(c) => return fail(c.failure()),
+    };
+    let Some(chat) = hub.ses.chat.get().cloned() else { return fail(Code::ChatDisabled.failure()) };
+    if !common::keyspace::valid_piece(space) || !crate::chat::store::rec_file_ok(file) {
+        return fail(Code::InvalidPayload.failure());
+    }
+    let Some(talk_id) = rec_talk_id(space, file) else { return rec_fail(Code::RecNotFound.failure()) };
+    if let Err(c) = chat.rec_seen(&user, space, talk_id).await {
+        return rec_fail(c.failure());
+    }
+    let Some(root) = &hub.data_root else { return rec_fail(Code::RecNotFound.failure()) };
+    let path = root.join("rec").join(space).join(file);
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(b) => b,
+        Err(_) => return rec_fail(Code::RecNotFound.failure()),
+    };
+    let mime = if file.ends_with(".mkv") { "video/x-matroska" } else if file.ends_with(".ogg") { "audio/ogg" } else { "application/octet-stream" };
+    let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
+    let (status, body, span) = match range.map(|r| byte_range(r, bytes.len() as u64)) {
+        None => (StatusCode::OK, bytes, None),
+        Some(Some((a, b))) => (StatusCode::PARTIAL_CONTENT, bytes[a as usize..=b as usize].to_vec(), Some(format!("bytes {a}-{b}/{}", bytes.len()))),
+        Some(None) => {
+            let mut r = StatusCode::RANGE_NOT_SATISFIABLE.into_response();
+            if let Ok(v) = HeaderValue::from_str(&format!("bytes */{}", bytes.len())) {
+                r.headers_mut().insert(header::CONTENT_RANGE, v);
+            }
+            return r;
+        }
+    };
+    let mut r = (status, body).into_response();
+    let h = r.headers_mut();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static(mime));
+    h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    if let Some(v) = span.and_then(|s| HeaderValue::from_str(&s).ok()) {
+        h.insert(header::CONTENT_RANGE, v);
+    }
+    r
+}
+
+pub fn byte_range(spec: &str, len: u64) -> Option<(u64, u64)> {
+    let r = spec.trim().strip_prefix("bytes=")?;
+    if r.contains(',') || len == 0 {
+        return None;
+    }
+    let (a, b) = r.split_once('-')?;
+    let (a, b) = (a.trim(), b.trim());
+    let (start, end) = if a.is_empty() {
+        let n: u64 = b.parse().ok()?;
+        if n == 0 {
+            return None;
+        }
+        (len.saturating_sub(n), len - 1)
+    } else {
+        let s: u64 = a.parse().ok()?;
+        let e: u64 = if b.is_empty() { len - 1 } else { b.parse::<u64>().ok()?.min(len - 1) };
+        (s, e)
+    };
+    (start <= end && start < len).then_some((start, end))
 }
 
 fn admin_auth(hub: &Hub, peer: SocketAddr, headers: &HeaderMap) -> Result<(), Failure> {

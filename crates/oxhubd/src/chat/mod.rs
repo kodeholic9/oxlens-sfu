@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 연:RULE-CHAT-KIND · 연:RULE-CHAT-EXT · 정:RULE-CHAT-GATEWAY-MODULE ·정:IMPL-CHAT-STORE · 정:IMPL-CHAT-FANOUT · 정:IMPL-CHAT-FILTER · 정:IMPL-CHAT-READ · 정:IMPL-CHAT-UNDELIVERED · 정:IMPL-CHAT-CATCHUP · 정:IMPL-CHAT-STORE-FAULTS · 연:CHAT.op.MESSAGE · 연:CHAT.op.SPACE_HISTORY · 연:CHAT.op.SPACE_LIST · 연:CHAT.op.SPACE_VIEW · 연:CHAT.op.CATCHUP · 연:RULE-CHAT-MSG-ID · 연:RULE-CHAT-CONTENT · 연:RULE-CHAT-RECV · 연:RULE-CHAT-DISABLED · 연:RULE-CHAT-LIVE-SOCKET-LOSS · 연:RULE-CHAT-CATCHUP · model: claude-opus-5-5
-//! 채팅 — 게이트웨이 안 모듈 · op 다섯 · 저장이 낸 `{멤버 판, 보낸 세션, 메시지}` 를 다른 node 에 뿌린다(실패 수를 돌려주고 다시 안 보낸다) · 공간마다 멤버 캐시로 `명단(t_M)` 을 낸다 · 받은 ACK 는 채널에 넣기만 하고 지우는 스레드 하나가 모아 한 트랜잭션에 지운다 · 보관 기간을 넘긴 미전송 기록을 지운다. 세션은 모른다 — 세션이 이 모듈을 부른다.
+// spec: v1.6 · 연:RULE-CHAT-KIND · 연:RULE-CHAT-EXT · 정:RULE-CHAT-GATEWAY-MODULE ·정:IMPL-CHAT-STORE · 정:IMPL-CHAT-FANOUT · 정:IMPL-CHAT-FILTER · 정:IMPL-CHAT-READ · 정:IMPL-CHAT-UNDELIVERED · 정:IMPL-CHAT-CATCHUP · 정:IMPL-CHAT-STORE-FAULTS · 정:IMPL-CHAT-TALK · 연:RULE-CHAT-TALK · 연:CHAT.op.MESSAGE · 연:CHAT.op.SPACE_HISTORY · 연:CHAT.op.SPACE_LIST · 연:CHAT.op.SPACE_VIEW · 연:CHAT.op.CATCHUP · 연:RULE-CHAT-MSG-ID · 연:RULE-CHAT-CONTENT · 연:RULE-CHAT-RECV · 연:RULE-CHAT-DISABLED · 연:RULE-CHAT-LIVE-SOCKET-LOSS · 연:RULE-CHAT-CATCHUP · model: claude-opus-5-5
+//! 채팅 — 게이트웨이 안 모듈 · op 다섯 · 발언 기록(node 안 요청 `talk` — 같은 저장 길목 · 보낸 세션 없음) · 저장이 낸 `{멤버 판, 보낸 세션, 메시지}` 를 다른 node 에 뿌린다(실패 수를 돌려주고 다시 안 보낸다) · 공간마다 멤버 캐시로 `명단(t_M)` 을 낸다 · 받은 ACK 는 채널에 넣기만 하고 지우는 스레드 하나가 모아 한 트랜잭션에 지운다 · 보관 기간을 넘긴 미전송 기록을 지운다. 세션은 모른다 — 세션이 이 모듈을 부른다.
 
 pub mod store;
 
@@ -161,6 +161,20 @@ impl Chat {
         }
     }
 
+    pub async fn talk(&self, r: common::talk::Report) -> Result<(u64, Option<Deliver>), Code> {
+        let st = self.store.clone();
+        let sent = blocking(move || st.talk(&r, None)).await?;
+        Ok(match sent {
+            Sent::Fresh { msg, ver } => (msg.t, Some(Deliver { ver, sid: String::new(), message: msg })),
+            Sent::Again { msg } => (msg.t, None),
+        })
+    }
+
+    pub async fn rec_seen(&self, user: &str, space: &str, talk_id: &str) -> Result<(), Code> {
+        let (st, user, space, talk_id) = (self.store.clone(), user.to_string(), space.to_string(), talk_id.to_string());
+        blocking(move || st.rec_seen(&user, &space, &talk_id)).await
+    }
+
     pub async fn catchup_page(&self, user: &str, req: &CatchupReq, after: &Cursor) -> Result<Vec<ChatMessage>, Code> {
         let st = self.store.clone();
         let (user, space, since, after, lim) = (user.to_string(), req.space_id.clone(), req.t, after.clone(), self.limits);
@@ -250,6 +264,9 @@ pub fn outgoing(body: &Value) -> Result<Outgoing, Failure> {
     };
     if body.get("target").is_some() {
         return Err(bad("target"));
+    }
+    if body.get("talk").is_some() {
+        return Err(bad("talk"));
     }
     if content.as_ref().is_some_and(|c| c.len() > CONTENT_MAX) {
         return Err(bad("content"));

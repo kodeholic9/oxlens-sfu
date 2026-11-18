@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · 정:RULE-BUS-PRESENCE · 정:RULE-BUS-EVENTS · 정:IMPL-BUS-HOME-LOST · 운영:LOG.log.LINE · 운영:RULE-LOG-KIND · 정:IMPL-ROOM-LIFE · model: claude-opus-5-5
-//! sfud 의 버스 — oxmesh client(로컬 hub 에만 · 202610/20261031e) · `room` 토큰 선언(토큰은 그 방이 든다 — 재선언은 방 집합에서) · `ev` put 은 낸 차례 그대로 한 줄로(데이터 레인 — 차면 버리고 센다) · `node` 토큰 history 구독(홈 잃음).
+// spec: v1.6 · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · 정:RULE-BUS-PRESENCE · 정:RULE-BUS-EVENTS · 정:IMPL-BUS-HOME-LOST · 운영:LOG.log.LINE · 운영:RULE-LOG-KIND · 정:IMPL-ROOM-LIFE · 정:IMPL-FLR-TALK-REPORT · model: claude-opus-5-5
+//! sfud 의 버스 — oxmesh client(로컬 hub 에만 · 202610/20261031e) · `room` 토큰 선언(토큰은 그 방이 든다 — 재선언은 방 집합에서) · `ev` put 은 낸 차례 그대로 한 줄로(데이터 레인 — 차면 버리고 센다) · `node` 토큰 history 구독(홈 잃음) · 로컬 hub 에 묻기(`q/node/{node}/talk`).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -110,6 +110,12 @@ impl Bus {
 
     pub fn user_notice(&self, user: &str, n: Notice) {
         let _ = self.tx.send(Put::User(user.to_string(), n));
+    }
+
+    pub async fn ask(&self, what: &str, payload: Vec<u8>, timeout: std::time::Duration) -> Option<Vec<u8>> {
+        let key = self.keys.q_node(&self.node, what);
+        let mut replies = self.session.get(&key, payload, timeout).ok()?;
+        replies.recv().await.and_then(|r| r.result.ok())
     }
 
     pub async fn declare_room(&self, room: &str) -> Option<RoomToken> {

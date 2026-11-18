@@ -8,7 +8,7 @@ use std::time::Duration;
 use common::log::{Setup, Sink};
 use oxhubd::bus::{Bus, BusCfg};
 use oxhubd::cfg::HubCfg;
-use oxhubd::ops::supervisor::{Role, SupCfg, Supervisor, UnitState};
+use oxhubd::ops::supervisor::{RecLaunch, Role, SupCfg, Supervisor, UnitState};
 use oxhubd::ops::{self, Hub};
 use oxhubd::ses::{self, token::Accounts};
 
@@ -75,6 +75,12 @@ async fn run(cfg: HubCfg) -> i32 {
             intensity_window: Duration::from_secs(cfg.system.supervisor.intensity_window_secs),
             hello_timeout: Duration::from_millis(cfg.system.supervisor.hello_timeout_ms),
             extra_args: cfg.child_args(),
+            sfu_args: cfg.sfu_args(),
+            rec: Some(RecLaunch {
+                args: cfg.rec_args(),
+                accounts: Accounts { keys: cfg.system.hub.auth.api_keys.clone(), jwt_secret: cfg.system.hub.auth.jwt_secret.clone() },
+                ttl_secs: cfg.policy.hub.token_ttl_secs,
+            }),
         },
         fatal_tx.clone(),
     );
@@ -171,6 +177,7 @@ async fn run(cfg: HubCfg) -> i32 {
         namespace: z.namespace.clone(),
         shutdown: shut_tx,
         log_files,
+        data_root: cfg.system.data_root().map(std::path::PathBuf::from),
     });
     tokio::spawn(ops::dispatch(hub.clone(), bus_rx));
     tokio::spawn(ops::sweeper(hub.clone()));

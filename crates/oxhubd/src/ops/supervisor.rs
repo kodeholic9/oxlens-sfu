@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-OPS-SUPERVISOR · 정:RULE-OPS-SURFACE · 정:RULE-BUS-FATE · 정:IMPL-CFG-SYSTEM-FILE · 정:IMPL-BUS-FAULTS · 운영:RULE-CTL-SUPERVISOR · 정:CAND-OPS-SUPERVISOR-DEFAULTS · 정:CAND-OPS-SHUTDOWN-NO-RESTART · 정:CAND-OPS-SUPERVISOR-EXTRA-TRANSITIONS · 정:CAND-OPS-ZENOH-UNIT-DOWN · 정:CAND-OPS-UNIT-STATE-LINE · model: claude-opus-5-5
-//! supervisor — `UnitState` 여덟 · 못 띄운 것도 기동 시도로 센다 · `Stopped` 뒤 기동은 창에 안 쌓는다 · 준비 = Hello 성공 · 부모 생존 채널(stdin) · 종료 중엔 되살리지 않는다.
+// spec: v1.6 · 정:RULE-OPS-SUPERVISOR · 정:RULE-OPS-SURFACE · 정:RULE-BUS-FATE · 정:IMPL-CFG-SYSTEM-FILE · 정:IMPL-BUS-FAULTS · 운영:RULE-CTL-SUPERVISOR · 정:CAND-OPS-SUPERVISOR-DEFAULTS · 정:CAND-OPS-SHUTDOWN-NO-RESTART · 정:CAND-OPS-SUPERVISOR-EXTRA-TRANSITIONS · 정:CAND-OPS-ZENOH-UNIT-DOWN · 정:CAND-OPS-UNIT-STATE-LINE · 정:IMPL-OPS-REC-UNIT · model: claude-opus-5-5
+//! supervisor — `UnitState` 여덟 · 못 띄운 것도 기동 시도로 센다 · `Stopped` 뒤 기동은 창에 안 쌓는다 · 준비 = Hello 성공(녹음 유닛은 띄움 성공 · ready 에 세지 않는다 · 띄울 때마다 녹화 참가자 토큰) · 부모 생존 채널(stdin) · 종료 중엔 되살리지 않는다.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -44,6 +44,13 @@ pub enum Role {
     Log,
     Bus,
     Sfu,
+    Rec,
+}
+
+pub struct RecLaunch {
+    pub args: Vec<String>,
+    pub accounts: crate::ses::token::Accounts,
+    pub ttl_secs: u32,
 }
 
 pub struct UnitRec {
@@ -82,6 +89,8 @@ pub struct SupCfg {
     pub intensity_window: Duration,
     pub hello_timeout: Duration,
     pub extra_args: Vec<String>,
+    pub sfu_args: Vec<String>,
+    pub rec: Option<RecLaunch>,
 }
 
 pub struct Supervisor {
@@ -173,7 +182,8 @@ impl Supervisor {
         let mut rest: Vec<&Unit> = units_cfg.iter().filter(|u| u.role != "log").collect();
         rest.sort_by_key(|u| u.order);
         for u in rest {
-            units.push(mk(u.clone(), Role::Sfu));
+            let role = if u.role == common::system::ROLE_REC { Role::Rec } else { Role::Sfu };
+            units.push(mk(u.clone(), role));
         }
         Arc::new(Supervisor {
             units,
@@ -192,9 +202,14 @@ impl Supervisor {
         self.units.iter().filter(|u| u.role == Role::Sfu).cloned().collect()
     }
 
+    pub fn process_units(&self) -> Vec<Arc<UnitHandle>> {
+        self.units.iter().filter(|u| matches!(u.role, Role::Sfu | Role::Rec)).cloned().collect()
+    }
+
     pub fn down_units(&self) -> Vec<String> {
         self.units
             .iter()
+            .filter(|u| u.role != Role::Rec)
             .filter(|u| !matches!(u.state(), UnitState::Running | UnitState::Disabled))
             .map(|u| u.id.clone())
             .collect()
@@ -214,7 +229,7 @@ impl Supervisor {
     }
 
     pub fn start_sfu(self: &Arc<Self>, bus: Arc<Bus>) {
-        for u in self.sfu_units() {
+        for u in self.process_units() {
             if u.state() == UnitState::Disabled {
                 continue;
             }
@@ -266,6 +281,20 @@ impl Supervisor {
         c.args(["--id", &self.cfg.node]);
         c.args(["--build", self.cfg.build_label.as_deref().unwrap_or("")]);
         c.args(&self.cfg.extra_args);
+        match u.role {
+            Role::Rec => {
+                let r = self.cfg.rec.as_ref()?;
+                c.args(&r.args);
+                let Some(tok) = r.accounts.sign_unit(&rec_user(&self.cfg.node), r.ttl_secs) else {
+                    tracing::warn!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", unit = %u.id, "rec unit token not signed — no account secret");
+                    return None;
+                };
+                c.args(["--token", &tok]);
+            }
+            _ => {
+                c.args(&self.cfg.sfu_args);
+            }
+        }
         c.stdin(std::process::Stdio::piped());
         c.kill_on_drop(true);
         Some(c)
@@ -362,6 +391,22 @@ impl Supervisor {
                 },
                 _ => None,
             };
+            if u.role == Role::Rec {
+                u.set(UnitState::Running, "spawn");
+                let outcome = self.supervise(&u, child, &mut rx).await;
+                match outcome {
+                    Outcome::Exited | Outcome::Killed => {
+                        if self.stopping.load(Ordering::SeqCst) {
+                            u.set(UnitState::Stopped, "shutdown");
+                            return;
+                        }
+                        self.go_down(&u, if matches!(outcome, Outcome::Killed) { "kill" } else { "exit" });
+                    }
+                    Outcome::Stopped => {}
+                    Outcome::Gone => return,
+                }
+                continue;
+            }
             let Some((local, build)) = self.hello(&u).await else {
                 if let Some(mut c) = child {
                     let _ = c.start_kill();
@@ -474,7 +519,7 @@ impl Supervisor {
 
     pub async fn stop_all(&self) {
         self.stopping.store(true, Ordering::SeqCst);
-        let mut units: Vec<Arc<UnitHandle>> = self.sfu_units();
+        let mut units: Vec<Arc<UnitHandle>> = self.process_units();
         units.reverse();
         for u in units {
             if u.state() == UnitState::Running {
@@ -482,6 +527,10 @@ impl Supervisor {
             }
         }
     }
+}
+
+pub fn rec_user(node: &str) -> String {
+    format!("rec-{node}")
 }
 
 enum Outcome {

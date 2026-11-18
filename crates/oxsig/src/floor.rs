@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.7 · 연:RULE-FLR-HEADER · 연:RULE-FLR-MSG-TYPES · 연:RULE-FLR-TLV · 연:RULE-FLR-TIMERS · 연:FLR.wire · 연:RULE-FLR-MSG-GRANTED · 연:RULE-FLR-MSG-TAKEN · 연:RULE-FLR-MSG-ACK · 연:RULE-FLR-MSG-QUEUE · 연:RULE-FLR-MSG-REQUEST · 연:RULE-FLR-MSG-DENY · 연:RULE-FLR-TLV-MATRIX · 연:RULE-FLR-ACK-BIT · 연:RULE-FLR-RTCP-HEADER-DROPPED · 연:RULE-FLR-T9-VALUE · 연:DEV-FLR-TLV-EXT · 연:DEV-FLR-DENY-101 · 연:DEV-FLR-DENY-102 · 연:DEV-FLR-DENY-255 · 연:DEV-FLR-T7-VALUE · 연:DEV-FLR-T9 · 연:DEV-FLR-CAUSE-U8 · 연:DEV-FLR-ACK-NOSRC · 연:DEV-FLR-CLIENT-RETX · 연:RULE-ERR-FLOOR-OUTSIDE · 연:RULE-ERR-NOT-MIXED · model: claude-opus-5-5
+// spec: v1.7 · 연:RULE-FLR-HEADER · 연:RULE-FLR-MSG-TYPES · 연:RULE-FLR-TLV · 연:RULE-CHAT-TALK · 연:RULE-FLR-TIMERS · 연:FLR.wire · 연:RULE-FLR-MSG-GRANTED · 연:RULE-FLR-MSG-TAKEN · 연:RULE-FLR-MSG-ACK · 연:RULE-FLR-MSG-QUEUE · 연:RULE-FLR-MSG-REQUEST · 연:RULE-FLR-MSG-DENY · 연:RULE-FLR-TLV-MATRIX · 연:RULE-FLR-ACK-BIT · 연:RULE-FLR-RTCP-HEADER-DROPPED · 연:RULE-FLR-T9-VALUE · 연:DEV-FLR-TLV-EXT · 연:DEV-FLR-DENY-101 · 연:DEV-FLR-DENY-102 · 연:DEV-FLR-DENY-255 · 연:DEV-FLR-T7-VALUE · 연:DEV-FLR-T9 · 연:DEV-FLR-CAUSE-U8 · 연:DEV-FLR-ACK-NOSRC · 연:DEV-FLR-CLIENT-RETX · 연:RULE-ERR-FLOOR-OUTSIDE · 연:RULE-ERR-NOT-MIXED · model: claude-opus-5-5
 //! 발언권 메시지(MBCP) 부호화 — 머리(V · R · A · Type) · TLV 개수 · TLV. 원문 번호 · 사유 · 타이머 값.
 
 pub const REQUEST: u8 = 0;
@@ -16,6 +16,7 @@ pub const ACK: u8 = 10;
 pub const RETIRED: &[u8] = &[7, 28, 30];
 pub const MAX_VALUE: usize = 255;
 pub const SEQ_WRAP: u32 = 65_536;
+pub const TALK_MAX: usize = 64;
 
 pub mod tlv {
     pub const PRIORITY: u8 = 0;
@@ -29,6 +30,7 @@ pub mod tlv {
     pub const REASON: u8 = 27;
     pub const ROOM: u8 = 29;
     pub const SOURCES: u8 = 31;
+    pub const TALK: u8 = 32;
 }
 
 pub mod deny {
@@ -181,6 +183,10 @@ impl Msg {
         self.get(tlv::SOURCES).map(|b| b.chunks_exact(4).map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]])).collect()).unwrap_or_default()
     }
 
+    pub fn talk(&self) -> Option<String> {
+        self.text(tlv::TALK)
+    }
+
     pub fn cause(&self) -> Option<u8> {
         self.get(tlv::CAUSE).and_then(|b| b.first().copied())
     }
@@ -215,13 +221,22 @@ pub fn request(room: &str, priority: Option<u8>) -> Msg {
     }
 }
 
-pub fn granted(priority: u8, duration_s: u16, room: &str) -> Msg {
-    Msg::new(GRANTED, true).push(tlv::PRIORITY, u8spare(priority)).push(tlv::DURATION, u16be(duration_s)).push(tlv::ROOM, utf8(room))
+pub fn granted(priority: u8, duration_s: u16, room: &str, talk: Option<&str>) -> Msg {
+    let m = Msg::new(GRANTED, true).push(tlv::PRIORITY, u8spare(priority)).push(tlv::DURATION, u16be(duration_s)).push(tlv::ROOM, utf8(room));
+    with_talk(m, talk)
 }
 
-pub fn taken(speaker: &str, seq: u16, room: &str, sources: &[u32]) -> Msg {
+pub fn taken(speaker: &str, seq: u16, room: &str, sources: &[u32], talk: Option<&str>) -> Msg {
     let m = Msg::new(TAKEN, true).push(tlv::SPEAKER, utf8(speaker)).push(tlv::SEQ, u16be(seq)).push(tlv::ROOM, utf8(room));
-    if sources.is_empty() { m } else { m.push(tlv::SOURCES, sources.iter().flat_map(|x| x.to_be_bytes()).collect()) }
+    let m = if sources.is_empty() { m } else { m.push(tlv::SOURCES, sources.iter().flat_map(|x| x.to_be_bytes()).collect()) };
+    with_talk(m, talk)
+}
+
+fn with_talk(m: Msg, talk: Option<&str>) -> Msg {
+    match talk.filter(|t| !t.is_empty() && t.len() <= TALK_MAX) {
+        Some(t) => m.push(tlv::TALK, utf8(t)),
+        None => m,
+    }
 }
 
 pub fn deny_msg(cause: u8, room: &str, reason: Option<&str>) -> Msg {
@@ -270,7 +285,7 @@ mod tests {
 
     #[test]
     fn granted_roundtrip() {
-        let m = granted(5, 30, "r1");
+        let m = granted(5, 30, "r1", None);
         let b = encode(&m).unwrap();
         assert_eq!(b[0], 0x11);
         let d = decode(&b).unwrap();
@@ -289,12 +304,25 @@ mod tests {
 
     #[test]
     fn taken_carries_speaker_sources() {
-        let d = decode(&encode(&taken("u1", 7, "r1", &[0x0000_0003, 0x7fff_fffe])).unwrap()).unwrap();
+        let d = decode(&encode(&taken("u1", 7, "r1", &[0x0000_0003, 0x7fff_fffe], None)).unwrap()).unwrap();
         assert_eq!(d.sources(), vec![3, 0x7fff_fffe]);
         assert_eq!(d.get(tlv::SOURCES).map(|b| b.len()), Some(8));
-        let none = decode(&encode(&taken("u1", 7, "r1", &[])).unwrap()).unwrap();
+        let none = decode(&encode(&taken("u1", 7, "r1", &[], None)).unwrap()).unwrap();
         assert!(none.get(tlv::SOURCES).is_none());
         assert!(none.sources().is_empty());
+        assert_eq!(none.talk(), None);
+    }
+
+    #[test]
+    fn granted_and_taken_carry_the_talk_id() {
+        let id = "81330e4c0190a1b2c3d4e5f60718293a4b5c";
+        let g = decode(&encode(&granted(5, 30, "r1", Some(id))).unwrap()).unwrap();
+        assert_eq!(g.talk().as_deref(), Some(id));
+        assert_eq!(g.get(tlv::TALK).map(|b| b.len()), Some(36));
+        let t = decode(&encode(&taken("u1", 7, "r1", &[3], Some(id))).unwrap()).unwrap();
+        assert_eq!(t.talk().as_deref(), Some(id));
+        let long = "x".repeat(TALK_MAX + 1);
+        assert_eq!(decode(&encode(&granted(5, 30, "r1", Some(&long))).unwrap()).unwrap().talk(), None);
     }
 
     #[test]

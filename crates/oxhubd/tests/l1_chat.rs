@@ -8,7 +8,8 @@ use common::system::{ChatDb, System, Visibility};
 use oxhubd::chat::store::{Cursor, Dir, Outgoing, Page, SYS, SYS_HASH, Sent, Store, catchup_since_sql, relations_sql};
 use oxhubd::chat::{BODY_MAX, Chat, Limits, outgoing, valid_msg_id};
 use oxhubd::ses::conn::QUEUE_MAX;
-use oxsig::msg::{ChatKind, ChatMessage, MessagesBody};
+use common::talk::Report;
+use oxsig::msg::{ChatKind, ChatMessage, MessagesBody, TalkState};
 use oxsig::{Code, Op};
 
 const ID_A: &str = "e818000001a1e480b5fd7da4c5b6bc0df205";
@@ -1168,7 +1169,7 @@ mod lane {
     }
 
     pub fn msg(i: usize, t: u64, content: &str) -> ChatMessage {
-        ChatMessage { space_id: "S".into(), msg_id: super::id(i), user_id: "a".into(), t, content: content.into(), kind: None, r#ref: None, keys: None, ext: None, target: None }
+        ChatMessage { space_id: "S".into(), msg_id: super::id(i), user_id: "a".into(), t, content: content.into(), kind: None, r#ref: None, keys: None, ext: None, target: None, talk: None }
     }
 }
 
@@ -1363,4 +1364,167 @@ fn the_send_lane_closes_on_bytes_before_the_frame_count() {
         assert!(n <= QUEUE_MAX + lane::WINDOW + 1, "형상 — 건수 상한에서 끊겨야 한다");
     };
     assert_eq!((cut, n), (Code::FlowOverflow, QUEUE_MAX), "S-sym-IMPL-SES-SOCKET-LIFE-1③ — 양성 대조: 건수 {QUEUE_MAX} 초과도 같은 사유");
+}
+
+fn talk_id(i: usize) -> String {
+    format!("{}{:012x}{:016x}", SYS_HASH, 0x0190_0000_0000u64 + i as u64, i)
+}
+
+fn talk_start(id: &str, room: &str, user: &str) -> Report {
+    Report::Start { talk_id: id.into(), room_id: room.into(), user_id: user.into(), start: 1_000, deadline: 38_000, sfu_id: "e1".into() }
+}
+
+fn talk_end(id: &str, state: TalkState, reason: Option<u8>, d: u64) -> Report {
+    Report::End { talk_id: id.into(), state, reason, duration_ms: d }
+}
+
+fn talk_rec(id: &str, path: &str) -> Report {
+    Report::Rec { talk_id: id.into(), path: path.into(), size: 123, mime: "audio/ogg".into(), duration_ms: 900 }
+}
+
+fn sent_msg(r: Result<Sent, Code>) -> (bool, ChatMessage) {
+    match r.expect("talk") {
+        Sent::Fresh { msg, .. } => (true, msg),
+        Sent::Again { msg } => (false, msg),
+    }
+}
+
+all_forms!(a_talk_is_a_message_by_the_speaker_for_everyone |db| {
+    let s = store(db, Visibility::Shared);
+    join(&s, "S", "a", 1);
+    join(&s, "S", "b", 1);
+    let id = talk_id(1);
+    let (fresh, m) = sent_msg(s.talk(&talk_start(&id, "S", "a"), Some(2_000)));
+    assert!(fresh, "stand check — the first start stores");
+    assert_eq!((m.kind, m.user_id.as_str(), m.content.as_str(), m.msg_id.as_str()), (Some(ChatKind::Talk), "a", "", id.as_str()), "연:RULE-CHAT-TALK — kind talk · user = speaker · empty content · msg_id = talk id");
+    let info = m.talk.clone().expect("talk info");
+    assert_eq!((info.state, info.room_id.as_str(), info.start, info.deadline), (TalkState::Talking, "S", 1_000, 38_000));
+    for u in ["a", "b"] {
+        assert!(s.pending(u).expect("pending").contains(&id), "정:IMPL-CHAT-TALK — the speaker too gets the talk ({u})");
+    }
+    let e = s.list("a").expect("list").remove(0);
+    assert_eq!((e.total, e.read), (1, 1), "연:RULE-CHAT-UNREAD — total counts the talk · the speaker has read it");
+    assert_eq!(s.list("b").expect("list").remove(0).read, 0, "the listener has not");
+    let (again, m2) = sent_msg(s.talk(&talk_start(&id, "S", "a"), Some(9_000)));
+    assert!(!again && m2.t == m.t, "S-sym-IMPL-CHAT-TALK-3 연:RULE-CHAT-MSG-ID — a resent start answers the first t without comparing");
+    assert_eq!(s.talk(&talk_start(&talk_id(2), "nope", "a"), None), Err(Code::SpaceNotFound), "정:IMPL-CHAT-TALK 1 — no space = no record");
+    let (fresh, m3) = sent_msg(s.talk(&talk_start(&talk_id(3), "S", "outsider"), Some(3_000)));
+    assert!(fresh && m3.user_id == "outsider", "연:RULE-CHAT-TALK — a speaker who is not a member still leaves a talk");
+    assert_eq!(s.list("a").expect("list")[0].total, 2);
+});
+
+all_forms!(a_talk_update_carries_the_whole_state |db| {
+    let s = store(db, Visibility::Shared);
+    join(&s, "S", "a", 1);
+    let id = talk_id(10);
+    sent_msg(s.talk(&talk_start(&id, "S", "a"), Some(2_000)));
+    let path = format!("rec/S/S-{id}-a.ogg");
+    let (fresh, r) = sent_msg(s.talk(&talk_rec(&id, &path), Some(2_500)));
+    assert!(fresh, "a recording that closes before the end still updates");
+    assert_eq!((r.kind, r.r#ref.as_deref(), r.user_id.as_str()), (Some(ChatKind::TalkUpdate), Some(id.as_str()), "a"));
+    assert_eq!(r.msg_id, common::talk::update_msg_id(&id, ":rec"), "정:IMPL-CHAT-TALK 2 — the update msg_id is fixed by the talk id and the tail");
+    let ri = r.talk.clone().expect("info");
+    assert_eq!((ri.state, ri.rec.as_ref().map(|x| x.path.as_str())), (TalkState::Talking, Some(path.as_str())));
+    let (_, e) = sent_msg(s.talk(&talk_end(&id, TalkState::Cut, Some(2), 4_000), Some(3_000)));
+    let ei = e.talk.clone().expect("info");
+    assert_eq!((ei.state, ei.reason, ei.duration_ms), (TalkState::Cut, Some(2), Some(4_000)), "연:RULE-CHAT-TALK-STATE");
+    assert_eq!(ei.rec.as_ref().map(|x| x.path.as_str()), Some(path.as_str()), "S-sym-IMPL-CHAT-TALK-1 — the end keeps the earlier recording (whole state, not an append)");
+    let (again, e2) = sent_msg(s.talk(&talk_end(&id, TalkState::Ok, None, 1), Some(9_000)));
+    assert!(!again && e2.t == e.t && e2.talk == e.talk, "S-sym-IMPL-CHAT-TALK-3 연:RULE-CHAT-MSG-ID — a resent end is the first one, body not compared");
+    assert_eq!(s.list("a").expect("list")[0].total, 1, "연:RULE-CHAT-UNREAD — updates do not count");
+    assert!(s.pending("a").expect("pending").contains(&e.msg_id), "the update goes to everyone");
+    let page = s.history("a", "S", Dir::Latest, 60).expect("history");
+    assert!(page.messages.iter().any(|m| m.msg_id == id), "연:RULE-CHAT-HISTORY-PAGE — the talk is a visible message");
+    assert!(page.messages.iter().all(|m| m.kind != Some(ChatKind::TalkUpdate)), "updates are not page messages");
+    let ups: Vec<_> = page.relations.iter().filter(|m| m.kind == Some(ChatKind::TalkUpdate)).collect();
+    assert_eq!(ups.len(), 1, "연:RULE-CHAT-HISTORY-PAGE — one update per talk in relations");
+    assert_eq!(ups[0].msg_id, e.msg_id, "the last by (t, msg_id)");
+    assert_eq!(s.talk(&talk_end(&talk_id(11), TalkState::Ok, None, 1), None), Err(Code::PreconditionFailed), "정:IMPL-CHAT-TALK 2 — no talk yet is a passing failure");
+    let other = talk_id(12);
+    sent_msg(s.talk(&talk_start(&other, "S", "a"), Some(2_000)));
+    assert_eq!(s.talk(&talk_rec(&other, "rec/T/x.ogg"), None), Err(Code::InvalidPayload), "정:IMPL-CHAT-TALK 2 — a path outside rec/{{space}}/ is refused");
+    assert_eq!(s.talk(&talk_rec(&other, "rec/S/../x.ogg"), None), Err(Code::InvalidPayload));
+    let r2 = Report::Regrant { talk_id: id.clone(), deadline: 99_000 };
+    let (_, g) = sent_msg(s.talk(&r2, Some(3_500)));
+    assert_eq!(g.talk.expect("info").deadline, 99_000, "a regrant moves the deadline");
+});
+
+all_forms!(a_talk_is_an_origin_only_for_reply_and_react |db| {
+    let s = store(db, Visibility::Shared);
+    join(&s, "S", "a", 1);
+    let tid = talk_id(20);
+    sent_msg(s.talk(&talk_start(&tid, "S", "a"), Some(2_000)));
+    let reply = Outgoing { content: "copy".into(), r#ref: Some(tid.clone()), ..Outgoing::default() };
+    assert!(s.post("a", "S", ID_A, &reply, Some(2_100)).is_ok(), "연:RULE-CHAT-REF-CHECK — a reply may point at a talk");
+    assert!(s.post("a", "S", ID_B, &react(&tid, &["👍"]), Some(2_200)).is_ok(), "a react may point at a talk");
+    assert_eq!(s.post("a", "S", ID_C, &edit(&tid, "x"), Some(2_300)), Err(Code::RefNotFound), "연:RULE-CHAT-REF-CHECK — a talk is not edited");
+    assert_eq!(s.post("a", "S", &id(30), &rel(ChatKind::Delete, &tid), Some(2_400)), Err(Code::RefNotFound), "a talk is not deleted");
+    let up = common::talk::update_msg_id(&tid, ":end");
+    sent_msg(s.talk(&talk_end(&tid, TalkState::Ok, None, 900), Some(2_500)));
+    assert_eq!(s.post("a", "S", &id(31), &react(&up, &["👍"]), Some(2_600)), Err(Code::RefNotFound), "a talk update is not an origin");
+});
+
+all_forms!(a_recording_is_seen_like_the_history |db| {
+    let s = db.open(Visibility::Joined);
+    s.create_space("S", None).expect("space");
+    join(&s, "S", "a", 1);
+    let id = talk_id(40);
+    sent_msg(s.talk(&talk_start(&id, "S", "a"), Some(2_000)));
+    join(&s, "S", "late", 3_000);
+    assert_eq!(s.rec_seen("a", "S", &id), Ok(()), "연:RULE-CHAT-REC-FILE — a member who could see the talk");
+    assert_eq!(s.rec_seen("late", "S", &id), Err(Code::NotSpaceMember), "joined visibility — a talk before the join is not seen");
+    assert_eq!(s.rec_seen("x", "S", &id), Err(Code::NotSpaceMember), "not a member");
+    assert_eq!(s.rec_seen("a", "S", &talk_id(41)), Err(Code::RecNotFound), "no such talk");
+});
+
+all_forms!(end_and_rec_racing_on_one_talk_keep_both |db| {
+    let a = Arc::new(store(db, Visibility::Shared));
+    join(&a, "S", "u", 1);
+    let (s1, s2) = (side(db, &a), side(db, &a));
+    for round in 0..40usize {
+        let id = talk_id(100 + round);
+        sent_msg(a.talk(&talk_start(&id, "S", "u"), None));
+        let gate = Arc::new(std::sync::Barrier::new(2));
+        let go = |st: Arc<Store>, g: Arc<std::sync::Barrier>, r: Report| {
+            std::thread::spawn(move || {
+                g.wait();
+                st.talk(&r, None)
+            })
+        };
+        let path = format!("rec/S/S-{id}-u.ogg");
+        let h1 = go(s1.clone(), gate.clone(), talk_end(&id, TalkState::Ok, None, 900));
+        let h2 = go(s2.clone(), gate.clone(), talk_rec(&id, &path));
+        let (r1, r2) = (h1.join().expect("end"), h2.join().expect("rec"));
+        let (_, m1) = sent_msg(r1);
+        let (_, m2) = sent_msg(r2);
+        let full = |m: &ChatMessage| m.talk.as_ref().is_some_and(|i| i.state == TalkState::Ok && i.rec.is_some());
+        assert!(full(&m1) || full(&m2), "S-sym-IMPL-CHAT-TALK-2 — the later of end · rec holds both (round {round}: {:?} / {:?})", m1.talk, m2.talk);
+    }
+});
+
+#[test]
+fn a_client_cannot_send_talk_kinds() {
+    for k in ["talk", "talk_update"] {
+        let f = outgoing(&serde_json::json!({ "kind": k, "ref": ID_A, "content": "" })).expect_err("refused");
+        assert_eq!(f.code, Code::InvalidPayload.num(), "연:RULE-CHAT-TALK — a client {k} is 1002");
+    }
+    let f = outgoing(&serde_json::json!({ "content": "x", "talk": { "state": "ok" } })).expect_err("refused");
+    assert_eq!(f.code, Code::InvalidPayload.num(), "연:RULE-CHAT-KIND — a talk field on a client message is 1002");
+}
+
+#[test]
+fn rec_file_names_and_ranges() {
+    use oxhubd::ops::http::{byte_range, rec_talk_id};
+    let id = talk_id(7);
+    assert_eq!(rec_talk_id("ch-1", &format!("ch-1-{id}-bot-a.ogg")), Some(id.as_str()), "정:IMPL-CHAT-TALK 3 — the file name gives the talk id even when the space has '-'");
+    assert_eq!(rec_talk_id("ch-1", "other-x-y.ogg"), None);
+    assert!(oxhubd::chat::store::rec_path_ok("S", &format!("rec/S/S-{id}-a.ogg")));
+    assert!(!oxhubd::chat::store::rec_path_ok("S", "rec/S/a/b.ogg"));
+    assert!(!oxhubd::chat::store::rec_file_ok(".."));
+    assert_eq!(byte_range("bytes=0-9", 100), Some((0, 9)), "연:RULE-CHAT-REC-FILE Range");
+    assert_eq!(byte_range("bytes=90-", 100), Some((90, 99)));
+    assert_eq!(byte_range("bytes=-10", 100), Some((90, 99)));
+    assert_eq!(byte_range("bytes=50-500", 100), Some((50, 99)));
+    assert_eq!(byte_range("bytes=100-", 100), None, "416 past the end");
+    assert_eq!(byte_range("bytes=0-1,5-6", 100), None, "one range only");
 }

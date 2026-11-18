@@ -67,6 +67,7 @@ pub const DROP_NAMES: &[&str] = &[
     "dc_out_full",
     "dtls_in_full",
     "bus_ev_drop",
+    "talk_drop",
 ];
 
 pub struct Sfu {
@@ -274,8 +275,10 @@ pub fn drops_json() -> serde_json::Value {
                 o.insert(format!("code_{k}"), serde_json::json!(v));
             }
         }
-        if let Some(b) = crate::bus::get() {
-            o.insert("bus_ev_drop".into(), serde_json::json!(b.ev_dropped() + s.drops[DROP_NAMES.len() - 1].load(Ordering::Relaxed)));
+        if let Some(b) = crate::bus::get()
+            && let Some(i) = DROP_NAMES.iter().position(|n| *n == "bus_ev_drop")
+        {
+            o.insert("bus_ev_drop".into(), serde_json::json!(b.ev_dropped() + s.drops[i].load(Ordering::Relaxed)));
         }
         if let Some(l) = common::log::global() {
             o.insert("log_queue_full".into(), serde_json::json!(l.counters.queue_full.load(Ordering::Relaxed)));

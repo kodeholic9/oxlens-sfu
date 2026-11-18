@@ -156,6 +156,13 @@ impl Accounts {
         Ok(iss)
     }
 
+    pub fn sign_unit(&self, user: &str, ttl_secs: u32) -> Option<String> {
+        let secret = self.jwt_secret.as_deref().or_else(|| self.keys.first().map(|k| k.secret.as_str()))?;
+        let now = secs_now();
+        let c = UserClaims { sub: Some(user.to_string()), user_id: None, participant_type: 1, hidden: true, metadata: None, permission: None, iat: now, exp: now + ttl_secs as u64 };
+        encode(&Header::new(Algorithm::HS256), &c, &EncodingKey::from_secret(secret.as_bytes())).ok()
+    }
+
     pub fn sign_ops(&self, iss: &str, ttl_secs: u64) -> Option<String> {
         let acc = self.find(iss)?;
         let now = secs_now();

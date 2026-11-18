@@ -327,7 +327,7 @@ pub async fn create(env: &Envelope) -> Result<Value, Failure> {
     let req: CreateRoomReq = parse(&env.body)?;
     let id = req.room_id.clone().filter(|x| !x.is_empty()).ok_or_else(|| Code::MissingField.failure().with_message("room_id"))?;
     if let Some(r) = s.rooms.get(&id) {
-        return ok(&CreateRoomRes { room_id: r.id.clone(), name: r.name.clone(), capacity: r.capacity, created_at: r.created_at, media_codecs: r.media_codecs.clone() });
+        return ok(&CreateRoomRes { room_id: r.id.clone(), name: r.name.clone(), capacity: r.capacity, created_at: r.created_at, record: r.record, media_codecs: r.media_codecs.clone() });
     }
     let codecs = crate::trk::resolve_room_codecs(req.media_codecs.as_ref())
         .ok_or_else(|| Code::CodecRequired.failure().with_details(json!({ "supported": crate::trk::supported_list() })))?;
@@ -342,6 +342,7 @@ pub async fn create(env: &Envelope) -> Result<Value, Failure> {
         media_codecs: codecs,
         epoch: s.epoch.clone(),
         floor: crate::flr::core::Floor::new(s.policy.floor.queue_max as usize, s.policy.floor.t2_stop_talking_secs as u32),
+        record: req.record.unwrap_or(false),
     });
     let (room, fresh) = s.rooms.insert(room);
     if fresh {
@@ -353,7 +354,7 @@ pub async fn create(env: &Envelope) -> Result<Value, Failure> {
         }
         tracing::info!(kind = "diag", spec = "SV-IMPL-ROOM-LIFE", room = %room.id, "in.unused_ttl" = room.unused_ttl, "in.departure_ttl" = room.departure_ttl, "room created");
     }
-    ok(&CreateRoomRes { room_id: room.id.clone(), name: room.name.clone(), capacity: room.capacity, created_at: room.created_at, media_codecs: room.media_codecs.clone() })
+    ok(&CreateRoomRes { room_id: room.id.clone(), name: room.name.clone(), capacity: room.capacity, created_at: room.created_at, record: room.record, media_codecs: room.media_codecs.clone() })
 }
 
 pub fn get(env: &Envelope) -> Result<Value, Failure> {
@@ -371,6 +372,7 @@ pub fn get(env: &Envelope) -> Result<Value, Failure> {
         participants: room.participants(),
         me,
         created_at: room.created_at,
+        record: room.record,
         media_codecs: room.media_codecs.clone(),
         version: room.version(),
         tracks: if tracks { Some(tracks_of(&room)) } else { None },

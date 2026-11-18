@@ -71,8 +71,21 @@ impl HubCfg {
             a.push("--log-socket".into());
             a.push(s.display().to_string());
         }
-        a.push("--node-grace-secs".into());
-        a.push(self.system.supervisor.node_grace_secs.to_string());
+        a
+    }
+
+    pub fn sfu_args(&self) -> Vec<String> {
+        vec!["--node-grace-secs".into(), self.system.supervisor.node_grace_secs.to_string()]
+    }
+
+    pub fn rec_args(&self) -> Vec<String> {
+        let mut a = Vec::new();
+        if let Some(r) = self.system.data_root() {
+            a.push("--data-root".into());
+            a.push(r.to_string());
+        }
+        a.push("--rec-keep-days".into());
+        a.push(self.system.rec_keep_days().to_string());
         a
     }
 }

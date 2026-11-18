@@ -67,6 +67,7 @@ pub struct Room {
     pub unused_ttl: u32,
     pub departure_ttl: u32,
     pub media_codecs: MediaCodecs,
+    pub record: bool,
     pub epoch: String,
     pub st: Mutex<RoomState>,
     pub floor: Mutex<Floor>,
@@ -84,6 +85,7 @@ pub struct RoomInit {
     pub media_codecs: MediaCodecs,
     pub epoch: String,
     pub floor: Floor,
+    pub record: bool,
 }
 
 impl Room {
@@ -97,6 +99,7 @@ impl Room {
             unused_ttl: i.unused_ttl,
             departure_ttl: i.departure_ttl,
             media_codecs: i.media_codecs,
+            record: i.record,
             epoch: i.epoch,
             st: Mutex::new(RoomState { seq: 0, empty_since: now, ..Default::default() }),
             floor: Mutex::new(i.floor),
@@ -205,6 +208,7 @@ impl Room {
             user_count: self.user_count(),
             created_at: self.created_at,
             rec: self.rec(),
+            record: self.record,
         }
     }
 

@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-CFG-SYSTEM-FILE · 정:RULE-CFG-THREE-PLACES · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · 정:RULE-MESH-SHAPE · 정:RULE-CHAT-GATEWAY-MODULE · 정:IMPL-CHAT-MEMBERSHIP · 정:IMPL-CHAT-STORE-FORMS · model: claude-opus-5-5
-//! 시스템 파일(hub 전용) — 키 전량 strict(모르는 키 = 기동 실패) · `[bus]` 는 oxmesh router 의 접속 좌표와 배포 이름공간 · `[chat] db` 값의 꼴이 채팅 저장소를 고른다(모르는 꼴 = 기동 실패 · 배너는 비밀번호를 가린다).
+// spec: v1.6 · 정:IMPL-CFG-SYSTEM-FILE · 정:RULE-CFG-THREE-PLACES · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · 정:RULE-MESH-SHAPE · 정:RULE-CHAT-GATEWAY-MODULE · 정:IMPL-CHAT-MEMBERSHIP · 정:IMPL-CHAT-STORE-FORMS · 정:IMPL-OPS-REC-UNIT · model: claude-opus-5-5
+//! 시스템 파일(hub 전용) — 키 전량 strict(모르는 키 = 기동 실패) · `[bus]` 는 oxmesh router 의 접속 좌표와 배포 이름공간 · `[chat] db` 값의 꼴이 채팅 저장소를 고른다(모르는 꼴 = 기동 실패 · 배너는 비밀번호를 가린다) · `[data]` 는 남아야 할 파일의 뿌리(녹음 유닛이 있으면 필수).
 
 use serde::Deserialize;
 
@@ -28,6 +28,26 @@ pub struct System {
     pub hook: Option<HookSection>,
     #[serde(default)]
     pub chat: Option<ChatSection>,
+    #[serde(default)]
+    pub data: Option<DataSection>,
+}
+
+pub const REC_KEEP_DAYS_DEFAULT: u32 = 30;
+pub const ROLE_REC: &str = "rec";
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DataSection {
+    #[serde(default)]
+    pub root: Option<String>,
+    #[serde(default)]
+    pub rec_keep_days: Option<u32>,
+}
+
+impl DataSection {
+    pub fn keep_days(&self) -> u32 {
+        self.rec_keep_days.unwrap_or(REC_KEEP_DAYS_DEFAULT)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -332,6 +352,12 @@ impl System {
             if u.kind == UnitKind::Process && u.cmd.is_empty() {
                 return Err(SystemError(format!("unit {} process 인데 cmd 가 없다", u.id)));
             }
+            if u.role == ROLE_REC && u.kind != UnitKind::Process {
+                return Err(SystemError(format!("unit {} role = rec 는 kind = process 다", u.id)));
+            }
+        }
+        if self.unit.iter().any(|u| u.role == ROLE_REC && u.enabled) && self.data_root().is_none() {
+            return Err(SystemError("role = rec 유닛이 있는데 [data] root 가 없다".into()));
         }
         if let Some(c) = &self.chat {
             let form = c.form().map_err(SystemError)?;
@@ -346,6 +372,14 @@ impl System {
 
     pub fn first_sfu_unit(&self) -> Option<&Unit> {
         self.unit.iter().find(|u| u.role == "sfu")
+    }
+
+    pub fn data_root(&self) -> Option<&str> {
+        self.data.as_ref().and_then(|d| d.root.as_deref()).filter(|r| !r.is_empty())
+    }
+
+    pub fn rec_keep_days(&self) -> u32 {
+        self.data.as_ref().map(|d| d.keep_days()).unwrap_or(REC_KEEP_DAYS_DEFAULT)
     }
 
     pub fn banner_fields(&self) -> Vec<(String, String)> {
@@ -418,6 +452,8 @@ impl System {
             }
             None => v.push(("chat".into(), "-".into())),
         }
+        v.push(("data.root".into(), self.data_root().unwrap_or("-").to_string()));
+        v.push(("data.rec_keep_days".into(), self.rec_keep_days().to_string()));
         v
     }
 }
@@ -446,5 +482,21 @@ mod tests {
         assert!(p.banner_fields().iter().any(|(k, v)| k == "chat.db_pool" && v == "16"));
         assert!(System::parse(&format!("{MIN}[chat]\ndb = \"x\"\n")).is_err());
         assert!(System::parse(&format!("{MIN}[chat]\ndb = \"sqlite:/x\"\ndb_pool = 4\n")).is_err());
+    }
+
+    #[test]
+    fn rec_unit_needs_data_root_and_process() {
+        let rec = "[[unit]]\nid = \"r1\"\nkind = \"process\"\norder = 3\nrole = \"rec\"\ncmd = [\"oxrecd\"]\n";
+        assert!(System::parse(&format!("{MIN}{rec}")).is_err());
+        let s = System::parse(&format!("{MIN}{rec}[data]\nroot = \"/d\"\n")).unwrap();
+        assert_eq!((s.data_root(), s.rec_keep_days()), (Some("/d"), 30));
+        assert!(s.banner_fields().iter().any(|(k, v)| k == "data.root" && v == "/d"));
+        let k = System::parse(&format!("{MIN}{rec}[data]\nroot = \"/d\"\nrec_keep_days = 7\n")).unwrap();
+        assert_eq!(k.rec_keep_days(), 7);
+        let inproc = rec.replace("kind = \"process\"", "kind = \"inproc\"");
+        assert!(System::parse(&format!("{MIN}{inproc}[data]\nroot = \"/d\"\n")).is_err());
+        assert!(System::parse(&format!("{MIN}[data]\nroots = \"/d\"\n")).is_err());
+        let m = System::parse(MIN).unwrap();
+        assert!(m.banner_fields().iter().any(|(k, v)| k == "data.root" && v == "-"));
     }
 }

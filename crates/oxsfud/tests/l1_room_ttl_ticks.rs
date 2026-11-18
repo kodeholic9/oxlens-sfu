@@ -19,6 +19,7 @@ fn room(unused: u32, departure: u32) -> Arc<Room> {
         media_codecs: MediaCodecs { audio: Some("opus".into()), video: Some("H264".into()) },
         epoch: "ep-1".into(),
         floor: Floor::new(10, 30),
+        record: false,
     })
 }
 

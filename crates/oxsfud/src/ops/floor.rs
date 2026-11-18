@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.7 · 정:IMPL-FLR-LOCK · 정:IMPL-FLR-RTP-OBSERVE · 정:IMPL-FLR-MEDIA-BIND · 정:IMPL-FLR-FIRST-NOTICE · 정:IMPL-FLR-MEMBER-JOIN · 정:RULE-FLR-SNAPSHOT · 연:RULE-FLR-TIMERS · 연:TRN.frame.DC · 정:IMPL-FLR-POLICY · 정:CAND-FLR-RELEASE-SILENCE-SPEAKER · 정:CAND-FWD-PRIME-SOURCE · 정:CAND-FWD-PRIME-EPISODE · 운영:RULE-LOG-TRANSITION · 정:IMPL-FWD-ROOM · 정:IMPL-ROOM-LIFE · 정:RULE-CONC-SIX · model: claude-opus-5-5
-//! 발언권 집행 — 판정은 방 락 안(보낼 것 · 걸 타이머 · 효과에 `grant_no`) · 집행은 락 밖(MBCP 를 DC 로 · 타이머는 가장 이른 만료 시각에 깨어난다 · 슬롯 결합 · 예열 CN · 해제 무음 · PLI burst). 시계 · 집행 큐 · 집행자는 그 방의 것(`Room.exec`) — 지음 → 돎 을 이긴 쪽만 집행자를 띄우고, 돎일 때만 판정한다.
+// spec: v1.7 · 정:IMPL-FLR-LOCK · 정:IMPL-FLR-RTP-OBSERVE · 정:IMPL-FLR-MEDIA-BIND · 정:IMPL-FLR-FIRST-NOTICE · 정:IMPL-FLR-MEMBER-JOIN · 정:RULE-FLR-SNAPSHOT · 연:RULE-FLR-TIMERS · 연:TRN.frame.DC · 정:IMPL-FLR-POLICY · 정:CAND-FLR-RELEASE-SILENCE-SPEAKER · 정:CAND-FWD-PRIME-SOURCE · 정:CAND-FWD-PRIME-EPISODE · 운영:RULE-LOG-TRANSITION · 정:IMPL-FWD-ROOM · 정:IMPL-ROOM-LIFE · 정:RULE-CONC-SIX · 정:IMPL-FLR-TALK-REPORT · 연:RULE-FLR-TLV · model: claude-opus-5-5
+//! 발언권 집행 — 판정은 방 락 안(보낼 것 · 걸 타이머 · 효과에 `grant_no`) · 집행은 락 밖(MBCP 를 DC 로 · 타이머는 가장 이른 만료 시각에 깨어난다 · 슬롯 결합 · 예열 CN · 해제 무음 · PLI burst) · 발언 알림(허가에 발언 id · 끝에 상태 — 방마다 한 줄). 시계 · 집행 큐 · 집행자는 그 방의 것(`Room.exec`) — 지음 → 돎 을 이긴 쪽만 집행자를 띄우고, 돎일 때만 판정한다.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
@@ -11,7 +11,9 @@ use oxsig::floor as mbcp;
 use oxsig::msg::Kind;
 
 use crate::flr::bind::Effect;
-use crate::flr::core::{Floor, G, Msg, Mt, Step};
+use crate::flr::core::{Floor, Fx, G, Msg, Mt, Step};
+use crate::flr::talk::{self, End, Talk};
+use common::talk::Report;
 use crate::fwd::rt::mono_us;
 use crate::fwd::SlotFan;
 use crate::link::Transport;
@@ -35,6 +37,7 @@ pub struct Clock {
     pub granted_at: u64,
     pub first_rtp_at: Option<u64>,
     pub last_rtp_at: Option<u64>,
+    pub talk: Option<Talk>,
 }
 
 const BUILT: u8 = 0;
@@ -47,12 +50,13 @@ pub struct RoomFloor {
     state: AtomicU8,
     jobs: tokio::sync::mpsc::UnboundedSender<Job>,
     rx: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Job>>>,
+    pub talks: talk::Queue,
 }
 
 impl RoomFloor {
     pub fn new() -> RoomFloor {
         let (jobs, rx) = tokio::sync::mpsc::unbounded_channel();
-        RoomFloor { clock: Mutex::new(Clock::default()), wake: tokio::sync::Notify::new(), state: AtomicU8::new(BUILT), jobs, rx: Mutex::new(Some(rx)) }
+        RoomFloor { clock: Mutex::new(Clock::default()), wake: tokio::sync::Notify::new(), state: AtomicU8::new(BUILT), jobs, rx: Mutex::new(Some(rx)), talks: talk::Queue::new() }
     }
 
     pub fn running(&self) -> bool {
@@ -101,12 +105,85 @@ pub fn start(room: &Arc<Room>) -> bool {
     LIVE.fetch_add(1, Ordering::AcqRel);
     let (r, live) = (room.clone(), Live);
     super::spawn(async move { room_task(r, rx, live).await });
+    if let Some(trx) = rf.talks.claim() {
+        super::spawn(talk_reporter(room.id.clone(), trx));
+    }
     true
+}
+
+async fn talk_reporter(room: String, mut rx: tokio::sync::mpsc::UnboundedReceiver<Report>) {
+    let mut refused: std::collections::HashSet<String> = std::collections::HashSet::new();
+    while let Some(r) = rx.recv().await {
+        let id = r.talk_id().to_string();
+        let last = matches!(r, Report::End { .. });
+        if refused.contains(&id) {
+            if last {
+                refused.remove(&id);
+            }
+            continue;
+        }
+        let o = common::talk::deliver(&r, common::talk::RETRY_FOR, |p| async move {
+            match crate::bus::get() {
+                Some(b) => b.ask(common::talk::WHAT, p, common::talk::ASK_TIMEOUT).await,
+                None => None,
+            }
+        })
+        .await;
+        match o {
+            common::talk::Outcome::Done => {}
+            common::talk::Outcome::Refused(c) => {
+                if !last {
+                    refused.insert(id.clone());
+                }
+                tracing::info!(kind = "diag", spec = "SV-IMPL-FLR-TALK-REPORT", room = %room, talk = %id, report = r.name(), code = c.num(), "talk not recorded — no space or chat off for this room");
+            }
+            common::talk::Outcome::Dropped => {
+                super::drop_count("talk_drop");
+                tracing::warn!(kind = "diag", spec = "SV-IMPL-FLR-TALK-REPORT", room = %room, talk = %id, report = r.name(), "talk report dropped after retry limit");
+            }
+        }
+    }
 }
 
 pub fn stop(room: &Room) {
     room.exec.state.store(STOPPED, Ordering::Release);
+    if let Ok(mut ck) = room.exec.clock.lock()
+        && let Some(t) = ck.talk.take()
+    {
+        let dur = ck.first_rtp_at.map(|f| now_ms().saturating_sub(f)).unwrap_or(0);
+        room.exec.talks.push(Report::End { talk_id: t.id, state: oxsig::msg::TalkState::Lost, reason: None, duration_ms: dur });
+    }
     room.exec.wake.notify_one();
+}
+
+pub fn talk_deadline(at_ms: u64) -> u64 {
+    talk::deadline(at_ms, T1_MS, t2_ms(), T3_MS)
+}
+
+fn talk_steps(room: &Room, e: &Entry, fl: &Floor, ck: &mut Clock, step: &Step, now: u64) {
+    let binds = step.fx.iter().any(|x| matches!(x, Fx::Bind(_)));
+    let release = step.fx.iter().any(|x| matches!(x, Fx::Release(_)));
+    if (release || binds)
+        && let Some(t) = ck.talk.take()
+    {
+        let dur = ck.first_rtp_at.map(|f| now.saturating_sub(f)).unwrap_or(0);
+        let end = End { labels: &step.labels, entry: e.name, why: e.why, rcause: fl.rcause_g, heard: ck.first_rtp_at.is_some(), duration_ms: dur, min_ms: super::policy().floor.talk_min_ms as u64 };
+        let (state, reason) = talk::end_state(&end);
+        room.exec.talks.push(Report::End { talk_id: t.id, state, reason, duration_ms: dur });
+    }
+    if step.labels.contains(&"FLR.S.G.TAKEN.req_regrant")
+        && let Some(t) = ck.talk.as_mut()
+    {
+        t.deadline = talk_deadline(common::now_ms());
+        room.exec.talks.push(Report::Regrant { talk_id: t.id.clone(), deadline: t.deadline });
+    }
+}
+
+fn talk_start(room: &Room, ck: &mut Clock, user: &str) {
+    let at = common::now_ms();
+    let t = Talk { id: common::talk::talk_id(at), user: user.to_string(), start: at, deadline: talk_deadline(at) };
+    room.exec.talks.push(Report::Start { talk_id: t.id.clone(), room_id: room.id.clone(), user_id: t.user.clone(), start: t.start, deadline: t.deadline, sfu_id: room.epoch.clone() });
+    ck.talk = Some(t);
 }
 
 fn t2_ms() -> u64 {
@@ -136,17 +213,24 @@ pub struct Job {
     step: Step,
     sources: Vec<Vec<u32>>,
     effects: Vec<Exec>,
+    talk: Option<String>,
 }
 
 pub struct Entry<'a> {
     pub name: &'static str,
     pub user: &'a str,
     pub ins: Vec<(&'static str, String)>,
+    pub why: Option<&'static str>,
 }
 
 impl<'a> Entry<'a> {
     pub fn of(name: &'static str, user: &'a str) -> Self {
-        Entry { name, user, ins: Vec::new() }
+        Entry { name, user, ins: Vec::new(), why: None }
+    }
+
+    pub fn because(mut self, why: &'static str) -> Self {
+        self.why = Some(why);
+        self
     }
 
     pub fn with(mut self, k: &'static str, v: impl Into<String>) -> Self {
@@ -185,10 +269,12 @@ where
         let Some(step) = f(&mut fl, t2_left) else { return Step::default() };
         ck.events += 1;
         trace(&room.id, &e, from, fl.g, &step, ck.events);
+        talk_steps(room, &e, &fl, &mut ck, &step, now);
         let mut effects = Vec::new();
         for fx in &step.fx {
             match fx {
                 crate::flr::core::Fx::Bind(u) => {
+                    talk_start(room, &mut ck, u);
                     ck.grant_no += 1;
                     ck.granted_at = now;
                     ck.first_rtp_at = None;
@@ -204,7 +290,8 @@ where
         rearm(&fl, &mut ck, now);
         let sources = step.out.iter().map(|o| if o.m.t == Mt::Taken { o.m.a.as_deref().map(|u| slot_sources(room, u)).unwrap_or_default() } else { Vec::new() }).collect();
         let ret = step.clone();
-        if !(step.out.is_empty() && effects.is_empty()) && rf.jobs.send(Job { step, sources, effects }).is_err() {
+        let talk = ck.talk.as_ref().map(|t| t.id.clone());
+        if !(step.out.is_empty() && effects.is_empty()) && rf.jobs.send(Job { step, sources, effects, talk }).is_err() {
             super::drop_count("exec_order");
         }
         ret
@@ -264,7 +351,7 @@ fn execute(room: &Arc<Room>, job: Job) {
     }
     let reason = if job.step.labels.contains(&"FLR.S.gate.not_in_room") { Some("not_in_room") } else { None };
     for (o, sources) in job.step.out.iter().zip(job.sources.iter()) {
-        if let Some(m) = to_mbcp(&o.m, &room.id, reason, sources) {
+        if let Some(m) = to_mbcp(&o.m, &room.id, reason, sources, job.talk.as_deref()) {
             send(&o.to, &m);
         }
     }
@@ -280,10 +367,10 @@ fn execute(room: &Arc<Room>, job: Job) {
     }
 }
 
-pub fn to_mbcp(m: &Msg, room: &str, reason: Option<&str>, sources: &[u32]) -> Option<mbcp::Msg> {
+pub fn to_mbcp(m: &Msg, room: &str, reason: Option<&str>, sources: &[u32], talk: Option<&str>) -> Option<mbcp::Msg> {
     Some(match m.t {
-        Mt::Granted => mbcp::granted(m.n as u8, m.d as u16, room),
-        Mt::Taken => mbcp::taken(m.a.as_deref().unwrap_or(""), m.q as u16, room, sources),
+        Mt::Granted => mbcp::granted(m.n as u8, m.d as u16, room, talk),
+        Mt::Taken => mbcp::taken(m.a.as_deref().unwrap_or(""), m.q as u16, room, sources, talk),
         Mt::Idle => mbcp::idle(m.q as u16, room, m.a.as_deref()),
         Mt::Deny => mbcp::deny_msg(m.n as u8, room, reason),
         Mt::Revoke => mbcp::revoke_msg(m.n as u8, room, None),

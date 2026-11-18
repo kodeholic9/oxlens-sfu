@@ -44,6 +44,7 @@ fn fresh(id: &str) -> Arc<Room> {
         media_codecs: MediaCodecs::default(),
         epoch: sfu().epoch.clone(),
         floor: Floor::new(10, 30),
+        record: false,
     })
 }
 
