@@ -194,18 +194,22 @@ pub struct Trendline {
     overuse_ms: f64,
     overuse_count: u32,
     prev_trend: f64,
+    deltas: u32,
     pub usage: Option<Usage>,
 }
 
 pub const TREND_WINDOW: usize = 20;
+pub const TREND_MIN_DELTAS: u32 = 60;
+pub const TREND_DELTA_MAX: u32 = 1000;
 
 impl Trendline {
     pub fn new() -> Trendline {
-        Trendline { threshold: 12.5, usage: Some(Usage::Normal), ..Default::default() }
+        Trendline { threshold: 12.5, overuse_ms: -1.0, usage: Some(Usage::Normal), ..Default::default() }
     }
 
     pub fn update(&mut self, recv_delta_ms: f64, send_delta_ms: f64, arrival_ms: f64) -> Usage {
         let delta = recv_delta_ms - send_delta_ms;
+        self.deltas = (self.deltas + 1).min(TREND_DELTA_MAX);
         let first = *self.first_arrival_ms.get_or_insert(arrival_ms);
         self.acc_delay += delta;
         self.smoothed = 0.9 * self.smoothed + 0.1 * self.acc_delay;
@@ -224,9 +228,13 @@ impl Trendline {
                 trend = num / den;
             }
         }
-        let modified = (self.samples.len().min(60) as f64) * trend * 4.0;
+        if self.deltas < 2 {
+            self.usage = Some(Usage::Normal);
+            return Usage::Normal;
+        }
+        let modified = (self.deltas.min(TREND_MIN_DELTAS) as f64) * trend * 4.0;
         let usage = if modified > self.threshold {
-            self.overuse_ms += send_delta_ms.max(0.0);
+            self.overuse_ms = if self.overuse_ms < 0.0 { send_delta_ms / 2.0 } else { self.overuse_ms + send_delta_ms };
             self.overuse_count += 1;
             if self.overuse_ms > 10.0 && self.overuse_count > 1 && trend >= self.prev_trend {
                 self.overuse_ms = 0.0;
@@ -236,17 +244,17 @@ impl Trendline {
                 self.usage.unwrap_or(Usage::Normal)
             }
         } else if modified < -self.threshold {
-            self.overuse_ms = 0.0;
+            self.overuse_ms = -1.0;
             self.overuse_count = 0;
             Usage::Underuse
         } else {
-            self.overuse_ms = 0.0;
+            self.overuse_ms = -1.0;
             self.overuse_count = 0;
             Usage::Normal
         };
         let dt = self.last_update_ms.map(|t| (arrival_ms - t).min(100.0)).unwrap_or(0.0);
         let k = if modified.abs() < self.threshold { 0.039 } else { 0.0087 };
-        if modified.abs() - self.threshold < 15.0 {
+        if modified.abs() <= self.threshold + 15.0 {
             self.threshold = (self.threshold + k * (modified.abs() - self.threshold) * dt).clamp(6.0, 600.0);
         }
         self.last_update_ms = Some(arrival_ms);

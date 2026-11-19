@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use oxsfud::flr::bind::{Effect, Slot};
 use oxsfud::fwd::core::{Rewriter, covers, pt_byte1, serial_after};
 use oxsfud::rtcp::core::{RecvStats, SYM_LARGE, SYM_NONE, SYM_SMALL, TwccRecv};
-use oxsfud::sim::core::{Aimd, Usage};
+use oxsfud::sim::core::{Aimd, Trendline, Usage};
 use oxsfud::sub::ext::{ExtInput, ExtTable, build};
 use serde_json::Value;
 
@@ -179,6 +179,20 @@ fn sim_aimd_vectors() {
             let out = a.update(s["at_ms"].as_u64().unwrap_or(0), usage, s["acked_bps"].as_u64().unwrap_or(0));
             assert_eq!(out, s["out_bps"].as_u64().unwrap_or(0), "sim 벡터 AIMD {name} @{}", s["at_ms"]);
             assert_eq!(a.near(), s["out_near"].as_bool().unwrap_or(false), "sim 벡터 AIMD near {name} @{}", s["at_ms"]);
+        }
+    }
+}
+
+#[test]
+fn sim_trendline_vectors() {
+    let v = load("sim.json");
+    for c in cases(&v, "trendline") {
+        let name = c["name"].as_str().unwrap_or("");
+        let mut t = Trendline::new();
+        for (i, s) in c["steps"].as_array().unwrap_or(&vec![]).iter().enumerate() {
+            let got = t.update(s["recv_ms"].as_f64().unwrap_or(0.0), s["send_ms"].as_f64().unwrap_or(0.0), s["arrival_ms"].as_f64().unwrap_or(0.0));
+            let want = Usage::parse(s["usage"].as_str().unwrap_or("")).unwrap_or(Usage::Normal);
+            assert_eq!(got, want, "sim 벡터 trendline {name} 걸음 {i}");
         }
     }
 }
