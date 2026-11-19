@@ -6,7 +6,8 @@
     python3 dev/gen_nodes.py 3
 
 로그 — node 마다 로거 유닛 하나(hub 안 inproc — 정:RULE-OPS-LOGGER) · {LOG_ROOT}/{node}/ox.log.{날짜} · 소켓 {LOG_ROOT}/{node}/log.sock
-포트 — hub HTTP 1974+i · sfu gRPC 50061+i · sfu UDP 20000+i · sfu TCP 20000+i(정:IMPL — TCP 전송로 · 설정됐을 때만 광고) · 버스 7447+i
+포트 — hub HTTP 1974+i · sfu gRPC 50061+i · sfu UDP 20000+i · sfu TCP 20000+i(정:IMPL — TCP 전송로 · 설정됐을 때만 광고) · 버스 7447+i · 녹음 유닛 gRPC 50071+i
+녹음 유닛 — node 마다 하나(정:IMPL-OPS-REC-UNIT · role = "rec" · Handle addr = --grpc-listen) · [data] root = {DATA_ROOT} — 2층 하네스는 회차마다 이 자리를 ~/oxlens-data/runs/<회차 ID>/ 로 가리키는 링크로 바꾼다(20261118v §8)
 """
 import sys
 from pathlib import Path
@@ -16,6 +17,7 @@ N = int(sys.argv[1]) if len(sys.argv) > 1 else 3
 NS = "oxdev"
 HUB_BASE = 1974
 LOG_ROOT = "/tmp/oxlens"
+DATA_ROOT = f"{LOG_ROOT}/data"
 
 AUTH = '''
 [hub.auth]
@@ -68,6 +70,17 @@ order = 1
 role = "sfu"
 addr = "127.0.0.1:{50061 + i}"
 cmd = ["./target/debug/oxsfud", "--grpc-listen", "127.0.0.1:{50061 + i}", "--udp-port", "{20000 + i}", "--tcp-port", "{20000 + i}", "--policy", "policy.toml", "--public-ip", "auto"]
+
+[[unit]]
+id = "rec-{me}"
+kind = "process"
+order = 3
+role = "rec"
+addr = "127.0.0.1:{50071 + i}"
+cmd = ["./target/debug/oxrecd", "--grpc-listen", "127.0.0.1:{50071 + i}"]
+
+[data]
+root = "{DATA_ROOT}"
 
 [bus]
 listen = ["tcp/127.0.0.1:{7447 + i}"]

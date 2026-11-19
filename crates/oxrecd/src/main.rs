@@ -85,7 +85,8 @@ async fn run(a: Args) -> i32 {
         Some(p) => Sink::Socket(p.clone()),
         None => Sink::Stdout,
     };
-    let _sender = common::log::init(Setup { node: a.node.clone(), proc_name: "rec", epoch: None, sink, log_dir: a.log_dir.clone() }, &policy);
+    let epoch = common::ident::new_epoch();
+    let _sender = common::log::init(Setup { node: a.node.clone(), proc_name: "peer", epoch: Some(epoch.clone()), sink, log_dir: a.log_dir.clone() }, &policy);
     tracing::info!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", node = %a.node, build = %a.build, root = %a.root.display(), keep_days = a.keep_days, "rec unit boot");
     let ca = match &a.hub_ca {
         Some(p) => match std::fs::read(p) {
@@ -102,7 +103,7 @@ async fn run(a: Args) -> i32 {
         return 2;
     };
     let drops = Arc::new(AtomicU64::new(0));
-    let svc = oxrecd::Svc { epoch: common::ident::new_epoch(), build: common::ident::build_id(common::ident::COMPILED, Some(&a.build)), drops: drops.clone() };
+    let svc = oxrecd::Svc { epoch, build: common::ident::build_id(common::ident::COMPILED, Some(&a.build)), drops: drops.clone() };
     let addr = a.grpc;
     tokio::spawn(async move {
         if let Err(e) = tonic::transport::Server::builder().add_service(common::envelope::handle::handle_server::HandleServer::new(svc)).serve(addr).await {

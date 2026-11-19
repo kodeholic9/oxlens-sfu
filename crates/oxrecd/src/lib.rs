@@ -109,6 +109,9 @@ impl Talks {
         if let Output::Segment(s) = o {
             match s.event {
                 SegmentKind::Opened => {
+                    if let Err(e) = std::fs::create_dir_all(self.layout.staging()) {
+                        tracing::warn!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", "rec staging: {e}");
+                    }
                     self.rooms.insert(s.id, s.room.clone());
                     self.pick.saw(s);
                 }

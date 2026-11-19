@@ -39,6 +39,17 @@ role = "sfu"
 addr = "127.0.0.1:50063"
 cmd = ["./target/debug/oxsfud", "--grpc-listen", "127.0.0.1:50063", "--udp-port", "20002", "--tcp-port", "20002", "--policy", "policy.toml", "--public-ip", "auto"]
 
+[[unit]]
+id = "rec-node-c"
+kind = "process"
+order = 3
+role = "rec"
+addr = "127.0.0.1:50073"
+cmd = ["./target/debug/oxrecd", "--grpc-listen", "127.0.0.1:50073"]
+
+[data]
+root = "/tmp/oxlens/data"
+
 [bus]
 listen = ["tcp/127.0.0.1:7449"]
 connect = ["tcp/127.0.0.1:7447", "tcp/127.0.0.1:7448"]

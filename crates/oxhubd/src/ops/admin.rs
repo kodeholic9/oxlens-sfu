@@ -150,7 +150,7 @@ async fn per_rec_unit(hub: &Hub, path: &str) -> Vec<Value> {
             Reply::Ok { body: Value::Object(mut o) } => {
                 o.insert("unit".into(), json!(u.id));
                 if let Some(e) = u.epoch() {
-                    o.insert("epoch".into(), json!(e));
+                    o.insert("sfu_id".into(), json!(e));
                 }
                 out.push(Value::Object(o));
             }
