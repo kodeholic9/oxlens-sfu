@@ -1,8 +1,9 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.6 · 정:RULE-CFG-THREE-PLACES · 정:RULE-BUS-KEYSPACE · 운영:RULE-BOOT-ARGS · 운영:RULE-LOG-SENDER · 정:IMPL-FLR-TALK-REPORT · model: claude-opus-5-5
-//! hub · sfud 가 함께 쓰는 것 — 값의 자리 셋(정책 · 시스템 파일 · 인자) · 빌드 신원 · 로그 줄 · 버스 키 · 발언 알림 형.
+//! hub · sfud 가 함께 쓰는 것 — 유닛의 버스 client · 값의 자리 셋(정책 · 시스템 파일 · 인자) · 빌드 신원 · 로그 줄 · 버스 키 · 발언 알림 형.
 
 pub mod args;
+pub mod bus;
 pub mod envelope;
 pub mod ident;
 pub mod keyspace;

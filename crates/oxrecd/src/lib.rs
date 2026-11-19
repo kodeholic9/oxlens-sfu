@@ -2,6 +2,8 @@
 // spec: v1.6 · 정:IMPL-OPS-REC-UNIT · 정:IMPL-CHAT-TALK · 정:IMPL-FLR-TALK-REPORT · 정:RULE-OPS-DROPS · 정:RULE-BUS-KEYSPACE · 연:RULE-CHAT-REC-FILE · 연:ROOM.http.CREATE_ROOM · model: claude-opus-5-5
 //! 녹음 유닛 — 발언마다 파일 하나(영상 트랙이 든 발언은 `.mkv` — 음성도 그 안 · 아니면 `.ogg` · 알림도 하나) · 파일 자리(`<root>/.rec-part/` 에 다 쓰고 `<root>/rec/{space_id}/` 로 이름 바꿔 닫는다 — 같은 저장소라 바꾸기는 한 번에) · 닫은 녹취의 `rec` 알림 · 하루 한 번 보관 기간을 넘긴 녹취 지우기 · 알림은 한 줄로(일시 실패는 백오프로 다시 · 상한을 넘기면 버리고 센다) · 로컬 게이트웨이(`--hub-base` · TLS 면 `--hub-ca` 인증서 하나로 검증) 방 상세의 `record` · 운영 표면(Handle `Call` 은 `/admin/drops` 만).
 
+pub mod bus;
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
@@ -228,11 +230,6 @@ where
             }
         }
     }
-}
-
-pub async fn ask_bus(mesh: oxmesh::Mesh, key: String, payload: Vec<u8>) -> Option<Vec<u8>> {
-    let mut r = mesh.get(&key, payload, common::talk::ASK_TIMEOUT).ok()?;
-    r.recv().await.and_then(|x| x.result.ok())
 }
 
 #[derive(Clone)]

@@ -8,12 +8,13 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
-use common::keyspace::{Keys, Parsed};
+use common::bus::TokenEvent;
+use common::keyspace::Parsed;
 use common::log::{Setup, Sink};
 use common::talk::Report;
-use oxmesh::{Mesh, TokenEvent};
 use oxpeer::record::{Pipeline, Policy, RecordConfig};
 use oxpeer::{Client, Config, Event};
+use oxrecd::bus::Bus;
 use oxrecd::{Hub, Layout};
 use tokio::sync::mpsc;
 
@@ -117,14 +118,13 @@ async fn run(a: Args) -> i32 {
         eprintln!("oxrecd: staging {}: {e}", layout.staging().display());
         return 2;
     }
-    let mesh = match Mesh::open(oxmesh::Config::client(&format!("{}.rec", a.node), oxmesh::endpoint(&a.connect))).await {
-        Ok(m) => m,
+    let bus = match Bus::open(&a.node, &a.ns, &a.connect).await {
+        Ok(b) => b,
         Err(e) => {
             eprintln!("oxrecd: bus: {e}");
             return 2;
         }
     };
-    let keys = Keys::new(&a.ns);
     std::thread::spawn(|| {
         let mut sink = Vec::new();
         let _ = std::io::Read::read_to_end(&mut std::io::stdin(), &mut sink);
@@ -144,18 +144,21 @@ async fn run(a: Args) -> i32 {
         }
     });
     let (rep_tx, rep_rx) = mpsc::unbounded_channel::<Report>();
-    let (m2, key, d2) = (mesh.clone(), keys.q_node(&a.node, common::talk::WHAT), drops.clone());
+    let (b2, d2) = (bus.clone(), drops.clone());
     tokio::spawn(async move {
         oxrecd::report_line(
             rep_rx,
             common::talk::RETRY_FOR,
-            |p| oxrecd::ask_bus(m2.clone(), key.clone(), p),
+            |p| {
+                let b = b2.clone();
+                async move { b.ask(common::talk::WHAT, p).await }
+            },
             &d2,
         )
         .await
     });
     let (room_tx, mut room_rx) = mpsc::unbounded_channel::<RoomCmd>();
-    if let Err(e) = discover(&mesh, &keys, &a.node, hub, a.token.clone(), room_tx).await {
+    if let Err(e) = discover(&bus, hub, a.token.clone(), room_tx).await {
         eprintln!("oxrecd: bus watch: {e}");
         return 2;
     }
@@ -220,9 +223,9 @@ async fn run(a: Args) -> i32 {
     }
 }
 
-async fn discover(mesh: &Mesh, keys: &Keys, node: &str, hub: Hub, token: String, tx: mpsc::UnboundedSender<RoomCmd>) -> Result<(), String> {
-    let mut sub = mesh.token_sub(&keys.rooms_of_node(node), true).await.map_err(|e| e.to_string())?;
-    let keys = keys.clone();
+async fn discover(bus: &Bus, hub: Hub, token: String, tx: mpsc::UnboundedSender<RoomCmd>) -> Result<(), String> {
+    let mut sub = bus.rooms().await?;
+    let keys = bus.keys.clone();
     let hub = Arc::new(hub);
     tokio::spawn(async move {
         let mut live: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();

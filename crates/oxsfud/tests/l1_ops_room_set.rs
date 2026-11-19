@@ -379,9 +379,12 @@ fn t610_2_destroying_a_room_withdraws_its_token() {
     let r = room(&tag("t6102"));
     let key = format!("l1/room/{}", r.id);
     let (put, deleted) = drive(async {
-        let mesh = oxmesh::Mesh::open(oxmesh::Config::router("l1-t6102")).await.expect("in-process router");
+        let mut rc = oxmesh::Config::router("l1-t6102");
+        rc.listen = vec!["127.0.0.1:0".into()];
+        let mesh = oxmesh::Mesh::open(rc).await.expect("in-process router");
         let mut sub = mesh.token_sub("l1/room/**", false).await.expect("token subscription");
-        let t = mesh.declare_token(&key).await.expect("room token");
+        let unit = common::bus::Client::open("l1-t6102", "sfud", &mesh.bound()[0].to_string()).await.expect("sfud bus client");
+        let t = unit.declare_token(&key).await.expect("room token");
         let put = seen(&mut sub, &key, true).await;
         r.hold_token(t);
         ops::rooms::destroy_room(&r, "SV-IMPL-ROOM-LIFE", "l1").await;
@@ -399,9 +402,12 @@ fn t610_1_a_token_that_lands_on_a_removed_room_goes_with_its_last_reference() {
     let r = room(&tag("t6101"));
     let key = format!("l1/room/{}", r.id);
     let (put, held, only, alive, deleted) = drive(async move {
-        let mesh = oxmesh::Mesh::open(oxmesh::Config::router("l1-t6101")).await.expect("in-process router");
+        let mut rc = oxmesh::Config::router("l1-t6101");
+        rc.listen = vec!["127.0.0.1:0".into()];
+        let mesh = oxmesh::Mesh::open(rc).await.expect("in-process router");
         let mut sub = mesh.token_sub("l1/room/**", false).await.expect("token subscription");
-        let t = mesh.declare_token(&key).await.expect("room token");
+        let unit = common::bus::Client::open("l1-t6101", "sfud", &mesh.bound()[0].to_string()).await.expect("sfud bus client");
+        let t = unit.declare_token(&key).await.expect("room token");
         let put = seen(&mut sub, &key, true).await;
         ops::rooms::destroy_room(&r, "SV-IMPL-ROOM-LIFE", "l1").await;
         r.hold_token(t);

@@ -245,23 +245,41 @@ async fn a_closed_recording_is_reported_to_the_gateway_over_the_bus() {
             query.reply("ox/t/int/q/node/n1/talk", Reply::ok(serde_json::json!({ "t": 1 })).encode());
         }
     });
-    let unit = Mesh::open(Config::client("n1.rec", &hub.bound()[0].to_string())).await.expect("client");
+    let at = hub.bound()[0].to_string();
+    let unit = oxrecd::bus::Bus::open("n1", "t", &at).await.expect("client");
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let key = common::keyspace::Keys::new("t").q_node("n1", common::talk::WHAT);
     let drops = AtomicU64::new(0);
     let (tx, rx) = mpsc::unbounded_channel();
     let rec = Report::Rec { talk_id: TALK.into(), path: format!("rec/ch-1/ch-1-{TALK}-bot-a.ogg"), size: 9, mime: "audio/ogg".into(), duration_ms: 1_000 };
     tx.send(rec.clone()).expect("queue");
     drop(tx);
     let u2 = unit.clone();
-    oxrecd::report_line(rx, Duration::from_secs(10), |p| oxrecd::ask_bus(u2.clone(), key.clone(), p), &drops).await;
+    oxrecd::report_line(
+        rx,
+        Duration::from_secs(10),
+        |p| {
+            let b = u2.clone();
+            async move { b.ask(common::talk::WHAT, p).await }
+        },
+        &drops,
+    )
+    .await;
     let (k, r) = tokio::time::timeout(Duration::from_secs(5), got_rx.recv()).await.expect("in time").expect("arrived");
     assert_eq!((k.as_str(), r), ("ox/t/int/q/node/n1/talk", rec), "정:IMPL-OPS-REC-UNIT 알림 — rec goes to q/node/{{node}}/talk");
     assert_eq!(drops.load(Ordering::Relaxed), 0);
-    let dead = common::keyspace::Keys::new("t").q_node("n9", common::talk::WHAT);
+    let dead = oxrecd::bus::Bus::open("n9", "t", &at).await.expect("client");
     let (tx, rx) = mpsc::unbounded_channel();
     tx.send(Report::Rec { talk_id: TALK.into(), path: "rec/x/y".into(), size: 1, mime: "audio/ogg".into(), duration_ms: 1 }).expect("queue");
     drop(tx);
-    oxrecd::report_line(rx, Duration::from_millis(400), |p| oxrecd::ask_bus(unit.clone(), dead.clone(), p), &drops).await;
+    oxrecd::report_line(
+        rx,
+        Duration::from_millis(400),
+        |p| {
+            let b = dead.clone();
+            async move { b.ask(common::talk::WHAT, p).await }
+        },
+        &drops,
+    )
+    .await;
     assert_eq!(drops.load(Ordering::Relaxed), 1, "정:RULE-OPS-DROPS talk_drop — no answer past the retry limit is dropped and counted");
 }

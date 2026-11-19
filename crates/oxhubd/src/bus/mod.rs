@@ -14,7 +14,7 @@ use common::envelope::handle::handle_client::HandleClient;
 use common::envelope::handle::{CallReq, HelloReq};
 use common::envelope::{Envelope, Notice, Reply};
 use common::keyspace::{Keys, Parsed};
-use oxmesh::{Mesh, Query, Token, TokenEvent};
+use oxmesh::{Mesh, Token, TokenEvent};
 use oxsig::Code;
 use tokio::sync::mpsc;
 
@@ -29,6 +29,26 @@ pub enum BusEvent {
     UserNotice { user: String, notice: Notice },
     RoomDropped(String),
     Query(Query),
+}
+
+pub struct Query(oxmesh::Query);
+
+impl Query {
+    pub fn key_expr(&self) -> &str {
+        self.0.key_expr()
+    }
+
+    pub fn payload(&self) -> &[u8] {
+        self.0.payload()
+    }
+
+    pub fn reply(&self, key: &str, payload: Vec<u8>) {
+        self.0.reply(key, payload);
+    }
+
+    pub fn reply_err(&self, key: &str, payload: Vec<u8>) {
+        self.0.reply_err(key, payload);
+    }
 }
 
 pub struct BusCfg {
@@ -156,7 +176,7 @@ impl Bus {
         let tx = self.tx.clone();
         let qh = tokio::spawn(async move {
             while let Some(query) = q.recv().await {
-                if tx.send(BusEvent::Query(query)).is_err() {
+                if tx.send(BusEvent::Query(Query(query))).is_err() {
                     break;
                 }
             }

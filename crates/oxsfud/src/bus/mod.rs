@@ -1,16 +1,16 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.6 · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · 정:RULE-BUS-PRESENCE · 정:RULE-BUS-EVENTS · 정:IMPL-BUS-HOME-LOST · 운영:LOG.log.LINE · 운영:RULE-LOG-KIND · 정:IMPL-ROOM-LIFE · 정:IMPL-FLR-TALK-REPORT · model: claude-opus-5-5
-//! sfud 의 버스 — oxmesh client(로컬 hub 에만 · 202610/20261031e) · `room` 토큰 선언(토큰은 그 방이 든다 — 재선언은 방 집합에서) · `ev` put 은 낸 차례 그대로 한 줄로(데이터 레인 — 차면 버리고 센다) · `node` 토큰 history 구독(홈 잃음) · 로컬 hub 에 묻기(`q/node/{node}/talk`).
+//! sfud 의 버스 — `common::bus` client(`{node}.sfud` · 로컬 hub 에만 · 202610/20261031e) · `room` 토큰 선언(토큰은 그 방이 든다 — 재선언은 방 집합에서) · `ev` put 은 낸 차례 그대로 한 줄로(데이터 레인 — 차면 버리고 센다) · `node` 토큰 history 구독(홈 잃음) · 로컬 hub 에 묻기(`q/node/{node}/talk`).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use common::bus::{Client, TokenEvent};
 use common::envelope::Notice;
 use common::keyspace::{Keys, Parsed};
-use oxmesh::{Mesh, TokenEvent};
 use tokio::sync::mpsc;
 
-pub use oxmesh::Token as RoomToken;
+pub type RoomToken = common::bus::Token;
 
 static BUS: OnceLock<Arc<Bus>> = OnceLock::new();
 
@@ -23,7 +23,7 @@ pub struct Bus {
     pub keys: Keys,
     pub node: String,
     pub epoch: String,
-    session: Mesh,
+    session: Client,
     tx: mpsc::UnboundedSender<Put>,
     pub nodes: Mutex<HashMap<String, (String, bool, u64)>>,
     pub seen_other: Mutex<bool>,
@@ -41,7 +41,7 @@ impl Bus {
     }
 
     pub async fn open(node: &str, epoch: &str, ns: &str, connect: &str) -> Result<Arc<Bus>, String> {
-        let session = Mesh::open(oxmesh::Config::client(&format!("{node}.sfud"), oxmesh::endpoint(connect))).await.map_err(|e| format!("mesh open: {e}"))?;
+        let session = Client::open(node, "sfud", connect).await.map_err(|e| format!("mesh open: {e}"))?;
         let (tx, mut rx) = mpsc::unbounded_channel::<Put>();
         let bus = Arc::new(Bus {
             keys: Keys::new(ns),
@@ -114,8 +114,7 @@ impl Bus {
 
     pub async fn ask(&self, what: &str, payload: Vec<u8>, timeout: std::time::Duration) -> Option<Vec<u8>> {
         let key = self.keys.q_node(&self.node, what);
-        let mut replies = self.session.get(&key, payload, timeout).ok()?;
-        replies.recv().await.and_then(|r| r.result.ok())
+        self.session.ask(&key, payload, timeout).await
     }
 
     pub async fn declare_room(&self, room: &str) -> Option<RoomToken> {

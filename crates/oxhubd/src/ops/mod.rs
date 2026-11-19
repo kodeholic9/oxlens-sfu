@@ -15,7 +15,7 @@ use common::policy::Policy;
 use oxsig::Code;
 use tokio::sync::mpsc;
 
-use crate::bus::{Bus, BusEvent};
+use crate::bus::{Bus, BusEvent, Query};
 use crate::ses;
 use supervisor::Supervisor;
 
@@ -56,7 +56,7 @@ pub async fn dispatch(hub: Arc<Hub>, mut rx: mpsc::UnboundedReceiver<BusEvent>) 
     }
 }
 
-async fn answer(hub: &Arc<Hub>, q: oxmesh::Query) {
+async fn answer(hub: &Arc<Hub>, q: Query) {
     let what = q.key_expr().rsplit('/').next().unwrap_or("").to_string();
     let payload = q.payload().to_vec();
     let key = hub.bus.keys.q_node(&hub.node, &what);
