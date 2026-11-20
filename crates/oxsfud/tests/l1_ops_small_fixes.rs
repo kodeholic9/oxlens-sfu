@@ -11,7 +11,7 @@ use std::thread::JoinHandle;
 use common::envelope::CallKind;
 use oxsfud::flr::core::{Msg, Mt};
 use oxsfud::gc::Why;
-use oxsfud::link::Peer;
+use oxsfud::link::{PathKey, Peer};
 use oxsfud::ops;
 use oxsfud::ops::floor::{self, Entry};
 use oxsfud::r#pub::{PubStream, PubTrack};
@@ -109,12 +109,20 @@ fn t7_2_ready_asks_keyframe_of_the_speaker_in_pub_room() {
     assert_eq!(h.r1.slot(Kind::Video).speaker().as_deref().map(|x| x.as_str()), Some(h.u.p.user.as_str()), "stand check — U is the R1 video slot speaker");
     assert_eq!(h.vt.pli_want.load(Ordering::Acquire), 0, "stand check — no keyframe request yet");
     let body = json!({ "room_id": h.r1.id, "join_id": format!("j-{}", h.r1.id), "arev": 0 });
+    assert!(h.l.p.subscribe.path.load().is_none(), "stand check — L's subscribe transport has no nominated path yet");
     let res = ops::media::ready(&ctx_of(&h.l.p), &body);
     assert!(res.is_ok(), "stand check — READY accepted: {res:?}");
+    assert_eq!(
+        h.vt.pli_want.load(Ordering::Acquire),
+        0,
+        "정:IMPL-SUB-READY-GATE S-sym-IMPL-SUB-READY-GATE-3① READY before the subscribe transport has a path does not ask yet — the keyframe would vanish before the path"
+    );
+    h.l.p.subscribe.path.store(Some(Arc::new(PathKey::Udp("198.51.100.7:40000".parse().expect("addr")))));
+    ops::media::ready_owed(&h.l.p.subscribe);
     assert_ne!(
         h.vt.pli_want.load(Ordering::Acquire),
         0,
-        "정:IMPL-FWD-ROOM 정:IMPL-SUB-READY-GATE S-sym-IMPL-FWD-ROOM-2 READY in R1 asks a keyframe of the R1 slot speaker's half video published under another room name"
+        "정:IMPL-FWD-ROOM 정:IMPL-SUB-READY-GATE S-sym-IMPL-FWD-ROOM-2 S-sym-IMPL-SUB-READY-GATE-3② once the path is up the deferred READY in R1 asks a keyframe of the R1 slot speaker's half video published under another room name"
     );
 }
 
@@ -341,7 +349,7 @@ fn t7_6_half_room_is_asked_only_through_pub_room() {
         ("ops/timers.rs", "eligible_from", "half_slot("),
         ("ops/floor.rs", "slot_sources", "half_in("),
         ("ops/floor.rs", "slot_video", "half_in("),
-        ("ops/media.rs", "ready", "half_in("),
+        ("ops/media.rs", "ready_pli", "half_in("),
     ] {
         if !lines_of(f, func).iter().any(|l| l.text.contains(pat)) {
             bad.push(format!("{f} {func} does not ask the half room through {pat}"));
@@ -801,4 +809,21 @@ fn t56_audit_kept_generation_owners() {
         "정:IMPL-GC-PEER-REAP the kept arev is forgotten only where the end of a session reaches this server"
     );
     assert_eq!(keep, vec![("ops/media.rs".to_string(), "retire_table".to_string())], "정:IMPL-GC-PEER-REAP the arev is kept only when a table is retired");
+}
+
+#[test]
+fn t57_layer_matching_sees_only_packets_with_a_send_path() {
+    let src = product_lines();
+    let admits: Vec<&Src> = src.iter().filter(|l| l.text.contains("sim::admit(")).collect();
+    let callers: Vec<String> = admits.iter().map(|l| at(l)).collect();
+    assert!(
+        admits.len() == 1 && admits[0].file == "fwd/mod.rs" && admits[0].func == "send_down",
+        "정:RULE-FWD-STEPS layer matching is called once, inside send_down: {callers:?}"
+    );
+    let path = src.iter().find(|l| l.file == "fwd/mod.rs" && l.func == "send_down" && l.text.contains("send_ok(")).map(|l| l.line);
+    assert!(
+        matches!(path, Some(p) if p < admits[0].line),
+        "정:RULE-FWD-STEPS S-sym-RULE-FWD-STEPS-4① FWD.model.AdmitAfterPath layer matching (adopt · keyframe commit · retry PLI) runs after the send path check — before it, a joiner whose READY beats the nomination spends the PLI window and loses the keyframe: send_ok at {path:?} · admit at {}",
+        admits[0].line
+    );
 }

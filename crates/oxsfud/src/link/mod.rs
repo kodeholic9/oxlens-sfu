@@ -108,6 +108,7 @@ pub struct Transport {
     pub ingress: arc_swap::ArcSwap<std::collections::HashMap<u32, Arc<crate::r#pub::PubTrack>>>,
     pub ext_ids: arc_swap::ArcSwap<ExtIds>,
     pub pub_room: ArcSwapOption<String>,
+    pub ready_owed: Mutex<Vec<String>>,
     pub rtc: crate::rtcp::ConnRtcp,
 }
 
@@ -158,6 +159,7 @@ impl Transport {
             ingress: arc_swap::ArcSwap::from_pointee(std::collections::HashMap::new()),
             ext_ids: arc_swap::ArcSwap::from_pointee(ExtIds::default()),
             pub_room: ArcSwapOption::empty(),
+            ready_owed: Mutex::new(Vec::new()),
             rtc: crate::rtcp::ConnRtcp::default(),
         })
     }

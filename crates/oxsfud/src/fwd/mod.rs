@@ -680,14 +680,6 @@ pub fn deliver(w: &Worker, row: &DownRow, rev: u64, pkt: &Pkt) {
         crate::ops::drop_count("row_stale");
         return;
     }
-    if !row.slot
-        && let Some(t) = &pkt.track
-        && t.stream.simulcast
-        && t.stream.kind == Kind::Video
-        && !crate::sim::admit(row, t, pkt.keyframe, common::now_ms())
-    {
-        return;
-    }
     send_down(w, row, pkt);
 }
 
@@ -703,6 +695,14 @@ pub fn send_down(w: &Worker, row: &DownRow, pkt: &Pkt) {
     }
     let now_ms = common::now_ms();
     let Some(path) = conn.send_ok(now_ms, |id| m.tcp_open(id)) else { return };
+    if !row.slot
+        && let Some(t) = &pkt.track
+        && t.stream.simulcast
+        && t.stream.kind == Kind::Video
+        && !crate::sim::admit(row, t, pkt.keyframe, now_ms)
+    {
+        return;
+    }
     let mapped = match row.rw.lock() {
         Ok(mut rw) => {
             if row.kind == Kind::Video && rw.src != Some(pkt.src_key) && !pkt.keyframe {

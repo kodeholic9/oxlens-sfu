@@ -547,6 +547,9 @@ fn datagram(m: &Media, st: &mut RecvState, data: &[u8], key: PathKey, at_us: u64
                     };
                     crate::ops::peer_state_changed(&tr, was.unwrap_or(PeerState::Alive), PeerState::Alive, cause, dwell);
                 }
+                if changed {
+                    crate::ops::media::ready_owed(&tr);
+                }
             }
             let from = match key {
                 PathKey::Udp(a) => a,

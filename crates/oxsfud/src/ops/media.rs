@@ -527,8 +527,27 @@ pub fn ready(c: &Ctx, body: &Value) -> Result<Value, Failure> {
         }
         let _ = first;
     }
-    for st in room_streams(&req.room_id) {
-        if st.kind == Kind::Video && st.user != c.user && !st.is_half() {
+    let now = match peer.subscribe.ready_owed.lock() {
+        Ok(mut owed) => {
+            let up = peer.subscribe.path.load().is_some();
+            if !up && !owed.iter().any(|r| r == &req.room_id) {
+                owed.push(req.room_id.clone());
+            }
+            up
+        }
+        Err(_) => true,
+    };
+    if now {
+        ready_pli(&room, &c.user);
+    }
+    let user = c.user.clone();
+    super::floor::run(&room, super::floor::Entry::of("ready", &user), |f, _| Some(f.ready(&user)));
+    ok(&Empty {})
+}
+
+fn ready_pli(room: &Room, user: &str) {
+    for st in room_streams(&room.id) {
+        if st.kind == Kind::Video && st.user != user && !st.is_half() {
             for t in st.physical() {
                 crate::rtcp::request_pli(&t, true);
             }
@@ -536,9 +555,9 @@ pub fn ready(c: &Ctx, body: &Value) -> Result<Value, Failure> {
     }
     let speaker = room.slot(Kind::Video).speaker();
     if let Some(sp) = speaker
-        && sp.as_str() != c.user
+        && sp.as_str() != user
     {
-        for st in half_in(&req.room_id, &sp) {
+        for st in half_in(&room.id, &sp) {
             if st.kind == Kind::Video {
                 for t in st.physical() {
                     crate::rtcp::request_pli(&t, true);
@@ -546,9 +565,19 @@ pub fn ready(c: &Ctx, body: &Value) -> Result<Value, Failure> {
             }
         }
     }
-    let user = c.user.clone();
-    super::floor::run(&room, super::floor::Entry::of("ready", &user), |f, _| Some(f.ready(&user)));
-    ok(&Empty {})
+}
+
+pub fn ready_owed(tr: &crate::link::Transport) {
+    let rooms: Vec<String> = match tr.ready_owed.lock() {
+        Ok(mut owed) => std::mem::take(&mut *owed),
+        Err(_) => return,
+    };
+    let Some(s) = super::sfu() else { return };
+    for id in rooms {
+        if let Some(room) = s.rooms.get(&id) {
+            ready_pli(&room, &tr.user);
+        }
+    }
 }
 
 pub fn subscribe_layer(c: &Ctx, body: &Value) -> Result<Value, Failure> {
