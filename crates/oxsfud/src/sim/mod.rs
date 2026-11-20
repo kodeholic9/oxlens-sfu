@@ -482,6 +482,10 @@ fn distribute(tr: &Transport, s: &mut ConnSim, sim: &Rows, fixed: &Rows, by: &st
         }
         adopt(r, t, now_ms);
     }
+    wish(tr, s, sim, fixed, now_ms, now_us);
+}
+
+fn wish(tr: &Transport, s: &mut ConnSim, sim: &Rows, fixed: &Rows, now_ms: u64, now_us: i64) {
     let want = desired(sim, fixed, now_ms);
     if let Some(c) = s.congestion.as_mut() {
         let st = c.set_desired(want, now_us);
@@ -494,7 +498,7 @@ fn distribute(tr: &Transport, s: &mut ConnSim, sim: &Rows, fixed: &Rows, by: &st
 
 fn remember(tags: &mut VecDeque<Tag>, st: &bwe::Step) {
     for o in &st.opened {
-        tags.push_back(Tag { id: o.id, min_probes: o.min_probes, min_bytes: (o.bitrate * o.duration_us + 4_000_000) / 8_000_000 });
+        tags.push_back(Tag { id: o.id, min_probes: o.min_probes, min_bytes: (o.bitrate * o.duration_us + 4_000_000) / 8_000_000, bitrate: o.bitrate });
         while tags.len() > TAG_KEEP {
             tags.pop_front();
         }
@@ -642,6 +646,7 @@ pub fn drive(w: &Worker, tr: &Arc<Transport>, now_ms: u64, now_us: u64) -> Optio
             && let Some(st) = s.congestion.as_mut().map(|c| c.process(now_us as i64))
         {
             apply(tr, &mut s, &sim, &fixed, st, now_ms, now_us as i64);
+            wish(tr, &mut s, &sim, &fixed, now_ms, now_us as i64);
         }
         if (fresh || due) && shape(&candidates(&s, &sim, &fixed, now_ms)) != s.priced {
             distribute(tr, &mut s, &sim, &fixed, "rows", now_ms, now_us as i64);

@@ -79,3 +79,24 @@ fn estimators_are_deterministic_in_their_arguments() {
     let y = b.update(1_500_000, Usage::Normal, Some(300_000));
     assert!(y > x, "S-sym-RULE-CONC-SANS-IO-1 increase follows elapsed time taken from the argument ({x} at 500ms vs {y} at 1500ms)");
 }
+
+#[test]
+fn a_probe_answers_no_more_than_it_asked() {
+    use oxsfud::sim::bwe::{ProbeEstimator, Tag};
+    let asked = Tag { id: 1, min_probes: 5, min_bytes: 3_375, bitrate: 1_800_000 };
+    let mut burst = ProbeEstimator::default();
+    let mut out = None;
+    for (i, size) in [67i64, 439, 1_177, 1_177, 1_177, 1_177].iter().enumerate() {
+        out = burst.handle(asked, 1_000_000 + i as i64 * 150, 2_000_000 + i as i64 * 120, *size);
+    }
+    let last = burst.last.expect("measured");
+    assert!(last.send > 20 * asked.bitrate, "media forwarded in a burst leaves far faster than the cluster asked ({} bps)", last.send);
+    assert_eq!(out, Some(asked.bitrate), "S-sym-RULE-SIM-TICK-22 a cluster that left faster than it asked still answers no more than the rate it asked");
+    let wide = Tag { id: 2, min_probes: 5, min_bytes: 6_750, bitrate: 3_600_000 };
+    let mut paced = ProbeEstimator::default();
+    let mut out = None;
+    for i in 0..16i64 {
+        out = paced.handle(wide, 1_000_000 + i * 2_000, 2_000_000 + i * 2_000, 450);
+    }
+    assert_eq!(out, Some(1_800_000), "S-sym-RULE-SIM-TICK-22 a result below the asked rate is left as measured");
+}

@@ -516,16 +516,25 @@ pub fn on_rtp(w: &Arc<Worker>, tr: &Arc<Transport>, plain: Bytes, at_us: u64) {
         crate::rtcp::twcc_in(tr, seq, at_us as i64);
     }
     if track.is_rtx(rtp.ssrc) {
-        let Some((_, fixed)) = track.unwrap_rtx(&plain, rtp.hlen) else {
-            crate::ops::drop_count("rtp_malformed");
-            return;
+        let fixed = match track.unwrap_rtx(&plain, rtp.hlen) {
+            crate::r#pub::Rtx::Original(_, b) => Bytes::from(b),
+            crate::r#pub::Rtx::Padding => {
+                crate::ops::drop_count("rtx_padding");
+                return;
+            }
+            crate::r#pub::Rtx::Malformed => {
+                crate::ops::drop_count("rtp_malformed");
+                return;
+            }
         };
-        let fixed = Bytes::from(fixed);
         let Some(orig) = parse_rtp(&fixed) else {
             crate::ops::drop_count("rtp_malformed");
             return;
         };
-        track.on_repair(&orig);
+        if !track.on_repair(&orig).repair_passes() {
+            crate::ops::drop_count("rtx_seen");
+            return;
+        }
         forward(w, tr, &track, &orig, fixed.clone(), at_us);
         return;
     }

@@ -41,6 +41,8 @@ pub const DROP_NAMES: &[&str] = &[
     "srtcp_fail",
     "rtp_malformed",
     "rtp_unknown_ssrc",
+    "rtx_padding",
+    "rtx_seen",
     "rid_unknown",
     "no_pub_room",
     "prefan_gate",

@@ -319,8 +319,8 @@ fn sim_congestion_vectors() {
                 "shot" => {
                     let s = c.prober.shot(us);
                     let o = &st["out"];
-                    let got = s.map(|x| (x.tag.id, x.tag.min_probes, x.tag.min_bytes, x.bytes, x.first));
-                    let want = Some((o["id"].as_i64().unwrap_or(-1), o["min_probes"].as_i64().unwrap_or(-1), o["min_bytes"].as_i64().unwrap_or(-1), o["bytes"].as_i64().unwrap_or(-1), o["first"].as_bool().unwrap_or(false)));
+                    let got = s.map(|x| (x.tag.id, x.tag.min_probes, x.tag.min_bytes, x.tag.bitrate, x.bytes, x.first));
+                    let want = Some((o["id"].as_i64().unwrap_or(-1), o["min_probes"].as_i64().unwrap_or(-1), o["min_bytes"].as_i64().unwrap_or(-1), o["bitrate"].as_i64().unwrap_or(-1), o["bytes"].as_i64().unwrap_or(-1), o["first"].as_bool().unwrap_or(false)));
                     assert_eq!(got, want, "S-sym-RULE-SIM-TICK-14 — 탐색 발 {name} 걸음 {i}");
                     shot = s;
                     continue;
@@ -362,7 +362,7 @@ fn sim_congestion_vectors() {
                                 send_us: p[1].as_i64().unwrap_or(0),
                                 size: p[2].as_i64().unwrap_or(0),
                                 recv_us: p[3].as_i64(),
-                                tag: if id != 0 { Some(Tag { id, min_probes: p[5].as_i64().unwrap_or(0), min_bytes: p[6].as_i64().unwrap_or(0) }) } else { None },
+                                tag: if id != 0 { Some(Tag { id, min_probes: p[5].as_i64().unwrap_or(0), min_bytes: p[6].as_i64().unwrap_or(0), bitrate: p[7].as_i64().unwrap_or(0) }) } else { None },
                             }
                         })
                         .collect();
@@ -493,6 +493,29 @@ fn rtcp_nack_ledger_vectors() {
         }
         assert_eq!(l.repeats, c["repeats"].as_u64().unwrap_or(0), "S-sym-RULE-SIM-TICK-4 — 반복 수 {name}");
     }
+}
+
+#[test]
+fn rtcp_nack_up_vectors() {
+    use oxsfud::r#pub::{NACK_JUMP, NACK_MAX, NackUp};
+    let v = load("rtcp.json");
+    let k = &v["nack_up_constants"];
+    assert_eq!(NACK_JUMP, k["jump"].as_i64().unwrap_or(0), "정:RULE-RTCP-NACK-UP 수치 jump — 원천 RTCP.model.NACK_UP");
+    assert_eq!(NACK_MAX as u64, k["max"].as_u64().unwrap_or(0), "정:RULE-RTCP-NACK-UP 수치 max");
+    let mut n_cases = 0;
+    for c in cases(&v, "nack_up") {
+        n_cases += 1;
+        let name = c["name"].as_str().unwrap_or("");
+        let mut n = NackUp::default();
+        for (i, s) in c["steps"].as_array().unwrap_or(&vec![]).iter().enumerate() {
+            let a = n.on_packet(s["seq"].as_u64().unwrap_or(0) as u16, s["at_ms"].as_u64().unwrap_or(0));
+            assert_eq!(a.name(), s["arrival"].as_str().unwrap_or(""), "S-sym-RULE-RTCP-NACK-UP-2 — 도착 판정 {name} 걸음 {i}");
+            assert_eq!(a.repair_passes(), s["passes"].as_bool().unwrap_or(false), "S-sym-RULE-RTCP-NACK-UP-2 — 복원본을 흘리나 {name} 걸음 {i}");
+            let holes: Vec<u64> = s["holes"].as_array().unwrap_or(&vec![]).iter().filter_map(|x| x.as_u64()).collect();
+            assert_eq!(n.holes().iter().map(|x| *x as u64).collect::<Vec<_>>(), holes, "S-sym-RULE-RTCP-NACK-UP-1 — 결손 장부 {name} 걸음 {i}");
+        }
+    }
+    assert!(n_cases > 0, "정:RULE-RTCP-NACK-UP 벡터가 비었다");
 }
 
 #[test]

@@ -18,6 +18,7 @@ pub const CACHE: usize = 1024;
 pub const NACK_RESEND_MS: u64 = 200;
 pub const NACK_GIVEUP_MS: u64 = 1_000;
 pub const NACK_MAX: usize = 128;
+pub const NACK_JUMP: i64 = 128;
 pub const PER_REQUEST: usize = 8;
 pub const PER_PERSON: usize = 16;
 
@@ -192,20 +193,69 @@ pub struct NackUp {
     pub pkts: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Arrival {
+    First,
+    Newer,
+    Filled,
+    Seen,
+}
+
+impl Arrival {
+    pub fn name(self) -> &'static str {
+        match self {
+            Arrival::First => "first",
+            Arrival::Newer => "newer",
+            Arrival::Filled => "filled",
+            Arrival::Seen => "seen",
+        }
+    }
+
+    pub fn repair_passes(self) -> bool {
+        self != Arrival::Seen
+    }
+}
+
+pub enum Rtx {
+    Original(u16, Vec<u8>),
+    Padding,
+    Malformed,
+}
+
+pub fn rtx_original(plain: &[u8], hlen: usize, pt: u8, ssrc: u32) -> Rtx {
+    if hlen < 12 || plain.len() < hlen {
+        return Rtx::Malformed;
+    }
+    let pad = if plain[0] & 0x20 != 0 { plain[plain.len() - 1] as usize } else { 0 };
+    if plain[0] & 0x20 != 0 && (pad == 0 || hlen + pad > plain.len()) {
+        return Rtx::Malformed;
+    }
+    if plain.len() - hlen - pad < 2 {
+        return Rtx::Padding;
+    }
+    let osn = u16::from_be_bytes([plain[hlen], plain[hlen + 1]]);
+    let mut out = Vec::with_capacity(plain.len());
+    out.extend_from_slice(&plain[..hlen]);
+    out[1] = (out[1] & 0x80) | (pt & 0x7f);
+    out[2..4].copy_from_slice(&osn.to_be_bytes());
+    out[8..12].copy_from_slice(&ssrc.to_be_bytes());
+    out.extend_from_slice(&plain[hlen + 2..]);
+    Rtx::Original(osn, out)
+}
+
 impl NackUp {
-    pub fn on_packet(&mut self, seq: u16, now: u64) {
+    pub fn on_packet(&mut self, seq: u16, now: u64) -> Arrival {
         let Some(l) = self.last else {
             self.last = Some(seq);
             self.base = seq as i64;
-            return;
+            return Arrival::First;
         };
         let u = self.base + (seq.wrapping_sub(l) as i16) as i64;
         let diff = u - self.base;
         if diff <= 0 {
-            self.missing.remove(&u);
-            return;
+            return if self.missing.remove(&u).is_some() { Arrival::Filled } else { Arrival::Seen };
         }
-        if diff > 1 && diff < 128 {
+        if diff > 1 && diff < NACK_JUMP {
             for s in (self.base + 1)..u {
                 if self.missing.len() >= NACK_MAX {
                     break;
@@ -215,6 +265,11 @@ impl NackUp {
         }
         self.last = Some(seq);
         self.base = u;
+        Arrival::Newer
+    }
+
+    pub fn holes(&self) -> Vec<u16> {
+        self.missing.keys().map(|s| s.rem_euclid(65_536) as u16).collect()
     }
 
     pub fn due(&mut self, now: u64) -> (Vec<u16>, bool) {
@@ -340,13 +395,17 @@ impl PubTrack {
         None
     }
 
-    pub fn on_repair(&self, rtp: &Rtp<'_>) {
-        if let Ok(mut n) = self.nack.lock() {
-            n.on_packet(rtp.seq, common::now_ms());
-        }
-        if let Ok(mut c) = self.cache.lock() {
+    pub fn on_repair(&self, rtp: &Rtp<'_>) -> Arrival {
+        let arrival = match self.nack.lock() {
+            Ok(mut n) => n.on_packet(rtp.seq, common::now_ms()),
+            Err(_) => return Arrival::Seen,
+        };
+        if arrival.repair_passes()
+            && let Ok(mut c) = self.cache.lock()
+        {
             c.put(rtp.seq, Bytes::copy_from_slice(rtp.raw));
         }
+        arrival
     }
 
     pub fn blocked_notify(&self, at_us: u64) -> bool {
@@ -358,18 +417,8 @@ impl PubTrack {
         false
     }
 
-    pub fn unwrap_rtx(&self, plain: &[u8], hlen: usize) -> Option<(u16, Vec<u8>)> {
-        if plain.len() < hlen + 2 || hlen < 12 {
-            return None;
-        }
-        let osn = u16::from_be_bytes([plain[hlen], plain[hlen + 1]]);
-        let mut out = Vec::with_capacity(plain.len());
-        out.extend_from_slice(&plain[..hlen]);
-        out[1] = (out[1] & 0x80) | (self.stream.pt & 0x7f);
-        out[2..4].copy_from_slice(&osn.to_be_bytes());
-        out[8..12].copy_from_slice(&self.ssrc.to_be_bytes());
-        out.extend_from_slice(&plain[hlen + 2..]);
-        Some((osn, out))
+    pub fn unwrap_rtx(&self, plain: &[u8], hlen: usize) -> Rtx {
+        rtx_original(plain, hlen, self.stream.pt, self.ssrc)
     }
 }
 
@@ -515,6 +564,39 @@ mod tests {
         n.due(50);
         n.due(200);
         assert_eq!((n.sent, n.pkts), (6, 2));
+    }
+
+    #[test]
+    fn rtx_restores_the_original_only_when_it_carries_one() {
+        let head = [0x80u8, 97, 0, 7, 0, 0, 0, 9, 0, 0, 0, 2];
+        let mut media = head.to_vec();
+        media.extend_from_slice(&[0x12, 0x34, 0xaa, 0xbb]);
+        match rtx_original(&media, 12, 96, 1) {
+            Rtx::Original(osn, b) => {
+                assert_eq!(osn, 0x1234, "정:RULE-RTCP-NACK-UP the first two payload bytes are the original seq");
+                assert_eq!(b, vec![0x80, 96, 0x12, 0x34, 0, 0, 0, 9, 0, 0, 0, 1, 0xaa, 0xbb]);
+            }
+            _ => panic!("정:RULE-RTCP-NACK-UP an RTX packet with a payload restores its original"),
+        }
+        let mut pad = head.to_vec();
+        pad[0] = 0xa0;
+        pad.extend_from_slice(&[0u8; 31]);
+        pad.push(32);
+        assert!(matches!(rtx_original(&pad, 12, 96, 1), Rtx::Padding), "S-sym-RULE-RTCP-NACK-UP-3 padding only — its padding bytes are not an original seq");
+        let mut both = head.to_vec();
+        both[0] = 0xa0;
+        both.extend_from_slice(&[0x00, 0x05, 0xcc, 0, 0, 3]);
+        assert!(matches!(rtx_original(&both, 12, 96, 1), Rtx::Original(5, _)), "정:RULE-RTCP-NACK-UP payload plus padding still carries an original");
+        assert!(matches!(rtx_original(&head, 12, 96, 1), Rtx::Padding), "S-sym-RULE-RTCP-NACK-UP-3 an empty RTX packet carries nothing");
+        let mut bad = head.to_vec();
+        bad[0] = 0xa0;
+        bad.extend_from_slice(&[1, 2, 0]);
+        assert!(matches!(rtx_original(&bad, 12, 96, 1), Rtx::Malformed), "정:RULE-RTCP-NACK-UP a zero padding count is malformed");
+        let mut over = head.to_vec();
+        over[0] = 0xa0;
+        over.extend_from_slice(&[1, 2, 200]);
+        assert!(matches!(rtx_original(&over, 12, 96, 1), Rtx::Malformed), "정:RULE-RTCP-NACK-UP a padding count past the packet is malformed");
+        assert!(matches!(rtx_original(&head[..8], 12, 96, 1), Rtx::Malformed));
     }
 
     #[test]

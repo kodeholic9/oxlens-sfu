@@ -231,6 +231,7 @@ pub struct Tag {
     pub id: i64,
     pub min_probes: i64,
     pub min_bytes: i64,
+    pub bitrate: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -467,7 +468,7 @@ impl Prober {
             self.queue.pop_front();
         }
         self.queue.push_back(Queued {
-            tag: Tag { id: c.id, min_probes: c.min_probes, min_bytes: (c.bitrate * c.duration_us + 4_000_000) / 8_000_000 },
+            tag: Tag { id: c.id, min_probes: c.min_probes, min_bytes: (c.bitrate * c.duration_us + 4_000_000) / 8_000_000, bitrate: c.bitrate },
             bitrate: c.bitrate,
             delta_us: c.delta_us,
             requested_at: c.at_us,
@@ -600,6 +601,7 @@ impl ProbeEstimator {
         if recv < scale(send, PE_UNSATURATED) {
             bitrate = scale(recv, PE_UTILIZATION);
         }
+        let bitrate = bitrate.min(tag.bitrate);
         self.estimate = Some(bitrate);
         self.last = Some(Measured { id: tag.id, send, recv, result: Some(bitrate) });
         Some(bitrate)
