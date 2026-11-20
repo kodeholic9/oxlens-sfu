@@ -680,8 +680,8 @@ pub fn send_rtx(w: &Worker, row: &DownRow, seqs: &[u16]) {
             crate::ops::drop_count("rtx_gate");
             continue;
         }
-        let (src_seq, ts_off) = match row.rw.lock() {
-            Ok(rw) => (rw.unmap_nack(out_seq), rw.ts_off),
+        let (src_seq, ts_off, rw_pic) = match row.rw.lock() {
+            Ok(rw) => (rw.unmap_nack(out_seq), rw.ts_off, rw.clone()),
             Err(_) => continue,
         };
         let Some(src_seq) = src_seq else {
@@ -705,6 +705,13 @@ pub fn send_rtx(w: &Worker, row: &DownRow, seqs: &[u16]) {
         let mut payload = Vec::with_capacity(orig.len() - rtp.hlen + 2);
         payload.extend_from_slice(&out_seq.to_be_bytes());
         payload.extend_from_slice(&orig[rtp.hlen..]);
+        if track.stream.kind == Kind::Video
+            && track.stream.codec_name().eq_ignore_ascii_case("VP8")
+            && let Some(d) = crate::fwd::core::vp8_pic(&orig[rtp.hlen..])
+        {
+            let (pid, tl0) = rw_pic.pic_out(Some(&d));
+            crate::fwd::core::vp8_write(&mut payload[2..], &d, pid, tl0);
+        }
         let csrc = row.conn.source_tag.then_some(track.stream.csrc);
         let b = Built { pt: rtx_pt, seq: rseq, ts: rtp.ts.wrapping_add(ts_off), ssrc: rtx_ssrc, csrc, marker: rtp.marker, payload: &payload, probe: false, padding: false };
         if send_built(w, m, row, b) {

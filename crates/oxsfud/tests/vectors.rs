@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use oxsfud::flr::bind::{Effect, Slot};
-use oxsfud::fwd::core::{Rewriter, covers, pt_byte1, serial_after};
+use oxsfud::fwd::core::{Rewriter, covers, pt_byte1, serial_after, vp8_pic, vp8_write};
 use oxsfud::rtcp::core::{RecvStats, SYM_LARGE, SYM_NONE, SYM_SMALL, TwccRecv};
 use oxsfud::sim::core::{Aimd, Trendline, Usage};
 use oxsfud::sub::ext::{ExtInput, ExtTable, build};
@@ -71,6 +71,43 @@ fn fwd_rewrite_vectors() {
         for n in c["nack"].as_array().unwrap_or(&vec![]) {
             let got = rw.unmap_nack(n["out_seq"].as_u64().unwrap_or(0) as u16).map(|x| x as u64);
             assert_eq!(got, n["in_seq"].as_u64(), "S-sym-IMPL-FWD-SOURCE-SWITCH-2 — NACK 되짚기 {name}");
+        }
+    }
+    for c in cases(&v, "vp8") {
+        let name = c["name"].as_str().unwrap_or("");
+        let mut rw = Rewriter::new(90000);
+        for (i, s) in c["steps"].as_array().unwrap_or(&vec![]).iter().enumerate() {
+            let payload = hex(s["payload"].as_str().unwrap_or(""));
+            let pic = vp8_pic(&payload);
+            assert!(pic.is_some(), "S-sym-IMPL-FWD-SOURCE-SWITCH-7 — VP8 descriptor 읽기 {name} #{i}");
+            let m = rw.map_pic(
+                s["src"].as_u64().unwrap_or(0),
+                s["seq"].as_u64().unwrap_or(0) as u16,
+                s["ts"].as_u64().unwrap_or(0) as u32,
+                s["at_ms"].as_u64().unwrap_or(0),
+                1,
+                pic.as_ref(),
+            );
+            assert_eq!(m.map(|x| x.seq as u64), s["out_seq"].as_u64(), "S-sym-IMPL-FWD-SOURCE-SWITCH-1 — out_seq {name} #{i}");
+            assert_eq!(m.and_then(|x| x.pid).map(|x| x as u64), s["out_pid"].as_u64(), "S-sym-IMPL-FWD-SOURCE-SWITCH-7① — picture ID {name} #{i}");
+            assert_eq!(m.and_then(|x| x.tl0).map(|x| x as u64), s["out_tl0"].as_u64(), "S-sym-IMPL-FWD-SOURCE-SWITCH-7① — TL0PICIDX {name} #{i}");
+            if let (Some(m), Some(d), Some(want)) = (m, pic, s["out_payload"].as_str()) {
+                let mut out = payload.clone();
+                vp8_write(&mut out, &d, m.pid, m.tl0);
+                assert_eq!(out, hex(want), "S-sym-IMPL-FWD-SOURCE-SWITCH-7② — 다시 쓴 descriptor {name} #{i}");
+            }
+        }
+        for r in c["rtx"].as_array().unwrap_or(&vec![]) {
+            let got = rw.unmap_nack(r["out_seq"].as_u64().unwrap_or(0) as u16).map(|x| x as u64);
+            assert_eq!(got, r["in_seq"].as_u64(), "S-sym-IMPL-FWD-SOURCE-SWITCH-2 — 재전송 되짚기 {name}");
+            if let Some(want) = r["out_payload"].as_str() {
+                let payload = hex(r["payload"].as_str().unwrap_or(""));
+                let d = vp8_pic(&payload).expect("descriptor");
+                let (pid, tl0) = rw.pic_out(Some(&d));
+                let mut out = payload.clone();
+                vp8_write(&mut out, &d, pid, tl0);
+                assert_eq!(out, hex(want), "S-sym-IMPL-FWD-SOURCE-SWITCH-7③ — 재전송도 같은 값 {name}");
+            }
         }
     }
     for s in cases(&v, "serial") {

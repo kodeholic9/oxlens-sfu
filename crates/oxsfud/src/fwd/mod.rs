@@ -280,6 +280,7 @@ pub struct Pkt {
     pub transit: bool,
     pub track: Option<Arc<crate::r#pub::PubTrack>>,
     pub ep: u64,
+    pub pic: Option<core::Vp8Pic>,
 }
 
 pub struct Egress {
@@ -585,6 +586,7 @@ fn forward(w: &Arc<Worker>, tr: &Arc<Transport>, track: &Arc<crate::r#pub::PubTr
         transit: true,
         track: Some(track.clone()),
         ep: 0,
+        pic: if stream.kind == Kind::Video && stream.codec_name().eq_ignore_ascii_case("VP8") { core::vp8_pic(payload) } else { None },
     };
     if keyframe {
         track.last_keyframe_ms.store(now_ms, Ordering::Release);
@@ -713,7 +715,7 @@ pub fn send_down(w: &Worker, row: &DownRow, pkt: &Pkt) {
                 }
                 return;
             }
-            rw.map(pkt.src_key, pkt.seq, pkt.ts, now_ms, pkt.covers)
+            rw.map_pic(pkt.src_key, pkt.seq, pkt.ts, now_ms, pkt.covers, pkt.pic.as_ref())
         }
         Err(_) => return,
     };
@@ -747,7 +749,11 @@ pub fn send_down(w: &Worker, row: &DownRow, pkt: &Pkt) {
     if n > 0 {
         out[0] |= 0x10;
     }
+    let body = out.len();
     out.extend_from_slice(&pkt.data[pkt.hlen..]);
+    if let Some(d) = &pkt.pic {
+        core::vp8_write(&mut out[body..], d, mapped.pid, mapped.tl0);
+    }
     let enc = match conn.srtp_tx.lock() {
         Ok(mut g) => match g.as_mut() {
             Some(ctx) => ctx.encrypt_rtp(&out),
