@@ -289,16 +289,25 @@ fn stat() {
     }
     for p in s.peers() {
         let tx = &p.subscribe.tx;
-        common::log::emit(
-            common::log::Line::new(common::log::Kind::Stat)
-                .key("session", &p.session)
-                .key("user", &p.user)
-                .rec("packets_sent", tx.packets.load(Ordering::Relaxed))
-                .rec("bytes_sent", tx.bytes.load(Ordering::Relaxed))
-                .rec("retransmitted_packets_sent", tx.retransmitted.load(Ordering::Relaxed))
-                .rec("nack_count", tx.nack_in.load(Ordering::Relaxed))
-                .rec("pli_count", tx.pli_in.load(Ordering::Relaxed)),
-        );
+        let mut l = common::log::Line::new(common::log::Kind::Stat)
+            .key("session", &p.session)
+            .key("user", &p.user)
+            .rec("packets_sent", tx.packets.load(Ordering::Relaxed))
+            .rec("bytes_sent", tx.bytes.load(Ordering::Relaxed))
+            .rec("retransmitted_packets_sent", tx.retransmitted.load(Ordering::Relaxed))
+            .rec("nack_count", tx.nack_in.load(Ordering::Relaxed))
+            .rec("pli_count", tx.pli_in.load(Ordering::Relaxed));
+        if crate::sim::mode() == crate::sim::Mode::V2
+            && let Ok(sim) = p.subscribe.rtc.sim.lock()
+        {
+            l = l
+                .rec("bwe_estimate_bps", sim.aimd.bps())
+                .rec("bwe_measured", sim.aimd.measured)
+                .rec("bwe_normal", sim.usage_seen.normal)
+                .rec("bwe_overuse", sim.usage_seen.overuse)
+                .rec("bwe_underuse", sim.usage_seen.underuse);
+        }
+        common::log::emit(l);
     }
     let peers = s.peers();
     common::log::emit(

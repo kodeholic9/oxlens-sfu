@@ -270,6 +270,82 @@ impl Trendline {
     }
 }
 
+pub const IA_GROUP_US: i64 = 5_000;
+pub const IA_BURST_US: i64 = 5_000;
+pub const IA_MAX_BURST_US: i64 = 100_000;
+pub const IA_OFFSET_RESET_US: i64 = 3_000_000;
+pub const IA_REORDER_RESET: u32 = 3;
+
+#[derive(Debug, Clone, Copy)]
+struct ArrivalGroup {
+    first_send: i64,
+    send: i64,
+    first_arrival: i64,
+    complete: i64,
+    system: i64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct InterArrival {
+    cur: Option<ArrivalGroup>,
+    prev: Option<ArrivalGroup>,
+    reordered: u32,
+}
+
+impl InterArrival {
+    pub fn push(&mut self, send: i64, arrival: i64, system: i64) -> Option<(f64, f64)> {
+        let fresh = ArrivalGroup { first_send: send, send, first_arrival: arrival, complete: arrival, system };
+        let Some(c) = self.cur else {
+            self.cur = Some(fresh);
+            return None;
+        };
+        if c.first_send > send {
+            return None;
+        }
+        if !self.belongs_to_burst(&c, send, arrival) && send - c.first_send > IA_GROUP_US {
+            let mut out = None;
+            if let Some(p) = self.prev {
+                let send_d = c.send - p.send;
+                let arr_d = c.complete - p.complete;
+                let sys_d = c.system - p.system;
+                if arr_d - sys_d >= IA_OFFSET_RESET_US {
+                    self.reset();
+                    return None;
+                }
+                if arr_d < 0 {
+                    self.reordered += 1;
+                    if self.reordered >= IA_REORDER_RESET {
+                        self.reset();
+                    }
+                    return None;
+                }
+                self.reordered = 0;
+                out = Some((arr_d as f64 / 1000.0, send_d as f64 / 1000.0));
+            }
+            self.prev = Some(c);
+            self.cur = Some(fresh);
+            return out;
+        }
+        self.cur = Some(ArrivalGroup { send: c.send.max(send), complete: arrival, system, ..c });
+        None
+    }
+
+    fn belongs_to_burst(&self, c: &ArrivalGroup, send: i64, arrival: i64) -> bool {
+        let arr_d = arrival - c.complete;
+        let send_d = send - c.send;
+        if send_d == 0 {
+            return true;
+        }
+        arr_d - send_d < 0 && arr_d <= IA_BURST_US && arrival - c.first_arrival < IA_MAX_BURST_US
+    }
+
+    fn reset(&mut self) {
+        self.cur = None;
+        self.prev = None;
+        self.reordered = 0;
+    }
+}
+
 pub const P_H_BPS: f64 = 1_650_000.0;
 pub const P_L_BPS: f64 = 250_000.0;
 pub const P_HEADROOM: f64 = 1.2;

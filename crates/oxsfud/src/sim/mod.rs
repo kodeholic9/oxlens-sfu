@@ -14,7 +14,7 @@ use crate::fwd::rt::{Worker, media};
 use crate::fwd::{DownRow, LAYER_PAUSE};
 use crate::link::Transport;
 use crate::r#pub::PubTrack;
-use core::{Aimd, P_L_BPS, Policy, Signals, Trendline, Usage};
+use core::{Aimd, InterArrival, P_L_BPS, Policy, Signals, Trendline, Usage};
 
 pub const LOSS_FRESH_MS: u64 = 6_000;
 pub const PENDING_MS: u64 = 10_000;
@@ -25,7 +25,6 @@ pub const V2_STALE_MS: u64 = 1_000;
 pub const START_BPS: u64 = 300_000;
 pub const DECREASE_GAP_MS: u64 = 300;
 pub const PAD_BYTES: usize = 224;
-pub const BURST_US: i64 = 5_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -216,8 +215,26 @@ pub struct ConnSim {
     pub fb_at: u64,
     pub last_decrease: u64,
     pub acked: VecDeque<(u64, usize)>,
-    pub group: Option<(i64, i64, i64, i64)>,
+    pub arrival: InterArrival,
     pub probe: Option<Probe>,
+    pub usage_seen: UsageSeen,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UsageSeen {
+    pub normal: u64,
+    pub overuse: u64,
+    pub underuse: u64,
+}
+
+impl UsageSeen {
+    pub fn note(&mut self, u: Usage) {
+        match u {
+            Usage::Normal => self.normal += 1,
+            Usage::Overuse => self.overuse += 1,
+            Usage::Underuse => self.underuse += 1,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -250,8 +267,9 @@ impl Default for ConnSim {
             fb_at: 0,
             last_decrease: 0,
             acked: VecDeque::new(),
-            group: None,
+            arrival: InterArrival::default(),
             probe: None,
+            usage_seen: UsageSeen::default(),
         }
     }
 }
@@ -413,17 +431,9 @@ pub fn on_twcc(tr: &Arc<Transport>, _t: &crate::sub::Table, body: &[u8]) {
             p.first_at.get_or_insert(*at);
             p.last_at = Some(*at);
         }
-        match s.group {
-            None => s.group = Some((send, *at, send, *at)),
-            Some((g_send0, g_recv0, _g_send, _g_recv)) if send - g_send0 <= BURST_US => {
-                s.group = Some((g_send0, g_recv0, send, *at));
-            }
-            Some((_, _, ps, pr)) => {
-                let recv_d = (*at - pr) as f64 / 1000.0;
-                let send_d = (send - ps) as f64 / 1000.0;
-                usage = s.trend.update(recv_d, send_d, *at as f64 / 1000.0);
-                s.group = Some((send, *at, send, *at));
-            }
+        if let Some((recv_d, send_d)) = s.arrival.push(send, *at, now as i64 * 1000) {
+            usage = s.trend.update(recv_d, send_d, *at as f64 / 1000.0);
+            s.usage_seen.note(usage);
         }
     }
     while s.acked.front().map(|(t, _)| now.saturating_sub(*t) > 1_000).unwrap_or(false) {

@@ -222,6 +222,34 @@ fn sim_aimd_vectors() {
 }
 
 #[test]
+fn sim_arrival_vectors() {
+    use oxsfud::sim::core::*;
+    let v = load("sim.json");
+    let k = &v["arrival_constants"];
+    let n = |key: &str| k[key].as_i64().unwrap_or(-1);
+    assert_eq!(IA_GROUP_US, n("groupUs"), "정:RULE-SIM-TICK 묶음 수치 groupUs — 원천 SIM.model.ARRIVAL");
+    assert_eq!(IA_BURST_US, n("burstUs"), "정:RULE-SIM-TICK 묶음 수치 burstUs");
+    assert_eq!(IA_MAX_BURST_US, n("maxBurstUs"), "정:RULE-SIM-TICK 묶음 수치 maxBurstUs");
+    assert_eq!(IA_OFFSET_RESET_US, n("offsetResetUs"), "정:RULE-SIM-TICK 묶음 수치 offsetResetUs");
+    assert_eq!(IA_REORDER_RESET as i64, n("reorderReset"), "정:RULE-SIM-TICK 묶음 수치 reorderReset");
+    for c in cases(&v, "arrival") {
+        let name = c["name"].as_str().unwrap_or("");
+        let mut ia = InterArrival::default();
+        for (i, s) in c["steps"].as_array().unwrap_or(&vec![]).iter().enumerate() {
+            let got = ia.push(s["send_us"].as_i64().unwrap_or(0), s["arrival_us"].as_i64().unwrap_or(0), s["system_us"].as_i64().unwrap_or(0));
+            let want = s["out"].as_array().map(|a| (a[0].as_f64().unwrap_or(f64::NAN), a[1].as_f64().unwrap_or(f64::NAN)));
+            match (got, want) {
+                (Some((r, sd)), Some((wr, ws))) => assert!(
+                    (r - wr).abs() < 1e-9 && (sd - ws).abs() < 1e-9,
+                    "S-sym-RULE-SIM-TICK-7 — 묶음 간 델타 {name} 걸음 {i}: 받은 {r} · 보낸 {sd} ≠ {wr} · {ws}"
+                ),
+                (g, w) => assert_eq!(g.is_some(), w.is_some(), "S-sym-RULE-SIM-TICK-7 — 묶음이 끝났나 {name} 걸음 {i}"),
+            }
+        }
+    }
+}
+
+#[test]
 fn sim_policy_vectors() {
     use oxsfud::sim::core::*;
     let v = load("sim.json");
