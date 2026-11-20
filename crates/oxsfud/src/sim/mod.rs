@@ -511,6 +511,13 @@ fn apply(tr: &Transport, s: &mut ConnSim, sim: &Rows, fixed: &Rows, st: bwe::Ste
     }
 }
 
+pub fn pad_payload(len: usize) -> Vec<u8> {
+    let len = len.clamp(1, PAD_BYTES);
+    let mut payload = vec![0u8; len];
+    payload[len - 1] = len as u8;
+    payload
+}
+
 fn pad(w: &Worker, row: &DownRow, len: usize, cluster: u32) -> Option<usize> {
     let m = media()?;
     let rtx_ssrc = row.rtx_ssrc?;
@@ -518,16 +525,11 @@ fn pad(w: &Worker, row: &DownRow, len: usize, cluster: u32) -> Option<usize> {
     if rtx_pt == 0 {
         return None;
     }
-    let (osn, ts) = {
+    let ts = {
         let rw = row.rw.lock().ok()?;
-        let l = rw.last?;
-        (l.seq, l.ts)
+        rw.last?.ts
     };
-    let len = len.clamp(1, PAD_BYTES);
-    let mut payload = Vec::with_capacity(len + 2);
-    payload.extend_from_slice(&osn.to_be_bytes());
-    payload.extend(std::iter::repeat_n(0u8, len - 1));
-    payload.push(len as u8);
+    let payload = pad_payload(len);
     let seq = row.rtx_seq.fetch_add(1, Ordering::AcqRel);
     let b = crate::rtcp::Built { pt: rtx_pt, seq, ts, ssrc: rtx_ssrc, csrc: None, marker: false, payload: &payload, padding: true, cluster };
     crate::rtcp::send_built(w, m, row, b)
@@ -550,7 +552,7 @@ fn shoot(w: &Worker, tr: &Arc<Transport>, row: &DownRow) -> Option<u64> {
         {
             bytes += n as i64 + PATH_OVERHEAD;
         }
-        let len = (shot.bytes - bytes - PAD_OVERHEAD - 2).clamp(1, PAD_BYTES as i64) as usize;
+        let len = (shot.bytes - bytes - PAD_OVERHEAD).clamp(1, PAD_BYTES as i64) as usize;
         if let Some(n) = pad(w, row, len, shot.tag.id as u32) {
             bytes += n as i64 + PATH_OVERHEAD;
         }
@@ -571,7 +573,7 @@ fn fill(w: &Worker, tr: &Arc<Transport>, row: &DownRow) {
     };
     let mut left = due;
     while left > 0 {
-        let len = (left - PAD_OVERHEAD - 2).clamp(1, PAD_BYTES as i64) as usize;
+        let len = (left - PAD_OVERHEAD).clamp(1, PAD_BYTES as i64) as usize;
         let Some(n) = pad(w, row, len, 0) else { return };
         left -= n as i64 + PATH_OVERHEAD;
     }
@@ -753,6 +755,17 @@ mod tests {
     fn names() {
         assert_eq!(layer_name(0), "l");
         assert_eq!(layer_name(LAYER_PAUSE), "pause");
+    }
+
+    #[test]
+    fn padding_carries_no_osn() {
+        for len in [0usize, 1, 2, 100, PAD_BYTES, PAD_BYTES + 50] {
+            let p = pad_payload(len);
+            let n = len.clamp(1, PAD_BYTES);
+            assert_eq!(p.len(), n, "정:RULE-SIM-TICK padding only");
+            assert_eq!(p[n - 1] as usize, n, "정:RULE-SIM-TICK RTP padding count covers the whole payload — no OSN left for the receiver");
+            assert!(p[..n - 1].iter().all(|b| *b == 0));
+        }
     }
 
     #[test]
