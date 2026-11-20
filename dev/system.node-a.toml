@@ -44,8 +44,8 @@ id = "rec-node-a"
 kind = "process"
 order = 3
 role = "rec"
-addr = "127.0.0.1:50071"
-cmd = ["./target/debug/oxrecd", "--grpc-listen", "127.0.0.1:50071"]
+addr = "127.0.0.1:50161"
+cmd = ["./target/debug/oxrecd", "--grpc-listen", "127.0.0.1:50161"]
 
 [data]
 root = "/tmp/oxlens/data"

@@ -6,7 +6,7 @@
     python3 dev/gen_nodes.py 3
 
 로그 — node 마다 로거 유닛 하나(hub 안 inproc — 정:RULE-OPS-LOGGER) · {LOG_ROOT}/{node}/ox.log.{날짜} · 소켓 {LOG_ROOT}/{node}/log.sock
-포트 — hub HTTP 1974+i · sfu gRPC 50061+i · sfu UDP 20000+i · sfu TCP 20000+i(정:IMPL — TCP 전송로 · 설정됐을 때만 광고) · 버스 7447+i · 녹음 유닛 gRPC 50071+i
+포트 — hub HTTP 1974+i · sfu gRPC 50061+i · sfu UDP 20000+i · sfu TCP 20000+i(정:IMPL — TCP 전송로 · 설정됐을 때만 광고) · 버스 7447+i · 녹음 유닛 gRPC 50161+i(50071+i 는 용량 측정기 oxcap 몫 — 20261120 겹침)
 녹음 유닛 — node 마다 하나(정:IMPL-OPS-REC-UNIT · role = "rec" · Handle addr = --grpc-listen) · [data] root = {DATA_ROOT} — 2층 하네스는 회차마다 이 자리를 ~/oxlens-data/runs/<회차 ID>/ 로 가리키는 링크로 바꾼다(20261118v §8)
 """
 import sys
@@ -76,8 +76,8 @@ id = "rec-{me}"
 kind = "process"
 order = 3
 role = "rec"
-addr = "127.0.0.1:{50071 + i}"
-cmd = ["./target/debug/oxrecd", "--grpc-listen", "127.0.0.1:{50071 + i}"]
+addr = "127.0.0.1:{50161 + i}"
+cmd = ["./target/debug/oxrecd", "--grpc-listen", "127.0.0.1:{50161 + i}"]
 
 [data]
 root = "{DATA_ROOT}"
