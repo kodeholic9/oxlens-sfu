@@ -587,6 +587,9 @@ pub fn on_rtcp(w: &Arc<Worker>, tr: &Arc<Transport>, plain: &[u8]) {
                 match table.as_ref().and_then(|t| t.row_by_ssrc(ms)) {
                     Some((row, _)) => {
                         tr.tx.pli_in.fetch_add(1, Ordering::Relaxed);
+                        if let Ok(mut l) = row.nack.lock() {
+                            l.on_key_request();
+                        }
                         if let Some(src) = row.src_track.load_full() {
                             request_pli(&src, false);
                         }
@@ -670,15 +673,20 @@ pub fn send_rtx(w: &Worker, row: &DownRow, seqs: &[u16]) {
             crate::ops::drop_count("rtx_cache_miss");
             continue;
         };
+        let Some(rtp) = parse_rtp(&orig) else { continue };
+        let age_ms = rw_pic.last.map(|l| l.ts.wrapping_sub(rtp.ts.wrapping_add(ts_off)) as u64 * 1000 / row.clock.max(1) as u64).unwrap_or(0);
         let step = match row.nack.lock() {
-            Ok(mut l) => l.step(out_seq, now),
+            Ok(mut l) => l.step(out_seq, now, age_ms),
             Err(_) => continue,
         };
         if !step.send {
-            crate::ops::drop_count("rtx_repeat");
+            crate::ops::drop_count(match step.why {
+                crate::rtcp::nack::Why::WaitKey => "rtx_wait_key",
+                crate::rtcp::nack::Why::Old => "rtx_old",
+                _ => "rtx_repeat",
+            });
             continue;
         }
-        let Some(rtp) = parse_rtp(&orig) else { continue };
         let rseq = row.rtx_seq.fetch_add(1, Ordering::AcqRel);
         let mut payload = Vec::with_capacity(orig.len() - rtp.hlen + 2);
         payload.extend_from_slice(&out_seq.to_be_bytes());

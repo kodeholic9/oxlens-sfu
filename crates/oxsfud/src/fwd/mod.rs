@@ -756,6 +756,11 @@ pub fn send_down(w: &Worker, row: &DownRow, pkt: &Pkt) {
     if let Some(d) = &pkt.pic {
         core::vp8_write(&mut out[body..], d, mapped.pid, mapped.tl0);
     }
+    if pkt.keyframe
+        && let Ok(mut l) = row.nack.lock()
+    {
+        l.on_key_sent();
+    }
     let enc = match conn.srtp_tx.lock() {
         Ok(mut g) => match g.as_mut() {
             Some(ctx) => ctx.encrypt_rtp(&out),

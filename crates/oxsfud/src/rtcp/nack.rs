@@ -1,11 +1,12 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.6 · 정:RULE-RTCP-NACK-DOWN · 정:RULE-SIM-TICK · model: claude-opus-5-5
-//! 하향 NACK 장부 — 다운링크 줄마다 최근 seq 의 재전송 횟수 · 마지막으로 청한 시각. 재전송 여부(seq 마다 상한)와 반복 NACK 셈을 한 장부가 정한다. 시각은 인자.
+//! 하향 NACK 장부 — 다운링크 줄마다 최근 seq 의 재전송 횟수 · 마지막으로 청한 시각 · 키프레임 기다림. 재전송 여부(키프레임 기다림 · 나이 상한 · seq 마다 상한)와 반복 NACK 셈을 한 장부가 정한다. 시각은 인자.
 
 pub const MAX_PER_SEQ: u8 = 3;
 pub const REPEAT_GAP_MS: u64 = 100;
-pub const SLOTS: usize = 512;
-pub const FRESH_MS: u64 = 1_000;
+pub const SLOTS: usize = 1024;
+pub const FRESH_MS: u64 = 2_000;
+pub const MAX_AGE_MS: u64 = 2_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Why {
@@ -13,6 +14,21 @@ pub enum Why {
     Repeat,
     Soon,
     Limit,
+    Old,
+    WaitKey,
+}
+
+impl Why {
+    pub fn name(self) -> &'static str {
+        match self {
+            Why::First => "first",
+            Why::Repeat => "repeat",
+            Why::Soon => "soon",
+            Why::Limit => "limit",
+            Why::Old => "old",
+            Why::WaitKey => "waitKey",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,16 +49,31 @@ struct Cell {
 pub struct Ledger {
     cells: Vec<Option<Cell>>,
     pub repeats: u64,
+    pub wait_key: bool,
 }
 
 impl Default for Ledger {
     fn default() -> Self {
-        Ledger { cells: vec![None; SLOTS], repeats: 0 }
+        Ledger { cells: vec![None; SLOTS], repeats: 0, wait_key: false }
     }
 }
 
 impl Ledger {
-    pub fn step(&mut self, seq: u16, now: u64) -> Step {
+    pub fn on_key_request(&mut self) {
+        self.wait_key = true;
+    }
+
+    pub fn on_key_sent(&mut self) {
+        self.wait_key = false;
+    }
+
+    pub fn step(&mut self, seq: u16, now: u64, age_ms: u64) -> Step {
+        if self.wait_key {
+            return Step { send: false, repeated: false, why: Why::WaitKey };
+        }
+        if age_ms > MAX_AGE_MS {
+            return Step { send: false, repeated: false, why: Why::Old };
+        }
         let i = seq as usize % SLOTS;
         let fresh = self.cells[i].filter(|c| c.seq == seq && now.saturating_sub(c.at) <= FRESH_MS);
         let Some(c) = fresh else {

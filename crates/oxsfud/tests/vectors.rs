@@ -290,18 +290,24 @@ fn rtcp_nack_ledger_vectors() {
     assert_eq!(REPEAT_GAP_MS, k["repeatGapMs"].as_u64().unwrap_or(0), "정:RULE-RTCP-NACK-DOWN 수치 repeatGapMs");
     assert_eq!(SLOTS as u64, k["slots"].as_u64().unwrap_or(0), "정:RULE-RTCP-NACK-DOWN 수치 slots");
     assert_eq!(FRESH_MS, k["freshMs"].as_u64().unwrap_or(0), "정:RULE-RTCP-NACK-DOWN 수치 freshMs");
+    assert_eq!(MAX_AGE_MS, k["maxAgeMs"].as_u64().unwrap_or(0), "정:RULE-RTCP-NACK-DOWN 수치 maxAgeMs");
     for c in cases(&v, "nack_ledger") {
         let name = c["name"].as_str().unwrap_or("");
         let mut l = Ledger::default();
         for (i, s) in c["steps"].as_array().unwrap_or(&vec![]).iter().enumerate() {
-            let st = l.step(s["seq"].as_u64().unwrap_or(0) as u16, s["at_ms"].as_u64().unwrap_or(0));
-            let why = match st.why {
-                Why::First => "first",
-                Why::Repeat => "repeat",
-                Why::Soon => "soon",
-                Why::Limit => "limit",
-            };
-            assert_eq!(why, s["why"].as_str().unwrap_or(""), "S-sym-RULE-RTCP-NACK-DOWN-2 · S-sym-RULE-SIM-TICK-5 — 장부 판정 {name} 걸음 {i}");
+            match s["event"].as_str() {
+                Some("keyRequest") => {
+                    l.on_key_request();
+                    continue;
+                }
+                Some("keySent") => {
+                    l.on_key_sent();
+                    continue;
+                }
+                _ => {}
+            }
+            let st = l.step(s["seq"].as_u64().unwrap_or(0) as u16, s["at_ms"].as_u64().unwrap_or(0), s["age_ms"].as_u64().unwrap_or(0));
+            assert_eq!(st.why.name(), s["why"].as_str().unwrap_or(""), "S-sym-RULE-RTCP-NACK-DOWN-2 · S-sym-RULE-RTCP-NACK-DOWN-3 · S-sym-RULE-SIM-TICK-5 — 장부 판정 {name} 걸음 {i}");
             assert_eq!(st.send, s["send"].as_bool().unwrap_or(false), "S-sym-RULE-RTCP-NACK-DOWN-2 — 재전송 {name} 걸음 {i}");
             assert_eq!(st.repeated, s["repeated"].as_bool().unwrap_or(false), "S-sym-RULE-SIM-TICK-4 — 반복 셈 {name} 걸음 {i}");
         }
