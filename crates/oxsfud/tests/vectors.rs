@@ -216,7 +216,96 @@ fn sim_aimd_vectors() {
             let out = a.update(s["at_ms"].as_u64().unwrap_or(0), usage, s["acked_bps"].as_u64().unwrap_or(0));
             assert_eq!(out, s["out_bps"].as_u64().unwrap_or(0), "sim 벡터 AIMD {name} @{}", s["at_ms"]);
             assert_eq!(a.near(), s["out_near"].as_bool().unwrap_or(false), "sim 벡터 AIMD near {name} @{}", s["at_ms"]);
+            assert_eq!(a.measured, s["out_measured"].as_bool().unwrap_or(false), "S-sym-RULE-SIM-TICK-6 — 속도 줄이 실측으로 섰나 {name} @{}", s["at_ms"]);
         }
+    }
+}
+
+#[test]
+fn sim_policy_vectors() {
+    use oxsfud::sim::core::*;
+    let v = load("sim.json");
+    let k = &v["policy_constants"];
+    let f = |n: &str| k[n].as_f64().unwrap_or(f64::NAN);
+    for (name, got, want) in [
+        ("hBps", P_H_BPS, f("hBps")),
+        ("lBps", P_L_BPS, f("lBps")),
+        ("headroom", P_HEADROOM, f("headroom")),
+        ("demoteLoss", P_DEMOTE_LOSS, f("demoteLoss")),
+        ("cleanLoss", P_CLEAN_LOSS, f("cleanLoss")),
+        ("nackRatio", P_NACK_RATIO, f("nackRatio")),
+        ("nackWinTicks", P_NACK_WIN_TICKS as f64, f("nackWinTicks")),
+        ("demoteTicks", P_DEMOTE_TICKS as f64, f("demoteTicks")),
+        ("backoffMs", P_BACKOFF_MS as f64, f("backoffMs")),
+        ("backoffMaxMs", P_BACKOFF_MAX_MS as f64, f("backoffMaxMs")),
+        ("collapseMs", P_COLLAPSE_MS as f64, f("collapseMs")),
+        ("graceMs", P_GRACE_MS as f64, f("graceMs")),
+        ("probeJudgeMs", P_PROBE_JUDGE_MS as f64, f("probeJudgeMs")),
+        ("probeGain", P_PROBE_GAIN, f("probeGain")),
+        ("probeMaxBps", P_PROBE_MAX_BPS, f("probeMaxBps")),
+    ] {
+        assert_eq!(got, want, "정:RULE-SIM-TICK 층 판단 수치 {name} — 원천 SIM.model.SIM_POLICY 와 같아야 한다");
+    }
+    for c in cases(&v, "policy") {
+        let name = c["name"].as_str().unwrap_or("");
+        let mut p = Policy::default();
+        for (i, st) in c["steps"].as_array().unwrap_or(&vec![]).iter().enumerate() {
+            let s = &st["in"];
+            let sig = Signals {
+                now: s["now"].as_u64().unwrap_or(0),
+                v2: s["v2"].as_bool().unwrap_or(false),
+                rows: s["rows"].as_u64().unwrap_or(0) as usize,
+                loss: s["loss"].as_f64().unwrap_or(0.0),
+                sent: s["sent"].as_u64().unwrap_or(0),
+                repeats: s["repeats"].as_u64().unwrap_or(0),
+                drops: s["drops"].as_u64().unwrap_or(0),
+                estimate: s["estimate"].as_f64().unwrap_or(0.0),
+                measured: s["measured"].as_bool().unwrap_or(false),
+                overuse: s["overuse"].as_bool().unwrap_or(false),
+                probe: s["probe"].as_f64(),
+            };
+            let d = p.tick(&sig);
+            let o = &st["out"];
+            let reasons: Vec<&str> = d.reasons.iter().map(|r| r.name()).collect();
+            let want: Vec<&str> = o["reasons"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect()).unwrap_or_default();
+            assert_eq!(reasons, want, "S-sym-RULE-SIM-TICK-5 · S-sym-RULE-SIM-TICK-6 — 사유 {name} 걸음 {i}");
+            assert_eq!(d.to.map(|x| x as u64), o["to"].as_u64(), "S-sym-RULE-SIM-TICK-1 — 층 바꿈 {name} 걸음 {i}");
+            assert_eq!(d.promote_by, o["promoteBy"].as_str(), "정:RULE-SIM-TICK — 승격 근거 {name} 걸음 {i}");
+            assert_eq!(d.probe, o["probe"].as_f64(), "S-sym-RULE-SIM-TICK-2 — 프로브 열기 {name} 걸음 {i}");
+            assert_eq!(d.probe_end, o["probeEnd"].as_bool().unwrap_or(false), "S-sym-RULE-SIM-TICK-2 — 프로브 판정 {name} 걸음 {i}");
+            assert_eq!(d.raise, o["raise"].as_f64(), "S-sym-RULE-SIM-TICK-2 — 실증 올림 {name} 걸음 {i}");
+            assert!((d.nack_ratio - o["nackRatio"].as_f64().unwrap_or(f64::NAN)).abs() < 1e-12, "S-sym-RULE-SIM-TICK-4 — 반복 NACK 비율 {name} 걸음 {i}");
+            assert_eq!(p.level as u64, st["level"].as_u64().unwrap_or(9), "정:RULE-SIM-TICK — 층 {name} 걸음 {i}");
+            assert_eq!(p.backoff, st["backoff_ms"].as_u64().unwrap_or(0), "S-sym-RULE-SIM-TICK-1 — backoff {name} 걸음 {i}");
+        }
+    }
+}
+
+#[test]
+fn rtcp_nack_ledger_vectors() {
+    use oxsfud::rtcp::nack::*;
+    let v = load("rtcp.json");
+    let k = &v["nack_ledger_constants"];
+    assert_eq!(MAX_PER_SEQ as u64, k["maxPerSeq"].as_u64().unwrap_or(0), "정:RULE-RTCP-NACK-DOWN 수치 maxPerSeq — 원천 RTCP.model.NACK_LEDGER");
+    assert_eq!(REPEAT_GAP_MS, k["repeatGapMs"].as_u64().unwrap_or(0), "정:RULE-RTCP-NACK-DOWN 수치 repeatGapMs");
+    assert_eq!(SLOTS as u64, k["slots"].as_u64().unwrap_or(0), "정:RULE-RTCP-NACK-DOWN 수치 slots");
+    assert_eq!(FRESH_MS, k["freshMs"].as_u64().unwrap_or(0), "정:RULE-RTCP-NACK-DOWN 수치 freshMs");
+    for c in cases(&v, "nack_ledger") {
+        let name = c["name"].as_str().unwrap_or("");
+        let mut l = Ledger::default();
+        for (i, s) in c["steps"].as_array().unwrap_or(&vec![]).iter().enumerate() {
+            let st = l.step(s["seq"].as_u64().unwrap_or(0) as u16, s["at_ms"].as_u64().unwrap_or(0));
+            let why = match st.why {
+                Why::First => "first",
+                Why::Repeat => "repeat",
+                Why::Soon => "soon",
+                Why::Limit => "limit",
+            };
+            assert_eq!(why, s["why"].as_str().unwrap_or(""), "S-sym-RULE-RTCP-NACK-DOWN-2 · S-sym-RULE-SIM-TICK-5 — 장부 판정 {name} 걸음 {i}");
+            assert_eq!(st.send, s["send"].as_bool().unwrap_or(false), "S-sym-RULE-RTCP-NACK-DOWN-2 — 재전송 {name} 걸음 {i}");
+            assert_eq!(st.repeated, s["repeated"].as_bool().unwrap_or(false), "S-sym-RULE-SIM-TICK-4 — 반복 셈 {name} 걸음 {i}");
+        }
+        assert_eq!(l.repeats, c["repeats"].as_u64().unwrap_or(0), "S-sym-RULE-SIM-TICK-4 — 반복 수 {name}");
     }
 }
 

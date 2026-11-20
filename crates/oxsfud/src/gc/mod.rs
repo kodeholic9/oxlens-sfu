@@ -111,7 +111,6 @@ pub fn reap(peer: &Arc<Peer>, why: Why) {
     if mine {
         s.pubs.remove(&peer.user);
         crate::aux::forget(&peer.user);
-        crate::rtcp::forget_user(&peer.user);
     }
     crate::ops::media::retire_table(peer, why.as_str());
     let m = crate::fwd::rt::media();

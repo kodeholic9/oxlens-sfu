@@ -3,7 +3,7 @@
 //! 맹검 독립 1층 — 자동 층 상수의 성립 조건(유예 > 재강등 창) · AIMD 벡터를 시각 인자로 그대로 넣는다 · 같은 입력 같은 출력.
 
 use oxsfud::sim::core::{Aimd, Trendline, Usage};
-use oxsfud::sim::{COLLAPSE_MS, GRACE_MS};
+use oxsfud::sim::core::{P_COLLAPSE_MS as COLLAPSE_MS, P_GRACE_MS as GRACE_MS};
 use std::path::PathBuf;
 
 fn vectors_dir() -> PathBuf {

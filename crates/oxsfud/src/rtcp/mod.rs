@@ -3,10 +3,11 @@
 //! RTCP 종단 — 서버가 짓는 것(Ingress RR 1000ms · TWCC 100ms · REMB 1000ms · NACK 상향 · PLI 스로틀) · 구독자 것 소비(RR · NACK → RTX · PLI · TWCC) · 발행자 SR 번역 · `1pc` 분해. sender SSRC 1.
 
 pub mod core;
+pub mod nack;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use oxsig::msg::Kind;
@@ -24,8 +25,6 @@ pub const TWCC_MS: u64 = 100;
 pub const REMB_MS: u64 = 1_000;
 pub const SIM_MS: u64 = 1_000;
 pub const PROBE_US: u64 = 20_000;
-pub const RTX_BUDGET: u32 = 200;
-pub const RTX_WINDOW_MS: u64 = 3_000;
 pub const SENT_KEEP: usize = 1 << 15;
 pub const PLI_BURST_MS: [u64; 3] = [0, 500, 1_500];
 
@@ -57,31 +56,6 @@ pub struct ConnRtcp {
     pub sr: Mutex<HashMap<u32, Sr>>,
     pub sent: Mutex<VecDeque<Sent>>,
     pub sim: Mutex<crate::sim::ConnSim>,
-}
-
-static BUDGET: OnceLock<Mutex<HashMap<String, (u64, u32)>>> = OnceLock::new();
-
-fn budget_ok(user: &str, now: u64) -> bool {
-    let m = BUDGET.get_or_init(|| Mutex::new(HashMap::new()));
-    let Ok(mut g) = m.lock() else { return true };
-    let e = g.entry(user.to_string()).or_insert((now, 0));
-    if now.saturating_sub(e.0) >= RTX_WINDOW_MS {
-        e.0 = now;
-        e.1 = 0;
-    }
-    if e.1 >= RTX_BUDGET {
-        return false;
-    }
-    e.1 += 1;
-    true
-}
-
-pub fn forget_user(user: &str) {
-    if let Some(m) = BUDGET.get()
-        && let Ok(mut g) = m.lock()
-    {
-        g.remove(user);
-    }
 }
 
 fn header(fmt: u8, pt: u8, words: usize) -> Vec<u8> {
@@ -696,8 +670,12 @@ pub fn send_rtx(w: &Worker, row: &DownRow, seqs: &[u16]) {
             crate::ops::drop_count("rtx_cache_miss");
             continue;
         };
-        if !budget_ok(&row.user, now) {
-            crate::ops::drop_count("rtx_budget");
+        let step = match row.nack.lock() {
+            Ok(mut l) => l.step(out_seq, now),
+            Err(_) => continue,
+        };
+        if !step.send {
+            crate::ops::drop_count("rtx_repeat");
             continue;
         }
         let Some(rtp) = parse_rtp(&orig) else { continue };

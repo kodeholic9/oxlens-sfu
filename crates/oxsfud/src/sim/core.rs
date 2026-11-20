@@ -1,6 +1,8 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.6 · 정:RULE-SIM-TICK · 정:RULE-CONC-SANS-IO · model: claude-opus-5-5
-//! v2 속도 산수 — AIMD(draft-ietf-rmcat-gcc-02 §5.5 · libwebrtc AimdRateControl · LinkCapacityEstimator) · trendline 과사용 판정. 시각은 인자.
+//! v2 속도 산수 — AIMD(draft-ietf-rmcat-gcc-02 §5.5 · libwebrtc AimdRateControl · LinkCapacityEstimator) · trendline 과사용 판정 · 층 판단(신호 → 결정 + 사유). 시각은 인자.
+
+use std::collections::VecDeque;
 
 pub const FLOOR_BPS: f64 = 30_000.0;
 pub const BETA: f64 = 0.85;
@@ -88,6 +90,7 @@ pub struct Aimd {
     pub rtt_ms: u64,
     pub min_bps: f64,
     pub max_bps: f64,
+    pub measured: bool,
 }
 
 impl Aimd {
@@ -100,6 +103,7 @@ impl Aimd {
             rtt_ms,
             min_bps: FLOOR_BPS,
             max_bps: f64::INFINITY,
+            measured: false,
         }
     }
 
@@ -114,6 +118,7 @@ impl Aimd {
     pub fn set_estimate(&mut self, bps: u64, now_ms: u64) {
         self.current_bps = bps as f64;
         self.last_change_ms = Some(now_ms);
+        self.measured = true;
     }
 
     fn near_max_rate(&self) -> f64 {
@@ -170,6 +175,7 @@ impl Aimd {
                     self.link.reset();
                 }
                 self.link.on_overuse(acked);
+                self.measured = true;
                 self.state = State::Hold;
                 self.last_change_ms = Some(now_ms);
             }
@@ -261,6 +267,148 @@ impl Trendline {
         self.prev_trend = trend;
         self.usage = Some(usage);
         usage
+    }
+}
+
+pub const P_H_BPS: f64 = 1_650_000.0;
+pub const P_L_BPS: f64 = 250_000.0;
+pub const P_HEADROOM: f64 = 1.2;
+pub const P_DEMOTE_LOSS: f64 = 0.08;
+pub const P_CLEAN_LOSS: f64 = 0.02;
+pub const P_NACK_RATIO: f64 = 0.08;
+pub const P_NACK_WIN_TICKS: usize = 3;
+pub const P_DEMOTE_TICKS: u32 = 2;
+pub const P_BACKOFF_MS: u64 = 15_000;
+pub const P_BACKOFF_MAX_MS: u64 = 60_000;
+pub const P_COLLAPSE_MS: u64 = 5_000;
+pub const P_GRACE_MS: u64 = 10_000;
+pub const P_PROBE_JUDGE_MS: u64 = 4_000;
+pub const P_PROBE_GAIN: f64 = 1.35;
+pub const P_PROBE_MAX_BPS: f64 = 3_000_000.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reason {
+    Estimate,
+    Loss,
+    Nack,
+    Drop,
+}
+
+impl Reason {
+    pub fn name(self) -> &'static str {
+        match self {
+            Reason::Estimate => "estimate",
+            Reason::Loss => "loss",
+            Reason::Nack => "nack",
+            Reason::Drop => "drop",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Signals {
+    pub now: u64,
+    pub v2: bool,
+    pub rows: usize,
+    pub loss: f64,
+    pub sent: u64,
+    pub repeats: u64,
+    pub drops: u64,
+    pub estimate: f64,
+    pub measured: bool,
+    pub overuse: bool,
+    pub probe: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Decision {
+    pub to: Option<u8>,
+    pub reasons: Vec<Reason>,
+    pub promote_by: Option<&'static str>,
+    pub probe: Option<f64>,
+    pub probe_end: bool,
+    pub raise: Option<f64>,
+    pub nack_ratio: f64,
+    pub demand_h: f64,
+    pub demand_now: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct Policy {
+    pub level: u8,
+    pub bad: u32,
+    pub last_demote: u64,
+    pub last_promote: u64,
+    pub backoff: u64,
+    pub win: VecDeque<(u64, u64)>,
+    pub probe_at: Option<u64>,
+}
+
+impl Default for Policy {
+    fn default() -> Self {
+        Policy { level: 1, bad: 0, last_demote: 0, last_promote: 0, backoff: P_BACKOFF_MS, win: VecDeque::new(), probe_at: None }
+    }
+}
+
+impl Policy {
+    pub fn tick(&mut self, s: &Signals) -> Decision {
+        let rows = s.rows as f64;
+        let demand_h = rows * P_H_BPS * P_HEADROOM;
+        let demand_now = rows * if self.level == 1 { P_H_BPS } else { P_L_BPS } * P_HEADROOM;
+        self.win.push_back((s.sent, s.repeats));
+        while self.win.len() > P_NACK_WIN_TICKS {
+            self.win.pop_front();
+        }
+        let (sent, rep) = self.win.iter().fold((0u64, 0u64), |(a, b), (x, y)| (a + x, b + y));
+        let nack_ratio = if sent == 0 { if rep > 0 { 1.0 } else { 0.0 } } else { (rep as f64 / sent as f64).min(1.0) };
+        let in_grace = s.now.saturating_sub(self.last_promote) < P_GRACE_MS;
+        let mut reasons = Vec::new();
+        if s.v2 && s.measured && !in_grace && self.level == 1 && s.estimate < demand_now {
+            reasons.push(Reason::Estimate);
+        }
+        if s.loss >= P_DEMOTE_LOSS {
+            reasons.push(Reason::Loss);
+        }
+        if self.win.len() >= P_NACK_WIN_TICKS && rep > 0 && nack_ratio > P_NACK_RATIO {
+            reasons.push(Reason::Nack);
+        }
+        if s.drops > 0 {
+            reasons.push(Reason::Drop);
+        }
+        let bad = !reasons.is_empty();
+        self.bad = if bad { self.bad + 1 } else { 0 };
+        let (mut to, mut probe, mut raise, mut probe_end) = (None, None, None, false);
+        let mut promote_by = None;
+        if self.level == 1 && self.bad >= P_DEMOTE_TICKS {
+            if s.now.saturating_sub(self.last_promote) < P_COLLAPSE_MS && !reasons.contains(&Reason::Estimate) {
+                self.backoff = (self.backoff * 2).min(P_BACKOFF_MAX_MS);
+            }
+            self.level = 0;
+            self.bad = 0;
+            self.last_demote = s.now;
+            to = Some(0);
+        } else if self.level == 0 && !bad && s.loss <= P_CLEAN_LOSS && s.now.saturating_sub(self.last_demote) >= self.backoff {
+            if !s.v2 || (!s.overuse && s.estimate >= demand_h) {
+                self.level = 1;
+                self.last_promote = s.now;
+                to = Some(1);
+                promote_by = Some(if s.v2 { "estimate" } else { "clean" });
+            } else if self.probe_at.is_none() {
+                self.probe_at = Some(s.now);
+                probe = Some((demand_h * P_PROBE_GAIN).min(P_PROBE_MAX_BPS));
+            }
+        }
+        if let Some(at) = self.probe_at
+            && s.now.saturating_sub(at) >= P_PROBE_JUDGE_MS
+        {
+            self.probe_at = None;
+            probe_end = true;
+            match s.probe {
+                Some(x) if x >= demand_h => raise = Some(x),
+                _ => self.last_demote = s.now,
+            }
+        }
+        Decision { to, reasons, promote_by, probe, probe_end, raise, nack_ratio, demand_h, demand_now }
     }
 }
 

@@ -59,7 +59,7 @@ pub const DROP_NAMES: &[&str] = &[
     "nack_audio",
     "rtx_gate",
     "rtx_cache_miss",
-    "rtx_budget",
+    "rtx_repeat",
     "dc_bad_frame",
     "dc_unknown_svc",
     "dc_no_room",

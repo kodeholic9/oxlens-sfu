@@ -56,6 +56,7 @@ pub struct DownRow {
     pub rr_loss: AtomicU8,
     pub rr_at: AtomicU64,
     pub nacks: AtomicU64,
+    pub nack: Mutex<crate::rtcp::nack::Ledger>,
     pub drops: AtomicU64,
 }
 
@@ -98,6 +99,7 @@ impl DownRow {
             rr_loss: AtomicU8::new(0),
             rr_at: AtomicU64::new(0),
             nacks: AtomicU64::new(0),
+            nack: Mutex::new(crate::rtcp::nack::Ledger::default()),
             drops: AtomicU64::new(0),
         }
     }

@@ -14,27 +14,13 @@ use crate::fwd::rt::{Worker, media};
 use crate::fwd::{DownRow, LAYER_PAUSE};
 use crate::link::Transport;
 use crate::r#pub::PubTrack;
-use core::{Aimd, Trendline, Usage};
+use core::{Aimd, P_L_BPS, Policy, Signals, Trendline, Usage};
 
-pub const H_BPS: u64 = 1_650_000;
-pub const L_BPS: u64 = 250_000;
-pub const HEADROOM: f64 = 1.2;
-pub const DEMOTE_LOSS: f64 = 0.08;
-pub const CLEAN_LOSS: f64 = 0.02;
-pub const DEMOTE_NACK_PER_S: f64 = 20.0;
-pub const DEMOTE_TICKS: u32 = 2;
-pub const BACKOFF_MS: u64 = 15_000;
-pub const BACKOFF_MAX_MS: u64 = 60_000;
-pub const COLLAPSE_MS: u64 = 5_000;
-pub const GRACE_MS: u64 = 10_000;
 pub const LOSS_FRESH_MS: u64 = 6_000;
 pub const PENDING_MS: u64 = 10_000;
 pub const PENDING_PLI_RETRY_MS: u64 = 250;
 pub const INBAND_MS: u64 = 1_000;
 pub const PROBE_RUN_MS: u64 = 2_500;
-pub const PROBE_JUDGE_MS: u64 = 4_000;
-pub const PROBE_GAIN: f64 = 1.35;
-pub const PROBE_MAX_BPS: f64 = 3_000_000.0;
 pub const V2_STALE_MS: u64 = 1_000;
 pub const START_BPS: u64 = 300_000;
 pub const DECREASE_GAP_MS: u64 = 300;
@@ -221,12 +207,9 @@ pub fn admit(row: &DownRow, t: &Arc<PubTrack>, keyframe: bool, now: u64) -> bool
 }
 
 pub struct ConnSim {
-    pub level: u8,
-    pub bad: u32,
-    pub last_demote: u64,
-    pub last_promote: u64,
-    pub backoff: u64,
-    pub prev_nacks: HashMap<usize, u64>,
+    pub policy: Policy,
+    pub prev_rep: HashMap<usize, u64>,
+    pub prev_sent: HashMap<usize, u64>,
     pub prev_drops: HashMap<usize, u64>,
     pub aimd: Aimd,
     pub trend: Trendline,
@@ -246,15 +229,21 @@ pub struct Probe {
     pub last_at: Option<i64>,
 }
 
+impl Probe {
+    pub fn measured(&self) -> Option<f64> {
+        match (self.first_at, self.last_at) {
+            (Some(a), Some(b)) if b > a => Some((self.bytes_acked as f64 * 8.0 * 1_000_000.0 / (b - a) as f64).trunc()),
+            _ => None,
+        }
+    }
+}
+
 impl Default for ConnSim {
     fn default() -> Self {
         ConnSim {
-            level: 1,
-            bad: 0,
-            last_demote: 0,
-            last_promote: 0,
-            backoff: BACKOFF_MS,
-            prev_nacks: HashMap::new(),
+            policy: Policy::default(),
+            prev_rep: HashMap::new(),
+            prev_sent: HashMap::new(),
             prev_drops: HashMap::new(),
             aimd: Aimd::new(START_BPS, 200),
             trend: Trendline::new(),
@@ -279,9 +268,28 @@ fn sim_rows(tr: &Transport) -> Vec<(Arc<DownRow>, Arc<PubTrack>)> {
         .collect()
 }
 
-pub fn nack_per_s(prev: &mut HashMap<usize, u64>, key: usize, total: u64) -> f64 {
+pub fn delta(prev: &mut HashMap<usize, u64>, key: usize, total: u64) -> u64 {
     let p = prev.insert(key, total).unwrap_or(total);
-    total.saturating_sub(p) as f64 * 1000.0 / super::rtcp::SIM_MS as f64
+    total.saturating_sub(p)
+}
+
+fn log_change(tr: &Transport, sig: &Signals, d: &core::Decision) {
+    let Some(l) = d.to else { return };
+    let (loss, nack, est, demand) = (format!("{:.3}", sig.loss), format!("{:.3}", d.nack_ratio), format!("{:.0}", sig.estimate), format!("{:.0}", d.demand_h));
+    match d.promote_by {
+        Some(by) => tracing::info!(
+            kind = "diag", spec = "SV-RULE-SIM-TICK", session = %tr.session, user = %tr.user,
+            "in.to" = layer_name(l), "in.by" = by, "in.loss" = loss, "in.nack_ratio" = nack, "in.drops" = sig.drops,
+            "in.v2" = sig.v2, "in.estimate" = est, "in.measured" = sig.measured, "in.demand" = demand,
+            "auto layer → {}", layer_name(l)
+        ),
+        None => tracing::info!(
+            kind = "diag", spec = "SV-RULE-SIM-TICK", session = %tr.session, user = %tr.user,
+            "in.to" = layer_name(l), "in.reasons" = d.reasons.iter().map(|r| r.name()).collect::<Vec<_>>().join(","), "in.loss" = loss, "in.nack_ratio" = nack, "in.drops" = sig.drops,
+            "in.v2" = sig.v2, "in.estimate" = est, "in.measured" = sig.measured, "in.demand" = demand,
+            "auto layer → {}", layer_name(l)
+        ),
+    }
 }
 
 pub fn tick(tr: &Arc<Transport>, now: u64) {
@@ -296,80 +304,46 @@ pub fn tick(tr: &Arc<Transport>, now: u64) {
     let Ok(mut s) = tr.rtc.sim.lock() else { return };
     let v2 = m == Mode::V2 && now.saturating_sub(s.fb_at) <= V2_STALE_MS;
     let mut loss = 0.0f64;
-    let mut nack_rate = 0.0f64;
+    let (mut sent, mut rep) = (0u64, 0u64);
     let mut drops = 0u64;
     for (r, _) in &rows {
         let key = Arc::as_ptr(r) as usize;
         if now.saturating_sub(r.rr_at.load(Ordering::Relaxed)) <= LOSS_FRESH_MS {
             loss = loss.max(r.rr_loss.load(Ordering::Relaxed) as f64 / 256.0);
         }
-        nack_rate += nack_per_s(&mut s.prev_nacks, key, r.nacks.load(Ordering::Relaxed));
+        rep += delta(&mut s.prev_rep, key, r.nack.lock().map(|l| l.repeats).unwrap_or(0));
+        sent += delta(&mut s.prev_sent, key, r.sent.load(Ordering::Relaxed));
         let d = r.drops.load(Ordering::Relaxed);
         let pd = s.prev_drops.insert(key, d).unwrap_or(d);
         drops += d.saturating_sub(pd);
     }
-    let n_rows = rows.len() as f64;
-    let demand_h = n_rows * H_BPS as f64 * HEADROOM;
-    let demand_now = n_rows * if s.level == 1 { H_BPS } else { L_BPS } as f64 * HEADROOM;
-    let est = s.aimd.bps() as f64;
-    let in_grace = now.saturating_sub(s.last_promote) < GRACE_MS;
-    let short = v2 && !in_grace && s.level == 1 && est < demand_now;
-    let bad = short || loss >= DEMOTE_LOSS || nack_rate > DEMOTE_NACK_PER_S || drops > 0;
-    if bad {
-        s.bad += 1;
-    } else {
-        s.bad = 0;
+    let sig = Signals {
+        now,
+        v2,
+        rows: rows.len(),
+        loss,
+        sent,
+        repeats: rep,
+        drops,
+        estimate: s.aimd.bps() as f64,
+        measured: s.aimd.measured,
+        overuse: s.trend.usage == Some(Usage::Overuse),
+        probe: s.probe.and_then(|p| p.measured()),
+    };
+    let d = s.policy.tick(&sig);
+    if let Some(rate) = d.probe {
+        s.probe = Some(Probe { started: now, rate, bytes_acked: 0, first_at: None, last_at: None });
     }
-    let mut changed = None;
-    if s.level == 1 && s.bad >= DEMOTE_TICKS {
-        if now.saturating_sub(s.last_promote) < COLLAPSE_MS && !short {
-            s.backoff = (s.backoff * 2).min(BACKOFF_MAX_MS);
-        }
-        s.level = 0;
-        s.bad = 0;
-        s.last_demote = now;
-        changed = Some(0u8);
-    } else if s.level == 0 && !bad && loss <= CLEAN_LOSS && now.saturating_sub(s.last_demote) >= s.backoff {
-        let usage_ok = s.trend.usage != Some(Usage::Overuse);
-        if !v2 || (usage_ok && est >= demand_h) {
-            s.level = 1;
-            s.last_promote = now;
-            changed = Some(1u8);
-        } else if v2 && s.probe.is_none() {
-            s.probe = Some(Probe { started: now, rate: (demand_h * PROBE_GAIN).min(PROBE_MAX_BPS), bytes_acked: 0, first_at: None, last_at: None });
-        }
-    }
-    if let Some(p) = s.probe
-        && now.saturating_sub(p.started) >= PROBE_JUDGE_MS
-    {
-        let measured = match (p.first_at, p.last_at) {
-            (Some(a), Some(b)) if b > a => Some((p.bytes_acked as f64 * 8.0 * 1_000_000.0 / (b - a) as f64) as u64),
-            _ => None,
-        };
+    if d.probe_end {
         s.probe = None;
-        match measured {
-            Some(x) if x as f64 >= demand_h => s.aimd.set_estimate(x, now),
-            _ => s.last_demote = now,
-        }
     }
-    let level = s.level;
+    if let Some(x) = d.raise {
+        s.aimd.set_estimate(x as u64, now);
+    }
+    let level = s.policy.level;
     drop(s);
-    if let Some(l) = changed {
-        tracing::info!(
-            kind = "diag",
-            spec = "SV-RULE-SIM-TICK",
-            session = %tr.session,
-            user = %tr.user,
-            "in.to" = layer_name(l),
-            "in.loss" = format!("{loss:.3}"),
-            "in.nack_rate" = format!("{nack_rate:.1}"),
-            "in.drops" = drops,
-            "in.v2" = v2,
-            "in.estimate" = format!("{est:.0}"),
-            "in.demand" = format!("{demand_h:.0}"),
-            "auto layer → {}",
-            layer_name(l)
-        );
+    if d.to.is_some() {
+        log_change(tr, &sig, &d);
     }
     for (r, t) in rows {
         r.auto_cap.store(level, Ordering::Release);
@@ -388,7 +362,7 @@ pub fn probe(w: &Worker, tr: &Arc<Transport>, now_us: u64) {
     if rtx_pt == 0 {
         return;
     }
-    let extra = (p.rate - L_BPS as f64 * rows.len() as f64).max(0.0);
+    let extra = (p.rate - P_L_BPS * rows.len() as f64).max(0.0);
     let bytes = (extra * (crate::rtcp::PROBE_US as f64 / 1_000_000.0) / 8.0) as usize;
     let n = bytes / (PAD_BYTES + 2) + 1;
     let (osn, ts) = match row.rw.lock() {
@@ -503,12 +477,11 @@ mod tests {
     }
 
     #[test]
-    fn nack_rate_is_a_per_tick_window() {
+    fn delta_is_a_per_tick_window() {
         let mut prev = HashMap::new();
-        assert_eq!(nack_per_s(&mut prev, 1, 0), 0.0);
-        let burst = nack_per_s(&mut prev, 1, 40);
-        assert!(burst > DEMOTE_NACK_PER_S, "정:RULE-SIM-TICK a burst counts in its tick · {burst}");
-        assert_eq!(nack_per_s(&mut prev, 1, 40), 0.0, "정:RULE-SIM-TICK quiet tick after a burst is zero — the window decays");
-        assert_eq!(nack_per_s(&mut prev, 2, 500), 0.0, "정:RULE-SIM-TICK a newly seen row starts its window, not its history");
+        assert_eq!(delta(&mut prev, 1, 0), 0);
+        assert_eq!(delta(&mut prev, 1, 40), 40, "정:RULE-SIM-TICK a burst counts in its tick");
+        assert_eq!(delta(&mut prev, 1, 40), 0, "정:RULE-SIM-TICK quiet tick after a burst is zero — the window decays");
+        assert_eq!(delta(&mut prev, 2, 500), 0, "정:RULE-SIM-TICK a newly seen row starts its window, not its history");
     }
 }
