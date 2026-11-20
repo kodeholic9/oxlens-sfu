@@ -301,8 +301,8 @@ fn stat() {
             && let Ok(sim) = p.subscribe.rtc.sim.lock()
         {
             l = l
-                .rec("bwe_estimate_bps", sim.aimd.bps())
-                .rec("bwe_measured", sim.aimd.measured)
+                .rec("bwe_estimate_bps", sim.loss.target as u64)
+                .rec("bwe_measured", sim.aimd.measured || sim.loss.measured)
                 .rec("bwe_normal", sim.usage_seen.normal)
                 .rec("bwe_overuse", sim.usage_seen.overuse)
                 .rec("bwe_underuse", sim.usage_seen.underuse);

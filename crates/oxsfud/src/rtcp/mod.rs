@@ -40,7 +40,7 @@ pub struct Sent {
     pub seq: u16,
     pub at_us: u64,
     pub size: usize,
-    pub probe: bool,
+    pub cluster: u32,
 }
 
 #[derive(Default)]
@@ -53,6 +53,7 @@ pub struct ConnRtcp {
     pub next_keepalive: AtomicU64,
     pub next_sim: AtomicU64,
     pub next_probe_us: AtomicU64,
+    pub probe_cluster: AtomicU32,
     pub sr: Mutex<HashMap<u32, Sr>>,
     pub sent: Mutex<VecDeque<Sent>>,
     pub sim: Mutex<crate::sim::ConnSim>,
@@ -409,9 +410,10 @@ pub fn twcc_in(tr: &Transport, seq: u16, at_us: i64) {
     }
 }
 
-pub fn sent_twcc(conn: &Transport, seq: u16, size: usize, now_us: u64, probe: bool) {
+pub fn sent_twcc(conn: &Transport, seq: u16, size: usize, now_us: u64) {
+    let cluster = conn.rtc.probe_cluster.load(Ordering::Relaxed);
     if let Ok(mut g) = conn.rtc.sent.lock() {
-        g.push_back(Sent { seq, at_us: now_us, size, probe });
+        g.push_back(Sent { seq, at_us: now_us, size, cluster });
         while g.len() > SENT_KEEP {
             g.pop_front();
         }
@@ -699,7 +701,7 @@ pub fn send_rtx(w: &Worker, row: &DownRow, seqs: &[u16]) {
             crate::fwd::core::vp8_write(&mut payload[2..], &d, pid, tl0);
         }
         let csrc = row.conn.source_tag.then_some(track.stream.csrc);
-        let b = Built { pt: rtx_pt, seq: rseq, ts: rtp.ts.wrapping_add(ts_off), ssrc: rtx_ssrc, csrc, marker: rtp.marker, payload: &payload, probe: false, padding: false };
+        let b = Built { pt: rtx_pt, seq: rseq, ts: rtp.ts.wrapping_add(ts_off), ssrc: rtx_ssrc, csrc, marker: rtp.marker, payload: &payload, padding: false };
         if send_built(w, m, row, b) {
             row.conn.tx.retransmitted.fetch_add(1, Ordering::Relaxed);
         }
@@ -714,12 +716,11 @@ pub struct Built<'a> {
     pub csrc: Option<u32>,
     pub marker: bool,
     pub payload: &'a [u8],
-    pub probe: bool,
     pub padding: bool,
 }
 
 pub fn send_built(w: &Worker, m: &crate::fwd::rt::Media, row: &DownRow, b: Built<'_>) -> bool {
-    let Built { pt, seq, ts, ssrc, csrc, marker, payload, probe, padding } = b;
+    let Built { pt, seq, ts, ssrc, csrc, marker, payload, padding } = b;
     let conn = &row.conn;
     if conn.closed.load(Ordering::Acquire) || !conn.ready.load(Ordering::Acquire) {
         return false;
@@ -753,7 +754,7 @@ pub fn send_built(w: &Worker, m: &crate::fwd::rt::Media, row: &DownRow, b: Built
         crate::ops::drop_count("send_fail");
         return false;
     }
-    sent_twcc(conn, twcc, enc.len(), mono_us(), probe);
+    sent_twcc(conn, twcc, enc.len(), mono_us());
     true
 }
 

@@ -773,7 +773,7 @@ pub fn send_down(w: &Worker, row: &DownRow, pkt: &Pkt) {
         crate::ops::drop_count("send_fail");
         return;
     }
-    crate::rtcp::sent_twcc(conn, twcc, enc.len(), mono_us(), false);
+    crate::rtcp::sent_twcc(conn, twcc, enc.len(), mono_us());
     row.sent.fetch_add(1, Ordering::Relaxed);
     row.bytes.fetch_add(enc.len() as u64, Ordering::Relaxed);
     row.last_at.store(now_ms, Ordering::Relaxed);

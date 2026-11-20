@@ -14,7 +14,7 @@ use crate::fwd::rt::{Worker, media};
 use crate::fwd::{DownRow, LAYER_PAUSE};
 use crate::link::Transport;
 use crate::r#pub::PubTrack;
-use core::{Aimd, InterArrival, P_L_BPS, Policy, Signals, Trendline, Usage};
+use core::{Aimd, InterArrival, LossBased, P_H_BPS, P_L_BPS, Policy, Signals, Trendline, Usage};
 
 pub const LOSS_FRESH_MS: u64 = 6_000;
 pub const PENDING_MS: u64 = 10_000;
@@ -211,12 +211,14 @@ pub struct ConnSim {
     pub prev_sent: HashMap<usize, u64>,
     pub prev_drops: HashMap<usize, u64>,
     pub aimd: Aimd,
+    pub loss: LossBased,
     pub trend: Trendline,
     pub fb_at: u64,
     pub last_decrease: u64,
     pub acked: VecDeque<(u64, usize)>,
     pub arrival: InterArrival,
     pub probe: Option<Probe>,
+    pub clusters: u32,
     pub usage_seen: UsageSeen,
 }
 
@@ -239,6 +241,7 @@ impl UsageSeen {
 
 #[derive(Debug, Clone, Copy)]
 pub struct Probe {
+    pub id: u32,
     pub started: u64,
     pub rate: f64,
     pub bytes_acked: u64,
@@ -263,12 +266,14 @@ impl Default for ConnSim {
             prev_sent: HashMap::new(),
             prev_drops: HashMap::new(),
             aimd: Aimd::new(START_BPS, 200),
+            loss: LossBased::new(START_BPS as f64),
             trend: Trendline::new(),
             fb_at: 0,
             last_decrease: 0,
             acked: VecDeque::new(),
             arrival: InterArrival::default(),
             probe: None,
+            clusters: 0,
             usage_seen: UsageSeen::default(),
         }
     }
@@ -310,6 +315,26 @@ fn log_change(tr: &Transport, sig: &Signals, d: &core::Decision) {
     }
 }
 
+fn log_probe(tr: &Transport, sig: &Signals, d: &core::Decision, opened: Option<u32>, closed: u32) {
+    let (est, demand) = (format!("{:.0}", sig.estimate), format!("{:.0}", d.demand_h));
+    if let (Some(id), Some(rate)) = (opened, d.probe) {
+        tracing::info!(
+            kind = "diag", spec = "SV-RULE-SIM-TICK", session = %tr.session, user = %tr.user,
+            "in.cluster" = id, "in.rate" = format!("{rate:.0}"), "in.estimate" = est, "in.measured" = sig.measured, "in.demand" = demand,
+            "probe open"
+        );
+    }
+    if d.probe_end {
+        let got = sig.probe.map(|x| format!("{x:.0}")).unwrap_or_else(|| "none".into());
+        let raise = d.raise.map(|x| format!("{x:.0}")).unwrap_or_else(|| "none".into());
+        tracing::info!(
+            kind = "diag", spec = "SV-RULE-SIM-TICK", session = %tr.session, user = %tr.user,
+            "in.cluster" = closed, "in.probe" = got, "in.demand" = demand, "in.raise" = raise, "in.estimate" = est,
+            "probe judged"
+        );
+    }
+}
+
 pub fn tick(tr: &Arc<Transport>, now: u64) {
     let m = mode();
     if m == Mode::Off {
@@ -343,26 +368,31 @@ pub fn tick(tr: &Arc<Transport>, now: u64) {
         sent,
         repeats: rep,
         drops,
-        estimate: s.aimd.bps() as f64,
-        measured: s.aimd.measured,
+        estimate: s.loss.target,
+        measured: s.aimd.measured || s.loss.measured,
         overuse: s.trend.usage == Some(Usage::Overuse),
         probe: s.probe.and_then(|p| p.measured()),
     };
     let d = s.policy.tick(&sig);
+    let cluster = s.probe.map(|p| p.id).unwrap_or(0);
     if let Some(rate) = d.probe {
-        s.probe = Some(Probe { started: now, rate, bytes_acked: 0, first_at: None, last_at: None });
+        s.clusters = s.clusters.wrapping_add(1).max(1);
+        s.probe = Some(Probe { id: s.clusters, started: now, rate, bytes_acked: 0, first_at: None, last_at: None });
     }
     if d.probe_end {
         s.probe = None;
     }
     if let Some(x) = d.raise {
         s.aimd.set_estimate(x as u64, now);
+        s.loss.set_estimate(x, now);
     }
     let level = s.policy.level;
+    let opened = s.probe.filter(|_| d.probe.is_some()).map(|p| p.id);
     drop(s);
     if d.to.is_some() {
         log_change(tr, &sig, &d);
     }
+    log_probe(tr, &sig, &d, opened, cluster);
     for (r, t) in rows {
         r.auto_cap.store(level, Ordering::Release);
         adopt(&r, &t, now);
@@ -371,6 +401,7 @@ pub fn tick(tr: &Arc<Transport>, now: u64) {
 
 pub fn probe(w: &Worker, tr: &Arc<Transport>, now_us: u64) {
     let active = tr.rtc.sim.lock().ok().and_then(|s| s.probe).filter(|p| common::now_ms().saturating_sub(p.started) < PROBE_RUN_MS);
+    tr.rtc.probe_cluster.store(active.map(|p| p.id).unwrap_or(0), Ordering::Relaxed);
     let Some(p) = active else { return };
     let rows = sim_rows(tr);
     let Some((row, _)) = rows.first() else { return };
@@ -380,7 +411,8 @@ pub fn probe(w: &Worker, tr: &Arc<Transport>, now_us: u64) {
     if rtx_pt == 0 {
         return;
     }
-    let extra = (p.rate - P_L_BPS * rows.len() as f64).max(0.0);
+    let layer_bps = if tr.rtc.sim.lock().map(|s| s.policy.level).unwrap_or(0) == 1 { P_H_BPS } else { P_L_BPS };
+    let extra = (p.rate - layer_bps * rows.len() as f64).max(0.0);
     let bytes = (extra * (crate::rtcp::PROBE_US as f64 / 1_000_000.0) / 8.0) as usize;
     let n = bytes / (PAD_BYTES + 2) + 1;
     let (osn, ts) = match row.rw.lock() {
@@ -396,7 +428,7 @@ pub fn probe(w: &Worker, tr: &Arc<Transport>, now_us: u64) {
     payload.push(PAD_BYTES as u8);
     for _ in 0..n {
         let seq = row.rtx_seq.fetch_add(1, Ordering::AcqRel);
-        let b = crate::rtcp::Built { pt: rtx_pt, seq, ts, ssrc: rtx_ssrc, csrc: None, marker: false, payload: &payload, probe: true, padding: true };
+        let b = crate::rtcp::Built { pt: rtx_pt, seq, ts, ssrc: rtx_ssrc, csrc: None, marker: false, payload: &payload, padding: true };
         crate::rtcp::send_built(w, m, row, b);
     }
     let _ = now_us;
@@ -419,13 +451,20 @@ pub fn on_twcc(tr: &Arc<Transport>, _t: &crate::sub::Table, body: &[u8]) {
     let Ok(mut s) = tr.rtc.sim.lock() else { return };
     s.fb_at = now;
     let mut usage = s.trend.usage.unwrap_or(Usage::Normal);
+    let (mut lost, mut packets) = (0u64, 0u64);
     for (k, a) in arrivals.iter().enumerate() {
         let seq = base.wrapping_add(k as u16);
-        let (Some(at), Some(x)) = (a, by_seq.get(&seq)) else { continue };
+        let Some(x) = by_seq.get(&seq) else { continue };
+        packets += 1;
+        let Some(at) = a else {
+            lost += 1;
+            continue;
+        };
         let send = x.at_us as i64;
         s.acked.push_back((now, x.size));
-        if x.probe
+        if x.cluster != 0
             && let Some(p) = s.probe.as_mut()
+            && p.id == x.cluster
         {
             p.bytes_acked += x.size as u64;
             p.first_at.get_or_insert(*at);
@@ -440,13 +479,14 @@ pub fn on_twcc(tr: &Arc<Transport>, _t: &crate::sub::Table, body: &[u8]) {
         s.acked.pop_front();
     }
     let acked_bps = s.acked.iter().map(|(_, b)| *b as u64).sum::<u64>() * 8;
-    if usage == Usage::Overuse && now.saturating_sub(s.last_decrease) < DECREASE_GAP_MS {
-        return;
+    if usage != Usage::Overuse || now.saturating_sub(s.last_decrease) >= DECREASE_GAP_MS {
+        if usage == Usage::Overuse {
+            s.last_decrease = now;
+        }
+        s.aimd.update(now, usage, acked_bps);
     }
-    if usage == Usage::Overuse {
-        s.last_decrease = now;
-    }
-    s.aimd.update(now, usage, acked_bps);
+    let limit = s.aimd.bps() as f64;
+    s.loss.report(lost, packets, now, limit);
 }
 
 pub fn subscribe_layer(row: &DownRow, any: &Arc<PubTrack>, spatial: Option<u8>, paused: Option<bool>, priority: Option<u8>) {

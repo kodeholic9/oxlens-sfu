@@ -270,6 +270,83 @@ impl Trendline {
     }
 }
 
+pub const LB_MIN_PACKETS: u64 = 20;
+pub const LB_LOW_LOSS: f64 = 0.02;
+pub const LB_HIGH_LOSS: f64 = 0.1;
+pub const LB_DECREASE_GAP_MS: u64 = 300;
+pub const LB_INCREASE_WINDOW_MS: u64 = 1_000;
+pub const LB_INCREASE_GAIN: f64 = 1.08;
+pub const LB_INCREASE_ADD_BPS: f64 = 1_000.0;
+
+#[derive(Debug, Clone)]
+pub struct LossBased {
+    pub target: f64,
+    hist: VecDeque<(u64, f64)>,
+    expected: u64,
+    lost: u64,
+    frac: Option<u32>,
+    decreased_since_report: bool,
+    last_decrease: Option<u64>,
+    pub measured: bool,
+}
+
+impl LossBased {
+    pub fn new(start_bps: f64) -> LossBased {
+        LossBased { target: start_bps, hist: VecDeque::new(), expected: 0, lost: 0, frac: None, decreased_since_report: false, last_decrease: None, measured: false }
+    }
+
+    pub fn report(&mut self, lost: u64, packets: u64, now: u64, limit: f64) -> f64 {
+        if packets > 0 {
+            let expected = self.expected + packets;
+            if expected < LB_MIN_PACKETS {
+                self.expected = expected;
+                self.lost += lost;
+                return self.set(self.target, now, limit);
+            }
+            self.decreased_since_report = false;
+            self.frac = Some((((self.lost + lost) * 256) / expected).min(255) as u32);
+            self.expected = 0;
+            self.lost = 0;
+        }
+        self.update(now, limit)
+    }
+
+    fn update(&mut self, now: u64, limit: f64) -> f64 {
+        let Some(frac) = self.frac else { return self.set(self.target, now, limit) };
+        let loss = frac as f64 / 256.0;
+        if loss <= LB_LOW_LOSS {
+            while self.hist.front().is_some_and(|h| now.saturating_sub(h.0) >= LB_INCREASE_WINDOW_MS) {
+                self.hist.pop_front();
+            }
+            let base = self.hist.iter().map(|h| h.1).fold(self.target, f64::min);
+            return self.set((base * LB_INCREASE_GAIN + 0.5).floor() + LB_INCREASE_ADD_BPS, now, limit);
+        }
+        if loss > LB_HIGH_LOSS && !self.decreased_since_report && self.last_decrease.is_none_or(|t| now.saturating_sub(t) >= LB_DECREASE_GAP_MS) {
+            self.last_decrease = Some(now);
+            self.decreased_since_report = true;
+            self.measured = true;
+            return self.set((self.target * (512 - frac) as f64 / 512.0).floor(), now, limit);
+        }
+        self.set(self.target, now, limit)
+    }
+
+    fn set(&mut self, bps: f64, now: u64, limit: f64) -> f64 {
+        self.target = bps.min(limit);
+        while self.hist.front().is_some_and(|h| now.saturating_sub(h.0) >= LB_INCREASE_WINDOW_MS) {
+            self.hist.pop_front();
+        }
+        self.hist.push_back((now, self.target));
+        self.target
+    }
+
+    pub fn set_estimate(&mut self, bps: f64, now: u64) {
+        self.target = bps;
+        self.hist.clear();
+        self.hist.push_back((now, bps));
+        self.measured = true;
+    }
+}
+
 pub const IA_GROUP_US: i64 = 5_000;
 pub const IA_BURST_US: i64 = 5_000;
 pub const IA_MAX_BURST_US: i64 = 100_000;
@@ -418,11 +495,13 @@ pub struct Policy {
     pub backoff: u64,
     pub win: VecDeque<(u64, u64)>,
     pub probe_at: Option<u64>,
+    pub started: bool,
+    pub joined_at: Option<u64>,
 }
 
 impl Default for Policy {
     fn default() -> Self {
-        Policy { level: 1, bad: 0, last_demote: 0, last_promote: 0, backoff: P_BACKOFF_MS, win: VecDeque::new(), probe_at: None }
+        Policy { level: 1, bad: 0, last_demote: 0, last_promote: 0, backoff: P_BACKOFF_MS, win: VecDeque::new(), probe_at: None, started: false, joined_at: None }
     }
 }
 
@@ -437,15 +516,16 @@ impl Policy {
         }
         let (sent, rep) = self.win.iter().fold((0u64, 0u64), |(a, b), (x, y)| (a + x, b + y));
         let nack_ratio = if sent == 0 { if rep > 0 { 1.0 } else { 0.0 } } else { (rep as f64 / sent as f64).min(1.0) };
-        let in_grace = s.now.saturating_sub(self.last_promote) < P_GRACE_MS;
+        let joined = *self.joined_at.get_or_insert(s.now);
+        let in_grace = s.now.saturating_sub(self.last_promote.max(joined)) < P_GRACE_MS;
         let mut reasons = Vec::new();
         if s.v2 && s.measured && !in_grace && self.level == 1 && s.estimate < demand_now {
             reasons.push(Reason::Estimate);
         }
-        if s.loss >= P_DEMOTE_LOSS {
+        if !s.v2 && s.loss >= P_DEMOTE_LOSS {
             reasons.push(Reason::Loss);
         }
-        if self.win.len() >= P_NACK_WIN_TICKS && rep > 0 && nack_ratio > P_NACK_RATIO {
+        if !s.v2 && self.win.len() >= P_NACK_WIN_TICKS && rep > 0 && nack_ratio > P_NACK_RATIO {
             reasons.push(Reason::Nack);
         }
         if s.drops > 0 {
@@ -463,7 +543,7 @@ impl Policy {
             self.bad = 0;
             self.last_demote = s.now;
             to = Some(0);
-        } else if self.level == 0 && !bad && s.loss <= P_CLEAN_LOSS && s.now.saturating_sub(self.last_demote) >= self.backoff {
+        } else if self.level == 0 && !bad && (s.v2 || s.loss <= P_CLEAN_LOSS) && s.now.saturating_sub(self.last_demote) >= self.backoff {
             if !s.v2 || (!s.overuse && s.estimate >= demand_h) {
                 self.level = 1;
                 self.last_promote = s.now;
@@ -473,6 +553,11 @@ impl Policy {
                 self.probe_at = Some(s.now);
                 probe = Some((demand_h * P_PROBE_GAIN).min(P_PROBE_MAX_BPS));
             }
+        }
+        if s.v2 && !self.started && self.level == 1 && self.probe_at.is_none() {
+            self.started = true;
+            self.probe_at = Some(s.now);
+            probe = Some((demand_h * P_PROBE_GAIN).min(P_PROBE_MAX_BPS));
         }
         if let Some(at) = self.probe_at
             && s.now.saturating_sub(at) >= P_PROBE_JUDGE_MS

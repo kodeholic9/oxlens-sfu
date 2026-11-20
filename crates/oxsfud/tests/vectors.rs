@@ -222,6 +222,37 @@ fn sim_aimd_vectors() {
 }
 
 #[test]
+fn sim_loss_based_vectors() {
+    use oxsfud::sim::core::*;
+    let v = load("sim.json");
+    let k = &v["loss_based_constants"];
+    let f = |key: &str| k[key].as_f64().unwrap_or(f64::NAN);
+    assert_eq!(LB_MIN_PACKETS as f64, f("minPackets"), "정:RULE-SIM-TICK 손실 기반 수치 minPackets — 원천 SIM.model.LOSS_BASED");
+    assert_eq!(LB_LOW_LOSS, f("lowLoss"), "정:RULE-SIM-TICK 손실 기반 수치 lowLoss");
+    assert_eq!(LB_HIGH_LOSS, f("highLoss"), "정:RULE-SIM-TICK 손실 기반 수치 highLoss");
+    assert_eq!(LB_DECREASE_GAP_MS as f64, f("decreaseGapMs"), "정:RULE-SIM-TICK 손실 기반 수치 decreaseGapMs");
+    assert_eq!(LB_INCREASE_WINDOW_MS as f64, f("increaseWindowMs"), "정:RULE-SIM-TICK 손실 기반 수치 increaseWindowMs");
+    assert_eq!(LB_INCREASE_GAIN, f("increaseGain"), "정:RULE-SIM-TICK 손실 기반 수치 increaseGain");
+    assert_eq!(LB_INCREASE_ADD_BPS, f("increaseAddBps"), "정:RULE-SIM-TICK 손실 기반 수치 increaseAddBps");
+    for c in cases(&v, "loss_based") {
+        let name = c["name"].as_str().unwrap_or("");
+        let mut lb = LossBased::new(c["start_bps"].as_f64().unwrap_or(0.0));
+        for (i, s) in c["steps"].as_array().unwrap_or(&vec![]).iter().enumerate() {
+            let at = s["at_ms"].as_u64().unwrap_or(0);
+            let out = match s["probe_bps"].as_f64() {
+                Some(p) => {
+                    lb.set_estimate(p, at);
+                    lb.target
+                }
+                None => lb.report(s["lost"].as_u64().unwrap_or(0), s["packets"].as_u64().unwrap_or(0), at, s["limit_bps"].as_f64().unwrap_or(f64::INFINITY)),
+            };
+            assert_eq!(out, s["out_bps"].as_f64().unwrap_or(f64::NAN), "S-sym-RULE-SIM-TICK-8 — 손실 기반 목표 {name} 걸음 {i}");
+            assert_eq!(lb.measured, s["measured"].as_bool().unwrap_or(false), "S-sym-RULE-SIM-TICK-8 — 실측 {name} 걸음 {i}");
+        }
+    }
+}
+
+#[test]
 fn sim_arrival_vectors() {
     use oxsfud::sim::core::*;
     let v = load("sim.json");
