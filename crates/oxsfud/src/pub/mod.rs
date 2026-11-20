@@ -263,7 +263,7 @@ pub struct PubTrack {
     pub blocked_last_us: AtomicU64,
     pub pt_checked: AtomicBool,
     pub transport: std::sync::Weak<Transport>,
-    pub bytes_win: AtomicU64,
+    pub rate: Mutex<crate::sim::LayerRate>,
 }
 
 static SRC: AtomicU64 = AtomicU64::new(1);
@@ -290,7 +290,7 @@ impl PubTrack {
             blocked_last_us: AtomicU64::new(0),
             pt_checked: AtomicBool::new(false),
             transport: Arc::downgrade(tr),
-            bytes_win: AtomicU64::new(0),
+            rate: Mutex::new(crate::sim::LayerRate::default()),
         })
     }
 
@@ -310,7 +310,9 @@ impl PubTrack {
         if let Ok(mut c) = self.cache.lock() {
             c.put(rtp.seq, Bytes::copy_from_slice(rtp.raw));
         }
-        self.bytes_win.fetch_add(rtp.raw.len() as u64, Ordering::Relaxed);
+        if let Ok(mut r) = self.rate.lock() {
+            r.add(now_ms, rtp.raw.len() as u64);
+        }
         self.last_rtp_ms.store(now_ms, Ordering::Release);
         if self.stream.first_rtp_ms.compare_exchange(0, now_ms, Ordering::AcqRel, Ordering::Acquire).is_ok() {
             crate::ops::first_rtp(&self.stream);

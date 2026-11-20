@@ -1,13 +1,22 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-SIM-TICK · 정:RULE-CONC-SANS-IO · model: claude-opus-5-5
-//! v2 속도 산수 — AIMD(draft-ietf-rmcat-gcc-02 §5.5 · libwebrtc AimdRateControl · LinkCapacityEstimator) · trendline 과사용 판정 · 층 판단(신호 → 결정 + 사유). 시각은 인자.
+// spec: v1.6 · 정:RULE-SIM-TICK · 정:RULE-CONC-SANS-IO · model: claude-fable-5-2
+//! 자동 층 판단의 바닥 산수 — 지연 기울기 판정(trendline) · 묶음 간 델타 · AIMD 속도(mediasoup 3.32.2 AimdRateControl · LinkCapacityEstimator) · v1 층 판단(신호 → 결정 + 사유). 시각은 인자.
 
 use std::collections::VecDeque;
 
-pub const FLOOR_BPS: f64 = 30_000.0;
-pub const BETA: f64 = 0.85;
-pub const PACKET_BYTES: f64 = 1200.0;
-pub const FPS: f64 = 30.0;
+pub const BWE_MIN: i64 = 5_000;
+pub const INF: i64 = i64::MAX;
+
+pub fn scale(bps: i64, factor: f64) -> i64 {
+    if bps == INF {
+        return INF;
+    }
+    let r = bps as f64 * factor;
+    if r.is_nan() || r >= 9_007_199_254_740_991.0 {
+        return INF;
+    }
+    if r <= 0.0 { 0 } else { r.round() as i64 }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Usage {
@@ -25,54 +34,34 @@ impl Usage {
             _ => None,
         }
     }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct LinkCapacity {
-    estimate_kbps: Option<f64>,
-    deviation_kbps: f64,
-}
-
-impl LinkCapacity {
-    fn new() -> LinkCapacity {
-        LinkCapacity { estimate_kbps: None, deviation_kbps: 0.4 }
-    }
-
-    fn reset(&mut self) {
-        self.estimate_kbps = None;
-    }
-
-    fn deviation_bps(&self, e: f64) -> f64 {
-        (self.deviation_kbps * e).sqrt() * 1000.0
-    }
-
-    fn upper_bps(&self) -> f64 {
-        match self.estimate_kbps {
-            Some(e) => e * 1000.0 + 3.0 * self.deviation_bps(e),
-            None => f64::INFINITY,
+    pub fn name(self) -> &'static str {
+        match self {
+            Usage::Normal => "normal",
+            Usage::Overuse => "overuse",
+            Usage::Underuse => "underuse",
         }
     }
-
-    fn lower_bps(&self) -> f64 {
-        match self.estimate_kbps {
-            Some(e) => (e * 1000.0 - 3.0 * self.deviation_bps(e)).max(0.0),
-            None => 0.0,
-        }
-    }
-
-    fn on_overuse(&mut self, acked_bps: f64) {
-        let alpha = 0.05;
-        let sample = acked_bps / 1000.0;
-        let est = match self.estimate_kbps {
-            None => sample,
-            Some(e) => (1.0 - alpha) * e + alpha * sample,
-        };
-        self.estimate_kbps = Some(est);
-        let norm = est.max(1.0);
-        let err = est - sample;
-        self.deviation_kbps = ((1.0 - alpha) * self.deviation_kbps + alpha * err * err / norm).clamp(0.4, 2.5);
-    }
 }
+
+pub const AIMD_BETA: f64 = 0.85;
+pub const AIMD_RTT_US: i64 = 200_000;
+pub const AIMD_INIT_US: i64 = 5_000_000;
+pub const AIMD_REDUCE_MIN_US: i64 = 10_000;
+pub const AIMD_REDUCE_MAX_US: i64 = 200_000;
+pub const AIMD_MAX_BPS: i64 = 30_000_000;
+pub const AIMD_HEADROOM_BPS: i64 = 10_000;
+pub const AIMD_DECREASE_MARGIN_BPS: i64 = 5_000;
+pub const AIMD_MIN_MUL_BPS: i64 = 1_000;
+pub const AIMD_ALPHA: f64 = 1.08;
+pub const AIMD_FRAME_US: i64 = 33_333;
+pub const AIMD_PKT_BYTES: i64 = 1200;
+pub const AIMD_DETECTOR_US: i64 = 100_000;
+pub const AIMD_MIN_ADD_BPS_PER_S: i64 = 4_000;
+pub const CAP_ALPHA: f64 = 0.05;
+pub const CAP_BOUND: f64 = 3.0;
+pub const CAP_MIN_DEV: f64 = 0.4;
+pub const CAP_MAX_DEV: f64 = 2.5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -83,109 +72,191 @@ enum State {
 
 #[derive(Debug, Clone)]
 pub struct Aimd {
-    current_bps: f64,
+    pub min: i64,
+    pub rate: i64,
+    latest: i64,
+    pub rtt_us: i64,
+    pub valid: bool,
+    first_throughput_at: Option<i64>,
     state: State,
-    link: LinkCapacity,
-    last_change_ms: Option<u64>,
-    pub rtt_ms: u64,
-    pub min_bps: f64,
-    pub max_bps: f64,
-    pub measured: bool,
+    last_change: Option<i64>,
+    cap: Option<f64>,
+    dev: f64,
+}
+
+impl Default for Aimd {
+    fn default() -> Self {
+        Aimd::new()
+    }
 }
 
 impl Aimd {
-    pub fn new(start_bps: u64, rtt_ms: u64) -> Aimd {
+    pub fn new() -> Aimd {
         Aimd {
-            current_bps: start_bps as f64,
+            min: BWE_MIN,
+            rate: AIMD_MAX_BPS,
+            latest: AIMD_MAX_BPS,
+            rtt_us: AIMD_RTT_US,
+            valid: false,
+            first_throughput_at: None,
             state: State::Hold,
-            link: LinkCapacity::new(),
-            last_change_ms: None,
-            rtt_ms,
-            min_bps: FLOOR_BPS,
-            max_bps: f64::INFINITY,
-            measured: false,
+            last_change: None,
+            cap: None,
+            dev: CAP_MIN_DEV,
         }
     }
 
-    pub fn bps(&self) -> u64 {
-        self.current_bps as u64
-    }
-
     pub fn near(&self) -> bool {
-        self.link.estimate_kbps.is_some()
+        self.cap.is_some()
     }
 
-    pub fn set_estimate(&mut self, bps: u64, now_ms: u64) {
-        self.current_bps = bps as f64;
-        self.last_change_ms = Some(now_ms);
-        self.measured = true;
+    pub fn cap_kbps(&self) -> Option<f64> {
+        self.cap
     }
 
-    fn near_max_rate(&self) -> f64 {
-        let frame_bits = self.current_bps / FPS;
-        let packet_bits = PACKET_BYTES * 8.0;
-        let packets = (frame_bits / packet_bits).ceil().max(1.0);
-        let avg_packet_bits = frame_bits / packets;
-        let response_s = 2.0 * (self.rtt_ms as f64 + 100.0) / 1000.0;
-        (avg_packet_bits / response_s).max(4000.0)
+    pub fn set_start(&mut self, bps: i64) {
+        self.rate = bps;
+        self.latest = bps;
+        self.valid = true;
     }
 
-    pub fn update(&mut self, now_ms: u64, usage: Usage, acked_bps: u64) -> u64 {
-        let acked = acked_bps as f64;
+    pub fn set_min(&mut self, bps: i64) {
+        self.min = bps;
+        self.rate = bps.max(self.rate);
+    }
+
+    pub fn set_estimate(&mut self, bps: i64, now_us: i64) {
+        self.valid = true;
+        self.rate = bps.max(self.min);
+        self.last_change = Some(now_us);
+    }
+
+    pub fn time_to_reduce_further(&self, now_us: i64, throughput: i64) -> bool {
+        let gap = self.rtt_us.clamp(AIMD_REDUCE_MIN_US, AIMD_REDUCE_MAX_US);
+        match self.last_change {
+            None => return true,
+            Some(t) if now_us.saturating_sub(t) >= gap => return true,
+            _ => {}
+        }
+        self.valid && throughput < (0.5 * self.rate as f64).round() as i64
+    }
+
+    pub fn initial_time_to_reduce_further(&self, now_us: i64) -> bool {
+        self.valid && self.time_to_reduce_further(now_us, self.rate / 2 - 1)
+    }
+
+    fn cap_upper(&self) -> i64 {
+        match self.cap {
+            None => INF,
+            Some(c) => ((c + CAP_BOUND * (self.dev * c).sqrt()) * 1000.0) as i64,
+        }
+    }
+
+    fn cap_lower(&self) -> i64 {
+        match self.cap {
+            None => 0,
+            Some(c) => ((c - CAP_BOUND * (self.dev * c).sqrt()).max(0.0) * 1000.0) as i64,
+        }
+    }
+
+    fn cap_update(&mut self, bps: i64) {
+        let sample = (bps as f64 / 1000.0).round();
+        let c = match self.cap {
+            None => sample,
+            Some(c) => (1.0 - CAP_ALPHA) * c + CAP_ALPHA * sample,
+        };
+        self.cap = Some(c);
+        let err = c - sample;
+        self.dev = ((1.0 - CAP_ALPHA) * self.dev + (CAP_ALPHA * err * err) / c.max(1.0)).max(CAP_MIN_DEV).min(CAP_MAX_DEV);
+    }
+
+    fn near_rate(&self) -> i64 {
+        let frame = self.rate.saturating_mul(AIMD_FRAME_US).saturating_add(4_000_000) / 8_000_000;
+        let pkt = (frame as f64 / (frame as f64 / AIMD_PKT_BYTES as f64).ceil()).round() as i64;
+        AIMD_MIN_ADD_BPS_PER_S.max(pkt.saturating_mul(8_000_000) / (self.rtt_us.saturating_add(AIMD_DETECTOR_US).saturating_mul(2)).max(1))
+    }
+
+    pub fn update(&mut self, now_us: i64, usage: Usage, throughput: Option<i64>) -> i64 {
+        if !self.valid {
+            match self.first_throughput_at {
+                None => {
+                    if throughput.is_some() {
+                        self.first_throughput_at = Some(now_us);
+                    }
+                }
+                Some(t) => {
+                    if now_us.saturating_sub(t) > AIMD_INIT_US
+                        && let Some(k) = throughput
+                    {
+                        self.rate = k;
+                        self.valid = true;
+                    }
+                }
+            }
+        }
+        let est = throughput.unwrap_or(self.latest);
+        if let Some(k) = throughput {
+            self.latest = k;
+        }
+        if !self.valid && usage != Usage::Overuse {
+            return self.rate;
+        }
         match usage {
             Usage::Normal => {
                 if self.state == State::Hold {
-                    self.last_change_ms = Some(now_ms);
+                    self.last_change = Some(now_us);
                     self.state = State::Increase;
                 }
             }
             Usage::Overuse => self.state = State::Decrease,
             Usage::Underuse => self.state = State::Hold,
         }
-        let mut new = self.current_bps;
+        let mut next: Option<i64> = None;
         match self.state {
             State::Hold => {}
             State::Increase => {
-                if acked > self.link.upper_bps() {
-                    self.link.reset();
+                if est > self.cap_upper() {
+                    self.cap = None;
                 }
-                let elapsed_s = self.last_change_ms.map(|t| now_ms.saturating_sub(t) as f64 / 1000.0).unwrap_or(0.0);
-                if self.near() {
-                    new += self.near_max_rate() * elapsed_s;
-                } else {
-                    let alpha = 1.08f64.powf(elapsed_s.min(1.0));
-                    new += (self.current_bps * (alpha - 1.0)).max(1000.0);
+                let limit = ((1.5 * est as f64).round() as i64).saturating_add(AIMD_HEADROOM_BPS);
+                if self.rate < limit {
+                    let inc = if self.cap.is_some() {
+                        self.near_rate().saturating_mul(now_us.saturating_sub(self.last_change.unwrap_or(now_us))) / 1_000_000
+                    } else {
+                        let alpha = match self.last_change {
+                            Some(t) => AIMD_ALPHA.powf((now_us.saturating_sub(t) as f64 / 1_000_000.0).min(1.0)),
+                            None => AIMD_ALPHA,
+                        };
+                        ((self.rate as f64 * (alpha - 1.0)).round() as i64).max(AIMD_MIN_MUL_BPS)
+                    };
+                    next = Some(self.rate.saturating_add(inc).min(limit));
                 }
-                self.last_change_ms = Some(now_ms);
+                self.last_change = Some(now_us);
             }
             State::Decrease => {
-                let mut dec = acked * BETA;
-                if dec > 5000.0 {
-                    dec -= 5000.0;
+                let mut dec = (AIMD_BETA * est as f64).round() as i64;
+                if dec > AIMD_DECREASE_MARGIN_BPS {
+                    dec -= AIMD_DECREASE_MARGIN_BPS;
                 }
-                if dec > self.current_bps
-                    && let Some(e) = self.link.estimate_kbps
+                if dec > self.rate
+                    && let Some(c) = self.cap
                 {
-                    dec = BETA * e * 1000.0;
+                    dec = (AIMD_BETA * ((c * 1000.0) as i64) as f64).round() as i64;
                 }
-                if dec < self.current_bps {
-                    new = dec;
+                if dec < self.rate {
+                    next = Some(dec);
                 }
-                if acked < self.link.lower_bps() {
-                    self.link.reset();
+                if est < self.cap_lower() {
+                    self.cap = None;
                 }
-                self.link.on_overuse(acked);
-                self.measured = true;
+                self.valid = true;
+                self.cap_update(est);
                 self.state = State::Hold;
-                self.last_change_ms = Some(now_ms);
+                self.last_change = Some(now_us);
             }
         }
-        let cap = 1.5 * acked + 10_000.0;
-        if new > self.current_bps && new > cap {
-            new = self.current_bps.max(cap);
-        }
-        self.current_bps = new.clamp(self.min_bps, self.max_bps).floor();
-        self.bps()
+        self.rate = next.unwrap_or(self.rate).max(self.min);
+        self.rate
     }
 }
 
@@ -211,6 +282,10 @@ pub const TREND_DELTA_MAX: u32 = 1000;
 impl Trendline {
     pub fn new() -> Trendline {
         Trendline { threshold: 12.5, overuse_ms: -1.0, usage: Some(Usage::Normal), ..Default::default() }
+    }
+
+    pub fn state(&self) -> Usage {
+        self.usage.unwrap_or(Usage::Normal)
     }
 
     pub fn update(&mut self, recv_delta_ms: f64, send_delta_ms: f64, arrival_ms: f64) -> Usage {
@@ -267,83 +342,6 @@ impl Trendline {
         self.prev_trend = trend;
         self.usage = Some(usage);
         usage
-    }
-}
-
-pub const LB_MIN_PACKETS: u64 = 20;
-pub const LB_LOW_LOSS: f64 = 0.02;
-pub const LB_HIGH_LOSS: f64 = 0.1;
-pub const LB_DECREASE_GAP_MS: u64 = 300;
-pub const LB_INCREASE_WINDOW_MS: u64 = 1_000;
-pub const LB_INCREASE_GAIN: f64 = 1.08;
-pub const LB_INCREASE_ADD_BPS: f64 = 1_000.0;
-
-#[derive(Debug, Clone)]
-pub struct LossBased {
-    pub target: f64,
-    hist: VecDeque<(u64, f64)>,
-    expected: u64,
-    lost: u64,
-    frac: Option<u32>,
-    decreased_since_report: bool,
-    last_decrease: Option<u64>,
-    pub measured: bool,
-}
-
-impl LossBased {
-    pub fn new(start_bps: f64) -> LossBased {
-        LossBased { target: start_bps, hist: VecDeque::new(), expected: 0, lost: 0, frac: None, decreased_since_report: false, last_decrease: None, measured: false }
-    }
-
-    pub fn report(&mut self, lost: u64, packets: u64, now: u64, limit: f64) -> f64 {
-        if packets > 0 {
-            let expected = self.expected + packets;
-            if expected < LB_MIN_PACKETS {
-                self.expected = expected;
-                self.lost += lost;
-                return self.set(self.target, now, limit);
-            }
-            self.decreased_since_report = false;
-            self.frac = Some((((self.lost + lost) * 256) / expected).min(255) as u32);
-            self.expected = 0;
-            self.lost = 0;
-        }
-        self.update(now, limit)
-    }
-
-    fn update(&mut self, now: u64, limit: f64) -> f64 {
-        let Some(frac) = self.frac else { return self.set(self.target, now, limit) };
-        let loss = frac as f64 / 256.0;
-        if loss <= LB_LOW_LOSS {
-            while self.hist.front().is_some_and(|h| now.saturating_sub(h.0) >= LB_INCREASE_WINDOW_MS) {
-                self.hist.pop_front();
-            }
-            let base = self.hist.iter().map(|h| h.1).fold(self.target, f64::min);
-            return self.set((base * LB_INCREASE_GAIN + 0.5).floor() + LB_INCREASE_ADD_BPS, now, limit);
-        }
-        if loss > LB_HIGH_LOSS && !self.decreased_since_report && self.last_decrease.is_none_or(|t| now.saturating_sub(t) >= LB_DECREASE_GAP_MS) {
-            self.last_decrease = Some(now);
-            self.decreased_since_report = true;
-            self.measured = true;
-            return self.set((self.target * (512 - frac) as f64 / 512.0).floor(), now, limit);
-        }
-        self.set(self.target, now, limit)
-    }
-
-    fn set(&mut self, bps: f64, now: u64, limit: f64) -> f64 {
-        self.target = bps.min(limit);
-        while self.hist.front().is_some_and(|h| now.saturating_sub(h.0) >= LB_INCREASE_WINDOW_MS) {
-            self.hist.pop_front();
-        }
-        self.hist.push_back((now, self.target));
-        self.target
-    }
-
-    pub fn set_estimate(&mut self, bps: f64, now: u64) {
-        self.target = bps;
-        self.hist.clear();
-        self.hist.push_back((now, bps));
-        self.measured = true;
     }
 }
 
@@ -423,9 +421,6 @@ impl InterArrival {
     }
 }
 
-pub const P_H_BPS: f64 = 1_650_000.0;
-pub const P_L_BPS: f64 = 250_000.0;
-pub const P_HEADROOM: f64 = 1.2;
 pub const P_DEMOTE_LOSS: f64 = 0.08;
 pub const P_CLEAN_LOSS: f64 = 0.02;
 pub const P_NACK_RATIO: f64 = 0.08;
@@ -434,14 +429,9 @@ pub const P_DEMOTE_TICKS: u32 = 2;
 pub const P_BACKOFF_MS: u64 = 15_000;
 pub const P_BACKOFF_MAX_MS: u64 = 60_000;
 pub const P_COLLAPSE_MS: u64 = 5_000;
-pub const P_GRACE_MS: u64 = 10_000;
-pub const P_PROBE_JUDGE_MS: u64 = 4_000;
-pub const P_PROBE_GAIN: f64 = 1.35;
-pub const P_PROBE_MAX_BPS: f64 = 3_000_000.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
-    Estimate,
     Loss,
     Nack,
     Drop,
@@ -450,7 +440,6 @@ pub enum Reason {
 impl Reason {
     pub fn name(self) -> &'static str {
         match self {
-            Reason::Estimate => "estimate",
             Reason::Loss => "loss",
             Reason::Nack => "nack",
             Reason::Drop => "drop",
@@ -461,71 +450,53 @@ impl Reason {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Signals {
     pub now: u64,
-    pub v2: bool,
-    pub rows: usize,
     pub loss: f64,
     pub sent: u64,
     pub repeats: u64,
     pub drops: u64,
-    pub estimate: f64,
-    pub measured: bool,
-    pub overuse: bool,
-    pub probe: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Decision {
     pub to: Option<u8>,
     pub reasons: Vec<Reason>,
-    pub promote_by: Option<&'static str>,
-    pub probe: Option<f64>,
-    pub probe_end: bool,
-    pub raise: Option<f64>,
     pub nack_ratio: f64,
-    pub demand_h: f64,
-    pub demand_now: f64,
 }
 
 #[derive(Debug, Clone)]
 pub struct Policy {
     pub level: u8,
-    pub bad: u32,
-    pub last_demote: u64,
-    pub last_promote: u64,
+    bad: u32,
+    last_demote: u64,
+    last_promote: u64,
     pub backoff: u64,
-    pub win: VecDeque<(u64, u64)>,
-    pub probe_at: Option<u64>,
-    pub started: bool,
-    pub joined_at: Option<u64>,
+    win: VecDeque<(u64, u64)>,
 }
 
 impl Default for Policy {
     fn default() -> Self {
-        Policy { level: 1, bad: 0, last_demote: 0, last_promote: 0, backoff: P_BACKOFF_MS, win: VecDeque::new(), probe_at: None, started: false, joined_at: None }
+        Policy { level: 1, bad: 0, last_demote: 0, last_promote: 0, backoff: P_BACKOFF_MS, win: VecDeque::new() }
     }
 }
 
 impl Policy {
     pub fn tick(&mut self, s: &Signals) -> Decision {
-        let rows = s.rows as f64;
-        let demand_h = rows * P_H_BPS * P_HEADROOM;
-        let demand_now = rows * if self.level == 1 { P_H_BPS } else { P_L_BPS } * P_HEADROOM;
         self.win.push_back((s.sent, s.repeats));
         while self.win.len() > P_NACK_WIN_TICKS {
             self.win.pop_front();
         }
-        let (sent, rep) = self.win.iter().fold((0u64, 0u64), |(a, b), (x, y)| (a + x, b + y));
-        let nack_ratio = if sent == 0 { if rep > 0 { 1.0 } else { 0.0 } } else { (rep as f64 / sent as f64).min(1.0) };
-        let joined = *self.joined_at.get_or_insert(s.now);
-        let in_grace = s.now.saturating_sub(self.last_promote.max(joined)) < P_GRACE_MS;
+        let sent: u64 = self.win.iter().map(|w| w.0).sum();
+        let rep: u64 = self.win.iter().map(|w| w.1).sum();
+        let nack_ratio = if sent == 0 {
+            if rep > 0 { 1.0 } else { 0.0 }
+        } else {
+            (rep as f64 / sent as f64).min(1.0)
+        };
         let mut reasons = Vec::new();
-        if s.v2 && s.measured && !in_grace && self.level == 1 && s.estimate < demand_now {
-            reasons.push(Reason::Estimate);
-        }
-        if !s.v2 && s.loss >= P_DEMOTE_LOSS {
+        if s.loss >= P_DEMOTE_LOSS {
             reasons.push(Reason::Loss);
         }
-        if !s.v2 && self.win.len() >= P_NACK_WIN_TICKS && rep > 0 && nack_ratio > P_NACK_RATIO {
+        if self.win.len() >= P_NACK_WIN_TICKS && rep > 0 && nack_ratio > P_NACK_RATIO {
             reasons.push(Reason::Nack);
         }
         if s.drops > 0 {
@@ -533,61 +504,20 @@ impl Policy {
         }
         let bad = !reasons.is_empty();
         self.bad = if bad { self.bad + 1 } else { 0 };
-        let (mut to, mut probe, mut raise, mut probe_end) = (None, None, None, false);
-        let mut promote_by = None;
+        let mut to = None;
         if self.level == 1 && self.bad >= P_DEMOTE_TICKS {
-            if s.now.saturating_sub(self.last_promote) < P_COLLAPSE_MS && !reasons.contains(&Reason::Estimate) {
+            if s.now.saturating_sub(self.last_promote) < P_COLLAPSE_MS {
                 self.backoff = (self.backoff * 2).min(P_BACKOFF_MAX_MS);
             }
             self.level = 0;
             self.bad = 0;
             self.last_demote = s.now;
             to = Some(0);
-        } else if self.level == 0 && !bad && (s.v2 || s.loss <= P_CLEAN_LOSS) && s.now.saturating_sub(self.last_demote) >= self.backoff {
-            if !s.v2 || (!s.overuse && s.estimate >= demand_h) {
-                self.level = 1;
-                self.last_promote = s.now;
-                to = Some(1);
-                promote_by = Some(if s.v2 { "estimate" } else { "clean" });
-            } else if self.probe_at.is_none() {
-                self.probe_at = Some(s.now);
-                probe = Some((demand_h * P_PROBE_GAIN).min(P_PROBE_MAX_BPS));
-            }
+        } else if self.level == 0 && !bad && s.loss <= P_CLEAN_LOSS && s.now.saturating_sub(self.last_demote) >= self.backoff {
+            self.level = 1;
+            self.last_promote = s.now;
+            to = Some(1);
         }
-        if s.v2 && !self.started && self.level == 1 && self.probe_at.is_none() {
-            self.started = true;
-            self.probe_at = Some(s.now);
-            probe = Some((demand_h * P_PROBE_GAIN).min(P_PROBE_MAX_BPS));
-        }
-        if let Some(at) = self.probe_at
-            && s.now.saturating_sub(at) >= P_PROBE_JUDGE_MS
-        {
-            self.probe_at = None;
-            probe_end = true;
-            match s.probe {
-                Some(x) if x >= demand_h => raise = Some(x),
-                _ => self.last_demote = s.now,
-            }
-        }
-        Decision { to, reasons, promote_by, probe, probe_end, raise, nack_ratio, demand_h, demand_now }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn first_increase_is_1000() {
-        let mut a = Aimd::new(300_000, 200);
-        assert_eq!(a.update(0, Usage::Normal, 300_000), 301_000);
-        assert_eq!(a.update(500, Usage::Normal, 300_000), 312_808);
-    }
-
-    #[test]
-    fn decrease_from_acked() {
-        let mut a = Aimd::new(1_000_000, 200);
-        assert_eq!(a.update(0, Usage::Overuse, 900_000), 760_000);
-        assert!(a.near());
+        Decision { to, reasons, nack_ratio }
     }
 }

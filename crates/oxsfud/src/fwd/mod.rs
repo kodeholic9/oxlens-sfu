@@ -5,7 +5,7 @@
 pub mod core;
 pub mod rt;
 
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arc_swap::{ArcSwap, ArcSwapOption};
@@ -55,6 +55,8 @@ pub struct DownRow {
     pub src_track: ArcSwapOption<crate::r#pub::PubTrack>,
     pub rr_loss: AtomicU8,
     pub rr_at: AtomicU64,
+    pub sr_mid: AtomicU32,
+    pub sr_at_us: AtomicU64,
     pub nacks: AtomicU64,
     pub nack: Mutex<crate::rtcp::nack::Ledger>,
     pub drops: AtomicU64,
@@ -98,6 +100,8 @@ impl DownRow {
             src_track: ArcSwapOption::empty(),
             rr_loss: AtomicU8::new(0),
             rr_at: AtomicU64::new(0),
+            sr_mid: AtomicU32::new(0),
+            sr_at_us: AtomicU64::new(0),
             nacks: AtomicU64::new(0),
             nack: Mutex::new(crate::rtcp::nack::Ledger::default()),
             drops: AtomicU64::new(0),
@@ -415,9 +419,12 @@ pub fn worker_loop(w: &Arc<Worker>) {
             }
         }
         let now = mono_us();
-        if now >= next_tick {
+        let probe_due = now >= w.probe_at.load(Ordering::Acquire);
+        if now >= next_tick || probe_due {
             crate::rtcp::tick(w, now);
-            next_tick = now + 10_000;
+            if now >= next_tick {
+                next_tick = now + 10_000;
+            }
         }
         if did > 0 {
             idle = 0;
@@ -432,7 +439,8 @@ pub fn worker_loop(w: &Arc<Worker>) {
         std::sync::atomic::fence(Ordering::SeqCst);
         let empty = w.rows.is_empty() && w.inbox.iter().all(|r| r.is_empty());
         if empty {
-            std::thread::park_timeout(std::time::Duration::from_millis(5));
+            let until_probe = w.probe_at.load(Ordering::Acquire).saturating_sub(mono_us());
+            std::thread::park_timeout(std::time::Duration::from_micros(until_probe.min(5_000)));
         }
         w.sleeping.store(false, Ordering::SeqCst);
         idle = 0;
@@ -773,7 +781,7 @@ pub fn send_down(w: &Worker, row: &DownRow, pkt: &Pkt) {
         crate::ops::drop_count("send_fail");
         return;
     }
-    crate::rtcp::sent_twcc(conn, twcc, enc.len(), mono_us());
+    crate::rtcp::sent_twcc(conn, twcc, enc.len(), mono_us(), 0);
     row.sent.fetch_add(1, Ordering::Relaxed);
     row.bytes.fetch_add(enc.len() as u64, Ordering::Relaxed);
     row.last_at.store(now_ms, Ordering::Relaxed);

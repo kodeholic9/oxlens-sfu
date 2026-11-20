@@ -1,9 +1,9 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-SIM-TICK · 정:RULE-CONC-SANS-IO · model: claude-opus-5-5
-//! 맹검 독립 1층 — 자동 층 상수의 성립 조건(유예 > 재강등 창) · AIMD 벡터를 시각 인자로 그대로 넣는다 · 같은 입력 같은 출력.
+// spec: v1.6 · 정:RULE-SIM-TICK · 정:RULE-CONC-SANS-IO · model: claude-fable-5-2
+//! 맹검 독립 1층 — v1 층 판단 상수의 성립 조건(재강등 창 < backoff) · AIMD 벡터를 시각 인자로 그대로 넣는다 · 같은 입력 같은 출력.
 
 use oxsfud::sim::core::{Aimd, Trendline, Usage};
-use oxsfud::sim::core::{P_COLLAPSE_MS as COLLAPSE_MS, P_GRACE_MS as GRACE_MS};
+use oxsfud::sim::core::{P_BACKOFF_MS as BACKOFF_MS, P_COLLAPSE_MS as COLLAPSE_MS};
 use std::path::PathBuf;
 
 fn vectors_dir() -> PathBuf {
@@ -21,25 +21,33 @@ fn load(name: &str) -> serde_json::Value {
 }
 
 #[test]
-fn grace_exceeds_collapse_window() {
+fn collapse_window_is_shorter_than_the_backoff() {
     assert_eq!(COLLAPSE_MS, 5_000, "S-sym-RULE-SIM-TICK-1 re-demote (collapse) window 5,000 ms");
-    assert_eq!(GRACE_MS, 10_000, "S-sym-RULE-SIM-TICK-1 post-promotion estimate grace 10,000 ms");
-    let gap = std::hint::black_box(GRACE_MS).saturating_sub(COLLAPSE_MS);
-    assert!(gap > 0, "S-sym-RULE-SIM-TICK-1 grace must be longer than the collapse window or capacity shortfall reads as collapse");
+    assert_eq!(BACKOFF_MS, 15_000, "S-sym-RULE-SIM-TICK-1 first promotion backoff 15,000 ms");
+    let gap = std::hint::black_box(BACKOFF_MS).saturating_sub(COLLAPSE_MS);
+    assert!(gap > 0, "S-sym-RULE-SIM-TICK-1 the backoff must outlast the collapse window or every promotion re-demotes inside it");
 }
 
 #[test]
 fn aimd_matches_vectors_with_time_argument() {
     let v = load("sim.json");
-    let rtt = v["constants"]["rtt_ms"].as_u64().expect("rtt");
     for case in v["aimd"].as_array().expect("aimd") {
         let name = case["name"].as_str().unwrap_or("");
-        let mut a = Aimd::new(case["start_bps"].as_u64().expect("start"), rtt);
+        let mut a = Aimd::new();
+        if let Some(start) = case["start_bps"].as_i64() {
+            a.set_start(start);
+        }
         for st in case["steps"].as_array().expect("steps") {
-            let usage = Usage::parse(st["usage"].as_str().expect("usage")).expect("usage name");
-            let out = a.update(st["at_ms"].as_u64().expect("at"), usage, st["acked_bps"].as_u64().expect("acked"));
-            assert_eq!(out, st["out_bps"].as_u64().expect("out"), "S-sym-RULE-CONC-SANS-IO-1 AIMD rate from the at_ms argument · {name} · at {}", st["at_ms"]);
-            assert_eq!(a.near(), st["out_near"].as_bool().expect("near"), "S-sym-RULE-CONC-SANS-IO-1 AIMD link estimate presence · {name} · at {}", st["at_ms"]);
+            let at = st["at_us"].as_i64().expect("at");
+            match st["probe_bps"].as_i64() {
+                Some(p) => a.set_estimate(p, at),
+                None => {
+                    let usage = Usage::parse(st["usage"].as_str().expect("usage")).expect("usage name");
+                    a.update(at, usage, st["throughput_bps"].as_i64());
+                }
+            }
+            assert_eq!(a.rate, st["out_bps"].as_i64().expect("out"), "S-sym-RULE-CONC-SANS-IO-1 AIMD rate from the at_us argument · {name} · at {at}");
+            assert_eq!(a.near(), st["out_near"].as_bool().expect("near"), "S-sym-RULE-CONC-SANS-IO-1 AIMD link estimate presence · {name} · at {at}");
         }
     }
 }
@@ -47,24 +55,27 @@ fn aimd_matches_vectors_with_time_argument() {
 #[test]
 fn estimators_are_deterministic_in_their_arguments() {
     let run = || {
-        let mut a = Aimd::new(500_000, 200);
+        let mut a = Aimd::new();
+        a.set_start(500_000);
         let mut t = Trendline::new();
         let mut out = Vec::new();
-        for i in 0..200u64 {
+        for i in 0..200i64 {
             let recv = 20.0 + (i % 7) as f64 * 0.8;
             let u = t.update(recv, 20.0, i as f64 * 20.0);
-            out.push((u, a.update(i * 20, u, 400_000 + (i % 5) * 10_000)));
+            out.push((u, a.update(i * 20_000, u, Some(400_000 + (i % 5) * 10_000))));
         }
         out
     };
     let first = run();
     std::thread::sleep(std::time::Duration::from_millis(25));
     assert_eq!(first, run(), "S-sym-RULE-CONC-SANS-IO-1 trendline and AIMD give the same output for the same arguments");
-    let mut a = Aimd::new(300_000, 200);
-    let mut b = Aimd::new(300_000, 200);
-    a.update(0, Usage::Normal, 300_000);
-    b.update(0, Usage::Normal, 300_000);
-    let x = a.update(500, Usage::Normal, 300_000);
-    let y = b.update(1_500, Usage::Normal, 300_000);
+    let mut a = Aimd::new();
+    let mut b = Aimd::new();
+    a.set_start(300_000);
+    b.set_start(300_000);
+    a.update(0, Usage::Normal, Some(300_000));
+    b.update(0, Usage::Normal, Some(300_000));
+    let x = a.update(500_000, Usage::Normal, Some(300_000));
+    let y = b.update(1_500_000, Usage::Normal, Some(300_000));
     assert!(y > x, "S-sym-RULE-CONC-SANS-IO-1 increase follows elapsed time taken from the argument ({x} at 500ms vs {y} at 1500ms)");
 }

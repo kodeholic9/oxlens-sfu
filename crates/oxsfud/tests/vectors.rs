@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use oxsfud::flr::bind::{Effect, Slot};
 use oxsfud::fwd::core::{Rewriter, covers, pt_byte1, serial_after, vp8_pic, vp8_write};
 use oxsfud::rtcp::core::{RecvStats, SYM_LARGE, SYM_NONE, SYM_SMALL, TwccRecv};
-use oxsfud::sim::core::{Aimd, Trendline, Usage};
+use oxsfud::sim::core::{Trendline, Usage};
 use oxsfud::sub::ext::{ExtInput, ExtTable, build};
 use serde_json::Value;
 
@@ -207,48 +207,186 @@ fn rtcp_vectors() {
 #[test]
 fn sim_aimd_vectors() {
     let v = load("sim.json");
-    let rtt = v["constants"]["rtt_ms"].as_u64().unwrap_or(200);
+    use oxsfud::sim::core::*;
+    let k = &v["constants"]["aimd"];
+    assert_eq!(BWE_MIN, v["constants"]["bwe_min_bps"].as_i64().unwrap_or(-1), "정:RULE-SIM-TICK 대역 추정 바닥 — 원천 SIM.model.BWE_MIN");
+    assert_eq!(AIMD_BETA, k["beta"].as_f64().unwrap_or(f64::NAN), "정:RULE-SIM-TICK AIMD 수치 beta — 원천 SIM.model.AIMD");
+    assert_eq!(AIMD_RTT_US, k["rttUs"].as_i64().unwrap_or(-1), "정:RULE-SIM-TICK AIMD 수치 rttUs");
+    assert_eq!(AIMD_INIT_US, k["initUs"].as_i64().unwrap_or(-1), "정:RULE-SIM-TICK AIMD 수치 initUs");
+    assert_eq!(AIMD_MAX_BPS, k["maxBps"].as_i64().unwrap_or(-1), "정:RULE-SIM-TICK AIMD 수치 maxBps");
+    assert_eq!(AIMD_ALPHA, k["alpha"].as_f64().unwrap_or(f64::NAN), "정:RULE-SIM-TICK AIMD 수치 alpha");
+    assert_eq!(AIMD_FRAME_US, k["frameUs"].as_i64().unwrap_or(-1), "정:RULE-SIM-TICK AIMD 수치 frameUs");
     for c in cases(&v, "aimd") {
         let name = c["name"].as_str().unwrap_or("");
-        let mut a = Aimd::new(c["start_bps"].as_u64().unwrap_or(0), rtt);
-        for s in c["steps"].as_array().unwrap_or(&vec![]) {
-            let usage = Usage::parse(s["usage"].as_str().unwrap_or("normal")).unwrap_or(Usage::Normal);
-            let out = a.update(s["at_ms"].as_u64().unwrap_or(0), usage, s["acked_bps"].as_u64().unwrap_or(0));
-            assert_eq!(out, s["out_bps"].as_u64().unwrap_or(0), "sim 벡터 AIMD {name} @{}", s["at_ms"]);
-            assert_eq!(a.near(), s["out_near"].as_bool().unwrap_or(false), "sim 벡터 AIMD near {name} @{}", s["at_ms"]);
-            assert_eq!(a.measured, s["out_measured"].as_bool().unwrap_or(false), "S-sym-RULE-SIM-TICK-6 — 속도 줄이 실측으로 섰나 {name} @{}", s["at_ms"]);
+        let mut a = Aimd::new();
+        if let Some(start) = c["start_bps"].as_i64() {
+            a.set_start(start);
+        }
+        for (i, s) in c["steps"].as_array().unwrap_or(&vec![]).iter().enumerate() {
+            let at = s["at_us"].as_i64().unwrap_or(0);
+            if let Some(p) = s["probe_bps"].as_i64() {
+                a.set_estimate(p, at);
+            } else {
+                let usage = Usage::parse(s["usage"].as_str().unwrap_or("normal")).unwrap_or(Usage::Normal);
+                let k = s["throughput_bps"].as_i64();
+                let reduce = match k {
+                    Some(x) => a.time_to_reduce_further(at, x),
+                    None => a.initial_time_to_reduce_further(at),
+                };
+                assert_eq!(reduce, s["out_reduce_further"].as_bool().unwrap_or(false), "정:RULE-SIM-TICK — 더 줄일 때인가 {name} 걸음 {i}");
+                a.update(at, usage, k);
+            }
+            assert_eq!(a.rate, s["out_bps"].as_i64().unwrap_or(-1), "sim 벡터 AIMD {name} 걸음 {i}");
+            assert_eq!(a.near(), s["out_near"].as_bool().unwrap_or(false), "sim 벡터 AIMD near {name} 걸음 {i}");
+            assert_eq!(a.valid, s["out_valid"].as_bool().unwrap_or(false), "S-sym-RULE-SIM-TICK-6 — 속도 줄이 유효한가 {name} 걸음 {i}");
         }
     }
 }
 
 #[test]
-fn sim_loss_based_vectors() {
-    use oxsfud::sim::core::*;
+fn sim_allocator_vectors() {
+    use oxsfud::sim::alloc::*;
     let v = load("sim.json");
-    let k = &v["loss_based_constants"];
-    let f = |key: &str| k[key].as_f64().unwrap_or(f64::NAN);
-    assert_eq!(LB_MIN_PACKETS as f64, f("minPackets"), "정:RULE-SIM-TICK 손실 기반 수치 minPackets — 원천 SIM.model.LOSS_BASED");
-    assert_eq!(LB_LOW_LOSS, f("lowLoss"), "정:RULE-SIM-TICK 손실 기반 수치 lowLoss");
-    assert_eq!(LB_HIGH_LOSS, f("highLoss"), "정:RULE-SIM-TICK 손실 기반 수치 highLoss");
-    assert_eq!(LB_DECREASE_GAP_MS as f64, f("decreaseGapMs"), "정:RULE-SIM-TICK 손실 기반 수치 decreaseGapMs");
-    assert_eq!(LB_INCREASE_WINDOW_MS as f64, f("increaseWindowMs"), "정:RULE-SIM-TICK 손실 기반 수치 increaseWindowMs");
-    assert_eq!(LB_INCREASE_GAIN, f("increaseGain"), "정:RULE-SIM-TICK 손실 기반 수치 increaseGain");
-    assert_eq!(LB_INCREASE_ADD_BPS, f("increaseAddBps"), "정:RULE-SIM-TICK 손실 기반 수치 increaseAddBps");
-    for c in cases(&v, "loss_based") {
+    assert_eq!(HYSTERESIS, v["constants"]["alloc"]["hysteresis"].as_f64().unwrap_or(f64::NAN), "정:RULE-SIM-TICK 배분 수치 hysteresis — 원천 SIM.model.ALLOC");
+    for c in cases(&v, "allocator") {
         let name = c["name"].as_str().unwrap_or("");
-        let mut lb = LossBased::new(c["start_bps"].as_f64().unwrap_or(0.0));
-        for (i, s) in c["steps"].as_array().unwrap_or(&vec![]).iter().enumerate() {
-            let at = s["at_ms"].as_u64().unwrap_or(0);
-            let out = match s["probe_bps"].as_f64() {
-                Some(p) => {
-                    lb.set_estimate(p, at);
-                    lb.target
-                }
-                None => lb.report(s["lost"].as_u64().unwrap_or(0), s["packets"].as_u64().unwrap_or(0), at, s["limit_bps"].as_f64().unwrap_or(f64::INFINITY)),
-            };
-            assert_eq!(out, s["out_bps"].as_f64().unwrap_or(f64::NAN), "S-sym-RULE-SIM-TICK-8 — 손실 기반 목표 {name} 걸음 {i}");
-            assert_eq!(lb.measured, s["measured"].as_bool().unwrap_or(false), "S-sym-RULE-SIM-TICK-8 — 실측 {name} 걸음 {i}");
+        let mut a = Allocator::default();
+        for (i, st) in c["steps"].as_array().unwrap_or(&vec![]).iter().enumerate() {
+            let cands: Vec<Candidate> = st["candidates"]
+                .as_array()
+                .unwrap_or(&vec![])
+                .iter()
+                .map(|x| Candidate {
+                    id: x["id"].as_u64().unwrap_or(0),
+                    weight: x["weight"].as_u64().unwrap_or(0) as u8,
+                    points: x["points"].as_array().unwrap_or(&vec![]).iter().map(|p| Point { bitrate: p["bitrate"].as_i64().unwrap_or(0), layer: p["layer"].as_i64().unwrap_or(0) as i8 }).collect(),
+                    current: x["current"].as_u64().map(|n| n as usize),
+                })
+                .collect();
+            let (grants, left) = a.distribute(st["available"].as_i64().unwrap_or(0), &cands);
+            let want = st["out"]["grants"].as_array().cloned().unwrap_or_default();
+            assert_eq!(grants.len(), want.len(), "S-sym-RULE-SIM-TICK-11 — 배분받은 줄 수 {name} 걸음 {i}");
+            for (g, w) in grants.iter().zip(want.iter()) {
+                assert_eq!(g.id, w["id"].as_u64().unwrap_or(u64::MAX), "S-sym-RULE-SIM-TICK-11 — 줄 차례 {name} 걸음 {i}");
+                assert_eq!(g.layer as i64, w["layer"].as_i64().unwrap_or(9), "S-sym-RULE-SIM-TICK-11 · S-sym-RULE-SIM-TICK-12 — 층 {name} 걸음 {i} 줄 {}", g.id);
+                assert_eq!(g.point as u64, w["point"].as_u64().unwrap_or(99), "S-sym-RULE-SIM-TICK-11 — 점 {name} 걸음 {i}");
+                assert_eq!(g.changed, w["changed"].as_bool().unwrap_or(false), "정:RULE-SIM-TICK — 바뀌었나 {name} 걸음 {i}");
+                assert_eq!(g.reason.name(), w["reason"].as_str().unwrap_or(""), "S-sym-RULE-SIM-TICK-12 — 못 오른 까닭 {name} 걸음 {i}");
+                assert_eq!(g.need, w["need"].as_i64().unwrap_or(-1), "S-sym-RULE-SIM-TICK-12 — 위 점에 더 드는 양 {name} 걸음 {i}");
+            }
+            assert_eq!(left, st["out"]["left"].as_i64().unwrap_or(-1), "S-sym-RULE-SIM-TICK-11 — 남은 양 {name} 걸음 {i}");
         }
+    }
+}
+
+#[test]
+fn sim_congestion_vectors() {
+    use oxsfud::sim::bwe::*;
+    let v = load("sim.json");
+    let k = &v["constants"];
+    assert_eq!(CONGESTION_START_BPS, k["congestion"]["startBps"].as_i64().unwrap_or(-1), "정:RULE-SIM-TICK 대역 추정 수치 startBps — 원천 SIM.model.CONGESTION");
+    assert_eq!(CONGESTION_PROCESS_US, k["congestion"]["processUs"].as_i64().unwrap_or(-1), "정:RULE-SIM-TICK 대역 추정 수치 processUs");
+    assert_eq!(PROBE_FIRST, k["probe"]["first"].as_f64().unwrap_or(f64::NAN), "정:RULE-SIM-TICK 탐색 수치 first — 원천 SIM.model.PROBE");
+    assert_eq!(PROBE_SECOND, k["probe"]["second"].as_f64().unwrap_or(f64::NAN), "정:RULE-SIM-TICK 탐색 수치 second");
+    assert_eq!(PROBE_ALR_INTERVAL_US, k["probe"]["alrIntervalUs"].as_i64().unwrap_or(-1), "정:RULE-SIM-TICK 탐색 수치 alrIntervalUs");
+    assert_eq!(PROBE_DURATION_US, k["probe"]["durationUs"].as_i64().unwrap_or(-1), "정:RULE-SIM-TICK 탐색 수치 durationUs");
+    assert_eq!(PROBER_MAX_DELAY_US, k["prober"]["maxDelayUs"].as_i64().unwrap_or(-1), "정:RULE-SIM-TICK 묶음 쏘기 수치 maxDelayUs — 원천 SIM.model.PROBER");
+    assert_eq!(PE_UTILIZATION, k["probe_estimator"]["utilization"].as_f64().unwrap_or(f64::NAN), "정:RULE-SIM-TICK 묶음 실측 수치 utilization — 원천 SIM.model.PROBE_EST");
+    assert_eq!(ALR_USAGE, k["alr"]["usage"].as_f64().unwrap_or(f64::NAN), "정:RULE-SIM-TICK 여유 구간 수치 usage — 원천 SIM.model.ALR");
+    assert_eq!(TP_WINDOW_PACKETS as u64, k["throughput"]["windowPackets"].as_u64().unwrap_or(0), "정:RULE-SIM-TICK 처리량 수치 windowPackets — 원천 SIM.model.THROUGHPUT");
+    assert_eq!(LOSS_MAX_INCREASE, k["loss"]["maxIncrease"].as_f64().unwrap_or(f64::NAN), "정:RULE-SIM-TICK 손실 기반 수치 maxIncrease — 원천 SIM.model.LOSS");
+    assert_eq!(LOSS_WINDOW as u64, k["loss"]["window"].as_u64().unwrap_or(0), "정:RULE-SIM-TICK 손실 기반 수치 window");
+    assert_eq!(TARGET_MAX_RTT_US, k["target"]["maxRttUs"].as_i64().unwrap_or(-1), "정:RULE-SIM-TICK 목표 속도 수치 maxRttUs — 원천 SIM.model.TARGET");
+    for c in cases(&v, "congestion") {
+        let name = c["name"].as_str().unwrap_or("");
+        let mut g: Option<Congestion> = None;
+        let mut shot: Option<Shot> = None;
+        let mut sent_tags: Vec<Option<Tag>> = Vec::new();
+        for (i, st) in c["steps"].as_array().unwrap_or(&vec![]).iter().enumerate() {
+            let us = st["us"].as_i64().unwrap_or(0);
+            let op = st["op"].as_str().unwrap_or("");
+            if op == "new" {
+                g = Some(Congestion::new(st["start_bps"].as_i64().unwrap_or(0), us));
+                continue;
+            }
+            let Some(c) = g.as_mut() else { panic!("sim 벡터 대역 추정 {name} 걸음 {i} — new 가 먼저다") };
+            let step = match op {
+                "sent" => {
+                    c.on_sent(st["size"].as_i64().unwrap_or(0), us, us);
+                    sent_tags.push(shot.map(|s| s.tag));
+                    continue;
+                }
+                "shot" => {
+                    let s = c.prober.shot(us);
+                    let o = &st["out"];
+                    let got = s.map(|x| (x.tag.id, x.tag.min_probes, x.tag.min_bytes, x.bytes, x.first));
+                    let want = Some((o["id"].as_i64().unwrap_or(-1), o["min_probes"].as_i64().unwrap_or(-1), o["min_bytes"].as_i64().unwrap_or(-1), o["bytes"].as_i64().unwrap_or(-1), o["first"].as_bool().unwrap_or(false)));
+                    assert_eq!(got, want, "S-sym-RULE-SIM-TICK-14 — 탐색 발 {name} 걸음 {i}");
+                    shot = s;
+                    continue;
+                }
+                "media" => {
+                    let got = c.prober.media(us, st["size"].as_i64().unwrap_or(0)).map(|t| t.id).unwrap_or(0);
+                    assert_eq!(got, st["out"].as_i64().unwrap_or(-1), "S-sym-RULE-SIM-TICK-20 — 묶음이 도는 동안 나간 패킷 {name} 걸음 {i}");
+                    continue;
+                }
+                "twccless" => {
+                    assert_eq!(c.twccless(us), st["out"].as_bool().unwrap_or(false), "S-sym-RULE-SIM-TICK-19 — TWCC 없는 구독자 {name} 걸음 {i}");
+                    continue;
+                }
+                "padding" => {
+                    assert_eq!(c.padding(us), st["out"].as_i64().unwrap_or(-1), "S-sym-RULE-SIM-TICK-17 — 패딩 예산 {name} 걸음 {i}");
+                    continue;
+                }
+                "rtt" => {
+                    c.on_rtt(st["rtt_us"].as_i64().unwrap_or(0));
+                    continue;
+                }
+                "shot_sent" => {
+                    c.prober.sent(us, st["bytes"].as_i64().unwrap_or(0));
+                    shot = None;
+                    continue;
+                }
+                "network" => c.set_network(true, us),
+                "desired" => c.set_desired(st["bps"].as_i64().unwrap_or(0), us),
+                "process" => c.process(us),
+                "feedback" => {
+                    let fed: Vec<Fed> = st["pk"]
+                        .as_array()
+                        .unwrap_or(&vec![])
+                        .iter()
+                        .map(|p| {
+                            let id = p[4].as_i64().unwrap_or(0);
+                            Fed {
+                                seq: p[0].as_i64().unwrap_or(0),
+                                send_us: p[1].as_i64().unwrap_or(0),
+                                size: p[2].as_i64().unwrap_or(0),
+                                recv_us: p[3].as_i64(),
+                                tag: if id != 0 { Some(Tag { id, min_probes: p[5].as_i64().unwrap_or(0), min_bytes: p[6].as_i64().unwrap_or(0) }) } else { None },
+                            }
+                        })
+                        .collect();
+                    c.on_feedback(&fed, us, st["base_us"].as_i64().unwrap_or(0))
+                }
+                other => panic!("sim 벡터 대역 추정 {name} 걸음 {i} — 모르는 걸음 {other}"),
+            };
+            let o = &st["out"];
+            assert_eq!(c.available(), o["target"].as_i64().unwrap_or(-1), "S-sym-RULE-SIM-TICK-13 — 목표 속도 {name} 걸음 {i}({op} @{us})");
+            assert_eq!(step.target, o["notify"].as_i64(), "정:RULE-SIM-TICK — 목표 알림 {name} 걸음 {i}({op} @{us})");
+            assert_eq!(step.by.name(), o["by"].as_str().unwrap_or(""), "정:RULE-SIM-TICK — 목표를 정한 것 {name} 걸음 {i}({op} @{us})");
+            let opened: Vec<(i64, i64, &str)> = step.opened.iter().map(|x| (x.id, x.bitrate, x.why.name())).collect();
+            let want: Vec<(i64, i64, &str)> = o["opened"].as_array().map(|a| a.iter().map(|x| (x["id"].as_i64().unwrap_or(-1), x["bitrate"].as_i64().unwrap_or(-1), x["why"].as_str().unwrap_or(""))).collect()).unwrap_or_default();
+            assert_eq!(opened, want, "S-sym-RULE-SIM-TICK-14 — 연 탐색 묶음 {name} 걸음 {i}({op} @{us})");
+            let judged = step.judged.map(|j| (j.id, j.send, j.recv, j.result));
+            let wj = if o["judged"].is_null() { None } else { Some((o["judged"]["id"].as_i64().unwrap_or(-1), o["judged"]["send"].as_i64().unwrap_or(-1), o["judged"]["recv"].as_i64().unwrap_or(-1), o["judged"]["result"].as_i64())) };
+            assert_eq!(judged, wj, "S-sym-RULE-SIM-TICK-14 — 묶음 실측 {name} 걸음 {i}({op} @{us})");
+            assert_eq!(c.delay.trend.state().name(), o["usage"].as_str().unwrap_or(""), "정:RULE-SIM-TICK — 지연 기울기 판정 {name} 걸음 {i}");
+            assert_eq!(c.delay.aimd.rate, o["aimd"].as_i64().unwrap_or(-1), "정:RULE-SIM-TICK — 지연 기반 속도 {name} 걸음 {i}({op} @{us})");
+            assert_eq!(c.rate.loss_state.name(), o["loss_state"].as_str().unwrap_or(""), "S-sym-RULE-SIM-TICK-8 — 손실 기반 상태 {name} 걸음 {i}({op} @{us})");
+            assert_eq!(c.alr.started_at.is_some(), o["alr"].as_bool().unwrap_or(false), "정:RULE-SIM-TICK — 여유 구간 {name} 걸음 {i}({op} @{us})");
+            assert_eq!(c.throughput.bitrate(), o["throughput"].as_i64(), "정:RULE-SIM-TICK — 처리량 {name} 걸음 {i}({op} @{us})");
+        }
+        assert!(!sent_tags.is_empty(), "sim 벡터 대역 추정 {name} — 보낸 패킷이 없다");
     }
 }
 
@@ -287,9 +425,6 @@ fn sim_policy_vectors() {
     let k = &v["policy_constants"];
     let f = |n: &str| k[n].as_f64().unwrap_or(f64::NAN);
     for (name, got, want) in [
-        ("hBps", P_H_BPS, f("hBps")),
-        ("lBps", P_L_BPS, f("lBps")),
-        ("headroom", P_HEADROOM, f("headroom")),
         ("demoteLoss", P_DEMOTE_LOSS, f("demoteLoss")),
         ("cleanLoss", P_CLEAN_LOSS, f("cleanLoss")),
         ("nackRatio", P_NACK_RATIO, f("nackRatio")),
@@ -298,10 +433,6 @@ fn sim_policy_vectors() {
         ("backoffMs", P_BACKOFF_MS as f64, f("backoffMs")),
         ("backoffMaxMs", P_BACKOFF_MAX_MS as f64, f("backoffMaxMs")),
         ("collapseMs", P_COLLAPSE_MS as f64, f("collapseMs")),
-        ("graceMs", P_GRACE_MS as f64, f("graceMs")),
-        ("probeJudgeMs", P_PROBE_JUDGE_MS as f64, f("probeJudgeMs")),
-        ("probeGain", P_PROBE_GAIN, f("probeGain")),
-        ("probeMaxBps", P_PROBE_MAX_BPS, f("probeMaxBps")),
     ] {
         assert_eq!(got, want, "정:RULE-SIM-TICK 층 판단 수치 {name} — 원천 SIM.model.SIM_POLICY 와 같아야 한다");
     }
@@ -312,27 +443,17 @@ fn sim_policy_vectors() {
             let s = &st["in"];
             let sig = Signals {
                 now: s["now"].as_u64().unwrap_or(0),
-                v2: s["v2"].as_bool().unwrap_or(false),
-                rows: s["rows"].as_u64().unwrap_or(0) as usize,
                 loss: s["loss"].as_f64().unwrap_or(0.0),
                 sent: s["sent"].as_u64().unwrap_or(0),
                 repeats: s["repeats"].as_u64().unwrap_or(0),
                 drops: s["drops"].as_u64().unwrap_or(0),
-                estimate: s["estimate"].as_f64().unwrap_or(0.0),
-                measured: s["measured"].as_bool().unwrap_or(false),
-                overuse: s["overuse"].as_bool().unwrap_or(false),
-                probe: s["probe"].as_f64(),
             };
             let d = p.tick(&sig);
             let o = &st["out"];
             let reasons: Vec<&str> = d.reasons.iter().map(|r| r.name()).collect();
             let want: Vec<&str> = o["reasons"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect()).unwrap_or_default();
-            assert_eq!(reasons, want, "S-sym-RULE-SIM-TICK-5 · S-sym-RULE-SIM-TICK-6 — 사유 {name} 걸음 {i}");
+            assert_eq!(reasons, want, "S-sym-RULE-SIM-TICK-4 · S-sym-RULE-SIM-TICK-5 — 사유 {name} 걸음 {i}");
             assert_eq!(d.to.map(|x| x as u64), o["to"].as_u64(), "S-sym-RULE-SIM-TICK-1 — 층 바꿈 {name} 걸음 {i}");
-            assert_eq!(d.promote_by, o["promoteBy"].as_str(), "정:RULE-SIM-TICK — 승격 근거 {name} 걸음 {i}");
-            assert_eq!(d.probe, o["probe"].as_f64(), "S-sym-RULE-SIM-TICK-2 — 프로브 열기 {name} 걸음 {i}");
-            assert_eq!(d.probe_end, o["probeEnd"].as_bool().unwrap_or(false), "S-sym-RULE-SIM-TICK-2 — 프로브 판정 {name} 걸음 {i}");
-            assert_eq!(d.raise, o["raise"].as_f64(), "S-sym-RULE-SIM-TICK-2 — 실증 올림 {name} 걸음 {i}");
             assert!((d.nack_ratio - o["nackRatio"].as_f64().unwrap_or(f64::NAN)).abs() < 1e-12, "S-sym-RULE-SIM-TICK-4 — 반복 NACK 비율 {name} 걸음 {i}");
             assert_eq!(p.level as u64, st["level"].as_u64().unwrap_or(9), "정:RULE-SIM-TICK — 층 {name} 걸음 {i}");
             assert_eq!(p.backoff, st["backoff_ms"].as_u64().unwrap_or(0), "S-sym-RULE-SIM-TICK-1 — backoff {name} 걸음 {i}");

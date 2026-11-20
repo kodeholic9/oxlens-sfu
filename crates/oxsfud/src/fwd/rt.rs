@@ -99,6 +99,7 @@ pub struct Worker {
     pub subs: AtomicUsize,
     pub voice: tokio::sync::mpsc::Sender<Arc<crate::r#pub::PubStream>>,
     pub rows: super::RowCmds,
+    pub probe_at: AtomicU64,
 }
 
 impl Worker {
@@ -294,6 +295,7 @@ pub fn start(c: StartCfg) -> Result<Arc<Media>, String> {
                 subs: AtomicUsize::new(0),
                 voice,
                 rows: super::RowCmds::default(),
+                probe_at: AtomicU64::new(u64::MAX),
             })
         })
         .collect();

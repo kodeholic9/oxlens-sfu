@@ -24,7 +24,6 @@ pub const RR_MS: u64 = 1_000;
 pub const TWCC_MS: u64 = 100;
 pub const REMB_MS: u64 = 1_000;
 pub const SIM_MS: u64 = 1_000;
-pub const PROBE_US: u64 = 20_000;
 pub const SENT_KEEP: usize = 1 << 15;
 pub const PLI_BURST_MS: [u64; 3] = [0, 500, 1_500];
 
@@ -52,8 +51,6 @@ pub struct ConnRtcp {
     pub next_remb: AtomicU64,
     pub next_keepalive: AtomicU64,
     pub next_sim: AtomicU64,
-    pub next_probe_us: AtomicU64,
-    pub probe_cluster: AtomicU32,
     pub sr: Mutex<HashMap<u32, Sr>>,
     pub sent: Mutex<VecDeque<Sent>>,
     pub sim: Mutex<crate::sim::ConnSim>,
@@ -391,6 +388,8 @@ pub fn send_sr(w: &Worker, row: &DownRow, src_key: u64, sr: &Sr, rtp: u32) {
         _ => return,
     };
     let pk = build_sr(row.ssrc, sr, translated, row.sent.load(Ordering::Relaxed) as u32, row.bytes.load(Ordering::Relaxed) as u32);
+    row.sr_at_us.store(mono_us(), Ordering::Release);
+    row.sr_mid.store(((sr.ntp >> 16) & 0xffff_ffff) as u32, Ordering::Release);
     send_rtcp(w, &row.conn, &pk);
 }
 
@@ -410,8 +409,8 @@ pub fn twcc_in(tr: &Transport, seq: u16, at_us: i64) {
     }
 }
 
-pub fn sent_twcc(conn: &Transport, seq: u16, size: usize, now_us: u64) {
-    let cluster = conn.rtc.probe_cluster.load(Ordering::Relaxed);
+pub fn sent_twcc(conn: &Transport, seq: u16, size: usize, now_us: u64, cluster: u32) {
+    let cluster = crate::sim::on_sent(conn, size, now_us, cluster);
     if let Ok(mut g) = conn.rtc.sent.lock() {
         g.push_back(Sent { seq, at_us: now_us, size, cluster });
         while g.len() > SENT_KEEP {
@@ -445,6 +444,7 @@ pub fn tick(w: &Arc<Worker>, now_us: u64) {
         Err(_) => return,
     };
     let now = common::now_ms();
+    let mut probe_at = u64::MAX;
     for tr in trs {
         if tr.closed.load(Ordering::Acquire) {
             continue;
@@ -459,16 +459,13 @@ pub fn tick(w: &Arc<Worker>, now_us: u64) {
         if !ups.is_empty() {
             uplink(w, &tr, &ups, now, now_us);
         }
-        if crate::ops::auto_layer_on() {
-            if due(&tr.rtc.next_sim, now, SIM_MS) {
-                crate::sim::tick(&tr, now);
-            }
-            if now_us >= tr.rtc.next_probe_us.load(Ordering::Relaxed) {
-                tr.rtc.next_probe_us.store(now_us + PROBE_US, Ordering::Relaxed);
-                crate::sim::probe(w, &tr, now_us);
-            }
+        if crate::ops::auto_layer_on()
+            && let Some(at) = crate::sim::drive(w, &tr, now, now_us)
+        {
+            probe_at = probe_at.min(at);
         }
     }
+    w.probe_at.store(probe_at, Ordering::Release);
 }
 
 fn keepalive(tr: &Transport) {
@@ -553,7 +550,7 @@ pub fn on_rtcp(w: &Arc<Worker>, tr: &Arc<Transport>, plain: &[u8]) {
                     crate::ops::drop_count("rtcp_unresolved");
                     continue;
                 };
-                on_rr(t, p.body);
+                on_rr(tr, t, p.body);
             }
             (205, 1) => {
                 let Some((media_ssrc, seqs)) = parse_nack(p.body) else {
@@ -636,14 +633,28 @@ fn on_sr(w: &Worker, tr: &Arc<Transport>, body: &[u8]) {
     }
 }
 
-fn on_rr(t: &crate::sub::Table, body: &[u8]) {
+pub fn rr_rtt(now_us: u64, sr_at_us: u64, dlsr: u32) -> Option<i64> {
+    let held = dlsr as u64 * 1_000_000 / 65_536;
+    let rtt = now_us.checked_sub(sr_at_us)?.checked_sub(held)?;
+    (rtt > 0).then_some(rtt as i64)
+}
+
+fn on_rr(tr: &Transport, t: &crate::sub::Table, body: &[u8]) {
     let rc = body.len().saturating_sub(4) / 24;
+    let now_us = mono_us();
     for k in 0..rc {
         let o = 4 + k * 24;
         let Some(ssrc) = be32(body, o) else { break };
         if let Some((row, false)) = t.row_by_ssrc(ssrc) {
             row.rr_loss.store(body[o + 4], Ordering::Relaxed);
             row.rr_at.store(common::now_ms(), Ordering::Relaxed);
+            let (Some(lsr), Some(dlsr)) = (be32(body, o + 16), be32(body, o + 20)) else { continue };
+            if lsr != 0
+                && lsr == row.sr_mid.load(Ordering::Acquire)
+                && let Some(rtt) = rr_rtt(now_us, row.sr_at_us.load(Ordering::Acquire), dlsr)
+            {
+                crate::sim::on_rtt(tr, rtt);
+            }
         }
     }
 }
@@ -701,8 +712,8 @@ pub fn send_rtx(w: &Worker, row: &DownRow, seqs: &[u16]) {
             crate::fwd::core::vp8_write(&mut payload[2..], &d, pid, tl0);
         }
         let csrc = row.conn.source_tag.then_some(track.stream.csrc);
-        let b = Built { pt: rtx_pt, seq: rseq, ts: rtp.ts.wrapping_add(ts_off), ssrc: rtx_ssrc, csrc, marker: rtp.marker, payload: &payload, padding: false };
-        if send_built(w, m, row, b) {
+        let b = Built { pt: rtx_pt, seq: rseq, ts: rtp.ts.wrapping_add(ts_off), ssrc: rtx_ssrc, csrc, marker: rtp.marker, payload: &payload, padding: false, cluster: 0 };
+        if send_built(w, m, row, b).is_some() {
             row.conn.tx.retransmitted.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -717,15 +728,16 @@ pub struct Built<'a> {
     pub marker: bool,
     pub payload: &'a [u8],
     pub padding: bool,
+    pub cluster: u32,
 }
 
-pub fn send_built(w: &Worker, m: &crate::fwd::rt::Media, row: &DownRow, b: Built<'_>) -> bool {
-    let Built { pt, seq, ts, ssrc, csrc, marker, payload, padding } = b;
+pub fn send_built(w: &Worker, m: &crate::fwd::rt::Media, row: &DownRow, b: Built<'_>) -> Option<usize> {
+    let Built { pt, seq, ts, ssrc, csrc, marker, payload, padding, cluster } = b;
     let conn = &row.conn;
     if conn.closed.load(Ordering::Acquire) || !conn.ready.load(Ordering::Acquire) {
-        return false;
+        return None;
     }
-    let Some(path) = conn.send_ok(common::now_ms(), |id| m.tcp_open(id)) else { return false };
+    let path = conn.send_ok(common::now_ms(), |id| m.tcp_open(id))?;
     let twcc = conn.twcc_seq.fetch_add(1, Ordering::AcqRel);
     let mut out = Vec::with_capacity(payload.len() + 40);
     out.push((if padding { 0xa0 } else { 0x80 }) | u8::from(csrc.is_some()));
@@ -745,22 +757,30 @@ pub fn send_built(w: &Worker, m: &crate::fwd::rt::Media, row: &DownRow, b: Built
     let enc = match conn.srtp_tx.lock() {
         Ok(mut g) => match g.as_mut() {
             Some(c) => c.encrypt_rtp(&out),
-            None => return false,
+            None => return None,
         },
-        Err(_) => return false,
+        Err(_) => return None,
     };
-    let Ok(enc): Result<Bytes, _> = enc else { return false };
+    let Ok(enc): Result<Bytes, _> = enc else { return None };
     if !m.send_on(&w.sock, path, &enc) {
         crate::ops::drop_count("send_fail");
-        return false;
+        return None;
     }
-    sent_twcc(conn, twcc, enc.len(), mono_us());
-    true
+    sent_twcc(conn, twcc, enc.len(), mono_us(), cluster);
+    Some(enc.len())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rr_round_trip_is_the_time_since_the_sr_less_the_time_the_receiver_held_it() {
+        assert_eq!(rr_rtt(1_250_000, 1_000_000, 65_536 / 5), Some(50_004),"정:RULE-SIM-TICK now − SR sent − DLSR(1/65536 s)");
+        assert_eq!(rr_rtt(1_000_000, 1_000_000, 0), None, "정:RULE-SIM-TICK a zero round trip is no measurement");
+        assert_eq!(rr_rtt(1_100_000, 1_000_000, 65_536), None, "정:RULE-SIM-TICK a DLSR longer than the elapsed time is no measurement");
+        assert_eq!(rr_rtt(900_000, 1_000_000, 0), None);
+    }
 
     #[test]
     fn nack_roundtrip() {
