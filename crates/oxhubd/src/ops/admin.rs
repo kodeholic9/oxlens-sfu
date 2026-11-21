@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 운영:RULE-READ-SFUS · 운영:RULE-READ-ROOMS · 운영:RULE-READ-USERS · 운영:RULE-READ-SNAPSHOT · 운영:RULE-READ-DROPS · 운영:RULE-READ-TRANSIT · 운영:RULE-READ-ROOM-DETAIL · 운영:RULE-READ-NODE-ROOMS · 운영:RULE-READ-BUS · 운영:RULE-READ-BUS-ALL · 운영:RULE-READ-HISTORY · 운영:RULE-READ-USER-MEDIA · 운영:RULE-READ-USER-PROBE · 운영:RULE-CTL-SUPERVISOR · 운영:RULE-CTL-CUT · 운영:RULE-CTL-ROOM · 운영:RULE-CTL-LOG-LEVEL · 운영:RULE-FMT-NO-INVENT · 정:IMPL-OPS-CUT · 정:IMPL-OPS-DESTROY-REAP · model: claude-opus-5-5
+// spec: v1.6 · 운영:RULE-READ-SFUS · 운영:RULE-READ-ROOMS · 운영:RULE-READ-USERS · 운영:RULE-READ-SNAPSHOT · 운영:RULE-READ-DROPS · 운영:RULE-READ-TRANSIT · 운영:RULE-READ-ROOM-DETAIL · 운영:RULE-READ-NODE-ROOMS · 운영:RULE-READ-BUS · 운영:RULE-READ-BUS-ALL · 운영:RULE-READ-HISTORY · 운영:RULE-READ-USER-MEDIA · 운영:RULE-READ-USER-PROBE · 운영:RULE-CTL-SUPERVISOR · 운영:RULE-CTL-CUT · 운영:RULE-CTL-ROOM · 운영:RULE-CTL-LOG-LEVEL · 운영:RULE-FMT-NO-INVENT · 정:IMPL-OPS-CUT · 정:IMPL-OPS-DESTROY-REAP · 정:RULE-CHAT-EXT-SUB · model: claude-opus-5-5
 //! `/admin` — 읽기(유닛 · 방 · 세션 · 버림 · 체류 · 버스 · 사건 이력) · 제어(supervisor · 절단 · 퇴장 · 폭파 · 수준). 정본은 sfud 를 경유해 가져온다 · 못 닿은 곳은 `error`.
 
 use std::sync::Arc;
@@ -113,6 +113,12 @@ pub async fn drops(hub: &Hub) -> Value {
         "notice_refused": hub.ses.counters.notice_refused.load(Ordering::Relaxed),
         "chat_fanout_fail": hub.ses.counters.chat_fanout_fail.load(Ordering::Relaxed),
         "session_end_fail": hub.ses.counters.session_end_fail.load(Ordering::Relaxed),
+        "ext_refused": hub.ses.counters.ext_refused.load(Ordering::Relaxed),
+        "ext_fanout_fail": hub.ses.counters.ext_fanout_fail.load(Ordering::Relaxed),
+        "ext_queue_full": hub.ses.counters.ext_queue_full.load(Ordering::Relaxed),
+        "ext_reply_timeout": hub.ses.counters.ext_reply_timeout.load(Ordering::Relaxed),
+        "ext_given_up": hub.ses.counters.ext_given_up.load(Ordering::Relaxed),
+        "ext_push_dropped": hub.ses.counters.ext_push_dropped.load(Ordering::Relaxed),
         "bus_ev_drop": hub.bus.ev_dropped(),
         "bus_malformed": hub.bus.malformed.load(Ordering::Relaxed),
         "log_queue_full": c.queue_full.load(Ordering::Relaxed),
@@ -244,6 +250,16 @@ pub async fn bus_view(hub: &Hub, user: Option<&str>) -> Value {
         }
         o
     });
+    let ext = match hub.ses.chat.get() {
+        Some(chat) if !chat.store.subs().is_empty() => match chat.ext_pending_counts().await {
+            Ok(rows) => json!(rows.into_iter().map(|(key, pending)| json!({ "key": key, "conns": [], "pending": pending })).collect::<Vec<_>>()),
+            Err(c) => {
+                tracing::warn!(kind = "diag", spec = "SV-RULE-CHAT-EXT-SUB", code = c.num(), "ext pending count failed — bus view ext left null");
+                Value::Null
+            }
+        },
+        _ => Value::Null,
+    };
     json!({
         "node": hub.node,
         "inst": hub.inst,
@@ -256,6 +272,7 @@ pub async fn bus_view(hub: &Hub, user: Option<&str>) -> Value {
         "isolated": isolated,
         "last_event": last,
         "sess": sess,
+        "ext": ext,
     })
 }
 

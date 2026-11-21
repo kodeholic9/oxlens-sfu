@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-CHAT-STORE-FORMS · 정:IMPL-CHAT-STORE · 정:IMPL-CHAT-MEMBERSHIP · 정:IMPL-CHAT-READ · 정:IMPL-CHAT-UNDELIVERED · 정:IMPL-CHAT-CATCHUP · 정:IMPL-CHAT-STORE-FAULTS · 연:RULE-CHAT-MSG-ID · 연:RULE-CHAT-ORDER · 연:RULE-CHAT-REF-CHECK · 연:RULE-CHAT-UNDELIVERED · model: claude-opus-5-5
-//! 채팅 저장소 PostgreSQL 꼴 — 연결 풀(`[chat] db_pool`)에서 요청마다 연결 하나 · 저장소가 쥔 런타임에서 돌고 부르는 쪽은 결과만 기다린다 · 원본 행은 `SELECT … FOR UPDATE` · `msg_id` 는 유일 제약 + `INSERT … ON CONFLICT`(먼저 찾아본 것은 이미 있는 행에만 쓴다) · 멤버 변경은 공간 행 잠금으로 줄 선다 · 문자열 키는 `COLLATE "C"`(바이트 차례 — 커서 비교가 SQLite 꼴과 같다) · 잠금 기다림 상한 · 진단 줄은 부른 쪽 스레드에서 남긴다 · 비밀번호는 `PGPASSWORD` · `~/.pgpass`(`PGPASSFILE`) · 기동 때 advisory 잠금 아래 표를 만든다.
+// spec: v1.6 · 정:IMPL-CHAT-STORE-FORMS · 정:IMPL-CHAT-STORE · 정:IMPL-CHAT-MEMBERSHIP · 정:IMPL-CHAT-READ · 정:IMPL-CHAT-UNDELIVERED · 정:IMPL-CHAT-CATCHUP · 정:IMPL-CHAT-STORE-FAULTS · 정:RULE-CHAT-EXT-SUB · 연:RULE-CHAT-MSG-ID · 연:RULE-CHAT-ORDER · 연:RULE-CHAT-REF-CHECK · 연:RULE-CHAT-UNDELIVERED · model: claude-opus-5-5
+//! 채팅 저장소 PostgreSQL 꼴 — 연결 풀(`[chat] db_pool`)에서 요청마다 연결 하나 · 저장소가 쥔 런타임에서 돌고 부르는 쪽은 결과만 기다린다 · 원본 행은 `SELECT … FOR UPDATE` · `msg_id` 는 유일 제약 + `INSERT … ON CONFLICT`(먼저 찾아본 것은 이미 있는 행에만 쓴다) · 멤버 변경은 공간 행 잠금으로 줄 선다 · 문자열 키는 `COLLATE "C"`(바이트 차례 — 커서 비교가 SQLite 꼴과 같다) · 잠금 기다림 상한 · 진단 줄은 부른 쪽 스레드에서 남긴다 · 비밀번호는 `PGPASSWORD` · `~/.pgpass`(`PGPASSFILE`) · 기동 때 advisory 잠금 아래 표를 만든다 · 3rd 계정 몫 펜딩은 미전송 기록과 같은 트랜잭션.
 
 use std::future::Future;
 use std::panic::Location;
@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use common::extsub::ExtSubs;
 use common::system::{ChatDb, Visibility};
 use deadpool_postgres::{GenericClient, Manager, ManagerConfig, Object, Pool, RecyclingMethod};
 use oxsig::Code;
@@ -19,7 +20,7 @@ use tokio_postgres::{Config, NoTls, Row};
 use common::talk::Report;
 
 use super::{
-    Ack, COLS, Cursor, Dir, Interval, Outgoing, Page, RELATION_KINDS, Roster, Sent, VISIBLE, again, fold_relations, fresh, member_msg, n, now_or, probe_of, ref_ok, since_floor, talk_merged, talk_missing, talk_msg,
+    Ack, COLS, ExtRow, Lane, ext_keys, Cursor, Dir, Interval, Outgoing, Page, RELATION_KINDS, Roster, Sent, VISIBLE, again, fold_relations, fresh, member_msg, n, now_or, probe_of, ref_ok, since_floor, talk_merged, talk_missing, talk_msg,
     talk_started, talk_update_ok, u, within,
 };
 
@@ -75,6 +76,15 @@ CREATE TABLE IF NOT EXISTS undelivered (
 CREATE INDEX IF NOT EXISTS undelivered_user_t ON undelivered (user_id, t, msg_id);
 CREATE INDEX IF NOT EXISTS undelivered_t ON undelivered (t);
 CREATE INDEX IF NOT EXISTS members_user ON members (user_id, leave_t);
+CREATE TABLE IF NOT EXISTS ext_pending (
+  key TEXT COLLATE "C" NOT NULL,
+  msg_id TEXT COLLATE "C" NOT NULL,
+  t BIGINT NOT NULL,
+  tries INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (key, msg_id)
+);
+CREATE INDEX IF NOT EXISTS ext_pending_key_t ON ext_pending (key, t, msg_id);
+CREATE INDEX IF NOT EXISTS ext_pending_t ON ext_pending (t);
 "#;
 
 const SEEN_JOINED: &str =
@@ -239,6 +249,17 @@ async fn record(c: &impl GenericClient, m: &ChatMessage, exclude: &str) -> Resul
     Ok(())
 }
 
+async fn ext_record(c: &impl GenericClient, subs: &ExtSubs, m: &ChatMessage, orig: Option<&str>) -> Result<(), Code> {
+    if subs.is_empty() {
+        return Ok(());
+    }
+    let t = n(m.t);
+    for key in ext_keys(subs, m, orig) {
+        exec(c, "INSERT INTO ext_pending (key, msg_id, t) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING", &[&key, &m.msg_id, &t]).await?;
+    }
+    Ok(())
+}
+
 async fn erase(c: &impl GenericClient, orig: &str) -> Result<(), Code> {
     exec(c, "UPDATE messages SET content = '', ext = NULL, deleted = TRUE WHERE msg_id = $1", &[&orig]).await?;
     exec(c, "UPDATE messages SET content = '', ext = NULL WHERE ref_id = $1 AND kind = 'edit'", &[&orig]).await?;
@@ -398,7 +419,7 @@ impl Pg {
         })
     }
 
-    pub(super) fn join(&self, space: &str, user: &str, by: Option<&str>, at: Option<u64>, default_vis: Visibility) -> Result<Option<(ChatMessage, u64)>, Code> {
+    pub(super) fn join(&self, subs: Arc<ExtSubs>, space: &str, user: &str, by: Option<&str>, at: Option<u64>, default_vis: Visibility) -> Result<Option<(ChatMessage, u64)>, Code> {
         let (conn, space, user, actor) = (self.conn(), space.to_string(), user.to_string(), by.unwrap_or(user).to_string());
         self.call(async move {
             let mut c = conn.await?;
@@ -418,13 +439,14 @@ impl Pg {
             let msg = member_msg(&space, &actor, &user, t, true);
             insert_msg(&tx, &msg).await?;
             record(&tx, &msg, "").await?;
+            ext_record(&tx, &subs, &msg, None).await?;
             exec(&tx, "UPDATE spaces SET ver = ver + 1 WHERE space_id = $1", &[&space]).await?;
             pg(tx.commit().await)?;
             Ok(Some((msg, u(ver) + 1)))
         })
     }
 
-    pub(super) fn leave(&self, space: &str, user: &str, by: Option<&str>, at: Option<u64>) -> Result<(ChatMessage, u64), Code> {
+    pub(super) fn leave(&self, subs: Arc<ExtSubs>, space: &str, user: &str, by: Option<&str>, at: Option<u64>) -> Result<(ChatMessage, u64), Code> {
         let (conn, space, user, actor) = (self.conn(), space.to_string(), user.to_string(), by.unwrap_or(user).to_string());
         self.call(async move {
             let mut c = conn.await?;
@@ -442,13 +464,14 @@ impl Pg {
             let msg = member_msg(&space, &actor, &user, t, false);
             insert_msg(&tx, &msg).await?;
             record(&tx, &msg, "").await?;
+            ext_record(&tx, &subs, &msg, None).await?;
             exec(&tx, "UPDATE spaces SET ver = ver + 1 WHERE space_id = $1", &[&space]).await?;
             pg(tx.commit().await)?;
             Ok((msg, u(ver) + 1))
         })
     }
 
-    pub(super) fn post(&self, user: &str, space: &str, msg_id: &str, out: &Outgoing, at: Option<u64>) -> Result<Sent, Code> {
+    pub(super) fn post(&self, subs: Arc<ExtSubs>, user: &str, space: &str, msg_id: &str, out: &Outgoing, at: Option<u64>) -> Result<Sent, Code> {
         let (conn, user, space, msg_id, out) = (self.conn(), user.to_string(), space.to_string(), msg_id.to_string(), out.clone());
         self.call(async move {
             let mut c = conn.await?;
@@ -463,12 +486,14 @@ impl Pg {
             if !open_member(&tx, &space, &user).await? {
                 return Err(Code::NotSpaceMember);
             }
+            let mut orig_kind: Option<String> = None;
             if let Some(r) = out.r#ref.as_deref() {
                 let orig = one(&tx, "SELECT space_id, kind, user_id, deleted FROM messages WHERE msg_id = $1 FOR UPDATE", &[&r]).await?;
-                let orig = match orig {
+                let orig: Option<(String, Option<String>, String, bool)> = match orig {
                     Some(x) => Some((get(&x, 0)?, get(&x, 1)?, get(&x, 2)?, get(&x, 3)?)),
                     None => None,
                 };
+                orig_kind = orig.as_ref().map(|o| o.1.clone().unwrap_or_default());
                 ref_ok(orig, &space, &user, &out)?;
             }
             let t = now_or(at);
@@ -495,12 +520,13 @@ impl Pg {
                 erase(&tx, r).await?;
             }
             record(&tx, &msg, &user).await?;
+            ext_record(&tx, &subs, &msg, orig_kind.as_deref()).await?;
             pg(tx.commit().await)?;
             Ok(Sent::Fresh { msg, ver: u(ver) })
         })
     }
 
-    pub(super) fn talk(&self, r: &Report, at: Option<u64>) -> Result<Sent, Code> {
+    pub(super) fn talk(&self, subs: Arc<ExtSubs>, r: &Report, at: Option<u64>) -> Result<Sent, Code> {
         let (conn, r) = (self.conn(), r.clone());
         self.call(async move {
             let mut c = conn.await?;
@@ -528,6 +554,7 @@ impl Pg {
                 )
                 .await?;
                 record(&tx, &msg, "").await?;
+                ext_record(&tx, &subs, &msg, None).await?;
                 pg(tx.commit().await)?;
                 return Ok(Sent::Fresh { msg, ver: u(ver) });
             }
@@ -562,6 +589,7 @@ impl Pg {
             }
             exec(&tx, "UPDATE spaces SET last_t = GREATEST(COALESCE(last_t, $2), $2) WHERE space_id = $1", &[&orig.space_id, &tn]).await?;
             record(&tx, &msg, "").await?;
+            ext_record(&tx, &subs, &msg, orig.kind.map(|k| k.as_str())).await?;
             pg(tx.commit().await)?;
             Ok(Sent::Fresh { msg, ver: u(ver) })
         })
@@ -737,7 +765,7 @@ impl Pg {
         })
     }
 
-    pub(super) fn ack_batch(&self, conn: Option<Object>, batch: Vec<Ack>) -> Result<(), Code> {
+    pub(super) fn ack_batch(&self, conn: Option<Object>, lane: Lane, batch: Vec<Ack>) -> Result<(), Code> {
         let fresh_conn = self.conn();
         self.call(async move {
             let mut c = match conn {
@@ -745,8 +773,12 @@ impl Pg {
                 None => fresh_conn.await?,
             };
             let tx = pg(c.transaction().await)?;
-            for (user, ids) in &batch {
-                exec(&tx, "DELETE FROM undelivered WHERE user_id = $1 AND msg_id = ANY($2)", &[user, ids]).await?;
+            let sql = match lane {
+                Lane::Member => "DELETE FROM undelivered WHERE user_id = $1 AND msg_id = ANY($2)",
+                Lane::Ext => "DELETE FROM ext_pending WHERE key = $1 AND msg_id = ANY($2)",
+            };
+            for (who, ids) in &batch {
+                exec(&tx, sql, &[who, ids]).await?;
             }
             pg(tx.commit().await)
         })
@@ -755,10 +787,48 @@ impl Pg {
     pub(super) fn purge(&self, before_t: u64) -> Result<usize, Code> {
         let conn = self.conn();
         self.call(async move {
-            let c = conn.await?;
+            let mut c = conn.await?;
             let b = n(before_t);
-            let k = exec(&c,"DELETE FROM undelivered WHERE t < $1", &[&b]).await?;
-            Ok(usize::try_from(k).unwrap_or(usize::MAX))
+            let tx = pg(c.transaction().await)?;
+            let k = exec(&tx, "DELETE FROM undelivered WHERE t < $1", &[&b]).await?;
+            let e = exec(&tx, "DELETE FROM ext_pending WHERE t < $1", &[&b]).await?;
+            pg(tx.commit().await)?;
+            Ok(usize::try_from(k + e).unwrap_or(usize::MAX))
+        })
+    }
+
+    pub(super) fn ext_failed(&self, key: &str, msg_ids: &[String], max_tries: u32) -> Result<Vec<String>, Code> {
+        let (conn, key, ids) = (self.conn(), key.to_string(), msg_ids.to_vec());
+        let max = i32::try_from(max_tries).unwrap_or(i32::MAX);
+        self.call(async move {
+            let mut c = conn.await?;
+            let tx = pg(c.transaction().await)?;
+            exec(&tx, "UPDATE ext_pending SET tries = tries + 1 WHERE key = $1 AND msg_id = ANY($2)", &[&key, &ids]).await?;
+            let rows = all(&tx, "DELETE FROM ext_pending WHERE key = $1 AND msg_id = ANY($2) AND tries >= $3 RETURNING msg_id", &[&key, &ids, &max]).await?;
+            pg(tx.commit().await)?;
+            let mut out: Vec<String> = rows.iter().map(|r| get(r, 0)).collect::<Result<_, _>>()?;
+            out.sort_by_key(|m| ids.iter().position(|x| x == m));
+            Ok(out)
+        })
+    }
+
+    pub(super) fn ext_count(&self, key: &str) -> Result<u64, Code> {
+        let (conn, key) = (self.conn(), key.to_string());
+        self.call(async move {
+            let c = conn.await?;
+            let row = one(&c, "SELECT COUNT(*) FROM ext_pending WHERE key = $1", &[&key]).await?;
+            Ok(row.map(|r| get::<i64>(&r, 0)).transpose()?.map(u).unwrap_or(0))
+        })
+    }
+
+    pub(super) fn ext_rows(&self, key: &str) -> Result<Vec<ExtRow>, Code> {
+        let (conn, key) = (self.conn(), key.to_string());
+        self.call(async move {
+            let c = conn.await?;
+            let rows = all(&c, "SELECT msg_id, t, tries FROM ext_pending WHERE key = $1 ORDER BY t, msg_id", &[&key]).await?;
+            rows.iter()
+                .map(|r| Ok(ExtRow { msg_id: get(r, 0)?, t: u(get(r, 1)?), tries: u32::try_from(get::<i32>(r, 2)?).unwrap_or(0) }))
+                .collect()
         })
     }
 

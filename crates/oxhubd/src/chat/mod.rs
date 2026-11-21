@@ -1,11 +1,11 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 연:RULE-CHAT-KIND · 연:RULE-CHAT-EXT · 정:RULE-CHAT-GATEWAY-MODULE ·정:IMPL-CHAT-STORE · 정:IMPL-CHAT-FANOUT · 정:IMPL-CHAT-FILTER · 정:IMPL-CHAT-READ · 정:IMPL-CHAT-UNDELIVERED · 정:IMPL-CHAT-CATCHUP · 정:IMPL-CHAT-STORE-FAULTS · 정:IMPL-CHAT-TALK · 연:RULE-CHAT-TALK · 연:CHAT.op.MESSAGE · 연:CHAT.op.SPACE_HISTORY · 연:CHAT.op.SPACE_LIST · 연:CHAT.op.SPACE_VIEW · 연:CHAT.op.CATCHUP · 연:RULE-CHAT-MSG-ID · 연:RULE-CHAT-CONTENT · 연:RULE-CHAT-RECV · 연:RULE-CHAT-DISABLED · 연:RULE-CHAT-LIVE-SOCKET-LOSS · 연:RULE-CHAT-CATCHUP · model: claude-opus-5-5
-//! 채팅 — 게이트웨이 안 모듈 · op 다섯 · 발언 기록(node 안 요청 `talk` — 같은 저장 길목 · 보낸 세션 없음) · 저장이 낸 `{멤버 판, 보낸 세션, 메시지}` 를 다른 node 에 뿌린다(실패 수를 돌려주고 다시 안 보낸다) · 공간마다 멤버 캐시로 `명단(t_M)` 을 낸다 · 받은 ACK 는 채널에 넣기만 하고 지우는 스레드 하나가 모아 한 트랜잭션에 지운다 · 보관 기간을 넘긴 미전송 기록을 지운다. 세션은 모른다 — 세션이 이 모듈을 부른다.
+// spec: v1.6 · 연:RULE-CHAT-KIND · 연:RULE-CHAT-EXT · 정:RULE-CHAT-GATEWAY-MODULE ·정:IMPL-CHAT-STORE · 정:IMPL-CHAT-FANOUT · 정:IMPL-CHAT-FILTER · 정:IMPL-CHAT-READ · 정:IMPL-CHAT-UNDELIVERED · 정:IMPL-CHAT-CATCHUP · 정:IMPL-CHAT-STORE-FAULTS · 정:IMPL-CHAT-TALK · 정:RULE-CHAT-EXT-SUB · 연:RULE-CHAT-TALK · 연:CHAT.op.MESSAGE · 연:CHAT.op.SPACE_HISTORY · 연:CHAT.op.SPACE_LIST · 연:CHAT.op.SPACE_VIEW · 연:CHAT.op.CATCHUP · 연:RULE-CHAT-MSG-ID · 연:RULE-CHAT-CONTENT · 연:RULE-CHAT-RECV · 연:RULE-CHAT-DISABLED · 연:RULE-CHAT-LIVE-SOCKET-LOSS · 연:RULE-CHAT-CATCHUP · model: claude-opus-5-5
+//! 채팅 — 게이트웨이 안 모듈 · op 다섯 · 발언 기록(node 안 요청 `talk` — 같은 저장 길목 · 보낸 세션 없음) · 저장이 낸 `{멤버 판, 보낸 세션, 메시지}` 를 다른 node 에 뿌린다(실패 수를 돌려주고 다시 안 보낸다) · 공간마다 멤버 캐시로 `명단(t_M)` 을 낸다 · 받은 ACK 는 줄(멤버 · 3rd — 따로 둔 상한)에 넣기만 하고 지우는 스레드 하나가 줄마다 모아 한 트랜잭션에 지운다 · 3rd 몫이 ACK 아닌 끝이면 시도 수를 올리고 상한에서 지운 것을 돌려준다(세는 것은 부른 쪽) · 보관 기간을 넘긴 미전송 기록을 지운다. 세션은 모른다 — 세션이 이 모듈을 부른다.
 
+pub mod acks;
 pub mod store;
 
 use std::collections::HashMap;
-use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -17,13 +17,15 @@ use serde_json::Value;
 
 use crate::bus::Bus;
 use common::envelope::Reply;
-use store::{Ack, CONTENT_MAX, Cursor, Dir, HISTORY_DEFAULT, HISTORY_MAX, MSG_ID_MAX, Outgoing, Roster, Sent, Store};
+use acks::{AckLanes, Push};
+use store::{CONTENT_MAX, Lane, Cursor, Dir, HISTORY_DEFAULT, HISTORY_MAX, MSG_ID_MAX, Outgoing, Roster, Sent, Store};
 
 pub const FANOUT_WHAT: &str = "chat";
 pub const BODY_MAX: usize = 131_072;
 pub const PURGE_EVERY: Duration = Duration::from_secs(600);
 const DAY_MS: u64 = 86_400_000;
 pub const ACK_QUEUE: usize = 65_536;
+pub const EXT_ACK_QUEUE: usize = 65_536;
 pub const ACK_BATCH: usize = 1_024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,8 +46,9 @@ pub struct Chat {
     pub store: Arc<Store>,
     pub limits: Limits,
     cache: Mutex<HashMap<String, Roster>>,
-    acks: SyncSender<Ack>,
+    acks: Arc<AckLanes>,
     ack_dropped: AtomicU64,
+    ext_ack_dropped: AtomicU64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -64,12 +67,12 @@ pub struct Answer {
 impl Chat {
     pub fn new(store: Store, limits: Limits) -> Chat {
         let store = Arc::new(store);
-        let (acks, rx) = std::sync::mpsc::sync_channel(ACK_QUEUE);
-        let st = store.clone();
-        if let Err(e) = std::thread::Builder::new().name("chat-ack".into()).spawn(move || ack_writer(&st, &rx)) {
+        let acks = Arc::new(AckLanes::new(ACK_QUEUE, EXT_ACK_QUEUE));
+        let (st, lanes) = (store.clone(), acks.clone());
+        if let Err(e) = std::thread::Builder::new().name("chat-ack".into()).spawn(move || ack_writer(&st, &lanes)) {
             tracing::warn!(kind = "diag", spec = "SV-IMPL-CHAT-STORE-FAULTS", "ack writer did not start: {e} — records stay, catchup sends them again");
         }
-        Chat { store, limits, cache: Mutex::new(HashMap::new()), acks, ack_dropped: AtomicU64::new(0) }
+        Chat { store, limits, cache: Mutex::new(HashMap::new()), acks, ack_dropped: AtomicU64::new(0), ext_ack_dropped: AtomicU64::new(0) }
     }
 
     pub async fn roster_at_least(&self, space: &str, ver: u64) -> Result<Roster, Code> {
@@ -185,15 +188,48 @@ impl Chat {
         if msg_ids.is_empty() {
             return;
         }
-        let why = match self.acks.try_send((user.to_string(), msg_ids)) {
-            Ok(()) => return,
-            Err(TrySendError::Full(_)) => "ack queue full",
-            Err(TrySendError::Disconnected(_)) => "ack writer gone",
+        let why = match self.acks.push(Lane::Member, (user.to_string(), msg_ids)) {
+            Push::Queued => return,
+            Push::Full => "ack queue full",
+            Push::Closed => "ack writer gone",
         };
         let n = self.ack_dropped.fetch_add(1, Ordering::Relaxed) + 1;
         if n.is_power_of_two() {
             tracing::warn!(kind = "diag", spec = "SV-IMPL-CHAT-STORE-FAULTS", user = %user, dropped = n, "{why} — records stay, catchup sends them again");
         }
+    }
+
+    pub fn ext_acked(&self, key: &str, msg_ids: Vec<String>) {
+        if msg_ids.is_empty() {
+            return;
+        }
+        let why = match self.acks.push(Lane::Ext, (key.to_string(), msg_ids)) {
+            Push::Queued => return,
+            Push::Full => "ext ack queue full",
+            Push::Closed => "ack writer gone",
+        };
+        let n = self.ext_ack_dropped.fetch_add(1, Ordering::Relaxed) + 1;
+        if n.is_power_of_two() {
+            tracing::warn!(kind = "diag", spec = "SV-RULE-CHAT-EXT-SUB", key = %key, dropped = n, "{why} — ext pending rows stay, drain sends them again");
+        }
+    }
+
+    pub async fn ext_pending_counts(&self) -> Result<Vec<(String, u64)>, Code> {
+        let st = self.store.clone();
+        blocking(move || st.subs().keys().map(|k| st.ext_count(k).map(|n| (k.to_string(), n))).collect()).await
+    }
+
+    pub fn ack_queued(&self, lane: Lane) -> usize {
+        self.acks.len(lane)
+    }
+
+    pub async fn ext_failed(&self, key: &str, msg_ids: Vec<String>, max_tries: u32) -> Result<Vec<String>, Code> {
+        let (st, k) = (self.store.clone(), key.to_string());
+        let gone = blocking(move || st.ext_failed(&k, &msg_ids, max_tries)).await?;
+        for m in &gone {
+            tracing::warn!(kind = "diag", spec = "SV-RULE-CHAT-EXT-SUB", key = %key, msg_id = %m, "in.max_tries" = max_tries, "ext pending given up — tries reached the limit");
+        }
+        Ok(gone)
     }
 
     pub fn purge_once(&self, now: u64) -> Result<usize, Code> {
@@ -213,10 +249,14 @@ impl Chat {
     }
 }
 
-fn ack_writer(store: &Store, rx: &Receiver<Ack>) {
-    while let Ok(first) = rx.recv() {
-        if let Err(c) = store.ack_drain(first, rx, ACK_BATCH) {
-            tracing::warn!(kind = "diag", spec = "SV-IMPL-CHAT-STORE-FAULTS", code = c.num(), "ack batch not deleted — records stay, catchup sends them again");
+fn ack_writer(store: &Store, lanes: &AckLanes) {
+    while let Some((lane, first)) = lanes.next() {
+        if let Err(c) = store.ack_drain(lane, first, || lanes.more(lane), ACK_BATCH) {
+            let spec = match lane {
+                Lane::Member => "SV-IMPL-CHAT-STORE-FAULTS",
+                Lane::Ext => "SV-RULE-CHAT-EXT-SUB",
+            };
+            tracing::warn!(kind = "diag", spec = spec, code = c.num(), "ack batch not deleted — rows stay, they are sent again");
         }
     }
 }

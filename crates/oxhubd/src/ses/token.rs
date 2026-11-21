@@ -184,7 +184,7 @@ mod tests {
                 participant_types: vec![0, 1],
                 hidden_allowed: false,
                 ops_allowed: true,
-                hook_allowed: false,
+                hook_allowed: false, subscribe: None,
             }],
             jwt_secret: None,
         }

@@ -50,7 +50,7 @@ fn the_hub_base_is_the_listen_and_base_path_with_loopback_for_any() {
 
 #[test]
 fn the_gateway_signs_a_hidden_recorder_token_for_the_unit() {
-    let acc = Accounts { keys: vec![ApiKey { key: "k".into(), secret: "s".into(), name: None, participant_types: vec![0, 1], hidden_allowed: true, ops_allowed: false, hook_allowed: false }], jwt_secret: None };
+    let acc = Accounts { keys: vec![ApiKey { key: "k".into(), secret: "s".into(), name: None, participant_types: vec![0, 1], hidden_allowed: true, ops_allowed: false, hook_allowed: false, subscribe: None }], jwt_secret: None };
     let tok = acc.sign_unit(&rec_user("n1"), 3_600).expect("signed");
     let id = acc.verify_user(&tok).expect("valid");
     assert_eq!((id.user_id.as_str(), id.claims.participant_type, id.claims.hidden), ("rec-n1", 1, true), "정:IMPL-OPS-REC-UNIT 신원 — rec-{{node}} · participant_type 1 · hidden");

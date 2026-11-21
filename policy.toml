@@ -49,3 +49,9 @@ retry_backoff_ms = [1000, 2000, 4000, 8000, 16000]
 retry_max = 5
 # ★3rd 마다 따로다 — 넘치면 오래된 것부터 버리고 센다.
 queue_max = 10000
+# ★채팅 구독(zenoh 입구 · 정:RULE-CHAT-EXT-SUB) — 연결마다 답 못 받은 query 상한 · query 시한 · 잇단 시한 넘김에 세션 닫기 · 한 행 시도 상한 · drain 훑기 주기.
+ext_window = 8
+ext_reply_timeout_ms = 10000
+ext_timeout_close = 3
+ext_max_tries = 10
+ext_sweep_secs = 30

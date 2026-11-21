@@ -1,8 +1,10 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-CFG-SYSTEM-FILE · 정:RULE-CFG-THREE-PLACES · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · 정:RULE-MESH-SHAPE · 정:RULE-CHAT-GATEWAY-MODULE · 정:IMPL-CHAT-MEMBERSHIP · 정:IMPL-CHAT-STORE-FORMS · 정:IMPL-OPS-REC-UNIT · model: claude-opus-5-5
-//! 시스템 파일(hub 전용) — 키 전량 strict(모르는 키 = 기동 실패) · `[bus]` 는 oxmesh router 의 접속 좌표와 배포 이름공간 · `[chat] db` 값의 꼴이 채팅 저장소를 고른다(모르는 꼴 = 기동 실패 · 배너는 비밀번호를 가린다) · `[data]` 는 남아야 할 파일의 뿌리(녹음 유닛이 있으면 필수).
+// spec: v1.6 · 정:IMPL-CFG-SYSTEM-FILE · 정:RULE-CFG-THREE-PLACES · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · 정:RULE-MESH-SHAPE · 정:RULE-CHAT-GATEWAY-MODULE · 정:IMPL-CHAT-MEMBERSHIP · 정:IMPL-CHAT-STORE-FORMS · 정:IMPL-OPS-REC-UNIT · 정:RULE-CHAT-EXT-SUB · model: claude-opus-5-5
+//! 시스템 파일(hub 전용) — 키 전량 strict(모르는 키 = 기동 실패) · `[bus]` 는 oxmesh router 의 접속 좌표와 배포 이름공간 · `[chat] db` 값의 꼴이 채팅 저장소를 고른다(모르는 꼴 = 기동 실패 · 배너는 비밀번호를 가린다) · `[data]` 는 남아야 할 파일의 뿌리(녹음 유닛이 있으면 필수) · 계정 `subscribe`(꼴이 틀린 항목 · 연동 허용 없는 계정 · 키 조각이 못 되는 계정 키 · 채팅 없음 = 기동 실패) · `[hook] zenoh_*`(zenoh 입구 — `tls/` 꼴 · 인증서 · 키 · CA 넷이 함께).
 
 use serde::Deserialize;
+
+use crate::extsub::{ExtSubs, Subscribe};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemError(pub String);
@@ -205,6 +207,14 @@ pub struct ApiKey {
     pub ops_allowed: bool,
     #[serde(default)]
     pub hook_allowed: bool,
+    #[serde(default)]
+    pub subscribe: Option<Subscribe>,
+}
+
+impl ApiKey {
+    pub fn subscribes(&self) -> bool {
+        self.subscribe.as_ref().is_some_and(|s| !s.is_empty())
+    }
 }
 
 fn default_participant_types() -> Vec<u8> {
@@ -319,6 +329,42 @@ fn default_node_grace() -> u64 {
 pub struct HookSection {
     #[serde(default)]
     pub webhooks: Vec<Webhook>,
+    #[serde(default)]
+    pub zenoh_listen: Option<String>,
+    #[serde(default)]
+    pub zenoh_cert: Option<String>,
+    #[serde(default)]
+    pub zenoh_key: Option<String>,
+    #[serde(default)]
+    pub zenoh_ca: Option<String>,
+}
+
+pub const ZENOH_SCHEME: &str = "tls/";
+
+impl HookSection {
+    pub fn zenoh_files(&self) -> [(&'static str, Option<&str>); 3] {
+        [("zenoh_cert", self.zenoh_cert.as_deref()), ("zenoh_key", self.zenoh_key.as_deref()), ("zenoh_ca", self.zenoh_ca.as_deref())]
+    }
+
+    fn validate(&self) -> Result<(), SystemError> {
+        let files = self.zenoh_files();
+        match self.zenoh_listen.as_deref() {
+            Some(l) => {
+                if !l.starts_with(ZENOH_SCHEME) || l.len() == ZENOH_SCHEME.len() {
+                    return Err(SystemError(format!("hook.zenoh_listen {l:?} — tls/<host>:<port> 꼴만 받는다")));
+                }
+                if let Some((k, _)) = files.iter().find(|(_, v)| v.is_none_or(str::is_empty)) {
+                    return Err(SystemError(format!("hook.zenoh_listen 이 있는데 hook.{k} 가 없다")));
+                }
+            }
+            None => {
+                if let Some((k, _)) = files.iter().find(|(_, v)| v.is_some()) {
+                    return Err(SystemError(format!("hook.{k} 가 있는데 hook.zenoh_listen 이 없다 — 읽지 않는 키")));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -359,6 +405,28 @@ impl System {
         if self.unit.iter().any(|u| u.role == ROLE_REC && u.enabled) && self.data_root().is_none() {
             return Err(SystemError("role = rec 유닛이 있는데 [data] root 가 없다".into()));
         }
+        for k in &self.hub.auth.api_keys {
+            if !k.subscribes() {
+                continue;
+            }
+            if !k.hook_allowed {
+                return Err(SystemError(format!("계정 {:?} — subscribe 는 hook_allowed 계정에만 둔다", k.key)));
+            }
+            if !crate::keyspace::valid_piece(&k.key) {
+                return Err(SystemError(format!("계정 {:?} — subscribe 가 있는 계정의 key 는 버스 키 조각이 못 된다(빈 값 · / * $ ? #)", k.key)));
+            }
+        }
+        if let Some(h) = &self.hook {
+            h.validate()?;
+        }
+        if self.chat.is_none() {
+            if let Some(k) = self.hub.auth.api_keys.iter().find(|k| k.subscribes()) {
+                return Err(SystemError(format!("계정 {:?} — subscribe 가 있는데 [chat] 이 없다", k.key)));
+            }
+            if self.zenoh_listen().is_some() {
+                return Err(SystemError("hook.zenoh_listen 이 있는데 [chat] 이 없다".into()));
+            }
+        }
         if let Some(c) = &self.chat {
             let form = c.form().map_err(SystemError)?;
             match (c.db_pool, &form) {
@@ -368,6 +436,22 @@ impl System {
             }
         }
         Ok(())
+    }
+
+    pub fn zenoh_listen(&self) -> Option<&str> {
+        self.hook.as_ref().and_then(|h| h.zenoh_listen.as_deref())
+    }
+
+    pub fn ext_subs(&self) -> ExtSubs {
+        ExtSubs::new(
+            self.hub
+                .auth
+                .api_keys
+                .iter()
+                .filter(|k| k.hook_allowed)
+                .filter_map(|k| k.subscribe.clone().map(|s| (k.key.clone(), s)))
+                .collect(),
+        )
     }
 
     pub fn first_sfu_unit(&self) -> Option<&Unit> {
@@ -407,6 +491,13 @@ impl System {
             v.push((format!("{p}.hidden_allowed"), k.hidden_allowed.to_string()));
             v.push((format!("{p}.ops_allowed"), k.ops_allowed.to_string()));
             v.push((format!("{p}.hook_allowed"), k.hook_allowed.to_string()));
+            v.push((
+                format!("{p}.subscribe"),
+                match &k.subscribe {
+                    Some(s) => format!("[{}]", s.raw().iter().map(|x| format!("{x:?}")).collect::<Vec<_>>().join(",")),
+                    None => "-".into(),
+                },
+            ));
         }
         for (i, u) in self.unit.iter().enumerate() {
             let p = format!("unit[{i}]");
@@ -438,6 +529,11 @@ impl System {
                 }
             }
             _ => v.push(("hook.webhooks".into(), "-".into())),
+        }
+        let hk = self.hook.clone().unwrap_or_default();
+        v.push(("hook.zenoh_listen".into(), hk.zenoh_listen.clone().unwrap_or_else(|| "-".into())));
+        for (k, val) in hk.zenoh_files() {
+            v.push((format!("hook.{k}"), val.unwrap_or("-").to_string()));
         }
         match &self.chat {
             Some(c) => {
@@ -498,5 +594,35 @@ mod tests {
         assert!(System::parse(&format!("{MIN}[data]\nroots = \"/d\"\n")).is_err());
         let m = System::parse(MIN).unwrap();
         assert!(m.banner_fields().iter().any(|(k, v)| k == "data.root" && v == "-"));
+    }
+
+    #[test]
+    fn subscribe_and_zenoh_gate_boot() {
+        let chat = "[chat]\ndb = \"memory:\"\n";
+        let acct = |extra: &str| format!("[[hub.auth.api_keys]]\nkey = \"acme\"\nsecret = \"s\"\nhook_allowed = true\n{extra}");
+        let ok = System::parse(&format!("{MIN}{}{chat}", acct("subscribe = [\"\", \"com.acme.*\", \"talk\", \"*\"]\n"))).unwrap();
+        assert_eq!(ok.ext_subs().keys().collect::<Vec<_>>(), vec!["acme"]);
+        assert!(ok.banner_fields().iter().any(|(k, v)| k == "hub.auth.api_keys[0].subscribe" && v == "[\"\",\"com.acme.*\",\"talk\",\"*\"]"));
+        assert!(ok.banner_fields().iter().any(|(k, v)| k == "hook.zenoh_listen" && v == "-"));
+        for bad in ["a*b", ".*", "x.*.y", "**"] {
+            assert!(System::parse(&format!("{MIN}{}{chat}", acct(&format!("subscribe = [\"{bad}\"]\n")))).is_err(), "정:IMPL-CFG-SYSTEM-FILE — 꼴이 틀린 항목 {bad}");
+        }
+        let no_hook = format!("{MIN}[[hub.auth.api_keys]]\nkey = \"acme\"\nsecret = \"s\"\nsubscribe = [\"\"]\n{chat}");
+        assert!(System::parse(&no_hook).is_err(), "정:IMPL-CFG-SYSTEM-FILE — hook_allowed 아닌 계정의 subscribe");
+        let slash = format!("{MIN}[[hub.auth.api_keys]]\nkey = \"ac/me\"\nsecret = \"s\"\nhook_allowed = true\nsubscribe = [\"\"]\n{chat}");
+        assert!(System::parse(&slash).is_err(), "정:RULE-BUS-KEYSPACE — subscribe 계정 키가 버스 금지 문자를 품음");
+        let slash_plain = format!("{MIN}[[hub.auth.api_keys]]\nkey = \"ac/me\"\nsecret = \"s\"\n");
+        assert!(System::parse(&slash_plain).is_ok(), "형상 — 구독 없는 계정 키는 보지 않는다");
+        assert!(System::parse(&format!("{MIN}{}", acct("subscribe = [\"\"]\n"))).is_err(), "정:IMPL-CFG-SYSTEM-FILE — [chat] 없이 subscribe");
+        assert!(System::parse(&format!("{MIN}{}", acct("subscribe = []\n"))).is_ok(), "정:IMPL-CFG-SYSTEM-FILE — 빈 배열은 없는 것과 같다");
+        let z = "[hook]\nzenoh_listen = \"tls/0.0.0.0:7447\"\nzenoh_cert = \"c.pem\"\nzenoh_key = \"k.pem\"\nzenoh_ca = \"ca.pem\"\n";
+        let zs = System::parse(&format!("{MIN}{z}{chat}")).unwrap();
+        assert_eq!(zs.zenoh_listen(), Some("tls/0.0.0.0:7447"));
+        assert!(zs.banner_fields().iter().any(|(k, v)| k == "hook.zenoh_ca" && v == "ca.pem"));
+        assert!(System::parse(&format!("{MIN}{z}")).is_err(), "정:IMPL-CFG-SYSTEM-FILE — [chat] 없이 zenoh_listen");
+        assert!(System::parse(&format!("{MIN}{}{chat}", z.replace("tls/", "tcp/"))).is_err(), "정:IMPL-CFG-SYSTEM-FILE — tls/ 꼴만");
+        assert!(System::parse(&format!("{MIN}{}{chat}", z.replace("zenoh_ca = \"ca.pem\"\n", ""))).is_err(), "정:IMPL-CFG-SYSTEM-FILE — 입구가 있는데 CA 가 없음");
+        assert!(System::parse(&format!("{MIN}[hook]\nzenoh_cert = \"c.pem\"\n{chat}")).is_err(), "정:IMPL-CFG-SYSTEM-FILE — 입구 없이 인증서(읽지 않는 키)");
+        assert!(System::parse(&format!("{MIN}[hook]\nzenoh_port = 1\n{chat}")).is_err(), "형상 — 모르는 키");
     }
 }

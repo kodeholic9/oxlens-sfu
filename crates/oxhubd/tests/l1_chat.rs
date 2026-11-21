@@ -1,11 +1,13 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 연:RULE-CHAT-KIND · 연:RULE-CHAT-REF-CHECK · 연:RULE-CHAT-DELETE · 연:RULE-CHAT-FOLD · 정:IMPL-CHAT-STORE ·정:IMPL-CHAT-MEMBERSHIP · 정:IMPL-CHAT-FILTER · 정:IMPL-CHAT-READ · 정:IMPL-CHAT-UNDELIVERED · 정:IMPL-CHAT-CATCHUP · 정:IMPL-CHAT-STORE-FAULTS · 정:IMPL-CHAT-STORE-FORMS · 정:IMPL-CFG-SYSTEM-FILE · 정:IMPL-CHAT-LIVE-BUNDLE · 정:IMPL-SES-SOCKET-LIFE · 연:RULE-CHAT-MSG-ID · 연:RULE-CHAT-CONTENT · 연:RULE-CHAT-ORDER · 연:RULE-CHAT-VISIBLE · 연:RULE-CHAT-UNREAD · 연:RULE-CHAT-HISTORY-PAGE · 연:RULE-CHAT-UNDELIVERED · 연:RULE-CHAT-CATCHUP · 연:RULE-CHAT-MEMBER-NOTICE · model: claude-opus-5-5
-//! 1층 — 채팅 저장소 시험은 `[chat] db` 꼴 셋(`memory:` · `sqlite:<경로>` · `postgres://…`)에서 같은 몸으로 돈다(꼴마다 시험 하나 · PostgreSQL 은 시험마다 따로 된 스키마 · 접속 `OXLENS_TEST_PG` · 못 닿으면 「못 잼」 빨강) · 바깥 연결로 잠그는 시험은 바깥이 있는 꼴(sqlite · postgres)에서 · 질의 계획은 SQLite 엔진 꼴(memory · sqlite)에서 · 옛 파일 칸 더하기는 sqlite 꼴에서. 저장소(저장할 때 찍는 t · 같은 t 를 가르지 않는 쪽 · msg_id 멱등 · 멤버 구간 · 멤버 변경 메시지 · 보이기 시작점 · 안 읽은 수 · 미전송 기록 · 따라잡기 쪽)와 받는 게이트웨이의 멤버 캐시 · op 경계 · 저장소 실패의 원인 진단 줄 · 송신 줄의 실시간 채팅 묶기(창이 찼을 때만 · 줄 끝 · 1단 제외 · 영수증 이어 붙이기 · 바이트 상한) · 설정 배너의 비밀번호 가림.
+// spec: v1.6 · 연:RULE-CHAT-KIND · 연:RULE-CHAT-REF-CHECK · 연:RULE-CHAT-DELETE · 연:RULE-CHAT-FOLD · 정:IMPL-CHAT-STORE ·정:IMPL-CHAT-MEMBERSHIP · 정:IMPL-CHAT-FILTER · 정:IMPL-CHAT-READ · 정:IMPL-CHAT-UNDELIVERED · 정:IMPL-CHAT-CATCHUP · 정:IMPL-CHAT-STORE-FAULTS · 정:IMPL-CHAT-STORE-FORMS · 정:IMPL-CFG-SYSTEM-FILE · 정:IMPL-CHAT-LIVE-BUNDLE · 정:IMPL-SES-SOCKET-LIFE · 정:RULE-CHAT-EXT-SUB · 연:RULE-CHAT-MSG-ID · 연:RULE-CHAT-CONTENT · 연:RULE-CHAT-ORDER · 연:RULE-CHAT-VISIBLE · 연:RULE-CHAT-UNREAD · 연:RULE-CHAT-HISTORY-PAGE · 연:RULE-CHAT-UNDELIVERED · 연:RULE-CHAT-CATCHUP · 연:RULE-CHAT-MEMBER-NOTICE · model: claude-opus-5-5
+//! 1층 — 채팅 저장소 시험은 `[chat] db` 꼴 셋(`memory:` · `sqlite:<경로>` · `postgres://…`)에서 같은 몸으로 돈다(꼴마다 시험 하나 · PostgreSQL 은 시험마다 따로 된 스키마 · 접속 `OXLENS_TEST_PG` · 못 닿으면 「못 잼」 빨강) · 바깥 연결로 잠그는 시험은 바깥이 있는 꼴(sqlite · postgres)에서 · 질의 계획은 SQLite 엔진 꼴(memory · sqlite)에서 · 옛 파일 칸 더하기는 sqlite 꼴에서. 저장소(저장할 때 찍는 t · 같은 t 를 가르지 않는 쪽 · msg_id 멱등 · 멤버 구간 · 멤버 변경 메시지 · 보이기 시작점 · 안 읽은 수 · 미전송 기록 · 따라잡기 쪽)와 받는 게이트웨이의 멤버 캐시 · op 경계 · 저장소 실패의 원인 진단 줄 · 송신 줄의 실시간 채팅 묶기(창이 찼을 때만 · 줄 끝 · 1단 제외 · 영수증 이어 붙이기 · 바이트 상한) · 설정 배너의 비밀번호 가림 · 3rd 계정 몫 펜딩(미전송 기록과 같은 트랜잭션 · 원본 따라 걸기 · 멱등 · 시도 수 상한 · 줄을 가른 ACK · 보관 지우기).
 
 use std::sync::Arc;
 
+use common::extsub::{ExtSubs, Subscribe};
 use common::system::{ChatDb, System, Visibility};
-use oxhubd::chat::store::{Cursor, Dir, Outgoing, Page, SYS, SYS_HASH, Sent, Store, catchup_since_sql, relations_sql};
+use oxhubd::chat::store::{Cursor, Dir, Lane, Outgoing, Page, SYS, SYS_HASH, Sent, Store, catchup_since_sql, relations_sql};
+use oxhubd::chat::acks::{AckLanes, Push};
 use oxhubd::chat::{BODY_MAX, Chat, Limits, outgoing, valid_msg_id};
 use oxhubd::ses::conn::QUEUE_MAX;
 use common::talk::Report;
@@ -916,7 +918,7 @@ all_forms!(acks_in_one_drain_are_one_transaction |db| {
         tx.send(("b".to_string(), vec![m.clone()])).expect("queue");
     }
     let before = s.ack_transactions();
-    let rows = s.ack_drain(("b".to_string(), vec![ids[0].clone()]), &rx, oxhubd::chat::ACK_BATCH).expect("drain");
+    let rows = s.ack_drain(Lane::Member, ("b".to_string(), vec![ids[0].clone()]), || rx.try_recv().ok(), oxhubd::chat::ACK_BATCH).expect("drain");
     assert_eq!(rows, ids.len(), "형상 — 줄 선 ACK 를 한 번에 거뒀다");
     assert!(s.pending("b").expect("b").is_empty(), "S-sym-IMPL-CHAT-UNDELIVERED-2① — ACK {} 건이 기록을 모두 지운다", ids.len());
     assert_eq!(s.ack_transactions() - before, 1, "S-sym-IMPL-CHAT-UNDELIVERED-2② — 묶음 하나 = 트랜잭션 하나(ACK {} 건)", ids.len());
@@ -1528,4 +1530,138 @@ fn rec_file_names_and_ranges() {
     assert_eq!(byte_range("bytes=50-500", 100), Some((50, 99)));
     assert_eq!(byte_range("bytes=100-", 100), None, "416 past the end");
     assert_eq!(byte_range("bytes=0-1,5-6", 100), None, "one range only");
+}
+
+fn subs(accounts: &[(&str, &[&str])]) -> ExtSubs {
+    ExtSubs::new(
+        accounts
+            .iter()
+            .map(|(k, items)| ((*k).to_string(), Subscribe::try_from(items.iter().map(|s| (*s).to_string()).collect::<Vec<_>>()).expect("subscribe")))
+            .collect(),
+    )
+}
+
+fn ext_store(db: &form::Db) -> Store {
+    let s = db.open(Visibility::Shared).subscribed(subs(&[("texts", &[""]), ("talks", &["talk"]), ("all", &["*"]), ("none", &["com.acme.*"])]));
+    s.create_space("S", None).expect("space");
+    s
+}
+
+fn ext_ids(s: &Store, key: &str) -> Vec<String> {
+    s.ext_rows(key).expect("ext rows").into_iter().map(|r| r.msg_id).collect()
+}
+
+all_forms!(ext_pending_is_written_in_the_store_transaction_per_matching_account |db| {
+    let s = ext_store(db);
+    join(&s, "S", "a", 1);
+    join(&s, "S", "b", 1);
+    let member_rows = ext_ids(&s, "all");
+    assert_eq!(member_rows.len(), 2, "정:RULE-CHAT-EXT-SUB 2 — 멤버 변경 메시지(정:IMPL-CHAT-MEMBERSHIP)도 같은 길목 · \"*\" 계정 몫 {member_rows:?}");
+    assert!(ext_ids(&s, "texts").is_empty(), "정:RULE-CHAT-EXT-SUB 1 — 글 구독에 멤버 변경은 안 걸림");
+    let post = id(1);
+    fresh_t(s.send("a", "S", &post, "hi", Some(10)));
+    let ed = id(2);
+    fresh_t(s.post("a", "S", &ed, &edit(&post, "hi!"), Some(11)));
+    let re = id(3);
+    fresh_t(s.post("b", "S", &re, &react(&post, &["+1"]), Some(12)));
+    let de = id(4);
+    fresh_t(s.post("a", "S", &de, &rel(ChatKind::Delete, &post), Some(13)));
+    let texts = ext_ids(&s, "texts");
+    assert!(texts.contains(&ed) && texts.contains(&de), "S-sym-RULE-CHAT-EXT-SUB-8① — 글 구독: 고침 · 지움도 원본 따라 걸린다 {texts:?}");
+    assert!(!texts.contains(&re), "S-sym-RULE-CHAT-EXT-SUB-8② — 반응은 안 걸린다 {texts:?}");
+    assert_eq!(texts, vec![post.clone(), ed.clone(), de.clone()], "정:RULE-CHAT-EXT-SUB 2 — 글 · 고침 · 지움 차례");
+    assert!(ext_ids(&s, "none").is_empty(), "정:RULE-CHAT-EXT-SUB 1 — 안 걸린 계정은 0 행");
+    let talk = talk_id(7);
+    sent_msg(s.talk(&talk_start(&talk, "S", "a"), Some(20)));
+    let (_, upd) = sent_msg(s.talk(&talk_end(&talk, TalkState::Ok, None, 900), Some(21)));
+    assert_eq!(ext_ids(&s, "talks"), vec![talk.clone(), upd.msg_id.clone()], "S-sym-RULE-CHAT-EXT-SUB-9① — talk 구독: 발언 기록과 그 갱신(원본 따라 걸기)");
+    assert!(!ext_ids(&s, "texts").contains(&upd.msg_id), "S-sym-RULE-CHAT-EXT-SUB-9② — 글 구독에 발언 기록 갱신은 안 걸림");
+    assert_eq!(ext_ids(&s, "all").len(), 2 + 4 + 2, "정:RULE-CHAT-EXT-SUB 1 — \"*\" 는 모든 종류");
+    assert!(s.ext_rows("texts").expect("rows").iter().all(|r| r.tries == 0), "형상 — 새 행의 시도 수 0");
+});
+
+all_forms!(a_resent_msg_id_writes_no_second_ext_row |db| {
+    let s = ext_store(db);
+    join(&s, "S", "a", 1);
+    let m = id(1);
+    let t1 = fresh_t(s.send("a", "S", &m, "x", Some(10)));
+    s.ext_failed("texts", std::slice::from_ref(&m), 10).expect("one try");
+    match s.send("a", "S", &m, "x", Some(20)).expect("again") {
+        Sent::Again { msg } => assert_eq!(msg.t, t1),
+        Sent::Fresh { .. } => panic!("형상 — 같은 msg_id 는 다시 저장하지 않는다"),
+    }
+    let rows = s.ext_rows("texts").expect("rows");
+    assert_eq!((rows.len(), rows[0].tries), (1, 1), "정:RULE-CHAT-EXT-SUB 2 — 다시 받은 msg_id 는 펜딩을 다시 쓰지 않는다(행 하나 · 시도 수 그대로)");
+});
+
+all_forms!(ext_tries_reach_the_limit_and_the_row_is_given_up |db| {
+    let s = ext_store(db);
+    join(&s, "S", "a", 1);
+    let (bad, good) = (id(1), id(2));
+    fresh_t(s.send("a", "S", &bad, "x", Some(10)));
+    fresh_t(s.send("a", "S", &good, "y", Some(11)));
+    for n in 1..3 {
+        assert!(s.ext_failed("texts", std::slice::from_ref(&bad), 3).expect("try").is_empty(), "형상 — {n} 번째는 상한 아래");
+    }
+    assert_eq!(s.ext_failed("texts", &[bad.clone(), "missing".into()], 3).expect("try"), vec![bad.clone()], "S-sym-RULE-CHAT-EXT-SUB-7① — 상한에 닿은 행을 지우고 돌려준다(없는 msg_id 는 무시 · 세는 것은 부른 쪽)");
+    let rows = s.ext_rows("texts").expect("rows");
+    assert_eq!((rows.len(), rows[0].msg_id.as_str(), rows[0].tries), (1, good.as_str(), 0), "정:RULE-CHAT-EXT-SUB 2 — 다른 행은 그대로");
+    assert!(ext_ids(&s, "all").contains(&bad), "형상 — 다른 계정 몫은 따로 센다");
+});
+
+all_forms!(ext_acks_clear_only_ext_rows_in_one_transaction |db| {
+    let s = ext_store(db);
+    join(&s, "S", "a", 1);
+    join(&s, "S", "b", 1);
+    for i in 0..10 {
+        fresh_t(s.send("a", "S", &id(i), "m", Some(100 + i as u64)));
+    }
+    let ids = ext_ids(&s, "texts");
+    assert_eq!(ids.len(), 10, "형상");
+    let member = s.pending("b").expect("b").len();
+    let mut rest: std::collections::VecDeque<(String, Vec<String>)> = ids[1..].iter().map(|m| ("texts".to_string(), vec![m.clone()])).collect();
+    let before = s.ack_transactions();
+    let rows = s.ack_drain(Lane::Ext, ("texts".to_string(), vec![ids[0].clone()]), || rest.pop_front(), oxhubd::chat::ACK_BATCH).expect("drain");
+    assert_eq!(rows, 10, "형상");
+    assert!(ext_ids(&s, "texts").is_empty(), "정:RULE-CHAT-EXT-SUB 2 — 3rd ACK 묶음이 그 계정 펜딩을 지운다");
+    assert_eq!(s.ack_transactions() - before, 1, "정:RULE-CHAT-EXT-SUB 2 — 묶음 하나 = 트랜잭션 하나");
+    assert_eq!(s.pending("b").expect("b").len(), member, "정:RULE-CHAT-EXT-SUB 2 — 멤버 미전송 기록은 건드리지 않는다");
+    assert_eq!(ext_ids(&s, "all").len(), 2 + 10, "형상 — 다른 계정 몫은 그대로");
+});
+
+all_forms!(the_retention_purge_clears_old_ext_rows_too |db| {
+    let s = ext_store(db);
+    join(&s, "S", "a", 1);
+    fresh_t(s.send("a", "S", &id(1), "old", Some(1_000)));
+    fresh_t(s.send("a", "S", &id(2), "new", Some(9_000)));
+    s.purge(5_000).expect("purge");
+    assert_eq!(ext_ids(&s, "texts"), vec![id(2)], "정:RULE-CHAT-EXT-SUB 2 · 정:IMPL-CHAT-UNDELIVERED 보관 — 같은 보관 지우기가 넘긴 3rd 몫 행도 지운다");
+});
+
+shared_forms!(an_ext_write_failure_rolls_the_whole_store_back |db| {
+    let s = ext_store(db);
+    join(&s, "S", "a", 1);
+    join(&s, "S", "b", 1);
+    let other = Outside::of(db);
+    other.exec("ALTER TABLE ext_pending RENAME TO ext_pending_away", "ALTER TABLE ext_pending RENAME TO ext_pending_away");
+    let (r, _) = diag::capture(|| s.send("a", "S", &id(1), "x", Some(10)));
+    other.exec("ALTER TABLE ext_pending_away RENAME TO ext_pending", "ALTER TABLE ext_pending_away RENAME TO ext_pending");
+    assert_eq!(r.err(), Some(Code::InternalError), "S-sym-RULE-CHAT-EXT-SUB-1① — 펜딩을 못 쓰면 저장이 실패한다");
+    assert!(!s.pending("b").expect("b").contains(&id(1)), "S-sym-RULE-CHAT-EXT-SUB-1② — 메시지 · 미전송 기록 · 펜딩은 한 트랜잭션(미전송 기록이 없다)");
+    assert!(posts(&s.history("a", "S", Dir::Latest, 10).expect("history")).is_empty(), "S-sym-RULE-CHAT-EXT-SUB-1② — 메시지 행도 없다");
+});
+
+#[test]
+fn a_full_ext_ack_lane_does_not_drop_member_acks() {
+    let lanes = AckLanes::new(2, 1);
+    assert_eq!(lanes.push(Lane::Ext, ("k".into(), vec!["e1".into()])), Push::Queued);
+    assert_eq!(lanes.push(Lane::Ext, ("k".into(), vec!["e2".into()])), Push::Full, "형상 — 3rd 줄 상한");
+    assert_eq!(lanes.push(Lane::Member, ("u".into(), vec!["m1".into()])), Push::Queued, "S-sym-RULE-CHAT-EXT-SUB-3① — 3rd 줄이 차도 멤버 ACK 는 들어간다");
+    assert_eq!(lanes.push(Lane::Member, ("u".into(), vec!["m2".into()])), Push::Queued);
+    assert_eq!(lanes.push(Lane::Member, ("u".into(), vec!["m3".into()])), Push::Full, "형상 — 멤버 줄은 제 상한");
+    let order: Vec<Lane> = std::iter::from_fn(|| (lanes.len(Lane::Member) + lanes.len(Lane::Ext) > 0).then(|| lanes.next().map(|(l, _)| l)).flatten()).collect();
+    assert_eq!(order, vec![Lane::Member, Lane::Ext, Lane::Member], "S-sym-RULE-CHAT-EXT-SUB-3② — 지우는 주인 하나가 둘 다 있으면 번갈아 거둔다(한쪽이 다른 쪽을 굶기지 않는다)");
+    lanes.close();
+    assert_eq!(lanes.push(Lane::Member, ("u".into(), vec!["m4".into()])), Push::Closed);
+    assert!(lanes.next().is_none(), "형상 — 닫히고 비면 끝");
 }

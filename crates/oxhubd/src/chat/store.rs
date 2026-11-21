@@ -1,16 +1,16 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 연:RULE-CHAT-REF-CHECK · 연:RULE-CHAT-EDIT · 연:RULE-CHAT-REACT · 연:RULE-CHAT-DELETE · 연:RULE-CHAT-REPLY · 정:IMPL-CHAT-STORE ·정:IMPL-CHAT-MEMBERSHIP · 정:IMPL-CHAT-READ · 정:IMPL-CHAT-UNDELIVERED · 정:IMPL-CHAT-CATCHUP · 정:IMPL-CHAT-STORE-FAULTS · 정:IMPL-CHAT-STORE-FORMS · 연:RULE-CHAT-MSG-ID · 연:RULE-CHAT-ORDER · 연:RULE-CHAT-VISIBLE · 연:RULE-CHAT-UNREAD · 연:RULE-CHAT-VIEW · 연:RULE-CHAT-HISTORY-PAGE · 연:RULE-CHAT-UNDELIVERED · 연:RULE-CHAT-CATCHUP · 연:RULE-CHAT-MEMBER-NOTICE · model: claude-opus-5-5
-//! 채팅 저장소 — `[chat] db` 꼴 셋 중 하나를 직접 쥔다: `memory:` · `sqlite:<경로>` 는 SQLite 연결 하나(메모리 · 파일 — 저장소 전체 잠금 하나 · 쓰기 트랜잭션은 `BEGIN IMMEDIATE`) · `postgres://…` 는 연결 풀(`pg`) · 꼴마다 같은 계약 · `t` 는 저장 트랜잭션 안에서 찍은 ms(공간마다 줄 세우지 않음 · 같은 `t` 는 `msg_id` 차례) · 메시지와 같은 트랜잭션에 받을 사람 전원 몫 미전송 기록 · 멤버 입퇴장 구간과 멤버 변경 메시지 · 멤버 판 · 읽음 · 쪽은 같은 `t` 를 가르지 않음 · 따라잡기 쪽은 미전송 기록과 `t` 이상 메시지를 `msg_id` 로 합침(멤버 쪽에서 출발 · 하한 하나) · 관계는 `ref` 색인 · 저장소 오류는 원인을 진단 줄로 남김.
+// spec: v1.6 · 연:RULE-CHAT-REF-CHECK · 연:RULE-CHAT-EDIT · 연:RULE-CHAT-REACT · 연:RULE-CHAT-DELETE · 연:RULE-CHAT-REPLY · 정:IMPL-CHAT-STORE ·정:IMPL-CHAT-MEMBERSHIP · 정:IMPL-CHAT-READ · 정:IMPL-CHAT-UNDELIVERED · 정:IMPL-CHAT-CATCHUP · 정:IMPL-CHAT-STORE-FAULTS · 정:IMPL-CHAT-STORE-FORMS · 정:RULE-CHAT-EXT-SUB · 연:RULE-CHAT-MSG-ID · 연:RULE-CHAT-ORDER · 연:RULE-CHAT-VISIBLE · 연:RULE-CHAT-UNREAD · 연:RULE-CHAT-VIEW · 연:RULE-CHAT-HISTORY-PAGE · 연:RULE-CHAT-UNDELIVERED · 연:RULE-CHAT-CATCHUP · 연:RULE-CHAT-MEMBER-NOTICE · model: claude-opus-5-5
+//! 채팅 저장소 — `[chat] db` 꼴 셋 중 하나를 직접 쥔다: `memory:` · `sqlite:<경로>` 는 SQLite 연결 하나(메모리 · 파일 — 저장소 전체 잠금 하나 · 쓰기 트랜잭션은 `BEGIN IMMEDIATE`) · `postgres://…` 는 연결 풀(`pg`) · 꼴마다 같은 계약 · `t` 는 저장 트랜잭션 안에서 찍은 ms(공간마다 줄 세우지 않음 · 같은 `t` 는 `msg_id` 차례) · 메시지와 같은 트랜잭션에 받을 사람 전원 몫 미전송 기록 · 멤버 입퇴장 구간과 멤버 변경 메시지 · 멤버 판 · 읽음 · 쪽은 같은 `t` 를 가르지 않음 · 따라잡기 쪽은 미전송 기록과 `t` 이상 메시지를 `msg_id` 로 합침(멤버 쪽에서 출발 · 하한 하나) · 관계는 `ref` 색인 · 저장소 오류는 원인을 진단 줄로 남김 · 구독이 걸린 3rd 계정 몫 펜딩(`ext_pending`)을 미전송 기록과 같은 트랜잭션에 · 지우기는 줄(멤버 · 3rd)마다 묶음 하나 · 시도 수 상한에서 지우고 돌려준다 · 보관 지우기가 두 표를 함께.
 
 mod pg;
 
 pub use pg::pg_config;
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use common::extsub::ExtSubs;
 use common::system::{ChatDb, DB_POOL_DEFAULT, Visibility};
 use common::talk::Report;
 use oxsig::Code;
@@ -71,6 +71,15 @@ CREATE TABLE IF NOT EXISTS undelivered (
 CREATE INDEX IF NOT EXISTS undelivered_user_t ON undelivered (user_id, t, msg_id);
 CREATE INDEX IF NOT EXISTS undelivered_t ON undelivered (t);
 CREATE INDEX IF NOT EXISTS members_user ON members (user_id, leave_t);
+CREATE TABLE IF NOT EXISTS ext_pending (
+  key TEXT NOT NULL,
+  msg_id TEXT NOT NULL,
+  t INTEGER NOT NULL,
+  tries INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (key, msg_id)
+);
+CREATE INDEX IF NOT EXISTS ext_pending_key_t ON ext_pending (key, t, msg_id);
+CREATE INDEX IF NOT EXISTS ext_pending_t ON ext_pending (t);
 ";
 
 pub(crate) const COLS: &str ="x.msg_id, x.space_id, x.user_id, x.t, x.content, x.kind, x.target, x.ref_id, x.keys, x.ext, x.talk";
@@ -135,6 +144,7 @@ pub struct Cursor {
 
 pub struct Store {
     form: Form,
+    subs: Arc<ExtSubs>,
     default_vis: Visibility,
     ack_tx: AtomicU64,
     queued: Arc<AtomicUsize>,
@@ -146,6 +156,30 @@ enum Form {
 }
 
 pub type Ack = (String, Vec<String>);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lane {
+    Member,
+    Ext,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtRow {
+    pub msg_id: String,
+    pub t: u64,
+    pub tries: u32,
+}
+
+pub(crate) fn ext_keys(subs: &ExtSubs, m: &ChatMessage, orig: Option<&str>) -> Vec<String> {
+    let kind = m.kind.map(|k| k.as_str()).unwrap_or("");
+    subs.hits(kind, orig)
+        .into_iter()
+        .map(|(key, h)| {
+            tracing::debug!(kind = "diag", spec = "SV-RULE-CHAT-EXT-SUB", key = %key, msg_id = %m.msg_id, "in.kind" = kind, "in.orig" = orig.unwrap_or("-"), "out.by" = h.by.as_str(), "out.item" = h.item, "ext pending row");
+            key.to_string()
+        })
+        .collect()
+}
 
 pub(crate) const YIELD: Duration =Duration::from_micros(200);
 
@@ -165,8 +199,12 @@ fn db<T>(r: rusqlite::Result<T>) -> Result<T, Code> {
     })
 }
 
-fn delete_acks(tx: &Transaction, batch: &[Ack]) -> Result<(), Code> {
-    let mut st = db(tx.prepare_cached("DELETE FROM undelivered WHERE user_id = ?1 AND msg_id = ?2"))?;
+fn delete_acks(tx: &Transaction, lane: Lane, batch: &[Ack]) -> Result<(), Code> {
+    let sql = match lane {
+        Lane::Member => "DELETE FROM undelivered WHERE user_id = ?1 AND msg_id = ?2",
+        Lane::Ext => "DELETE FROM ext_pending WHERE key = ?1 AND msg_id = ?2",
+    };
+    let mut st = db(tx.prepare_cached(sql))?;
     for (user, ids) in batch {
         for id in ids {
             db(st.execute(params![user, id]))?;
@@ -411,14 +449,16 @@ pub(crate) fn bundle(all: Vec<ChatMessage>, max_msgs: usize, max_bytes: usize) -
     out
 }
 
-fn check_ref(tx: &Transaction, space: &str, user: &str, out: &Outgoing) -> Result<(), Code> {
-    let Some(r) = out.r#ref.as_deref() else { return Ok(()) };
+fn check_ref(tx: &Transaction, space: &str, user: &str, out: &Outgoing) -> Result<Option<String>, Code> {
+    let Some(r) = out.r#ref.as_deref() else { return Ok(None) };
     let orig = db(tx
         .query_row("SELECT space_id, kind, user_id, deleted FROM messages WHERE msg_id = ?1", params![r], |x| {
             Ok((x.get::<_, String>(0)?, x.get::<_, Option<String>>(1)?, x.get::<_, String>(2)?, x.get::<_, bool>(3)?))
         })
         .optional())?;
-    ref_ok(orig, space, user, out)
+    let kind = orig.as_ref().map(|o| o.1.clone().unwrap_or_default());
+    ref_ok(orig, space, user, out)?;
+    Ok(kind)
 }
 
 fn erase(tx: &Transaction, orig: &str) -> Result<(), Code> {
@@ -517,6 +557,17 @@ fn insert_msg(tx: &Transaction, m: &ChatMessage) -> Result<(), Code> {
     Ok(())
 }
 
+fn ext_record(tx: &Transaction, subs: &ExtSubs, m: &ChatMessage, orig: Option<&str>) -> Result<(), Code> {
+    if subs.is_empty() {
+        return Ok(());
+    }
+    let mut st = db(tx.prepare_cached("INSERT OR IGNORE INTO ext_pending (key, msg_id, t) VALUES (?1, ?2, ?3)"))?;
+    for key in ext_keys(subs, m, orig) {
+        db(st.execute(params![key, m.msg_id, n(m.t)]))?;
+    }
+    Ok(())
+}
+
 fn record(tx: &Transaction, m: &ChatMessage, exclude: &str) -> Result<(), Code> {
     db(tx.execute(
         "INSERT OR IGNORE INTO undelivered (user_id, msg_id, space_id, t)
@@ -539,7 +590,16 @@ impl Store {
             ChatDb::Sqlite(path) => Form::Lite(Mutex::new(Store::lite(Some(&path))?)),
             ChatDb::Postgres(url) => Form::Pg(pg::Pg::open(&url, pool, queued.clone())?),
         };
-        Ok(Store { form, default_vis, ack_tx: AtomicU64::new(0), queued })
+        Ok(Store { form, subs: Arc::new(ExtSubs::default()), default_vis, ack_tx: AtomicU64::new(0), queued })
+    }
+
+    pub fn subscribed(mut self, subs: ExtSubs) -> Store {
+        self.subs = Arc::new(subs);
+        self
+    }
+
+    pub fn subs(&self) -> &ExtSubs {
+        &self.subs
     }
 
     pub fn form(&self) -> &'static str {
@@ -602,7 +662,7 @@ impl Store {
     pub fn join(&self, space: &str, user: &str, by: Option<&str>, at: Option<u64>) -> Result<Option<(ChatMessage, u64)>, Code> {
         let default_vis = self.default_vis;
         if let Form::Pg(p) = &self.form {
-            return p.join(space, user, by, at, default_vis);
+            return p.join(self.subs.clone(), space, user, by, at, default_vis);
         }
         self.with(|c| {
             let tx = db(c.transaction_with_behavior(TransactionBehavior::Immediate))?;
@@ -620,6 +680,7 @@ impl Store {
             let msg = member_msg(space, by.unwrap_or(user), user, t, true);
             insert_msg(&tx, &msg)?;
             record(&tx, &msg, "")?;
+            ext_record(&tx, &self.subs, &msg, None)?;
             db(tx.execute("UPDATE spaces SET ver = ver + 1 WHERE space_id = ?1", params![space]))?;
             db(tx.commit())?;
             Ok(Some((msg, ver + 1)))
@@ -628,7 +689,7 @@ impl Store {
 
     pub fn leave(&self, space: &str, user: &str, by: Option<&str>, at: Option<u64>) -> Result<(ChatMessage, u64), Code> {
         if let Form::Pg(p) = &self.form {
-            return p.leave(space, user, by, at);
+            return p.leave(self.subs.clone(), space, user, by, at);
         }
         self.with(|c| {
             let tx = db(c.transaction_with_behavior(TransactionBehavior::Immediate))?;
@@ -644,6 +705,7 @@ impl Store {
             let msg = member_msg(space, by.unwrap_or(user), user, t, false);
             insert_msg(&tx, &msg)?;
             record(&tx, &msg, "")?;
+            ext_record(&tx, &self.subs, &msg, None)?;
             db(tx.execute("UPDATE spaces SET ver = ver + 1 WHERE space_id = ?1", params![space]))?;
             db(tx.commit())?;
             Ok((msg, ver + 1))
@@ -656,7 +718,7 @@ impl Store {
 
     pub fn post(&self, user: &str, space: &str, msg_id: &str, out: &Outgoing, at: Option<u64>) -> Result<Sent, Code> {
         if let Form::Pg(p) = &self.form {
-            return p.post(user, space, msg_id, out, at);
+            return p.post(self.subs.clone(), user, space, msg_id, out, at);
         }
         self.with(|c| {
             let tx = db(c.transaction_with_behavior(TransactionBehavior::Immediate))?;
@@ -674,7 +736,7 @@ impl Store {
             if !open_member(&tx, space, user)? {
                 return Err(Code::NotSpaceMember);
             }
-            check_ref(&tx, space, user, out)?;
+            let orig = check_ref(&tx, space, user, out)?;
             let t = now_or(at);
             let msg = fresh(space, msg_id, user, t, out);
             insert_msg(&tx, &msg)?;
@@ -696,6 +758,7 @@ impl Store {
                 erase(&tx, r)?;
             }
             record(&tx, &msg, user)?;
+            ext_record(&tx, &self.subs, &msg, orig.as_deref())?;
             db(tx.commit())?;
             Ok(Sent::Fresh { msg, ver })
         })
@@ -703,7 +766,7 @@ impl Store {
 
     pub fn talk(&self, r: &Report, at: Option<u64>) -> Result<Sent, Code> {
         if let Form::Pg(p) = &self.form {
-            return p.talk(r, at);
+            return p.talk(self.subs.clone(), r, at);
         }
         self.with(|c| {
             let tx = db(c.transaction_with_behavior(TransactionBehavior::Immediate))?;
@@ -725,6 +788,7 @@ impl Store {
                     params![space, user],
                 ))?;
                 record(&tx, &msg, "")?;
+                ext_record(&tx, &self.subs, &msg, None)?;
                 db(tx.commit())?;
                 return Ok(Sent::Fresh { msg, ver });
             }
@@ -748,6 +812,7 @@ impl Store {
             insert_msg(&tx, &msg)?;
             db(tx.execute("UPDATE spaces SET last_t = MAX(COALESCE(last_t, ?2), ?2) WHERE space_id = ?1", params![orig.space_id, n(t)]))?;
             record(&tx, &msg, "")?;
+            ext_record(&tx, &self.subs, &msg, orig.kind.map(|k| k.as_str()))?;
             db(tx.commit())?;
             Ok(Sent::Fresh { msg, ver })
         })
@@ -948,49 +1013,93 @@ impl Store {
             return Ok(());
         }
         if let Form::Pg(p) = &self.form {
-            p.ack_batch(None, vec![(user.to_string(), msg_ids.to_vec())])?;
+            p.ack_batch(None, Lane::Member, vec![(user.to_string(), msg_ids.to_vec())])?;
             self.ack_tx.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
         self.with(|c| {
             let tx = db(c.transaction_with_behavior(TransactionBehavior::Immediate))?;
-            delete_acks(&tx, &[(user.to_string(), msg_ids.to_vec())])?;
+            delete_acks(&tx, Lane::Member, &[(user.to_string(), msg_ids.to_vec())])?;
             db(tx.commit())?;
             self.ack_tx.fetch_add(1, Ordering::Relaxed);
             Ok(())
         })
     }
 
-    pub fn ack_drain(&self, first: Ack, more: &Receiver<Ack>, cap: usize) -> Result<usize, Code> {
+    pub fn ack_drain(&self, lane: Lane, first: Ack, mut more: impl FnMut() -> Option<Ack>, cap: usize) -> Result<usize, Code> {
         if self.queued.load(Ordering::Acquire) > 0 {
             std::thread::sleep(YIELD);
         }
-        if let Form::Pg(p) = &self.form {
-            let conn = p.take()?;
+        let mut gather = |first: Ack| {
             let mut rows = first.1.len();
             let mut batch = vec![first];
             while rows < cap {
-                let Ok(a) = more.try_recv() else { break };
+                let Some(a) = more() else { break };
                 rows += a.1.len();
                 batch.push(a);
             }
-            p.ack_batch(Some(conn), batch)?;
+            (rows, batch)
+        };
+        if let Form::Pg(p) = &self.form {
+            let conn = p.take()?;
+            let (rows, batch) = gather(first);
+            p.ack_batch(Some(conn), lane, batch)?;
             self.ack_tx.fetch_add(1, Ordering::Relaxed);
             return Ok(rows);
         }
         self.with(|c| {
             let tx = db(c.transaction_with_behavior(TransactionBehavior::Immediate))?;
-            let mut rows = first.1.len();
-            let mut batch = vec![first];
-            while rows < cap {
-                let Ok(a) = more.try_recv() else { break };
-                rows += a.1.len();
-                batch.push(a);
-            }
-            delete_acks(&tx, &batch)?;
+            let (rows, batch) = gather(first);
+            delete_acks(&tx, lane, &batch)?;
             db(tx.commit())?;
             self.ack_tx.fetch_add(1, Ordering::Relaxed);
             Ok(rows)
+        })
+    }
+
+    pub fn ext_failed(&self, key: &str, msg_ids: &[String], max_tries: u32) -> Result<Vec<String>, Code> {
+        if msg_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Form::Pg(p) = &self.form {
+            return p.ext_failed(key, msg_ids, max_tries);
+        }
+        self.with(|c| {
+            let tx = db(c.transaction_with_behavior(TransactionBehavior::Immediate))?;
+            let mut out = Vec::new();
+            for id in msg_ids {
+                let tries = db(tx
+                    .query_row("UPDATE ext_pending SET tries = tries + 1 WHERE key = ?1 AND msg_id = ?2 RETURNING tries", params![key, id], |r| r.get::<_, i64>(0))
+                    .optional())?;
+                if tries.is_some_and(|x| x >= i64::from(max_tries)) {
+                    db(tx.execute("DELETE FROM ext_pending WHERE key = ?1 AND msg_id = ?2", params![key, id]))?;
+                    out.push(id.clone());
+                }
+            }
+            db(tx.commit())?;
+            Ok(out)
+        })
+    }
+
+    pub fn ext_count(&self, key: &str) -> Result<u64, Code> {
+        if let Form::Pg(p) = &self.form {
+            return p.ext_count(key);
+        }
+        self.with(|c| db(c.query_row("SELECT COUNT(*) FROM ext_pending WHERE key = ?1", params![key], |r| r.get::<_, i64>(0))).map(u))
+    }
+
+    pub fn ext_rows(&self, key: &str) -> Result<Vec<ExtRow>, Code> {
+        if let Form::Pg(p) = &self.form {
+            return p.ext_rows(key);
+        }
+        self.with(|c| {
+            let mut st = db(c.prepare("SELECT msg_id, t, tries FROM ext_pending WHERE key = ?1 ORDER BY t, msg_id"))?;
+            let it = db(st.query_map(params![key], |r| Ok(ExtRow { msg_id: r.get(0)?, t: u(r.get(1)?), tries: u32::try_from(r.get::<_, i64>(2)?).unwrap_or(u32::MAX) })))?;
+            let mut v = Vec::new();
+            for x in it {
+                v.push(db(x)?);
+            }
+            Ok(v)
         })
     }
 
@@ -1018,7 +1127,13 @@ impl Store {
         if let Form::Pg(p) = &self.form {
             return p.purge(before_t);
         }
-        self.with(|c| db(c.execute("DELETE FROM undelivered WHERE t < ?1", params![n(before_t)])))
+        self.with(|c| {
+            let tx = db(c.transaction_with_behavior(TransactionBehavior::Immediate))?;
+            let k = db(tx.execute("DELETE FROM undelivered WHERE t < ?1", params![n(before_t)]))?;
+            let e = db(tx.execute("DELETE FROM ext_pending WHERE t < ?1", params![n(before_t)]))?;
+            db(tx.commit())?;
+            Ok(k + e)
+        })
     }
 
     pub fn pending(&self, user: &str) -> Result<Vec<String>, Code> {
