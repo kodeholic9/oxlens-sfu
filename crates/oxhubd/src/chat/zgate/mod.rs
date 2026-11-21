@@ -289,7 +289,7 @@ impl Gate {
                 return self.refuse(&r, peer);
             }
         };
-        let cid = format!("{}{:x}", self.boot, self.seq.fetch_add(1, Ordering::Relaxed));
+        let cid = format!("{:012x}{}{:x}", common::now_ms(), self.boot, self.seq.fetch_add(1, Ordering::Relaxed));
         let key = est.session.cn.clone();
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         if let Ok(mut g) = self.conns.lock() {

@@ -210,7 +210,9 @@ async fn a_zenoh_client_receives_queries_and_its_answers_come_back() {
     let cid = open_cid(&r).await;
     let t = wait_tokens(&r, 1, 3_000).await;
     assert_eq!(t, vec![("acme".to_string(), "n1".to_string(), cid.clone())], "HK-KEY-PUB-V1-CHAT-SUB-KEY① 정:RULE-CHAT-EXT-SUB 3 — 제 계정 키 queryable 이 서면 토큰 int/ext/acme/n1/{{cid}}");
-    assert!(cid.starts_with("e1"), "정:RULE-CHAT-EXT-SUB 3 — cid = 기동 신원 + 세션 번호 {cid}");
+    let now = common::now_ms();
+    let at = oxhubd::chat::zgate::plan::opened(&cid);
+    assert!(at <= now && now - at < 60_000 && cid[12..].starts_with("e1"), "정:RULE-CHAT-EXT-SUB 3 — cid = 열린 시각 12 자리 hex + 기동 신원 + 세션 번호 {cid}");
     let replier = tokio::spawn(async move {
         let mut seen = Vec::new();
         for i in 0..4 {
@@ -676,7 +678,7 @@ fn spec_dir() -> PathBuf {
 
 #[test]
 fn send_plan_vectors() {
-    use oxhubd::chat::zgate::plan::{After, Due, Item, Knobs, Outbox, Outcome, Row, drain_due, drain_pick, ring};
+    use oxhubd::chat::zgate::plan::{After, Due, Item, Knobs, Outbox, Outcome, Row, drain_due, drain_owner, drain_pick, ring};
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(spec_dir().join("server/out/vectors/chat.json")).expect("vectors")).expect("json");
     let arr = |k: &str| v[k].as_array().cloned().unwrap_or_else(|| panic!("판 묶음 {k} 없음"));
     let ringv = arr("ext_ring");
@@ -728,5 +730,11 @@ fn send_plan_vectors() {
             _ => Due::Older(c["due"]["before"].as_u64().expect("before")),
         };
         assert_eq!(due, want, "정:RULE-CHAT-EXT-SUB 6 — {}", c["name"]);
+    }
+    let owners = arr("ext_drain_owner");
+    assert!(!owners.is_empty());
+    for c in owners {
+        let conns: Vec<(String, String)> = c["conns"].as_array().expect("conns").iter().map(|p| (p[0].as_str().expect("node").to_string(), p[1].as_str().expect("cid").to_string())).collect();
+        assert_eq!(drain_owner(&conns), c["owner"].as_u64().map(|i| i as usize), "S-sym-RULE-CHAT-EXT-SUB-10① · 정:RULE-CHAT-EXT-SUB 3 — drain 주인 = 가장 오래 붙어 있는 연결 · {}", c["name"]);
     }
 }

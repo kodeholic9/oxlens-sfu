@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.6 · 정:RULE-CHAT-EXT-SUB · 정:IMPL-CHAT-UNDELIVERED · 정:RULE-OPS-DROPS · model: claude-opus-5-5
-//! zenoh 입구의 보내기 — 넘기기를 받아 연결의 보낼 줄에 넣는다(성공 · 연결 없음 · 밀림 · 줄 넘침) · 창에 빈 칸이 있으면 줄 앞을 질의로 꺼낸다 · 끝(ACK · ACK 아님 · 시간 넘김)을 처리한다(ACK 는 3rd ACK 줄로 · 아니면 시도 수 +1 · 상한에서 지운 것을 센다 · 시간 넘김은 밀림과 잇단 수) · 계정마다 drain 주인(목록 첫 연결)이 제 것이면 drain 한다(막 주인이 됨 · 밀림이 풀림 · 훑기) — 한 번에 하나 · 묶음 하나씩 끝을 기다린다.
+//! zenoh 입구의 보내기 — 넘기기를 받아 연결의 보낼 줄에 넣는다(성공 · 연결 없음 · 밀림 · 줄 넘침) · 창에 빈 칸이 있으면 줄 앞을 질의로 꺼낸다 · 끝(ACK · ACK 아님 · 시간 넘김)을 처리한다(ACK 는 3rd ACK 줄로 · 아니면 시도 수 +1 · 상한에서 지운 것을 센다 · 시간 넘김은 밀림과 잇단 수) · 계정마다 drain 주인(가장 오래 붙어 있는 연결)이 제 것이면 drain 한다(막 주인이 됨 · 밀림이 풀림 · 훑기) — 한 번에 하나 · 묶음 하나씩 끝을 기다린다.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
-use super::plan::{After, Due, Item, Knobs, Offer, Outcome, Row, drain_due, drain_pick};
+use super::plan::{After, Due, Item, Knobs, Offer, Outcome, Row, drain_due, drain_owner, drain_pick};
 use super::{Cmd, Gate, QueryError};
 use crate::chat::acks::{AckLanes, Push};
 use crate::chat::store::{Cursor, Lane, Store};
@@ -171,7 +171,7 @@ impl Gate {
 
     fn owner_here(&self, key: &str) -> Option<String> {
         let list = self.bus.ext_list(key);
-        let (node, cid) = list.first()?;
+        let (node, cid) = list.get(drain_owner(&list)?)?;
         if *node != self.bus.node {
             return None;
         }

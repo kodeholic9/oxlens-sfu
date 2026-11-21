@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.6 · 정:RULE-CHAT-EXT-SUB · model: claude-opus-5-5
-//! 채팅 3rd 구독 보내기 판단 — 원천 `server/areas/chat/behavior/extsend.ts` 의 거울(벡터 `chat.json` 이 맞댄다): 넘길 연결 차례(라운드 로빈 한 바퀴) · 연결마다 보낼 줄(창 · 줄 끝 실시간 묶음 합치기 · 줄 상한 = 밀림 · 시간 넘김 = 밀림 + 잇단 수 · 닫는 수 · 풀림) · drain 묶음 고르기(시도된 행은 한 건씩) · drain 때(주인 · 막 주인 · 풀림 · 훑기).
+//! 채팅 3rd 구독 보내기 판단 — 원천 `server/areas/chat/behavior/extsend.ts` 의 거울(벡터 `chat.json` 이 맞댄다): 넘길 연결 차례(라운드 로빈 한 바퀴) · 연결마다 보낼 줄(창 · 줄 끝 실시간 묶음 합치기 · 줄 상한 = 밀림 · 시간 넘김 = 밀림 + 잇단 수 · 닫는 수 · 풀림) · drain 묶음 고르기(시도된 행은 한 건씩) · drain 때(주인 · 막 주인 · 풀림 · 훑기) · drain 주인(가장 오래 붙어 있는 연결 — `cid` 앞 12 자리 열린 시각).
 
 use std::collections::VecDeque;
 
@@ -190,4 +190,12 @@ pub fn drain_due(owner: bool, was_owner: bool, released: bool, now: u64, last_sw
         return Due::Older(now.saturating_sub(sweep_ms));
     }
     Due::None
+}
+
+pub fn opened(cid: &str) -> u64 {
+    cid.get(..12).filter(|h| h.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))).and_then(|h| u64::from_str_radix(h, 16).ok()).unwrap_or(u64::MAX)
+}
+
+pub fn drain_owner(conns: &[(String, String)]) -> Option<usize> {
+    conns.iter().enumerate().min_by(|(_, (an, ac)), (_, (bn, bc))| (opened(ac), an, ac).cmp(&(opened(bc), bn, bc))).map(|(i, _)| i)
 }
