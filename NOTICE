@@ -3,6 +3,13 @@ Copyright kodeholic
 
 This product includes logic derived from third-party software.
 
+The zenoh gate (crates/oxhubd/src/chat/zgate/) links the Eclipse zenoh
+1.10.1 crates zenoh-protocol, zenoh-codec and zenoh-buffers for the wire
+types and encoding, and implements the accepting side of the zenoh unicast
+establishment and transport (InitSyn/InitAck/OpenSyn/OpenAck, frames,
+fragments, keep-alive, sequence-number masks) in its own code after
+io/zenoh-transport of the same release. No zenoh source file is copied.
+
 The subscriber-side bandwidth estimation and simulcast layer allocation
 (crates/oxsfud/src/sim/bwe.rs, crates/oxsfud/src/sim/alloc.rs,
 crates/oxsfud/src/sim/core.rs) are re-implemented in Rust from the
@@ -67,3 +74,15 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 The WebRTC project also provides an additional grant of patent rights;
 see the PATENTS file at https://webrtc.googlesource.com/src/+/main/PATENTS
+
+--------------------------------------------------------------------------
+Eclipse zenoh — https://github.com/eclipse-zenoh/zenoh
+
+Copyright (c) 2023 ZettaScale Technology and the Eclipse zenoh contributors.
+
+This program and the accompanying materials are made available under the
+terms of the Eclipse Public License 2.0 which is available at
+http://www.eclipse.org/legal/epl-2.0, or the Apache License, Version 2.0
+which is available at https://www.apache.org/licenses/LICENSE-2.0.
+
+SPDX-License-Identifier: EPL-2.0 OR Apache-2.0

@@ -4,10 +4,11 @@
 
 pub mod acks;
 pub mod store;
+pub mod zgate;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use oxsig::msg::{CatchupReq, ChatKind, ChatMessage, MessageRes, SpaceHistoryRes, SpaceListRes, SpaceViewRes};
@@ -49,6 +50,7 @@ pub struct Chat {
     acks: Arc<AckLanes>,
     ack_dropped: AtomicU64,
     ext_ack_dropped: AtomicU64,
+    pub zgate: OnceLock<Arc<zgate::Gate>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -72,7 +74,7 @@ impl Chat {
         if let Err(e) = std::thread::Builder::new().name("chat-ack".into()).spawn(move || ack_writer(&st, &lanes)) {
             tracing::warn!(kind = "diag", spec = "SV-IMPL-CHAT-STORE-FAULTS", "ack writer did not start: {e} — records stay, catchup sends them again");
         }
-        Chat { store, limits, cache: Mutex::new(HashMap::new()), acks, ack_dropped: AtomicU64::new(0), ext_ack_dropped: AtomicU64::new(0) }
+        Chat { store, limits, cache: Mutex::new(HashMap::new()), acks, ack_dropped: AtomicU64::new(0), ext_ack_dropped: AtomicU64::new(0), zgate: OnceLock::new() }
     }
 
     pub async fn roster_at_least(&self, space: &str, ver: u64) -> Result<Roster, Code> {

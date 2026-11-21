@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-BUS-KEYSPACE · model: claude-opus-5-5
-//! 버스 키 공간 — 알릴 것을 전부 키에 적는다(liveliness 토큰은 값을 못 싣는다) · 방 id 가 node 앞.
+// spec: v1.6 · 정:RULE-BUS-KEYSPACE · 정:RULE-CHAT-EXT-SUB · model: claude-opus-5-5
+//! 버스 키 공간 — 알릴 것을 전부 키에 적는다(liveliness 토큰은 값을 못 싣는다) · 방 id 가 node 앞 · 3rd 연결 위치(`ext`) · 대외 채팅 구독 키(`pub/v1/chat/sub`).
 
 pub const FORBIDDEN: &[char] = &['*', '$', '?', '#', '/'];
 
@@ -54,6 +54,22 @@ impl Keys {
         format!("{}/sess/**", self.base())
     }
 
+    pub fn ext_token(&self, key: &str, node: &str, cid: &str) -> String {
+        format!("{}/ext/{key}/{node}/{cid}", self.base())
+    }
+
+    pub fn ext_all(&self) -> String {
+        format!("{}/ext/**", self.base())
+    }
+
+    pub fn chat_sub_prefix(&self) -> String {
+        format!("ox/{}/pub/v1/chat/sub/", self.ns)
+    }
+
+    pub fn chat_sub(&self, key: &str) -> String {
+        format!("{}{key}", self.chat_sub_prefix())
+    }
+
     pub fn ev_room(&self, room: &str) -> String {
         format!("{}/ev/room/{room}", self.base())
     }
@@ -97,6 +113,7 @@ impl Keys {
             ["sess", user, node, sid] => {
                 Some(Parsed::Sess { user: user.to_string(), node: node.to_string(), sid: sid.to_string() })
             }
+            ["ext", key, node, cid] => Some(Parsed::Ext { key: key.to_string(), node: node.to_string(), cid: cid.to_string() }),
             ["ev", "room", room] => Some(Parsed::EvRoom(room.to_string())),
             ["ev", "user", user] => Some(Parsed::EvUser(user.to_string())),
             ["ev", "node", node] => Some(Parsed::EvNode(node.to_string())),
@@ -111,6 +128,7 @@ pub enum Parsed {
     Node { node: String, inst: String },
     Room { room: String, node: String, inst: String },
     Sess { user: String, node: String, sid: String },
+    Ext { key: String, node: String, cid: String },
     EvRoom(String),
     EvUser(String),
     EvNode(String),
@@ -139,5 +157,14 @@ mod tests {
             assert!(!valid_piece(bad));
         }
         assert!(valid_piece("room-1"));
+    }
+
+    #[test]
+    fn ext_token_and_chat_sub_keys() {
+        let k = Keys::new("c1");
+        assert_eq!(k.ext_token("acme", "n1", "e1a"), "ox/c1/int/ext/acme/n1/e1a");
+        assert_eq!(k.parse("ox/c1/int/ext/acme/n1/e1a"), Some(Parsed::Ext { key: "acme".into(), node: "n1".into(), cid: "e1a".into() }));
+        assert_eq!(k.ext_all(), "ox/c1/int/ext/**");
+        assert_eq!(k.chat_sub("acme"), "ox/c1/pub/v1/chat/sub/acme");
     }
 }

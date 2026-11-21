@@ -40,6 +40,15 @@ tower = { version = "0.5", features = ["util"] }
 rusqlite = { workspace = true }
 tokio-postgres = { workspace = true }
 deadpool-postgres = { workspace = true }
+zenoh-protocol = "=1.10.1"
+zenoh-codec = "=1.10.1"
+zenoh-buffers = "=1.10.1"
+x509-parser = "0.16"
+
+[dev-dependencies]
+zenoh = { version = "=1.10.1", default-features = false, features = ["transport_tcp", "transport_tls", "transport_multilink", "transport_compression", "auth_usrpwd"] }
+rcgen = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true

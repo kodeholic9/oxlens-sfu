@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · 정:RULE-BUS-PRESENCE · 정:RULE-BUS-EVENTS · 정:RULE-BUS-REQUEST · 정:IMPL-BUS-FAULTS · 정:RULE-BUS-PUBLIC · 정:CAND-BUS-REQUEST-TIMEOUT · 정:RULE-OPS-DROPS · 정:IMPL-CHAT-FANOUT · model: claude-opus-5-5
-//! hub 의 버스 — oxmesh router(임베드 · 202610/20261031e) · 토큰 선언 · 방 → node 맵 · 관심 구독 · node 안 Handle · node 사이 요청.
+// spec: v1.6 · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · 정:RULE-BUS-PRESENCE · 정:RULE-BUS-EVENTS · 정:RULE-BUS-REQUEST · 정:IMPL-BUS-FAULTS · 정:RULE-BUS-PUBLIC · 정:CAND-BUS-REQUEST-TIMEOUT · 정:RULE-OPS-DROPS · 정:IMPL-CHAT-FANOUT · 정:RULE-CHAT-EXT-SUB · model: claude-opus-5-5
+//! hub 의 버스 — oxmesh router(임베드 · 202610/20261031e) · 토큰 선언 · 방 → node 맵 · 관심 구독 · node 안 Handle · node 사이 요청 · 3rd 연결 위치 토큰(`ext`)을 쥐었다가 연결이 닫히면 놓는다(세션이 다시 서면 그물이 전량 다시 선언).
 
 pub mod placement;
 pub mod view;
@@ -86,6 +86,7 @@ pub struct Bus {
     tx: mpsc::UnboundedSender<BusEvent>,
     node_token: Mutex<Option<Token>>,
     sess_tokens: Mutex<HashMap<String, Token>>,
+    ext_tokens: Mutex<HashMap<String, Token>>,
     room_subs: SubMap,
     user_subs: SubMap,
     local: Mutex<Option<Local>>,
@@ -131,6 +132,7 @@ impl Bus {
             tx,
             node_token: Mutex::new(None),
             sess_tokens: Mutex::new(HashMap::new()),
+            ext_tokens: Mutex::new(HashMap::new()),
             room_subs: Mutex::new(HashMap::new()),
             user_subs: Mutex::new(HashMap::new()),
             local: Mutex::new(None),
@@ -280,6 +282,33 @@ impl Bus {
         if let Ok(mut g) = self.sess_tokens.lock() {
             g.remove(sid);
         }
+    }
+
+    pub async fn declare_ext(&self, key: &str, cid: &str) -> Result<(), String> {
+        let t = self.session.declare_token(&self.keys.ext_token(key, &self.node, cid)).await.map_err(|e| format!("ext token: {e}"))?;
+        if let Ok(mut g) = self.ext_tokens.lock() {
+            g.insert(cid.to_string(), t);
+        }
+        Ok(())
+    }
+
+    pub fn undeclare_ext(&self, cid: &str) {
+        if let Ok(mut g) = self.ext_tokens.lock() {
+            g.remove(cid);
+        }
+    }
+
+    pub async fn ext_conns(&self) -> Result<Vec<(String, String, String)>, String> {
+        let keys = self.session.tokens(&self.keys.ext_all(), SESS_GET_TIMEOUT).await.map_err(|e| format!("ext tokens: {e}"))?;
+        let mut out: Vec<(String, String, String)> = keys
+            .iter()
+            .filter_map(|k| match self.keys.parse(k) {
+                Some(Parsed::Ext { key, node, cid }) => Some((key, node, cid)),
+                _ => None,
+            })
+            .collect();
+        out.sort();
+        Ok(out)
     }
 
     pub async fn find_sess(&self, sid: &str) -> Option<(String, String)> {
@@ -493,6 +522,9 @@ impl Bus {
             g.take();
         }
         if let Ok(mut g) = self.sess_tokens.lock() {
+            g.clear();
+        }
+        if let Ok(mut g) = self.ext_tokens.lock() {
             g.clear();
         }
         self.session.close().await;

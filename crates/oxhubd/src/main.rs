@@ -156,6 +156,25 @@ async fn run(cfg: HubCfg) -> i32 {
                 };
                 let chat = Arc::new(oxhubd::chat::Chat::new(st, limits));
                 tokio::spawn(chat.clone().purge_loop());
+                if let Some(listen) = cfg.system.zenoh_listen() {
+                    let hk = cfg.system.hook.clone().unwrap_or_default();
+                    let gc = oxhubd::chat::zgate::GateCfg {
+                        listen: listen.to_string(),
+                        cert: hk.zenoh_cert.unwrap_or_default(),
+                        key: hk.zenoh_key.unwrap_or_default(),
+                        ca: hk.zenoh_ca.unwrap_or_default(),
+                    };
+                    match oxhubd::chat::zgate::Gate::bind(&gc, oxhubd::chat::zgate::judge::Accounts::of(&cfg.system), bus.clone()).await {
+                        Ok(g) => {
+                            tokio::spawn(g.clone().serve());
+                            let _ = chat.zgate.set(g);
+                        }
+                        Err(e) => {
+                            eprintln!("oxhubd: {e}");
+                            return 2;
+                        }
+                    }
+                }
                 let _ = ctx.chat.set(chat);
             }
             Err(e) => {

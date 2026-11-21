@@ -105,12 +105,8 @@ pub struct Counters {
     pub notice_refused: AtomicU64,
     pub chat_fanout_fail: AtomicU64,
     pub session_end_fail: AtomicU64,
-    pub ext_refused: AtomicU64,
     pub ext_fanout_fail: AtomicU64,
-    pub ext_queue_full: AtomicU64,
-    pub ext_reply_timeout: AtomicU64,
     pub ext_given_up: AtomicU64,
-    pub ext_push_dropped: AtomicU64,
     pub codes: Mutex<BTreeMap<u16, u64>>,
 }
 
