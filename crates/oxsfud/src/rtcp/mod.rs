@@ -342,25 +342,34 @@ pub enum PliGo {
     Send,
     Hold,
     Throttled,
+    Answered,
 }
 
-pub fn pli_decide(p: &mut PliState, want: u8, bound: bool, now: u64, gap: u64) -> PliGo {
-    if want == 0 && !p.pending {
-        return PliGo::Idle;
+pub fn held_answered(held_since: Option<u64>, last_key: u64) -> bool {
+    held_since.is_some_and(|s| last_key > 0 && last_key >= s)
+}
+
+pub fn pli_decide(p: &mut PliState, want: u8, bound: bool, now: u64, gap: u64, last_key: u64) -> PliGo {
+    let answered = held_answered(p.held_since, last_key);
+    if answered {
+        p.held_since = None;
+    }
+    if want == 0 && p.held_since.is_none() {
+        return if answered { PliGo::Answered } else { PliGo::Idle };
     }
     if !bound {
-        p.pending = false;
+        p.held_since = None;
         return PliGo::Unbound;
     }
     if p.last_ms == 0 || now.saturating_sub(p.last_ms) >= gap {
         p.last_ms = now;
-        p.pending = false;
+        p.held_since = None;
         p.sent += 1;
         return PliGo::Send;
     }
     let infra = want & PLI_INFRA != 0;
     if infra {
-        p.pending = true;
+        p.held_since.get_or_insert(now);
     }
     if want & PLI_USER != 0 && !infra { PliGo::Throttled } else { PliGo::Hold }
 }
@@ -368,15 +377,16 @@ pub fn pli_decide(p: &mut PliState, want: u8, bound: bool, now: u64, gap: u64) -
 fn pli_tick(w: &Worker, tr: &Transport, t: &PubTrack, now: u64) {
     let want = t.pli_want.swap(0, Ordering::AcqRel);
     let Ok(mut p) = t.pli.lock() else { return };
-    if want == 0 && !p.pending {
+    if want == 0 && p.held_since.is_none() {
         return;
     }
-    let go = pli_decide(&mut p, want, pli_bound(tr, t), now, throttle_ms(t));
+    let go = pli_decide(&mut p, want, pli_bound(tr, t), now, throttle_ms(t), t.last_keyframe_ms.load(Ordering::Acquire));
     drop(p);
     match go {
         PliGo::Send => send_rtcp(w, tr, &build_pli(t.ssrc)),
         PliGo::Unbound => crate::ops::drop_count("pli_unbound"),
         PliGo::Throttled => crate::ops::drop_count("pli_throttled"),
+        PliGo::Answered => crate::ops::drop_count("pli_answered"),
         PliGo::Idle | PliGo::Hold => {}
     }
 }

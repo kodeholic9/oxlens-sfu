@@ -295,7 +295,7 @@ impl NackUp {
 #[derive(Default)]
 pub struct PliState {
     pub last_ms: u64,
-    pub pending: bool,
+    pub held_since: Option<u64>,
     pub sent: u64,
 }
 
