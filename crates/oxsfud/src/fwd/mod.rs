@@ -730,7 +730,7 @@ pub fn send_down(w: &Worker, row: &DownRow, pkt: &Pkt) {
                 drop(rw);
                 crate::ops::drop_count("await_keyframe");
                 if let Some(t) = &pkt.track {
-                    crate::rtcp::request_pli(t, true);
+                    crate::rtcp::request_pli(t, crate::rtcp::PLI_AWAIT_KEY);
                 }
                 return;
             }

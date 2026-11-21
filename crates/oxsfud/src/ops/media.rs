@@ -549,7 +549,7 @@ fn ready_pli(room: &Room, user: &str) {
     for st in room_streams(&room.id) {
         if st.kind == Kind::Video && st.user != user && !st.is_half() {
             for t in st.physical() {
-                crate::rtcp::request_pli(&t, true);
+                crate::rtcp::request_pli(&t, crate::rtcp::PLI_READY);
             }
         }
     }
@@ -560,7 +560,7 @@ fn ready_pli(room: &Room, user: &str) {
         for st in half_in(&room.id, &sp) {
             if st.kind == Kind::Video {
                 for t in st.physical() {
-                    crate::rtcp::request_pli(&t, true);
+                    crate::rtcp::request_pli(&t, crate::rtcp::PLI_READY);
                 }
             }
         }

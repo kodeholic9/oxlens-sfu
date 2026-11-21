@@ -160,11 +160,17 @@ pub fn adopt_state(row: &DownRow, now: u64) -> Option<u8> {
     Some(w)
 }
 
+pub fn adopt_asks(adopted: Option<u8>, after: LayerState) -> Option<u8> {
+    adopted.filter(|&w| w != LAYER_PAUSE && after.layer != after.target)
+}
+
 pub fn adopt(row: &DownRow, any: &PubTrack, now: u64) {
-    if let Some(w) = adopt_state(row, now)
+    let adopted = adopt_state(row, now);
+    if let Some(w) = adopt_asks(adopted, layer_state(row))
         && let Some(t) = sibling(any, w)
     {
-        crate::rtcp::request_pli(&t, true);
+        row.pending_pli_at.store(now, Ordering::Relaxed);
+        crate::rtcp::request_pli(&t, crate::rtcp::PLI_ADOPT);
     }
 }
 
@@ -173,7 +179,7 @@ pub fn request(row: &DownRow, any: &PubTrack) {
     if layer_state(row).target != w
         && let Some(t) = sibling(any, w)
     {
-        crate::rtcp::request_pli(&t, true);
+        crate::rtcp::request_pli(&t, crate::rtcp::PLI_LAYER);
     }
 }
 
@@ -184,7 +190,7 @@ pub fn reset(row: &DownRow, now: u64) {
 pub fn judge(row: &DownRow, l: u8, keyframe: bool, now: u64, retry_due: bool, h_stale: impl Fn(LayerState) -> bool) -> (Step, Option<u8>) {
     let adopted = adopt_state(row, now);
     let s = layer_state(row);
-    let st = step(s, l, keyframe, now, retry_due, h_stale(s));
+    let st = step(s, l, keyframe, now, retry_due && adopted.is_none(), h_stale(s));
     if let Some(n) = st.next {
         put(row, n);
     }
@@ -200,19 +206,20 @@ pub fn admit(row: &DownRow, t: &Arc<PubTrack>, keyframe: bool, now: u64) -> bool
     let (st, adopted) = judge(row, l, keyframe, now, retry_due, |s| {
         s.layer == 1 && s.target == 1 && l == 0 && sibling(t, 1).is_some_and(|h| now.saturating_sub(h.last_rtp_ms.load(Ordering::Acquire)) > INBAND_MS)
     });
-    if let Some(w) = adopted
+    if let Some(w) = adopt_asks(adopted, layer_state(row))
         && let Some(ts) = sibling(t, w)
     {
-        crate::rtcp::request_pli(&ts, true);
+        row.pending_pli_at.store(now, Ordering::Relaxed);
+        crate::rtcp::request_pli(&ts, crate::rtcp::PLI_ADOPT);
     }
     match st.pli {
         Pli::Retry(x) => {
             row.pending_pli_at.store(now, Ordering::Relaxed);
             if let Some(ts) = sibling(t, x) {
-                crate::rtcp::request_pli(&ts, true);
+                crate::rtcp::request_pli(&ts, crate::rtcp::PLI_RETRY);
             }
         }
-        Pli::Here => crate::rtcp::request_pli(t, true),
+        Pli::Here => crate::rtcp::request_pli(t, crate::rtcp::PLI_HERE),
         Pli::None => {}
     }
     st.fwd
@@ -744,7 +751,7 @@ pub fn subscribe_layer(row: &DownRow, any: &Arc<PubTrack>, spatial: Option<u8>, 
         let was = row.paused.swap(p, Ordering::AcqRel);
         if was && !p {
             if let Some(t) = sibling(any, want(row)).or_else(|| Some(any.clone())) {
-                crate::rtcp::request_pli(&t, true);
+                crate::rtcp::request_pli(&t, crate::rtcp::PLI_LAYER);
             }
             return;
         }

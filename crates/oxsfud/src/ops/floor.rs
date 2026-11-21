@@ -568,7 +568,7 @@ fn pli_while_bound(fan: &Arc<SlotFan>, t: &Arc<crate::r#pub::PubTrack>) {
         super::spawn(async move {
             tokio::time::sleep(Duration::from_millis(d)).await;
             if fan.episode() == ep {
-                crate::rtcp::request_pli(&t, true);
+                crate::rtcp::request_pli(&t, crate::rtcp::PLI_BURST);
             }
         });
     }

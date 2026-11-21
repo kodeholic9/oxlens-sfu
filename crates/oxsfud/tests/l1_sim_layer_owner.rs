@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use oxsfud::fwd::{DownRow, LAYER_PAUSE, apply_row_cmd, row_same};
 use oxsfud::link::{Role, Transport};
-use oxsfud::sim::{LayerState, PENDING_MS, Pli, judge, layer_state, step, want};
+use oxsfud::sim::{LayerState, PENDING_MS, Pli, adopt_asks, judge, layer_state, step, want};
 use oxsig::msg::Kind;
 
 fn row() -> DownRow {
@@ -48,6 +48,41 @@ fn a_layer_request_writes_only_the_input_and_the_row_worker_adopts_it_in_one_ste
     assert!(st.fwd && adopted.is_none() && layer_state(&r).target == 0, "정:IMPL-SIM-SWITCH S-sym-IMPL-SIM-SWITCH-2 the next packet does not read the request as expired");
     let (st, _) = judge(&r, 0, true, 50_002, false, |_| false);
     assert!(st.fwd && layer_state(&r).layer == 0, "정:IMPL-SIM-SWITCH the target keyframe confirms the switch");
+}
+
+#[test]
+fn the_packet_that_adopts_and_confirms_at_once_asks_no_keyframe() {
+    let r = row();
+    on(&r, LayerState { layer: 1, target: 1, since: 0 });
+    r.cap.store(0, Ordering::Release);
+    let (st, adopted) = judge(&r, 0, true, 50_000, true, |_| false);
+    assert_eq!(adopted, Some(0), "정:IMPL-SIM-SWITCH the first packet after the request adopts the new target");
+    assert!(st.fwd && layer_state(&r).layer == 0, "정:IMPL-SIM-SWITCH the same packet is the target keyframe and confirms the switch");
+    assert_eq!(adopt_asks(adopted, layer_state(&r)), None, "정:IMPL-SIM-SWITCH S-sym-IMPL-SIM-SWITCH-4 a switch confirmed by the packet in hand asks no keyframe — the keyframe is already here");
+    assert_eq!(st.pli, Pli::None, "정:IMPL-SIM-SWITCH no retry either");
+}
+
+#[test]
+fn adopting_asks_once_and_the_same_step_does_not_retry() {
+    let r = row();
+    on(&r, LayerState { layer: 1, target: 1, since: 0 });
+    r.cap.store(0, Ordering::Release);
+    let (st, adopted) = judge(&r, 1, false, 50_000, true, |_| false);
+    assert_eq!(adopt_asks(adopted, layer_state(&r)), Some(0), "정:IMPL-SIM-SWITCH S-sym-IMPL-SIM-SWITCH-4 adopting a target still waiting for its keyframe asks once");
+    assert_eq!(st.pli, Pli::None, "정:IMPL-SIM-SWITCH S-sym-IMPL-SIM-SWITCH-4 the adopting step does not also retry — ④ asks again only after waiting");
+    let (st, adopted) = judge(&r, 1, false, 50_300, true, |_| false);
+    assert!(adopted.is_none(), "정:IMPL-SIM-SWITCH nothing new to adopt");
+    assert_eq!(st.pli, Pli::Retry(0), "정:IMPL-SIM-SWITCH ④ the retry comes on a later packet when the wait is due");
+}
+
+#[test]
+fn adopting_back_the_current_layer_asks_nothing() {
+    let r = row();
+    on(&r, LayerState { layer: 1, target: 0, since: 0 });
+    r.cap.store(1, Ordering::Release);
+    let (_, adopted) = judge(&r, 1, false, 50_000, false, |_| false);
+    assert_eq!(adopted, Some(1), "정:IMPL-SIM-SWITCH the target goes back to the current layer");
+    assert_eq!(adopt_asks(adopted, layer_state(&r)), None, "정:IMPL-SIM-SWITCH S-sym-IMPL-SIM-SWITCH-4 no keyframe is needed to stay on the current layer");
 }
 
 #[test]

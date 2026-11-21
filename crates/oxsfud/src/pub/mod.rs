@@ -3,7 +3,7 @@
 //! 발행 — 논리 `PublisherStream`(track_id · 메타 · 구독 줄 목록) · 물리 `PublisherTrack`(업링크 SSRC · 캐시 1024 · NACK 결손 · PLI 스로틀 · 수신 통계) · 시뮬캐스트는 첫 RTP 에 rid 로 붙인다.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
@@ -309,7 +309,7 @@ pub struct PubTrack {
     pub nack: Mutex<NackUp>,
     pub cache: Mutex<Cache>,
     pub pli: Mutex<PliState>,
-    pub pli_want: AtomicU8,
+    pub pli_want: AtomicU16,
     pub last_rtp_ms: AtomicU64,
     pub last_voice_ms: AtomicU64,
     pub voice_run_ms: AtomicU64,
@@ -336,7 +336,7 @@ impl PubTrack {
             nack: Mutex::new(NackUp::default()),
             cache: Mutex::new(Cache::default()),
             pli: Mutex::new(PliState::default()),
-            pli_want: AtomicU8::new(0),
+            pli_want: AtomicU16::new(0),
             last_rtp_ms: AtomicU64::new(0),
             last_voice_ms: AtomicU64::new(0),
             voice_run_ms: AtomicU64::new(0),

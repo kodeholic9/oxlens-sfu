@@ -325,14 +325,39 @@ fn pli_bound(tr: &Transport, t: &PubTrack) -> bool {
     pli_wanted(half, slot.as_deref(), &t.stream.user)
 }
 
-pub const PLI_INFRA: u8 = 1;
-pub const PLI_USER: u8 = 2;
+pub const PLI_USER: u16 = 1 << 0;
+pub const PLI_LAYER: u16 = 1 << 1;
+pub const PLI_ADOPT: u16 = 1 << 2;
+pub const PLI_RETRY: u16 = 1 << 3;
+pub const PLI_HERE: u16 = 1 << 4;
+pub const PLI_AWAIT_KEY: u16 = 1 << 5;
+pub const PLI_READY: u16 = 1 << 6;
+pub const PLI_NACK: u16 = 1 << 7;
+pub const PLI_BURST: u16 = 1 << 8;
+pub const PLI_INFRA: u16 = PLI_LAYER | PLI_ADOPT | PLI_RETRY | PLI_HERE | PLI_AWAIT_KEY | PLI_READY | PLI_NACK | PLI_BURST;
 
-pub fn request_pli(t: &Arc<PubTrack>, infra: bool) {
+const PLI_WHY: [(u16, &str); 9] = [
+    (PLI_USER, "subscriber"),
+    (PLI_LAYER, "layer"),
+    (PLI_ADOPT, "adopt"),
+    (PLI_RETRY, "retry"),
+    (PLI_HERE, "here"),
+    (PLI_AWAIT_KEY, "await_key"),
+    (PLI_READY, "ready"),
+    (PLI_NACK, "nack"),
+    (PLI_BURST, "burst"),
+];
+
+pub fn pli_why(want: u16) -> String {
+    let names: Vec<&str> = PLI_WHY.iter().filter(|(b, _)| want & b != 0).map(|(_, n)| *n).collect();
+    if names.is_empty() { "-".into() } else { names.join("+") }
+}
+
+pub fn request_pli(t: &Arc<PubTrack>, why: u16) {
     if t.stream.kind != Kind::Video {
         return;
     }
-    t.pli_want.fetch_or(if infra { PLI_INFRA } else { PLI_USER }, Ordering::AcqRel);
+    t.pli_want.fetch_or(why, Ordering::AcqRel);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -345,11 +370,24 @@ pub enum PliGo {
     Answered,
 }
 
+impl PliGo {
+    pub fn name(self) -> &'static str {
+        match self {
+            PliGo::Idle => "idle",
+            PliGo::Unbound => "unbound",
+            PliGo::Send => "send",
+            PliGo::Hold => "hold",
+            PliGo::Throttled => "throttled",
+            PliGo::Answered => "answered",
+        }
+    }
+}
+
 pub fn held_answered(held_since: Option<u64>, last_key: u64) -> bool {
     held_since.is_some_and(|s| last_key > 0 && last_key >= s)
 }
 
-pub fn pli_decide(p: &mut PliState, want: u8, bound: bool, now: u64, gap: u64, last_key: u64) -> PliGo {
+pub fn pli_decide(p: &mut PliState, want: u16, bound: bool, now: u64, gap: u64, last_key: u64) -> PliGo {
     let answered = held_answered(p.held_since, last_key);
     if answered {
         p.held_since = None;
@@ -380,8 +418,20 @@ fn pli_tick(w: &Worker, tr: &Transport, t: &PubTrack, now: u64) {
     if want == 0 && p.held_since.is_none() {
         return;
     }
-    let go = pli_decide(&mut p, want, pli_bound(tr, t), now, throttle_ms(t), t.last_keyframe_ms.load(Ordering::Acquire));
+    let held = p.held_since;
+    let last_key = t.last_keyframe_ms.load(Ordering::Acquire);
+    let go = pli_decide(&mut p, want, pli_bound(tr, t), now, throttle_ms(t), last_key);
+    let fresh_hold = go == PliGo::Hold && held.is_none();
     drop(p);
+    if matches!(go, PliGo::Send | PliGo::Answered) || fresh_hold {
+        tracing::info!(
+            kind = "diag", spec = "SV-IMPL-RTCP-TERMINATE", session = %tr.session, user = %tr.user,
+            "in.ssrc" = t.ssrc, "in.rid" = t.rid.map(|r| r.to_string()).unwrap_or_else(|| "-".into()), "in.go" = go.name(), "in.why" = pli_why(want),
+            "in.held_ms" = held.map(|s| now.saturating_sub(s).to_string()).unwrap_or_else(|| "-".into()),
+            "in.key_age_ms" = if last_key == 0 { "-".to_string() } else { now.saturating_sub(last_key).to_string() },
+            "pli decided"
+        );
+    }
     match go {
         PliGo::Send => send_rtcp(w, tr, &build_pli(t.ssrc)),
         PliGo::Unbound => crate::ops::drop_count("pli_unbound"),
@@ -408,7 +458,7 @@ pub fn pli_burst(t: &Arc<PubTrack>) {
         let t = t.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(d)).await;
-            request_pli(&t, true);
+            request_pli(&t, PLI_BURST);
         });
     }
 }
@@ -506,7 +556,7 @@ fn uplink(w: &Worker, tr: &Arc<Transport>, ups: &[Arc<PubTrack>], now: u64, now_
                 send_rtcp(w, tr, &build_nack(t.ssrc, &seqs));
             }
             if gave_up {
-                request_pli(t, true);
+                request_pli(t, PLI_NACK);
             }
             pli_tick(w, tr, t, now);
         }
@@ -600,7 +650,7 @@ pub fn on_rtcp(w: &Arc<Worker>, tr: &Arc<Transport>, plain: &[u8]) {
                             l.on_key_request();
                         }
                         if let Some(src) = row.src_track.load_full() {
-                            request_pli(&src, false);
+                            request_pli(&src, PLI_USER);
                         }
                     }
                     None => crate::ops::drop_count("rtcp_unresolved"),
