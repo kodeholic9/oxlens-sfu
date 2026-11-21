@@ -93,6 +93,7 @@ async fn answer(hub: &Arc<Hub>, q: Query) {
         }
         crate::chat::FANOUT_WHAT => ses::deliver_chat(&hub.ses, &payload).await,
         common::talk::WHAT => ses::talk(&hub.ses, &payload).await,
+        crate::chat::zgate::send::WHAT => ses::deliver_ext(&hub.ses, &payload).await,
         "bus" => {
             let user = String::from_utf8_lossy(&payload).to_string();
             let user = Some(user.as_str()).filter(|u| !u.is_empty());

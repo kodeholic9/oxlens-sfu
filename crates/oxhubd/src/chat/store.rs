@@ -118,7 +118,7 @@ impl Roster {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Sent {
-    Fresh { msg: ChatMessage, ver: u64 },
+    Fresh { msg: ChatMessage, ver: u64, ext: Vec<String> },
     Again { msg: ChatMessage },
 }
 
@@ -557,15 +557,16 @@ fn insert_msg(tx: &Transaction, m: &ChatMessage) -> Result<(), Code> {
     Ok(())
 }
 
-fn ext_record(tx: &Transaction, subs: &ExtSubs, m: &ChatMessage, orig: Option<&str>) -> Result<(), Code> {
+fn ext_record(tx: &Transaction, subs: &ExtSubs, m: &ChatMessage, orig: Option<&str>) -> Result<Vec<String>, Code> {
     if subs.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
+    let keys = ext_keys(subs, m, orig);
     let mut st = db(tx.prepare_cached("INSERT OR IGNORE INTO ext_pending (key, msg_id, t) VALUES (?1, ?2, ?3)"))?;
-    for key in ext_keys(subs, m, orig) {
+    for key in &keys {
         db(st.execute(params![key, m.msg_id, n(m.t)]))?;
     }
-    Ok(())
+    Ok(keys)
 }
 
 fn record(tx: &Transaction, m: &ChatMessage, exclude: &str) -> Result<(), Code> {
@@ -680,7 +681,7 @@ impl Store {
             let msg = member_msg(space, by.unwrap_or(user), user, t, true);
             insert_msg(&tx, &msg)?;
             record(&tx, &msg, "")?;
-            ext_record(&tx, &self.subs, &msg, None)?;
+            let _ = ext_record(&tx, &self.subs, &msg, None)?;
             db(tx.execute("UPDATE spaces SET ver = ver + 1 WHERE space_id = ?1", params![space]))?;
             db(tx.commit())?;
             Ok(Some((msg, ver + 1)))
@@ -705,7 +706,7 @@ impl Store {
             let msg = member_msg(space, by.unwrap_or(user), user, t, false);
             insert_msg(&tx, &msg)?;
             record(&tx, &msg, "")?;
-            ext_record(&tx, &self.subs, &msg, None)?;
+            let _ = ext_record(&tx, &self.subs, &msg, None)?;
             db(tx.execute("UPDATE spaces SET ver = ver + 1 WHERE space_id = ?1", params![space]))?;
             db(tx.commit())?;
             Ok((msg, ver + 1))
@@ -758,9 +759,9 @@ impl Store {
                 erase(&tx, r)?;
             }
             record(&tx, &msg, user)?;
-            ext_record(&tx, &self.subs, &msg, orig.as_deref())?;
+            let ext = ext_record(&tx, &self.subs, &msg, orig.as_deref())?;
             db(tx.commit())?;
-            Ok(Sent::Fresh { msg, ver })
+            Ok(Sent::Fresh { msg, ver, ext })
         })
     }
 
@@ -788,9 +789,9 @@ impl Store {
                     params![space, user],
                 ))?;
                 record(&tx, &msg, "")?;
-                ext_record(&tx, &self.subs, &msg, None)?;
+                let ext = ext_record(&tx, &self.subs, &msg, None)?;
                 db(tx.commit())?;
-                return Ok(Sent::Fresh { msg, ver });
+                return Ok(Sent::Fresh { msg, ver, ext });
             }
             let id = common::talk::update_msg_id(r.talk_id(), &r.tail());
             if let Some(m) = stored(&id)? {
@@ -812,9 +813,9 @@ impl Store {
             insert_msg(&tx, &msg)?;
             db(tx.execute("UPDATE spaces SET last_t = MAX(COALESCE(last_t, ?2), ?2) WHERE space_id = ?1", params![orig.space_id, n(t)]))?;
             record(&tx, &msg, "")?;
-            ext_record(&tx, &self.subs, &msg, orig.kind.map(|k| k.as_str()))?;
+            let ext = ext_record(&tx, &self.subs, &msg, orig.kind.map(|k| k.as_str()))?;
             db(tx.commit())?;
-            Ok(Sent::Fresh { msg, ver })
+            Ok(Sent::Fresh { msg, ver, ext })
         })
     }
 
@@ -1078,6 +1079,27 @@ impl Store {
             }
             db(tx.commit())?;
             Ok(out)
+        })
+    }
+
+    pub fn ext_page(&self, key: &str, after: &Cursor, before: Option<u64>, limit: usize) -> Result<Vec<(ChatMessage, u32)>, Code> {
+        let lim = n(limit.max(1) as u64);
+        let cap = n(before.unwrap_or(u64::MAX >> 1));
+        if let Form::Pg(p) = &self.form {
+            return p.ext_page(key, after, cap, lim);
+        }
+        self.with(|c| {
+            let sql = format!(
+                "SELECT {COLS}, e.tries FROM ext_pending e JOIN messages x ON x.msg_id = e.msg_id
+                 WHERE e.key = ?1 AND (e.t, e.msg_id) > (?2, ?3) AND e.t < ?4 ORDER BY e.t, e.msg_id LIMIT ?5"
+            );
+            let mut st = db(c.prepare(&sql))?;
+            let it = db(st.query_map(params![key, n(after.t), after.msg_id, cap, lim], |r| Ok((msg_of(r)?, u32::try_from(r.get::<_, i64>(11)?).unwrap_or(u32::MAX)))))?;
+            let mut v = Vec::new();
+            for x in it {
+                v.push(db(x)?);
+            }
+            Ok(v)
         })
     }
 

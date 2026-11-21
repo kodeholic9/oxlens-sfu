@@ -25,6 +25,16 @@ hidden_allowed = false
 ops_allowed = false
 hook_allowed = false
 
+[[hub.auth.api_keys]]
+key = "ox_3rd"
+secret = "ox_s_3rd"
+name = "3rd"
+participant_types = [0]
+hidden_allowed = false
+ops_allowed = false
+hook_allowed = true
+subscribe = ["", "talk"]
+
 [[unit]]
 id = "log-node-a"
 kind = "inproc"
@@ -57,3 +67,9 @@ namespace = "oxdev"
 
 [chat]
 db = "sqlite:/tmp/oxlens/chat.db"
+
+[hook]
+zenoh_listen = "tls/127.0.0.1:7547"
+zenoh_cert = "dev/pki/hub.pem"
+zenoh_key = "dev/pki/hub.key"
+zenoh_ca = "dev/pki/ca.pem"

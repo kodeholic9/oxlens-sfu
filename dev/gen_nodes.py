@@ -7,6 +7,7 @@
 
 로그 — node 마다 로거 유닛 하나(hub 안 inproc — 정:RULE-OPS-LOGGER) · {LOG_ROOT}/{node}/ox.log.{날짜} · 소켓 {LOG_ROOT}/{node}/log.sock
 포트 — hub HTTP 1974+i · sfu gRPC 50061+i · sfu UDP 20000+i · sfu TCP 20000+i(정:IMPL — TCP 전송로 · 설정됐을 때만 광고) · 버스 7447+i · 녹음 유닛 gRPC 50161+i(50071+i 는 용량 측정기 oxcap 몫 — 20261120 겹침)
+zenoh 입구 — node 마다 하나 · tls/127.0.0.1:{7547+i}(정:RULE-CHAT-EXT-SUB) · 시험용 PKI dev/pki(bash dev/gen_pki.sh) · 3rd 계정 ox_3rd(구독 "" · "talk")
 녹음 유닛 — node 마다 하나(정:IMPL-OPS-REC-UNIT · role = "rec" · Handle addr = --grpc-listen) · [data] root = {DATA_ROOT} — 2층 하네스는 회차마다 이 자리를 ~/oxlens-data/runs/<회차 ID>/ 로 가리키는 링크로 바꾼다(20261118v §8)
 """
 import sys
@@ -40,6 +41,16 @@ participant_types = [0]
 hidden_allowed = false
 ops_allowed = false
 hook_allowed = false
+
+[[hub.auth.api_keys]]
+key = "ox_3rd"
+secret = "ox_s_3rd"
+name = "3rd"
+participant_types = [0]
+hidden_allowed = false
+ops_allowed = false
+hook_allowed = true
+subscribe = ["", "talk"]
 '''
 
 
@@ -89,7 +100,13 @@ namespace = "{NS}"
 
 [chat]
 db = "sqlite:{LOG_ROOT}/chat.db"
+
+[hook]
+zenoh_listen = "tls/127.0.0.1:{7547 + i}"
+zenoh_cert = "dev/pki/hub.pem"
+zenoh_key = "dev/pki/hub.key"
+zenoh_ca = "dev/pki/ca.pem"
 '''
     out = HERE / f"system.{me}.toml"
     out.write_text(body, encoding="utf-8")
-    print(f"{out.name}  hub=127.0.0.1:{HUB_BASE + i}  sfu={me}@{50061 + i}  udp={20000 + i}  tcp={20000 + i}  bus={7447 + i}")
+    print(f"{out.name}  hub=127.0.0.1:{HUB_BASE + i}  sfu={me}@{50061 + i}  udp={20000 + i}  tcp={20000 + i}  bus={7447 + i}  zenoh=tls/127.0.0.1:{7547 + i}")

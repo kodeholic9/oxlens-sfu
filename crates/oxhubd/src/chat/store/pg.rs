@@ -249,15 +249,16 @@ async fn record(c: &impl GenericClient, m: &ChatMessage, exclude: &str) -> Resul
     Ok(())
 }
 
-async fn ext_record(c: &impl GenericClient, subs: &ExtSubs, m: &ChatMessage, orig: Option<&str>) -> Result<(), Code> {
+async fn ext_record(c: &impl GenericClient, subs: &ExtSubs, m: &ChatMessage, orig: Option<&str>) -> Result<Vec<String>, Code> {
     if subs.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let t = n(m.t);
-    for key in ext_keys(subs, m, orig) {
-        exec(c, "INSERT INTO ext_pending (key, msg_id, t) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING", &[&key, &m.msg_id, &t]).await?;
+    let keys = ext_keys(subs, m, orig);
+    for key in &keys {
+        exec(c, "INSERT INTO ext_pending (key, msg_id, t) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING", &[key, &m.msg_id, &t]).await?;
     }
-    Ok(())
+    Ok(keys)
 }
 
 async fn erase(c: &impl GenericClient, orig: &str) -> Result<(), Code> {
@@ -439,7 +440,7 @@ impl Pg {
             let msg = member_msg(&space, &actor, &user, t, true);
             insert_msg(&tx, &msg).await?;
             record(&tx, &msg, "").await?;
-            ext_record(&tx, &subs, &msg, None).await?;
+            let _ = ext_record(&tx, &subs, &msg, None).await?;
             exec(&tx, "UPDATE spaces SET ver = ver + 1 WHERE space_id = $1", &[&space]).await?;
             pg(tx.commit().await)?;
             Ok(Some((msg, u(ver) + 1)))
@@ -464,7 +465,7 @@ impl Pg {
             let msg = member_msg(&space, &actor, &user, t, false);
             insert_msg(&tx, &msg).await?;
             record(&tx, &msg, "").await?;
-            ext_record(&tx, &subs, &msg, None).await?;
+            let _ = ext_record(&tx, &subs, &msg, None).await?;
             exec(&tx, "UPDATE spaces SET ver = ver + 1 WHERE space_id = $1", &[&space]).await?;
             pg(tx.commit().await)?;
             Ok((msg, u(ver) + 1))
@@ -520,9 +521,9 @@ impl Pg {
                 erase(&tx, r).await?;
             }
             record(&tx, &msg, &user).await?;
-            ext_record(&tx, &subs, &msg, orig_kind.as_deref()).await?;
+            let ext = ext_record(&tx, &subs, &msg, orig_kind.as_deref()).await?;
             pg(tx.commit().await)?;
-            Ok(Sent::Fresh { msg, ver: u(ver) })
+            Ok(Sent::Fresh { msg, ver: u(ver), ext })
         })
     }
 
@@ -554,9 +555,9 @@ impl Pg {
                 )
                 .await?;
                 record(&tx, &msg, "").await?;
-                ext_record(&tx, &subs, &msg, None).await?;
+                let ext = ext_record(&tx, &subs, &msg, None).await?;
                 pg(tx.commit().await)?;
-                return Ok(Sent::Fresh { msg, ver: u(ver) });
+                return Ok(Sent::Fresh { msg, ver: u(ver), ext });
             }
             let id = common::talk::update_msg_id(r.talk_id(), &r.tail());
             if let Some(m) = stored(&tx, &id).await? {
@@ -589,9 +590,9 @@ impl Pg {
             }
             exec(&tx, "UPDATE spaces SET last_t = GREATEST(COALESCE(last_t, $2), $2) WHERE space_id = $1", &[&orig.space_id, &tn]).await?;
             record(&tx, &msg, "").await?;
-            ext_record(&tx, &subs, &msg, orig.kind.map(|k| k.as_str())).await?;
+            let ext = ext_record(&tx, &subs, &msg, orig.kind.map(|k| k.as_str())).await?;
             pg(tx.commit().await)?;
-            Ok(Sent::Fresh { msg, ver: u(ver) })
+            Ok(Sent::Fresh { msg, ver: u(ver), ext })
         })
     }
 
@@ -809,6 +810,19 @@ impl Pg {
             let mut out: Vec<String> = rows.iter().map(|r| get(r, 0)).collect::<Result<_, _>>()?;
             out.sort_by_key(|m| ids.iter().position(|x| x == m));
             Ok(out)
+        })
+    }
+
+    pub(super) fn ext_page(&self, key: &str, after: &Cursor, cap: i64, lim: i64) -> Result<Vec<(ChatMessage, u32)>, Code> {
+        let (conn, key, at, aid) = (self.conn(), key.to_string(), n(after.t), after.msg_id.clone());
+        self.call(async move {
+            let c = conn.await?;
+            let sql = format!(
+                "SELECT {COLS}, e.tries FROM ext_pending e JOIN messages x ON x.msg_id = e.msg_id
+                 WHERE e.key = $1 AND (e.t, e.msg_id) > ($2, $3) AND e.t < $4 ORDER BY e.t, e.msg_id LIMIT $5"
+            );
+            let rows = all(&c, &sql, &[&key, &at, &aid, &cap, &lim]).await?;
+            rows.iter().map(|r| Ok((pg(msg_of(r))?, u32::try_from(get::<i32>(r, 11)?).unwrap_or(0)))).collect()
         })
     }
 

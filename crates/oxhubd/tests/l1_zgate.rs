@@ -10,7 +10,12 @@ use std::time::{Duration, Instant};
 use oxhubd::bus::{Bus, BusCfg};
 use oxhubd::chat::zgate::judge::{Accounts, Standing};
 use oxhubd::chat::zgate::session::Answer;
+use oxhubd::chat::zgate::send::{GateDeps, GateKnobs};
 use oxhubd::chat::zgate::{Gate, GateCfg, link, wire};
+use oxhubd::chat::store::Store;
+use oxhubd::chat::{Chat, Limits};
+use common::extsub::{ExtSubs, Subscribe};
+use common::system::Visibility;
 use rcgen::{BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair};
 use tokio_rustls::rustls::pki_types::ServerName;
 use zenoh_protocol::core::{Reliability, Resolution, WhatAmI, WireExpr, ZenohIdProto};
@@ -80,23 +85,50 @@ struct Rig {
     pki: Pki,
     bus: Arc<Bus>,
     gate: Arc<Gate>,
+    chat: Arc<Chat>,
     _events: tokio::sync::mpsc::UnboundedReceiver<oxhubd::bus::BusEvent>,
 }
 
 async fn rig() -> Rig {
+    rig_with(knobs()).await
+}
+
+fn knobs() -> GateKnobs {
+    GateKnobs {
+        window: 4,
+        reply_timeout: Duration::from_millis(400),
+        close_at: 2,
+        max_tries: 3,
+        sweep: Duration::from_secs(30),
+        live_max: 65_536,
+        cap: 524_288 * 4,
+        bundle_msgs: 100,
+        bundle_bytes: 524_288,
+    }
+}
+
+async fn rig_with(k: GateKnobs) -> Rig {
     let _ = tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).with_test_writer().try_init();
     let pki = Pki::new();
     let (bus, events) = Bus::open("n1", "e1", 1_000, BusCfg { listen: vec!["127.0.0.1:0".into()], advertise: vec![], connect: vec![], namespace: NS.into() }).await.expect("bus");
+    bus.follow_ext().await.expect("follow ext");
     let accounts = Accounts::new(vec![
         ("acme".into(), Standing::Ok),
         ("other".into(), Standing::Ok),
         ("nohook".into(), Standing::NoHook),
         ("nosub".into(), Standing::NoSubscribe),
     ]);
+    let subs = ExtSubs::new(vec![("acme".into(), Subscribe::try_from(vec![String::new()]).expect("subscribe"))]);
+    let store = Store::open("memory:", Visibility::Shared).expect("store").subscribed(subs);
+    let chat = Arc::new(Chat::new(store, Limits::default()));
+    chat.store.create_space("S", None).expect("space");
+    chat.store.join("S", "u1", None, Some(1)).expect("join");
     let cfg = GateCfg { listen: "tls/127.0.0.1:0".into(), cert: pki.path("hub.pem"), key: pki.path("hub.key"), ca: pki.path("ca.pem") };
-    let gate = Gate::bind(&cfg, accounts, bus.clone()).await.expect("gate");
+    let deps = GateDeps { accounts, bus: bus.clone(), store: chat.store.clone(), acks: chat.acks(), keys: vec!["acme".into()], knobs: k };
+    let gate = Gate::bind(&cfg, deps).await.expect("gate");
     tokio::spawn(gate.clone().serve());
-    Rig { pki, bus, gate, _events: events }
+    tokio::spawn(gate.clone().drains());
+    Rig { pki, bus, gate, chat, _events: events }
 }
 
 fn client_cfg(r: &Rig, endpoint: &str, cert: Option<&str>) -> zenoh::Config {
@@ -500,4 +532,201 @@ fn sequence_numbers_fragments_and_batches() {
     let packed = pack(many.clone(), batch);
     assert!(packed.iter().all(|b| b.len() <= room(batch)), "배치 몸 ≤ 배치 크기 − 길이 2 바이트");
     assert_eq!(packed.iter().map(|b| b.len()).sum::<usize>(), many.iter().map(|p| p.len()).sum::<usize>());
+}
+
+fn body_of(q: &zenoh::query::Query) -> serde_json::Value {
+    let b = q.payload().map(|p| p.to_bytes().to_vec()).unwrap_or_default();
+    serde_json::from_slice(&b).expect("query body json")
+}
+
+fn ids_of(v: &serde_json::Value) -> Vec<String> {
+    v["messages"].as_array().map(|a| a.iter().filter_map(|m| m["msg_id"].as_str().map(str::to_string)).collect()).unwrap_or_default()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Ack,
+    Err,
+    Hold,
+}
+
+fn answering(q: zenoh::query::Queryable<zenoh::handlers::FifoChannelHandler<zenoh::query::Query>>, mode: Mode) -> (tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>, tokio::task::JoinHandle<()>) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let h = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok(query) = q.recv_async().await {
+            let _ = tx.send(body_of(&query));
+            match mode {
+                Mode::Ack => {
+                    let _ = query.reply(query.key_expr().clone(), b"ok".to_vec()).await;
+                }
+                Mode::Err => {
+                    let _ = query.reply_err(b"no".to_vec()).await;
+                }
+                Mode::Hold => held.push(query),
+            }
+        }
+    });
+    (rx, h)
+}
+
+fn post(r: &Rig, i: usize) -> String {
+    let id = format!("m{i:04}");
+    match r.chat.store.send("u1", "S", &id, "hi", None).expect("send") {
+        oxhubd::chat::store::Sent::Fresh { ext, .. } => assert_eq!(ext, vec!["acme".to_string()], "형상 — 글은 acme 구독에 걸린다"),
+        _ => panic!("fresh"),
+    }
+    id
+}
+
+async fn rows_left(r: &Rig, n: usize, ms: u64) -> usize {
+    let end = Instant::now() + Duration::from_millis(ms);
+    loop {
+        let left = r.chat.store.ext_rows("acme").expect("rows").len();
+        if left == n || Instant::now() >= end {
+            return left;
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn what_waited_is_drained_when_the_client_comes_and_acks_clear_it() {
+    let r = rig().await;
+    let ids: Vec<String> = (0..3).map(|i| post(&r, i)).collect();
+    assert_eq!(r.chat.store.ext_rows("acme").expect("rows").len(), 3, "형상 — 붙기 전 펜딩 셋");
+    let s = open(&r, "acme").await;
+    let (mut got, _h) = answering(s.declare_queryable(sub_key("acme")).await.expect("queryable"), Mode::Ack);
+    let first = tokio::time::timeout(Duration::from_secs(5), got.recv()).await.expect("drain in time").expect("body");
+    assert_eq!(first["live"], serde_json::json!(false), "정:RULE-CHAT-EXT-SUB 6 — 밀린 몫은 live:false 묶음");
+    assert_eq!(ids_of(&first), ids, "정:RULE-CHAT-EXT-SUB 6 — 막 주인이 된 연결로 (t, msg_id) 차례 전부 · 묶음 하나");
+    assert_eq!(rows_left(&r, 0, 3_000).await, 0, "정:RULE-CHAT-EXT-SUB 2 — 묶음 ACK 가 3rd ACK 줄로 펜딩을 지운다");
+    let cid = open_cid(&r).await;
+    let live = post(&r, 9);
+    let msg = r.chat.store.history("u1", "S", oxhubd::chat::store::Dir::Latest, 1).expect("history").messages.remove(0);
+    assert_eq!(msg.msg_id, live);
+    let o = r.gate.deliver(&cid, true, vec![msg], None).expect("deliver");
+    assert!(o.accepted(), "정:RULE-CHAT-EXT-SUB 4 — 연결이 있으면 넣고 성공");
+    let b = tokio::time::timeout(Duration::from_secs(5), got.recv()).await.expect("live in time").expect("body");
+    assert_eq!((b["live"].clone(), ids_of(&b)), (serde_json::json!(true), vec![live]), "H-rule-7-3-6① — 실시간 몸 {{live:true, messages}} · 메시지 꼴 = MESSAGES 의 것");
+    assert_eq!(rows_left(&r, 0, 3_000).await, 0, "형상 — 실시간 ACK 도 지운다");
+    drop(s);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reply_timeouts_in_a_row_close_the_session_and_count_tries() {
+    let r = rig().await;
+    post(&r, 0);
+    let s = open(&r, "acme").await;
+    let (mut got, _h) = answering(s.declare_queryable(sub_key("acme")).await.expect("queryable"), Mode::Hold);
+    let _ = tokio::time::timeout(Duration::from_secs(5), got.recv()).await.expect("drain in time");
+    let cid = open_cid(&r).await;
+    let msg = r.chat.store.history("u1", "S", oxhubd::chat::store::Dir::Latest, 1).expect("history").messages.remove(0);
+    let _ = r.gate.deliver(&cid, true, vec![msg], None);
+    assert!(wait(8_000, || !r.gate.conns().iter().any(|c| c.cid == cid)).await, "S-sym-RULE-CHAT-EXT-SUB-6① · PL-KEY-HOOK-EXT-REPLY-TIMEOUT-MS② — 잇단 시간 넘김 close_at 번에 그 세션을 닫는다(클라이언트는 새 연결로 다시 붙는다)");
+    assert!(r.gate.drops.reply_timeout.load(Ordering::Relaxed) >= 2, "PL-KEY-HOOK-EXT-REPLY-TIMEOUT-MS① — 시간 넘김마다 ext_reply_timeout +1");
+    let end = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < end && r.chat.store.ext_rows("acme").expect("rows").first().is_none_or(|x| x.tries == 0) {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    assert!(r.chat.store.ext_rows("acme").expect("rows").first().is_some_and(|x| x.tries >= 1), "정:RULE-CHAT-EXT-SUB 2 — 시간 넘김은 ACK 아님 · 시도 수 +1 · 행은 남는다");
+    drop(s);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_row_that_is_never_acked_is_given_up_after_max_tries() {
+    let mut k = knobs();
+    k.sweep = Duration::from_millis(1_000);
+    let r = rig_with(k).await;
+    post(&r, 0);
+    let s = open(&r, "acme").await;
+    let (_got, _h) = answering(s.declare_queryable(sub_key("acme")).await.expect("queryable"), Mode::Err);
+    assert_eq!(rows_left(&r, 0, 12_000).await, 0, "S-sym-RULE-CHAT-EXT-SUB-7① · PL-KEY-HOOK-EXT-MAX-TRIES · PL-KEY-HOOK-EXT-SWEEP-SECS — 훑기가 다시 보내고 max_tries 번 뒤 지운다");
+    assert_eq!(r.gate.drops.given_up.load(Ordering::Relaxed), 1, "S-sym-RULE-CHAT-EXT-SUB-7① — ext_given_up +1");
+    drop(s);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_full_queue_refuses_and_counts() {
+    let mut k = knobs();
+    k.window = 1;
+    k.cap = 400;
+    k.reply_timeout = Duration::from_secs(30);
+    let r = rig_with(k).await;
+    let s = open(&r, "acme").await;
+    let (_got, _h) = answering(s.declare_queryable(sub_key("acme")).await.expect("queryable"), Mode::Hold);
+    let cid = open_cid(&r).await;
+    post(&r, 0);
+    let msg = r.chat.store.history("u1", "S", oxhubd::chat::store::Dir::Latest, 1).expect("history").messages.remove(0);
+    let offers: Vec<&str> = (0..40).map(|_| r.gate.deliver(&cid, true, vec![msg.clone()], None).expect("deliver").as_str()).collect();
+    let first_refusal = offers.iter().position(|o| o.starts_with("refused")).expect("a refusal");
+    assert_eq!(offers[first_refusal], "refused_full", "PL-KEY-HOOK-EXT-WINDOW① · 정:RULE-CHAT-EXT-SUB 5 — 창이 차 줄에 쌓이다 상한을 넘으면 밀림 · 거절 {offers:?}");
+    assert!(offers[first_refusal + 1..].iter().all(|o| *o == "refused_backlog"), "정:RULE-CHAT-EXT-SUB 5 — 밀림이면 새 것은 거절 {offers:?}");
+    assert!(offers[..first_refusal].iter().all(|o| *o == "queued" || *o == "merged"), "형상 {offers:?}");
+    assert_eq!(r.gate.drops.queue_full.load(Ordering::Relaxed), (offers.len() - first_refusal) as u64, "정:RULE-CHAT-EXT-SUB 5 — 거절마다 ext_queue_full");
+    drop(s);
+}
+
+fn spec_dir() -> PathBuf {
+    if let Ok(p) = std::env::var("OXLENS_SPEC") {
+        return PathBuf::from(p);
+    }
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../context/spec")
+}
+
+#[test]
+fn send_plan_vectors() {
+    use oxhubd::chat::zgate::plan::{After, Due, Item, Knobs, Outbox, Outcome, Row, drain_due, drain_pick, ring};
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(spec_dir().join("server/out/vectors/chat.json")).expect("vectors")).expect("json");
+    let arr = |k: &str| v[k].as_array().cloned().unwrap_or_else(|| panic!("판 묶음 {k} 없음"));
+    let ringv = arr("ext_ring");
+    assert!(!ringv.is_empty());
+    for c in ringv {
+        let want: Vec<usize> = c["order"].as_array().expect("order").iter().map(|x| x.as_u64().expect("i") as usize).collect();
+        assert_eq!(ring(c["n"].as_u64().expect("n") as usize, c["c"].as_u64().expect("c")), want, "정:RULE-CHAT-EXT-SUB 4 — 차례 {c}");
+    }
+    let ids = |x: &serde_json::Value| -> Vec<String> { x.as_array().map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect()).unwrap_or_default() };
+    for c in arr("ext_outbox") {
+        let k = &c["knobs"];
+        let g = |n: &str| k[n].as_u64().expect("knob") as usize;
+        let mut o: Outbox<(), ()> = Outbox::new(Knobs { window: g("window"), cap: g("cap"), live_max: g("live_max"), close_at: g("close_at") as u32 });
+        for s in c["steps"].as_array().expect("steps") {
+            let step = s["step"].as_array().expect("step");
+            let got: serde_json::Value = match step[0].as_str().expect("op") {
+                "offer" => {
+                    let it = ids(&step[2]);
+                    let n = it.len();
+                    serde_json::json!(o.offer(Item { live: step[1].as_bool().expect("live"), ids: it, bytes: step[3].as_u64().expect("bytes") as usize, msgs: vec![(); n], waiter: None }).as_str())
+                }
+                "take" => match o.take() {
+                    Some(it) => serde_json::json!({ "live": it.live, "ids": it.ids, "bytes": it.bytes }),
+                    None => serde_json::Value::Null,
+                },
+                _ => {
+                    let oc = match step[1].as_str().expect("outcome") {
+                        "ack" => Outcome::Ack,
+                        "fail" => Outcome::Fail,
+                        _ => Outcome::Timeout,
+                    };
+                    let a: After = o.done(oc);
+                    serde_json::json!(a.as_str())
+                }
+            };
+            assert_eq!(got, s["got"], "정:RULE-CHAT-EXT-SUB 5 — {} · {s}", c["name"]);
+            assert_eq!((o.inflight as u64, o.queued() as u64, o.backlog, o.streak as u64), (s["inflight"].as_u64().expect("i"), s["queued"].as_u64().expect("q"), s["backlog"].as_bool().expect("b"), s["streak"].as_u64().expect("s")), "{} · {s}", c["name"]);
+        }
+    }
+    for c in arr("ext_drain_pick") {
+        let rows: Vec<Row> = c["rows"].as_array().expect("rows").iter().map(|r| Row { id: r["id"].as_str().expect("id").into(), bytes: r["bytes"].as_u64().expect("b") as usize, tries: r["tries"].as_u64().expect("t") as u32 }).collect();
+        assert_eq!(drain_pick(&rows, c["max_msgs"].as_u64().expect("m") as usize, c["max_bytes"].as_u64().expect("b") as usize), ids(&c["pick"]), "정:RULE-CHAT-EXT-SUB 6 — {}", c["name"]);
+    }
+    for c in arr("ext_drain_due") {
+        let due = drain_due(c["owner"].as_bool().expect("o"), c["was_owner"].as_bool().expect("w"), c["released"].as_bool().expect("r"), c["now"].as_u64().expect("n"), c["last_sweep"].as_u64().expect("l"), c["sweep_ms"].as_u64().expect("s"));
+        let want = match c["due"]["mode"].as_str().expect("mode") {
+            "none" => Due::None,
+            "all" => Due::All,
+            _ => Due::Older(c["due"]["before"].as_u64().expect("before")),
+        };
+        assert_eq!(due, want, "정:RULE-CHAT-EXT-SUB 6 — {}", c["name"]);
+    }
 }

@@ -118,7 +118,7 @@ pub async fn drops(hub: &Hub) -> Value {
         "ext_fanout_fail": hub.ses.counters.ext_fanout_fail.load(Ordering::Relaxed),
         "ext_queue_full": gate.map_or(0, |g| g.drops.queue_full.load(Ordering::Relaxed)),
         "ext_reply_timeout": gate.map_or(0, |g| g.drops.reply_timeout.load(Ordering::Relaxed)),
-        "ext_given_up": hub.ses.counters.ext_given_up.load(Ordering::Relaxed),
+        "ext_given_up": gate.map_or(0, |g| g.drops.given_up.load(Ordering::Relaxed)),
         "ext_push_dropped": gate.map_or(0, |g| g.drops.push_dropped.load(Ordering::Relaxed)),
         "bus_ev_drop": hub.bus.ev_dropped(),
         "bus_malformed": hub.bus.malformed.load(Ordering::Relaxed),
@@ -254,11 +254,10 @@ pub async fn bus_view(hub: &Hub, user: Option<&str>) -> Value {
     let ext = match hub.ses.chat.get() {
         Some(chat) if !chat.store.subs().is_empty() => match chat.ext_pending_counts().await {
             Ok(rows) => {
-                let tokens = hub.bus.ext_conns().await.unwrap_or_default();
                 json!(rows
                     .into_iter()
                     .map(|(key, pending)| {
-                        let conns: Vec<Value> = tokens.iter().filter(|(k, _, _)| *k == key).map(|(_, node, cid)| json!({ "node": node, "cid": cid })).collect();
+                        let conns: Vec<Value> = hub.bus.ext_list(&key).into_iter().map(|(node, cid)| json!({ "node": node, "cid": cid })).collect();
                         json!({ "key": key, "conns": conns, "pending": pending })
                     })
                     .collect::<Vec<_>>())

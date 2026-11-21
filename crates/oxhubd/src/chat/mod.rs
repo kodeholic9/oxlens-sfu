@@ -7,6 +7,7 @@ pub mod store;
 pub mod zgate;
 
 use std::collections::HashMap;
+use std::ops::AddAssign;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -51,6 +52,7 @@ pub struct Chat {
     ack_dropped: AtomicU64,
     ext_ack_dropped: AtomicU64,
     pub zgate: OnceLock<Arc<zgate::Gate>>,
+    rr: Mutex<HashMap<String, u64>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -58,6 +60,8 @@ pub struct Deliver {
     pub ver: u64,
     pub sid: String,
     pub message: ChatMessage,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ext: Vec<String>,
 }
 
 pub struct Answer {
@@ -74,7 +78,7 @@ impl Chat {
         if let Err(e) = std::thread::Builder::new().name("chat-ack".into()).spawn(move || ack_writer(&st, &lanes)) {
             tracing::warn!(kind = "diag", spec = "SV-IMPL-CHAT-STORE-FAULTS", "ack writer did not start: {e} — records stay, catchup sends them again");
         }
-        Chat { store, limits, cache: Mutex::new(HashMap::new()), acks, ack_dropped: AtomicU64::new(0), ext_ack_dropped: AtomicU64::new(0), zgate: OnceLock::new() }
+        Chat { store, limits, cache: Mutex::new(HashMap::new()), acks, ack_dropped: AtomicU64::new(0), ext_ack_dropped: AtomicU64::new(0), zgate: OnceLock::new(), rr: Mutex::new(HashMap::new()) }
     }
 
     pub async fn roster_at_least(&self, space: &str, ver: u64) -> Result<Roster, Code> {
@@ -117,7 +121,7 @@ impl Chat {
                 let st = self.store.clone();
                 let sent = blocking(move || st.post(&user, &space, &msg_id, &out, None)).await.map_err(Code::failure)?;
                 let (msg, deliver) = match sent {
-                    Sent::Fresh { msg, ver } => (msg.clone(), Some(Deliver { ver, sid: sid.to_string(), message: msg })),
+                    Sent::Fresh { msg, ver, ext } => (msg.clone(), Some(Deliver { ver, sid: sid.to_string(), message: msg, ext })),
                     Sent::Again { msg } => (msg, None),
                 };
                 Ok(Answer { body: json(&MessageRes { t: msg.t })?, deliver, catchup: None })
@@ -170,7 +174,7 @@ impl Chat {
         let st = self.store.clone();
         let sent = blocking(move || st.talk(&r, None)).await?;
         Ok(match sent {
-            Sent::Fresh { msg, ver } => (msg.t, Some(Deliver { ver, sid: String::new(), message: msg })),
+            Sent::Fresh { msg, ver, ext } => (msg.t, Some(Deliver { ver, sid: String::new(), message: msg, ext })),
             Sent::Again { msg } => (msg.t, None),
         })
     }
@@ -219,6 +223,18 @@ impl Chat {
     pub async fn ext_pending_counts(&self) -> Result<Vec<(String, u64)>, Code> {
         let st = self.store.clone();
         blocking(move || st.subs().keys().map(|k| st.ext_count(k).map(|n| (k.to_string(), n))).collect()).await
+    }
+
+    pub fn acks(&self) -> Arc<AckLanes> {
+        self.acks.clone()
+    }
+
+    pub fn rr_next(&self, key: &str) -> u64 {
+        let Ok(mut g) = self.rr.lock() else { return 0 };
+        let c = g.entry(key.to_string()).or_insert(0);
+        let now = c.to_owned();
+        c.add_assign(1);
+        now
     }
 
     pub fn ack_queued(&self, lane: Lane) -> usize {

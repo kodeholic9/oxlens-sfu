@@ -1,9 +1,11 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.6 · 정:RULE-CHAT-EXT-SUB · 정:IMPL-CFG-SYSTEM-FILE · 정:RULE-BUS-KEYSPACE · 정:RULE-BUS-PRESENCE · 정:RULE-OPS-DROPS · model: claude-opus-5-5
-//! zenoh 입구(zgate) — hub 의 바깥 포트 하나(`[hook] zenoh_listen` · `tls/` 만): 3rd 의 zenoh 1.x 클라이언트를 직접 받는다(zenohd 없음 · 버스 그물에 안 들인다) · TLS 인증서 첫 CN = 계정 · InitSyn → InitAck(쿠키) → OpenSyn → OpenAck · 판 0x09 · client 만 · 확장은 되돌리지 않는다 · 연결마다 hub 가 짓는 이름(`{기동 신원}{세션 번호 hex}`) · 제 계정 키 queryable 이 서면 버스 토큰 `int/ext/{key}/{node}/{cid}` 를 내고 걷히거나 닫히면 거둔다 · lease 넘김 · KeepAlive · 연결표 · 연결에 묶음 질의를 보내고 결과(ACK · 거절 · 답 없음 · 닫힘)를 돌려받는 경계(창 · 줄 · drain 은 그 위) · 버림 계수 넷(거절 · Push · 시간 넘김 · 줄 넘침)의 주인.
+//! zenoh 입구(zgate) — hub 의 바깥 포트 하나(`[hook] zenoh_listen` · `tls/` 만): 3rd 의 zenoh 1.x 클라이언트를 직접 받는다(zenohd 없음 · 버스 그물에 안 들인다) · TLS 인증서 첫 CN = 계정 · InitSyn → InitAck(쿠키) → OpenSyn → OpenAck · 판 0x09 · client 만 · 확장은 되돌리지 않는다 · 연결마다 hub 가 짓는 이름(`{기동 신원}{세션 번호 hex}`) · 제 계정 키 queryable 이 서면 버스 토큰 `int/ext/{key}/{node}/{cid}` 를 내고 걷히거나 닫히면 거둔다 · lease 넘김 · KeepAlive · 연결표 · 연결에 묶음 질의를 보내고 결과(ACK · 거절 · 답 없음 · 닫힘)를 돌려받는 경계(창 · 줄 · drain 은 그 위) · 연결마다 보낼 줄(창 · 줄 · 시간 넘김 — `send`) · drain · 버림 계수 다섯(거절 · Push · 시간 넘김 · 줄 넘침 · 시도 수 포기)의 주인 · 토큰 선언이 실패하면 세션을 닫는다(3rd 가 다시 붙는다).
 
 pub mod judge;
 pub mod link;
+pub mod plan;
+pub mod send;
 pub mod session;
 pub mod wire;
 
@@ -51,6 +53,7 @@ pub struct Drops {
     pub push_dropped: AtomicU64,
     pub reply_timeout: AtomicU64,
     pub queue_full: AtomicU64,
+    pub given_up: AtomicU64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,12 +73,15 @@ enum Cmd {
     Query { ticket: u64, body: Vec<u8>, tx: oneshot::Sender<Answer> },
     Forget(u64),
     Close(&'static str),
+    Kick,
 }
 
 struct Handle {
     key: String,
     open: bool,
     cmd: mpsc::UnboundedSender<Cmd>,
+    outbox: plan::Outbox<serde_json::Value, send::Waiter>,
+    released: bool,
 }
 
 pub struct Pending {
@@ -114,7 +120,12 @@ pub struct Gate {
     ticket: AtomicU64,
     conns: Mutex<HashMap<String, Handle>>,
     seen: Mutex<HashMap<&'static str, u64>>,
-    pub drops: Drops,
+    store: Arc<crate::chat::store::Store>,
+    acks: Arc<crate::chat::acks::AckLanes>,
+    knobs: send::GateKnobs,
+    keys_sub: Vec<String>,
+    drain_st: Mutex<send::DrainStates>,
+    pub drops: Arc<Drops>,
 }
 
 fn zid() -> ZenohIdProto {
@@ -160,8 +171,16 @@ struct Est {
 
 type Ending = (&'static str, Option<Refuse>, Option<u8>);
 
+#[derive(Default)]
+struct Applied {
+    parts: Vec<Vec<u8>>,
+    answers: Vec<(u64, Answer)>,
+    close: bool,
+}
+
 impl Gate {
-    pub async fn bind(cfg: &GateCfg, accounts: Accounts, bus: Arc<Bus>) -> Result<Arc<Gate>, String> {
+    pub async fn bind(cfg: &GateCfg, deps: send::GateDeps) -> Result<Arc<Gate>, String> {
+        let send::GateDeps { accounts, bus, store, acks, keys, knobs } = deps;
         let at = cfg.listen.strip_prefix(SCHEME).ok_or_else(|| format!("hook.zenoh_listen {:?} — tls/ 꼴만", cfg.listen))?;
         let at = at.split(['#', '?']).next().unwrap_or(at);
         let acceptor = link::acceptor(&cfg.cert, &cfg.key, &cfg.ca)?;
@@ -180,7 +199,12 @@ impl Gate {
             ticket: AtomicU64::new(0),
             conns: Mutex::new(HashMap::new()),
             seen: Mutex::new(HashMap::new()),
-            drops: Drops::default(),
+            store,
+            acks,
+            knobs,
+            keys_sub: keys,
+            drain_st: Mutex::new(HashMap::new()),
+            drops: Arc::new(Drops::default()),
         }))
     }
 
@@ -269,7 +293,7 @@ impl Gate {
         let key = est.session.cn.clone();
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         if let Ok(mut g) = self.conns.lock() {
-            g.insert(cid.clone(), Handle { key: key.clone(), open: false, cmd: cmd_tx });
+            g.insert(cid.clone(), Handle { key: key.clone(), open: false, cmd: cmd_tx, outbox: plan::Outbox::new(self.knobs.outbox()), released: false });
         }
         tracing::info!(kind = "diag", spec = "SV-RULE-CHAT-EXT-SUB", key = %key, cid = %cid, node = %self.bus.node, peer = %peer, "ext conn open");
         let (why, refused) = self.run(&cid, est, rd, &mut wr, cmd_rx).await;
@@ -350,12 +374,11 @@ impl Gate {
         }
     }
 
-    async fn apply(&self, cid: &str, session: &mut Session, effects: Vec<Effect>, waiting: &mut HashMap<u64, oneshot::Sender<Answer>>) -> Vec<Vec<u8>> {
-        let mut parts: Vec<Vec<u8>> = Vec::new();
+    async fn apply(&self, cid: &str, session: &mut Session, effects: Vec<Effect>, waiting: &mut HashMap<u64, oneshot::Sender<Answer>>, out: &mut Applied) {
         for e in effects {
             match e {
                 Effect::Send(n) => match wire::parts(&n, &mut session.tx, session.batch) {
-                    Ok(p) => parts.extend(p),
+                    Ok(p) => out.parts.extend(p),
                     Err(w) => self.sparse("send did not encode", &format!("{w:?}")),
                 },
                 Effect::Open => match self.bus.declare_ext(&session.cn, cid).await {
@@ -363,17 +386,21 @@ impl Gate {
                         self.set_open(cid, true);
                         tracing::info!(kind = "diag", spec = "SV-RULE-CHAT-EXT-SUB", key = %session.cn, cid = %cid, "ext queryable declared — token up");
                     }
-                    Err(e) => tracing::warn!(kind = "diag", spec = "SV-RULE-CHAT-EXT-SUB", key = %session.cn, cid = %cid, "ext token not declared: {e}"),
+                    Err(e) => {
+                        tracing::warn!(kind = "diag", spec = "SV-RULE-CHAT-EXT-SUB", key = %session.cn, cid = %cid, "ext token not declared: {e} — session closed, the client connects again");
+                        out.close = true;
+                    }
                 },
                 Effect::Shut => {
                     self.bus.undeclare_ext(cid);
                     self.set_open(cid, false);
                 }
-                Effect::Answer { ticket, answer } => {
-                    if let Some(tx) = waiting.remove(&ticket) {
+                Effect::Answer { ticket, answer } => match waiting.remove(&ticket) {
+                    Some(tx) => {
                         let _ = tx.send(answer);
                     }
-                }
+                    None => out.answers.push((ticket, answer)),
+                },
                 Effect::Ignored(k) => {
                     self.drops.refused.fetch_add(1, Ordering::Relaxed);
                     self.sparse("declaration outside the allowed key", &k);
@@ -384,7 +411,6 @@ impl Gate {
                 Effect::Dropped(why) => self.sparse(why, cid),
             }
         }
-        parts
     }
 
     async fn run<R, W>(&self, cid: &str, est: Est, rd: R, wr: &mut W, mut cmd: mpsc::UnboundedReceiver<Cmd>) -> (&'static str, Option<Refuse>)
@@ -405,11 +431,15 @@ impl Gate {
             }
         });
         let mut waiting: HashMap<u64, oneshot::Sender<Answer>> = HashMap::new();
+        let mut flights: HashMap<u64, send::Flight> = HashMap::new();
+        let key = session.cn.clone();
         let mut last_rx = Instant::now();
         let mut last_tx = Instant::now();
         let out = loop {
             let mut effects: Vec<Effect> = Vec::new();
             let mut ending: Option<Ending> = None;
+            let mut expired: Vec<u64> = Vec::new();
+            let next_deadline = flights.values().map(|f| f.deadline).min().unwrap_or_else(|| Instant::now() + LEASE);
             tokio::select! {
                 b = brx.recv() => match b {
                     Some(Ok(bytes)) => {
@@ -439,8 +469,13 @@ impl Gate {
                         waiting.remove(&t);
                     }
                     Some(Cmd::Close(why)) => ending = Some((why, None, Some(close::reason::GENERIC))),
+                    Some(Cmd::Kick) => {}
                     None => ending = Some(("gate gone", None, Some(close::reason::GENERIC))),
                 },
+                _ = tokio::time::sleep_until(next_deadline), if !flights.is_empty() => {
+                    let now = Instant::now();
+                    expired = flights.iter().filter(|(_, f)| f.deadline <= now).map(|(t, _)| *t).collect();
+                }
                 _ = tokio::time::sleep_until(last_rx + lease) => ending = Some(("lease expired", None, Some(close::reason::EXPIRED))),
                 _ = tokio::time::sleep_until(last_tx + KEEPALIVE) => {
                     if send_msgs(wr, &[TransportMessage::from(KeepAlive)]).await.is_err() {
@@ -449,7 +484,46 @@ impl Gate {
                     last_tx = Instant::now();
                 }
             }
-            let parts = self.apply(cid, &mut session, effects, &mut waiting).await;
+            let mut applied = Applied::default();
+            self.apply(cid, &mut session, effects, &mut waiting, &mut applied).await;
+            if applied.close && ending.is_none() {
+                ending = Some(("ext token not declared", None, Some(close::reason::GENERIC)));
+            }
+            let mut ends: Vec<(send::Flight, plan::Outcome)> = Vec::new();
+            for t in expired {
+                session.forget(t);
+                if let Some(f) = flights.remove(&t) {
+                    ends.push((f, plan::Outcome::Timeout));
+                }
+            }
+            for (t, a) in applied.answers {
+                let o = match a {
+                    Answer::Ack => plan::Outcome::Ack,
+                    Answer::Refused(_) | Answer::NoReply => plan::Outcome::Fail,
+                    Answer::Closed => continue,
+                };
+                if let Some(f) = flights.remove(&t) {
+                    ends.push((f, o));
+                }
+            }
+            for (f, o) in ends {
+                if self.finish(cid, &key, f, o) == plan::After::Close && ending.is_none() {
+                    ending = Some(("reply timeouts in a row", None, Some(close::reason::GENERIC)));
+                }
+            }
+            if ending.is_none() {
+                for it in self.pull(cid) {
+                    let ticket = self.ticket.fetch_add(1, Ordering::Relaxed);
+                    let body = serde_json::to_vec(&serde_json::json!({ "live": it.live, "messages": it.msgs })).unwrap_or_default();
+                    let q = session.query(ticket, body);
+                    flights.insert(ticket, send::Flight { ids: it.ids, deadline: Instant::now() + self.knobs.reply_timeout, waiter: it.waiter });
+                    match wire::parts(&q, &mut session.tx, session.batch) {
+                        Ok(p) => applied.parts.extend(p),
+                        Err(w) => self.sparse("send did not encode", &format!("{w:?}")),
+                    }
+                }
+            }
+            let parts = applied.parts;
             if !parts.is_empty() {
                 if link::write_batches(wr, &wire::pack(parts, session.batch)).await.is_err() && ending.is_none() {
                     ending = Some(("link closed", None, None));

@@ -106,7 +106,6 @@ pub struct Counters {
     pub chat_fanout_fail: AtomicU64,
     pub session_end_fail: AtomicU64,
     pub ext_fanout_fail: AtomicU64,
-    pub ext_given_up: AtomicU64,
     pub codes: Mutex<BTreeMap<u16, u64>>,
 }
 
@@ -830,7 +829,55 @@ async fn catchup_run(s: Arc<Session>, chat: Arc<crate::chat::Chat>, req: oxsig::
     }
 }
 
-async fn chat_fanout(ctx: &Ctx, chat: &crate::chat::Chat, d: crate::chat::Deliver) {
+async fn chat_fanout(ctx: &Arc<Ctx>, chat: &Arc<crate::chat::Chat>, d: crate::chat::Deliver) {
+    for key in &d.ext {
+        let (ctx, chat, key, msg) = (ctx.clone(), chat.clone(), key.clone(), d.message.clone());
+        tokio::spawn(async move { ext_fanout(&ctx, &chat, &key, msg).await });
+    }
+    member_fanout(ctx, chat, d).await;
+}
+
+async fn ext_fanout(ctx: &Ctx, chat: &crate::chat::Chat, key: &str, msg: oxsig::msg::ChatMessage) {
+    let list = ctx.bus.ext_list(key);
+    if list.is_empty() {
+        return;
+    }
+    let start = chat.rr_next(key);
+    for i in crate::chat::zgate::plan::ring(list.len(), start) {
+        let (node, cid) = &list[i];
+        let ok = if *node == ctx.bus.node {
+            chat.zgate.get().is_some_and(|g| g.deliver(cid, true, vec![msg.clone()], None).is_ok_and(|o| o.accepted()))
+        } else {
+            let payload = serde_json::to_vec(&crate::chat::zgate::send::ExtDeliver { key: key.to_string(), cid: cid.clone(), messages: vec![msg.clone()] }).unwrap_or_default();
+            ctx.bus.query(node, crate::chat::zgate::send::WHAT, payload).await.ok().and_then(|b| Reply::decode(&b).ok()).is_some_and(|r| matches!(r, Reply::Ok { .. }))
+        };
+        if ok {
+            return;
+        }
+    }
+    ctx.counters.ext_fanout_fail.fetch_add(1, Ordering::Relaxed);
+    common::log::emit(
+        common::log::Line::ev("SV-RULE-CHAT-EXT-SUB")
+            .key("key", key)
+            .key("space", &msg.space_id)
+            .key("msg_id", &msg.msg_id)
+            .key("conns", list.len().to_string())
+            .msg("ext_fanout_fail"),
+    );
+}
+
+pub async fn deliver_ext(ctx: &Ctx, payload: &[u8]) -> Vec<u8> {
+    let Some(chat) = ctx.chat.get() else { return Reply::fail(Code::ChatDisabled).encode() };
+    let Some(gate) = chat.zgate.get() else { return Reply::fail(Code::SessionNotFound).encode() };
+    let Ok(d) = serde_json::from_slice::<crate::chat::zgate::send::ExtDeliver>(payload) else { return Reply::fail(Code::InvalidPayload).encode() };
+    match gate.deliver(&d.cid, true, d.messages, None) {
+        Ok(o) if o.accepted() => Reply::ok(serde_json::json!({})).encode(),
+        Ok(o) => Reply::fail(crate::chat::zgate::send::refusal_code(o)).encode(),
+        Err(_) => Reply::fail(Code::SessionNotFound).encode(),
+    }
+}
+
+async fn member_fanout(ctx: &Ctx, chat: &crate::chat::Chat, d: crate::chat::Deliver) {
     let roster = match ctx.bus.follows_sessions() {
         true => Some(chat.recipients(&d).await),
         false => None,

@@ -148,6 +148,7 @@ impl Bus {
         let me = Arc::downgrade(self);
         let keys = self.keys.clone();
         let sess = key == self.keys.sess_all();
+        let ext = key == self.keys.ext_all();
         let mut sub = self.session.token_sub(&key, true).await.map_err(|e| format!("token sub: {e}"))?;
         let h = tokio::spawn(async move {
             while let Some(ev) = sub.recv().await {
@@ -158,6 +159,11 @@ impl Bus {
                     TokenEvent::BatchEnd if sess => {
                         if let Ok(mut v) = b.view.lock() {
                             v.sessions_followed();
+                        }
+                    }
+                    TokenEvent::BatchEnd if ext => {
+                        if let Ok(mut v) = b.view.lock() {
+                            v.ext_followed();
                         }
                     }
                     TokenEvent::BatchEnd => {}
@@ -225,6 +231,8 @@ impl Bus {
             Some(Parsed::Room { room, node, inst }) => TokenEv::RoomDel { room, node, inst },
             Some(Parsed::Sess { user, node, sid }) if put => TokenEv::SessPut { user, node, sid },
             Some(Parsed::Sess { user, node, sid }) => TokenEv::SessDel { user, node, sid },
+            Some(Parsed::Ext { key, node, cid }) if put => TokenEv::ExtPut { key, node, cid },
+            Some(Parsed::Ext { key, node, cid }) => TokenEv::ExtDel { key, node, cid },
             _ => {
                 self.count_malformed();
                 return;
@@ -244,6 +252,25 @@ impl Bus {
             k.push(sub);
         }
         Ok(())
+    }
+
+    pub async fn follow_ext(self: &Arc<Self>) -> Result<(), String> {
+        if let Ok(mut v) = self.view.lock() {
+            v.follow_ext();
+        }
+        let sub = self.token_sub(self.keys.ext_all()).await?;
+        if let Ok(mut k) = self.keep.lock() {
+            k.push(sub);
+        }
+        Ok(())
+    }
+
+    pub fn ext_list(&self, key: &str) -> Vec<(String, String)> {
+        self.view.lock().ok().and_then(|v| v.ext.as_ref().map(|t| t.list(key))).unwrap_or_default()
+    }
+
+    pub fn ext_following(&self) -> Option<bool> {
+        self.view.lock().ok().and_then(|v| v.ext.as_ref().map(|t| t.following))
     }
 
     pub fn follows_sessions(&self) -> bool {

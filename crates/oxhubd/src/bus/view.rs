@@ -16,6 +16,8 @@ pub enum TokenEv {
     RoomDel { room: String, node: String, inst: String },
     SessPut { user: String, node: String, sid: String },
     SessDel { user: String, node: String, sid: String },
+    ExtPut { key: String, node: String, cid: String },
+    ExtDel { key: String, node: String, cid: String },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -41,6 +43,31 @@ impl SessTable {
     pub fn nodes_of(&self, users: &[String]) -> Vec<String> {
         let v: BTreeSet<String> = users.iter().filter_map(|u| self.by_user.get(u)).flat_map(|m| m.iter().map(|(_, node)| node.clone())).collect();
         v.into_iter().collect()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExtTable {
+    pub following: bool,
+    by_key: BTreeMap<String, BTreeSet<(String, String)>>,
+}
+
+impl ExtTable {
+    pub fn put(&mut self, key: String, node: String, cid: String) {
+        self.by_key.entry(key).or_default().insert((node, cid));
+    }
+
+    pub fn del(&mut self, key: &str, node: String, cid: String) {
+        if let Some(m) = self.by_key.get_mut(key) {
+            m.remove(&(node, cid));
+            if m.is_empty() {
+                self.by_key.remove(key);
+            }
+        }
+    }
+
+    pub fn list(&self, key: &str) -> Vec<(String, String)> {
+        self.by_key.get(key).map(|m| m.iter().cloned().collect()).unwrap_or_default()
     }
 }
 
@@ -81,6 +108,7 @@ pub struct View {
     pub duplicates: u64,
     pub recovered: bool,
     pub sess: Option<SessTable>,
+    pub ext: Option<ExtTable>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -108,6 +136,7 @@ impl View {
             duplicates: 0,
             recovered: false,
             sess: None,
+            ext: None,
         }
     }
 
@@ -117,6 +146,16 @@ impl View {
 
     pub fn sessions_followed(&mut self) {
         if let Some(t) = self.sess.as_mut() {
+            t.following = true;
+        }
+    }
+
+    pub fn follow_ext(&mut self) {
+        self.ext.get_or_insert_with(ExtTable::default);
+    }
+
+    pub fn ext_followed(&mut self) {
+        if let Some(t) = self.ext.as_mut() {
             t.following = true;
         }
     }
@@ -143,6 +182,18 @@ impl View {
                 }
                 return;
             }
+            TokenEv::ExtPut { key, node, cid } => {
+                if let Some(t) = self.ext.as_mut() {
+                    t.put(key, node, cid);
+                }
+                return;
+            }
+            TokenEv::ExtDel { key, node, cid } => {
+                if let Some(t) = self.ext.as_mut() {
+                    t.del(&key, node, cid);
+                }
+                return;
+            }
             ev => ev,
         };
         self.last_token_at = now;
@@ -151,7 +202,7 @@ impl View {
             TokenEv::NodeDel { node, inst } => ("delete", format!("node/{node}/{inst}")),
             TokenEv::RoomPut { room, node, inst } => ("put", format!("room/{room}/{node}/{inst}")),
             TokenEv::RoomDel { room, node, inst } => ("delete", format!("room/{room}/{node}/{inst}")),
-            TokenEv::SessPut { .. } | TokenEv::SessDel { .. } => return,
+            TokenEv::SessPut { .. } | TokenEv::SessDel { .. } | TokenEv::ExtPut { .. } | TokenEv::ExtDel { .. } => return,
         };
         self.last_event = Some(LastEvent { at_ms: now, kind, key });
         match ev {
