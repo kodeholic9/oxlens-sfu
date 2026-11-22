@@ -295,7 +295,7 @@ pub struct Pkt {
     pub track: Option<Arc<crate::r#pub::PubTrack>>,
     pub ep: u64,
     pub pic: Option<core::Vp8Pic>,
-    pub tl: Option<crate::sim::temporal::Vp8Tl>,
+    pub tl: Option<crate::sim::temporal::Tl>,
 }
 
 pub struct Egress {
@@ -616,7 +616,13 @@ fn forward(w: &Arc<Worker>, tr: &Arc<Transport>, track: &Arc<crate::r#pub::PubTr
         track: Some(track.clone()),
         ep: 0,
         pic: if vp8 { core::vp8_pic(payload) } else { None },
-        tl: if vp8 { crate::sim::temporal::vp8_tl(payload) } else { None },
+        tl: if vp8 {
+            crate::sim::temporal::vp8_tl(payload)
+        } else if stream.kind == Kind::Video && ids.dd != 0 {
+            ext_get(rtp.ext, ids.dd).and_then(|raw| track.dd_tl(raw))
+        } else {
+            None
+        },
     };
     if keyframe {
         track.last_keyframe_ms.store(now_ms, Ordering::Release);

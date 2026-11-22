@@ -1,20 +1,25 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.12 · 정:IMPL-SIM-SWITCH · 정:IMPL-PUB-RID-SPATIAL · 정:RULE-CONC-SANS-IO · model: claude-opus-5-5
-//! 시간 층 고르기 — VP8 L1T3 표지(TID · Y · 15비트 picture ID) 읽기 · 프레임 단위 판단(내리기는 다음 프레임 · 올리기는 Y 프레임 · 키프레임은 목표로) · 줄 상태 묶음. 원천 server/areas/sim/behavior/temporal.ts.
+//! 시간 층 고르기 — 표지(TID · 전환점 시간 층 묶음 · 15비트 프레임 번호) 읽기(VP8 payload · H264 dependency-descriptor) · 프레임 단위 판단(내리기는 다음 프레임 · 올리기는 전환점 프레임 · 키프레임은 목표로) · 줄 상태 묶음. 원천 server/areas/sim/behavior/temporal.ts.
 
-use crate::fwd::core::after15;
+use crate::fwd::core::{M15, after15};
+use crate::sim::dd::{DdFrame, DdStructure, dd_sync};
 
 pub const TL_TOP: u8 = 2;
 pub const TL_NONE: u8 = 255;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Vp8Tl {
+pub struct Tl {
     pub tid: u8,
-    pub y: bool,
+    pub sync: u8,
     pub pid: u16,
 }
 
-pub fn vp8_tl(p: &[u8]) -> Option<Vp8Tl> {
+pub fn dd_tl(f: &DdFrame, st: &DdStructure) -> Tl {
+    Tl { tid: f.tid, sync: dd_sync(f, st), pid: f.frame % M15 }
+}
+
+pub fn vp8_tl(p: &[u8]) -> Option<Tl> {
     let b0 = *p.first()?;
     if b0 & 0x80 == 0 {
         return None;
@@ -29,7 +34,8 @@ pub fn vp8_tl(p: &[u8]) -> Option<Vp8Tl> {
     }
     let pid = (((hi & 0x7f) as u16) << 8) | *p.get(3)? as u16;
     let t = *p.get(5)?;
-    Some(Vp8Tl { tid: t >> 6, y: t & 0x20 != 0, pid })
+    let tid = t >> 6;
+    Some(Tl { tid, sync: if t & 0x20 != 0 { 1 << tid } else { 0 }, pid })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,7 +69,7 @@ impl Default for TemporalSel {
 }
 
 impl TemporalSel {
-    pub fn step(&mut self, tl: Vp8Tl, key: bool, target: u8) -> (bool, Option<TlWhy>) {
+    pub fn step(&mut self, tl: Tl, key: bool, target: u8) -> (bool, Option<TlWhy>) {
         let goal = target.min(TL_TOP);
         if self.pid == Some(tl.pid) {
             return (self.keep, None);
@@ -82,8 +88,8 @@ impl TemporalSel {
         } else if goal < self.current {
             self.current = goal;
             why = Some(TlWhy::Down);
-        } else if tl.tid > self.current && tl.tid <= goal && tl.y {
-            self.current = tl.tid;
+        } else if let Some(t) = (self.current + 1..=goal).rev().find(|t| (tl.sync >> t) & 1 == 1) {
+            self.current = t;
             why = Some(TlWhy::UpSync);
         }
         self.pid = Some(tl.pid);

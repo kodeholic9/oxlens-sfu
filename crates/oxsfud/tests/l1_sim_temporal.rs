@@ -5,7 +5,8 @@
 use std::path::{Path, PathBuf};
 
 use oxsfud::fwd::core::{M15, Rewriter, vp8_pic};
-use oxsfud::sim::temporal::{TL_NONE, TL_TOP, TemporalSel, Vp8Tl, goal, vp8_tl};
+use oxsfud::sim::dd::{DdStructure, dd_read};
+use oxsfud::sim::temporal::{TL_NONE, TL_TOP, TemporalSel, Tl, dd_tl, goal, vp8_tl};
 use serde_json::Value;
 
 fn spec() -> PathBuf {
@@ -35,7 +36,7 @@ fn temporal_vectors_match_product() {
     assert_eq!(v["tl_top"].as_u64(), Some(TL_TOP as u64), "S-sym-IMPL-SIM-SWITCH-5 TL_TOP equals the source");
     for r in v["tl_read"].as_array().expect("tl_read") {
         let got = vp8_tl(&hex(r["payload"].as_str().expect("payload")));
-        let want = r["tl"].as_object().map(|o| Vp8Tl { tid: o["tid"].as_u64().expect("tid") as u8, y: o["y"].as_bool().expect("y"), pid: o["pid"].as_u64().expect("pid") as u16 });
+        let want = r["tl"].as_object().map(|o| Tl { tid: o["tid"].as_u64().expect("tid") as u8, sync: o["sync"].as_u64().expect("sync") as u8, pid: o["pid"].as_u64().expect("pid") as u16 });
         assert_eq!(got, want, "S-sym-IMPL-SIM-SWITCH-5 vp8_tl · {}", r["name"]);
     }
     let cases = v["temporal"].as_array().expect("temporal");
@@ -144,13 +145,59 @@ fn selection_with_rewriter_keeps_numbers_contiguous() {
 #[test]
 fn never_rises_without_layer_sync() {
     let mut sel = TemporalSel::default();
-    let _ = sel.step(Vp8Tl { tid: 0, y: false, pid: 10 }, true, 0);
+    let _ = sel.step(Tl { tid: 0, sync: 0, pid: 10 }, true, 0);
     for p in 11..400u16 {
         let tid = [2u8, 1, 2, 0][(p % 4) as usize];
-        let (send, _) = sel.step(Vp8Tl { tid, y: false, pid: p }, false, TL_TOP);
+        let (send, _) = sel.step(Tl { tid, sync: 0, pid: p }, false, TL_TOP);
         assert_eq!(sel.current, 0, "S-sym-IMPL-SIM-SWITCH-6 no rise without Y · pid {p}");
         assert_eq!(send, tid == 0, "S-sym-IMPL-SIM-SWITCH-6 only TID0 while waiting for Y · pid {p}");
     }
-    let (send, _) = sel.step(Vp8Tl { tid: 1, y: true, pid: 400 }, false, TL_TOP);
+    let (send, _) = sel.step(Tl { tid: 1, sync: 1 << 1, pid: 400 }, false, TL_TOP);
     assert!(send && sel.current == 1, "S-sym-IMPL-SIM-SWITCH-6 Y frame lifts one step");
+}
+
+fn frame_json(f: &oxsfud::sim::dd::DdFrame) -> Value {
+    serde_json::json!({ "start": f.start, "end": f.end, "frame": f.frame, "tid": f.tid, "dtis": f.dtis })
+}
+
+fn structure_json(s: &DdStructure) -> Value {
+    let tpls: Vec<Value> = s.templates.iter().map(|t| serde_json::json!([t.sid, t.tid, t.dtis.iter().map(|d| d.to_string()).collect::<String>()])).collect();
+    let layers: Vec<Value> = s.dt_layer.iter().map(|(a, b)| serde_json::json!([a, b])).collect();
+    serde_json::json!({ "offset": s.offset, "dts": s.dts, "templates": tpls, "dt_layer": layers })
+}
+
+#[test]
+fn dd_vectors_match_product() {
+    let v = load("sim.json");
+    let cases = v["dd"].as_array().expect("dd");
+    assert!(!cases.is_empty(), "판 묶음 dd 비었다");
+    for c in cases {
+        let name = c["name"].as_str().unwrap_or("");
+        let mut held: Option<DdStructure> = None;
+        let mut sel = TemporalSel::default();
+        for (i, st) in c["steps"].as_array().expect("steps").iter().enumerate() {
+            let (frame, attached) = dd_read(&hex(st["raw"].as_str().expect("raw")), held.as_ref());
+            if attached.is_some() {
+                held = attached;
+            }
+            let got = frame.as_ref().map(frame_json).unwrap_or(Value::Null);
+            assert_eq!(got, st["frame"], "S-sym-IMPL-SIM-SWITCH-7 dd_read · {name} · step {i}");
+            let (Some(f), Some(s)) = (frame, held.as_ref()) else { continue };
+            let tl = dd_tl(&f, s);
+            assert_eq!(serde_json::json!({ "tid": tl.tid, "sync": tl.sync, "pid": tl.pid }), st["tl"], "S-sym-IMPL-SIM-SWITCH-7 dd_tl · {name} · step {i}");
+            let (send, why) = sel.step(tl, st["key"].as_bool().expect("key"), st["target"].as_u64().expect("target") as u8);
+            assert_eq!(send, st["send"].as_bool().expect("send"), "S-sym-IMPL-SIM-SWITCH-7 send · {name} · step {i}");
+            assert_eq!(why.map(|w| w.name()), st["why"].as_str(), "S-sym-IMPL-SIM-SWITCH-7 why · {name} · step {i}");
+            assert_eq!(sel.current as u64, st["current"].as_u64().expect("current"), "S-sym-IMPL-SIM-SWITCH-7 current · {name} · step {i}");
+        }
+    }
+    let base = dd_read(&hex(v["dd"][0]["steps"][0]["raw"].as_str().expect("raw")), None).1;
+    for r in v["dd_read"].as_array().expect("dd_read") {
+        let name = r["name"].as_str().unwrap_or("");
+        let given = if r["with_structure"].as_bool().expect("with_structure") { base.as_ref() } else { None };
+        let (frame, attached) = dd_read(&hex(r["raw"].as_str().expect("raw")), given);
+        assert_eq!(frame.as_ref().map(frame_json).unwrap_or(Value::Null), r["frame"], "S-sym-IMPL-SIM-SWITCH-7 dd_read frame · {name}");
+        let now = attached.as_ref().or(given);
+        assert_eq!(now.map(structure_json).unwrap_or(Value::Null), r["structure"], "S-sym-IMPL-SIM-SWITCH-7 dd_read structure · {name}");
+    }
 }

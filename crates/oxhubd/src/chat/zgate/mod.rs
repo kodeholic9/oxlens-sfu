@@ -295,7 +295,7 @@ impl Gate {
         if let Ok(mut g) = self.conns.lock() {
             g.insert(cid.clone(), Handle { key: key.clone(), open: false, cmd: cmd_tx, outbox: plan::Outbox::new(self.knobs.outbox()), released: false });
         }
-        tracing::info!(kind = "diag", spec = "SV-RULE-CHAT-EXT-SUB", key = %key, cid = %cid, node = %self.bus.node, peer = %peer, "ext conn open");
+        tracing::info!(kind = "diag", spec = "SV-RULE-CHAT-EXT-SUB", key = %key, cid = %cid, peer = %peer, "ext conn open");
         let (why, refused) = self.run(&cid, est, rd, &mut wr, cmd_rx).await;
         let _ = wr.shutdown().await;
         self.bus.undeclare_ext(&cid);
@@ -305,7 +305,7 @@ impl Gate {
         if let Some(r) = refused {
             self.refuse(&r, peer);
         }
-        tracing::info!(kind = "diag", spec = "SV-RULE-CHAT-EXT-SUB", key = %key, cid = %cid, node = %self.bus.node, why = why, "ext conn closed");
+        tracing::info!(kind = "diag", spec = "SV-RULE-CHAT-EXT-SUB", key = %key, cid = %cid, why = why, "ext conn closed");
     }
 
     async fn establish<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(&self, rd: &mut R, wr: &mut W, cn: Option<String>) -> Result<Est, (Refuse, bool)> {

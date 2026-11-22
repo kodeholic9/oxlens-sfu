@@ -716,6 +716,8 @@ pub enum PublishTracksReq {
         mid_extmap_id: Option<u8>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         audio_level_extmap_id: Option<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dd_extmap_id: Option<u8>,
     },
     Remove {
         action: RemoveAction,

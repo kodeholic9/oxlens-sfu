@@ -5,6 +5,7 @@
 pub mod alloc;
 pub mod bwe;
 pub mod core;
+pub mod dd;
 pub mod temporal;
 
 use std::collections::{HashMap, VecDeque};
@@ -741,7 +742,7 @@ pub fn on_twcc(tr: &Arc<Transport>, _t: &crate::sub::Table, body: &[u8]) {
     apply(tr, &mut s, &sim, &fixed, st, now_ms, now_us);
 }
 
-pub fn temporal_keep(row: &DownRow, tl: temporal::Vp8Tl, key: bool) -> bool {
+pub fn temporal_keep(row: &DownRow, tl: temporal::Tl, key: bool) -> bool {
     let target = temporal::goal(row.t_cap.load(Ordering::Acquire), row.t_auto.load(Ordering::Acquire));
     let mut s = temporal::TemporalSel::unpack(row.tsel.load(Ordering::Acquire));
     let before = s.current;
@@ -750,7 +751,7 @@ pub fn temporal_keep(row: &DownRow, tl: temporal::Vp8Tl, key: bool) -> bool {
     if let Some(w) = why {
         tracing::info!(
             kind = "diag", spec = "SV-IMPL-SIM-SWITCH", session = %row.conn.session, user = %row.user,
-            "in.mid" = %row.mid, "in.from" = before, "in.to" = s.current, "in.target" = target, "in.why" = w.name(), "in.tid" = tl.tid, "in.y" = tl.y,
+            "in.mid" = %row.mid, "in.from" = before, "in.to" = s.current, "in.target" = target, "in.why" = w.name(), "in.tid" = tl.tid, "in.sync" = tl.sync,
             "temporal layer → {}", s.current
         );
     }

@@ -280,8 +280,8 @@ pub fn publish(c: &Ctx, body: &Value) -> Result<Value, Failure> {
         return ok(&r);
     }
     let ext = |k: &str| -> Result<Option<u8>, Failure> { oxsig::code::field(body, k) };
-    let (twcc_extmap_id, rid_extmap_id, repair_rid_extmap_id, mid_extmap_id, audio_level_extmap_id) =
-        (ext("twcc_extmap_id")?, ext("rid_extmap_id")?, ext("repair_rid_extmap_id")?, ext("mid_extmap_id")?, ext("audio_level_extmap_id")?);
+    let (twcc_extmap_id, rid_extmap_id, repair_rid_extmap_id, mid_extmap_id, audio_level_extmap_id, dd_extmap_id) =
+        (ext("twcc_extmap_id")?, ext("rid_extmap_id")?, ext("repair_rid_extmap_id")?, ext("mid_extmap_id")?, ext("audio_level_extmap_id")?, ext("dd_extmap_id")?);
     {
         {
             let s = sfu()?;
@@ -354,6 +354,7 @@ pub fn publish(c: &Ctx, body: &Value) -> Result<Value, Failure> {
                 (&mut ids.repair_rid, repair_rid_extmap_id),
                 (&mut ids.mid, mid_extmap_id),
                 (&mut ids.audio_level, audio_level_extmap_id),
+                (&mut ids.dd, dd_extmap_id),
             ] {
                 if let Some(x) = v {
                     let _old = std::mem::replace(slot, x);

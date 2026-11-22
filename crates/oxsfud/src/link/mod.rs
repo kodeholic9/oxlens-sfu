@@ -121,6 +121,7 @@ pub struct ExtIds {
     pub repair_rid: u8,
     pub twcc: u8,
     pub audio_level: u8,
+    pub dd: u8,
 }
 
 impl Transport {

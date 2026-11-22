@@ -33,9 +33,10 @@ pub const URI_ABS_SEND_TIME: &str = "http://www.webrtc.org/experiments/rtp-hdrex
 pub const URI_TWCC: &str = "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01";
 pub const URI_RID: &str = "urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id";
 pub const URI_REPAIR_RID: &str = "urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id";
+pub const URI_DD: &str = "https://aomediacodec.github.io/av1-rtp-spec/#dependency-descriptor-rtp-header-extension";
 
 pub fn server_extmap() -> Vec<ExtMap> {
-    [(1, URI_MID), (4, URI_AUDIO_LEVEL), (5, URI_ABS_SEND_TIME), (6, URI_TWCC), (10, URI_RID), (11, URI_REPAIR_RID)]
+    [(1, URI_MID), (4, URI_AUDIO_LEVEL), (5, URI_ABS_SEND_TIME), (6, URI_TWCC), (10, URI_RID), (11, URI_REPAIR_RID), (12, URI_DD)]
         .into_iter()
         .map(|(id, uri)| ExtMap { id, uri: uri.to_string() })
         .collect()

@@ -319,6 +319,7 @@ pub struct PubTrack {
     pub pt_checked: AtomicBool,
     pub transport: std::sync::Weak<Transport>,
     pub rate: Mutex<crate::sim::LayerRate>,
+    pub dd: Mutex<Option<crate::sim::dd::DdStructure>>,
 }
 
 static SRC: AtomicU64 = AtomicU64::new(1);
@@ -346,7 +347,18 @@ impl PubTrack {
             pt_checked: AtomicBool::new(false),
             transport: Arc::downgrade(tr),
             rate: Mutex::new(crate::sim::LayerRate::default()),
+            dd: Mutex::new(None),
         })
+    }
+
+    pub fn dd_tl(&self, raw: &[u8]) -> Option<crate::sim::temporal::Tl> {
+        let mut held = self.dd.lock().ok()?;
+        let (frame, attached) = crate::sim::dd::dd_read(raw, held.as_ref());
+        if let Some(a) = attached {
+            held.replace(a);
+        }
+        let st = held.as_ref()?;
+        frame.map(|f| crate::sim::temporal::dd_tl(&f, st))
     }
 
     pub fn is_rtx(&self, ssrc: u32) -> bool {
