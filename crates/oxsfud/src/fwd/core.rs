@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.12 · 정:IMPL-FWD-SOURCE-SWITCH · 정:PROP-FWD-SWITCH-SEQ-CONTIGUOUS · 정:PROP-FWD-SWITCH-TS-FORWARD · 정:RULE-CONC-SANS-IO · 정:IMPL-SUB-SUBSCRIBER-TABLE · model: claude-opus-5-5
-//! 재기록기 — 다운링크 SSRC 하나의 단일 오프셋(seq · ts · VP8 picture ID · TL0PICIDX) · 전환 하한 = 앞 패킷이 덮는 길이 · NACK 되돌림 · SR 번역 · PT 교체. 시계는 인자.
+//! 재기록기 — 다운링크 SSRC 하나의 단일 오프셋(seq · ts · VP8 picture ID · TL0PICIDX) · 한 출처 안에서 뺀 런(전환에 비움 · 비면 단일 오프셋 그대로) · 전환 하한 = 앞 패킷이 덮는 길이 · NACK 되돌림 · SR 번역 · PT 교체. 시계는 인자.
 
 pub const M15: u16 = 0x8000;
 
@@ -103,6 +103,21 @@ pub struct Last {
     pub covers: u32,
 }
 
+pub const DROP_RUNS: usize = 128;
+
+pub fn after15(a: u16, b: u16) -> bool {
+    let d = a.wrapping_sub(b) % M15;
+    d != 0 && d < M15 / 2
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Run {
+    pub seq: u16,
+    pub seq_len: u16,
+    pub pid: u16,
+    pub pid_len: u16,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Rewriter {
     pub clock: u32,
@@ -117,6 +132,8 @@ pub struct Rewriter {
     pub tl0_off: u8,
     pub last_pid: Option<u16>,
     pub last_tl0: Option<u8>,
+    pub runs: std::collections::VecDeque<Run>,
+    pub hi_in: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,10 +154,84 @@ impl Rewriter {
         self.map_pic(src, seq, ts, at_ms, covers, None)
     }
 
+    pub fn seq_before(&self, seq: u16) -> u16 {
+        let mut n = 0u16;
+        for r in &self.runs {
+            if serial_after(seq, r.seq) {
+                n = n.wrapping_add(r.seq_len.min(seq.wrapping_sub(r.seq)));
+            }
+        }
+        n
+    }
+
+    pub fn pid_before(&self, pid: u16) -> u16 {
+        let mut n = 0u16;
+        for r in &self.runs {
+            if r.pid_len > 0 && after15(pid, r.pid) {
+                n = n.wrapping_add(r.pid_len.min(pid.wrapping_sub(r.pid) % M15));
+            }
+        }
+        n
+    }
+
+    pub fn skipped(&self, seq: u16) -> bool {
+        self.runs.iter().any(|r| seq.wrapping_sub(r.seq) < r.seq_len)
+    }
+
     pub fn pic_out(&self, pic: Option<&Vp8Pic>) -> (Option<u16>, Option<u8>) {
-        let pid = pic.and_then(|d| d.pid).map(|v| v.wrapping_add(self.pid_off) % M15);
+        let pid = pic.and_then(|d| d.pid.map(|v| (v, d.wide))).map(|(v, wide)| {
+            let gone = if wide { self.pid_before(v) } else { 0 };
+            v.wrapping_add(self.pid_off).wrapping_sub(gone) % M15
+        });
         let tl0 = pic.and_then(|d| d.tl0).map(|v| v.wrapping_add(self.tl0_off));
         (pid, tl0)
+    }
+
+    pub fn skip(&mut self, src: u64, seq: u16, pic: Option<&Vp8Pic>) {
+        if self.src != Some(src) {
+            return;
+        }
+        if let Some(h) = self.hi_in
+            && !serial_after(seq, h)
+        {
+            return;
+        }
+        self.hi_in = Some(seq);
+        let pid = pic.filter(|d| d.wide).and_then(|d| d.pid);
+        if let Some(r) = self.runs.back_mut() {
+            let last_pid = (r.pid_len > 0).then(|| r.pid.wrapping_add(r.pid_len - 1) % M15);
+            let same_pic = pid.is_some() && pid == last_pid;
+            let pid_next = match pid {
+                None => true,
+                Some(p) => same_pic || r.pid_len == 0 || r.pid.wrapping_add(r.pid_len) % M15 == p,
+            };
+            if r.seq.wrapping_add(r.seq_len) == seq && pid_next {
+                r.seq_len += 1;
+                if let Some(p) = pid
+                    && !same_pic
+                {
+                    if r.pid_len == 0 {
+                        r.pid = p;
+                    }
+                    r.pid_len += 1;
+                }
+                return;
+            }
+            let fresh = pid.is_some() && !same_pic;
+            self.runs.push_back(Run { seq, seq_len: 1, pid: pid.unwrap_or(0), pid_len: fresh as u16 });
+        } else {
+            self.runs.push_back(Run { seq, seq_len: 1, pid: pid.unwrap_or(0), pid_len: pid.is_some() as u16 });
+        }
+        if self.runs.len() > DROP_RUNS
+            && let Some(o) = self.runs.pop_front()
+        {
+            self.seq_off = self.seq_off.wrapping_sub(o.seq_len);
+            self.pid_off = self.pid_off.wrapping_sub(o.pid_len) % M15;
+            let b = o.seq.wrapping_add(o.seq_len).wrapping_add(self.seq_off);
+            if self.boundary.is_none_or(|x| serial_after(b, x)) {
+                self.boundary = Some(b);
+            }
+        }
     }
 
     pub fn map_pic(&mut self, src: u64, seq: u16, ts: u32, at_ms: u64, covers: u32, pic: Option<&Vp8Pic>) -> Option<Mapped> {
@@ -173,13 +264,21 @@ impl Rewriter {
             }
             self.src = Some(src);
             self.boundary = Some(seq.wrapping_add(self.seq_off));
+            self.runs.clear();
+            self.hi_in = None;
         }
-        let out_seq = seq.wrapping_add(self.seq_off);
+        if self.skipped(seq) {
+            return None;
+        }
+        let out_seq = seq.wrapping_add(self.seq_off).wrapping_sub(self.seq_before(seq));
         let out_ts = ts.wrapping_add(self.ts_off);
         if let Some(b) = self.boundary
             && serial_before(out_seq, b)
         {
             return None;
+        }
+        if self.hi_in.is_none_or(|h| serial_after(seq, h)) {
+            self.hi_in = Some(seq);
         }
         let advance = match self.last {
             None => true,
@@ -209,7 +308,13 @@ impl Rewriter {
         {
             return None;
         }
-        Some(out_seq.wrapping_sub(self.seq_off))
+        let mut c = out_seq.wrapping_sub(self.seq_off);
+        for r in &self.runs {
+            if !serial_before(c, r.seq) {
+                c = c.wrapping_add(r.seq_len);
+            }
+        }
+        Some(c)
     }
 
     pub fn translate_sr_ts(&self, rtp_ts: u32) -> u32 {

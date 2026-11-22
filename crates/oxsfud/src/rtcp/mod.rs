@@ -729,8 +729,8 @@ pub fn send_rtx(w: &Worker, row: &DownRow, seqs: &[u16]) {
             crate::ops::drop_count("rtx_gate");
             continue;
         }
-        let (src_seq, ts_off, rw_pic) = match row.rw.lock() {
-            Ok(rw) => (rw.unmap_nack(out_seq), rw.ts_off, rw.clone()),
+        let (src_seq, ts_off, rw_last) = match row.rw.lock() {
+            Ok(rw) => (rw.unmap_nack(out_seq), rw.ts_off, rw.last),
             Err(_) => continue,
         };
         let Some(src_seq) = src_seq else {
@@ -746,7 +746,7 @@ pub fn send_rtx(w: &Worker, row: &DownRow, seqs: &[u16]) {
             continue;
         };
         let Some(rtp) = parse_rtp(&orig) else { continue };
-        let age_ms = rw_pic.last.map(|l| l.ts.wrapping_sub(rtp.ts.wrapping_add(ts_off)) as u64 * 1000 / row.clock.max(1) as u64).unwrap_or(0);
+        let age_ms = rw_last.map(|l| l.ts.wrapping_sub(rtp.ts.wrapping_add(ts_off)) as u64 * 1000 / row.clock.max(1) as u64).unwrap_or(0);
         let step = match row.nack.lock() {
             Ok(mut l) => l.step(out_seq, now, age_ms),
             Err(_) => continue,
@@ -767,7 +767,7 @@ pub fn send_rtx(w: &Worker, row: &DownRow, seqs: &[u16]) {
             && track.stream.codec_name().eq_ignore_ascii_case("VP8")
             && let Some(d) = crate::fwd::core::vp8_pic(&orig[rtp.hlen..])
         {
-            let (pid, tl0) = rw_pic.pic_out(Some(&d));
+            let Ok((pid, tl0)) = row.rw.lock().map(|rw| rw.pic_out(Some(&d))) else { continue };
             crate::fwd::core::vp8_write(&mut payload[2..], &d, pid, tl0);
         }
         let csrc = row.conn.source_tag.then_some(track.stream.csrc);
