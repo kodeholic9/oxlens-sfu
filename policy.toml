@@ -8,7 +8,7 @@ retention_days = 14
 
 [media]
 bwe_mode = "twcc"
-max_bitrate_bps = 2000000
+max_bitrate_bps = 2500000
 slot_mid_reserve = 40
 pli_throttle_high_ms = 1000
 pli_throttle_low_ms = 500

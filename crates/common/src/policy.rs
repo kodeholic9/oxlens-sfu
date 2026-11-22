@@ -141,7 +141,7 @@ impl Default for Media {
             bwe_mode: MediaBwemode::Twcc,
             slot_mid_reserve: 40,
             auto_layer: MediaAutolayer::Off,
-            max_bitrate_bps: 2_000_000,
+            max_bitrate_bps: 2_500_000,
             pli_throttle_high_ms: 1_000,
             pli_throttle_low_ms: 500,
         }
@@ -336,8 +336,8 @@ impl Policy {
         if self.media.auto_layer == MediaAutolayer::V2 && self.media.bwe_mode != MediaBwemode::Twcc {
             return bad("v2-twcc: media.auto_layer = v2 면 media.bwe_mode = twcc");
         }
-        if self.media.max_bitrate_bps < 1_900_000 {
-            return bad("bitrate-layers: media.max_bitrate_bps ≥ 1,900,000");
+        if self.media.max_bitrate_bps < 2_260_000 {
+            return bad("bitrate-layers: media.max_bitrate_bps ≥ 2,260,000");
         }
         if self.hook.retry_max as usize > self.hook.retry_backoff_ms.len() {
             return bad("hook-retry: hook.retry_max ≤ hook.retry_backoff_ms 길이");
