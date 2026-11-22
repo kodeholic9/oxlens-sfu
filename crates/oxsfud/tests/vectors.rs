@@ -496,6 +496,50 @@ fn rtcp_nack_ledger_vectors() {
 }
 
 #[test]
+fn rtcp_nack_drain_vectors() {
+    use oxsfud::rtcp::nack::*;
+    let v = load("rtcp.json");
+    let k = &v["nack_ledger_constants"];
+    assert_eq!(PER_TURN as u64, k["perTurn"].as_u64().unwrap_or(0), "정:RULE-RTCP-NACK-DOWN 수치 perTurn — 원천 RTCP.model.NACK_LEDGER");
+    assert_eq!(TURN_MS, k["turnMs"].as_u64().unwrap_or(0), "정:RULE-RTCP-NACK-DOWN 수치 turnMs");
+    let cs = cases(&v, "nack_drain");
+    assert!(cs.len() >= 6, "S-sym-RULE-RTCP-NACK-DOWN-4 흘림 판 수");
+    for c in cs {
+        let name = c["name"].as_str().unwrap_or("");
+        let mut l = Ledger::default();
+        let steps = c["steps"].as_array().cloned().unwrap_or_default();
+        let ages: std::collections::HashMap<u16, u64> = c["ages"].as_object().map(|o| o.iter().filter_map(|(k, a)| Some((k.parse().ok()?, a.as_u64()?))).collect()).unwrap_or_default();
+        for (i, s) in steps.iter().enumerate() {
+            let at = s["at_ms"].as_u64().unwrap_or(0);
+            let d = match s["event"].as_str() {
+                Some("keyRequest") => {
+                    l.on_key_request();
+                    continue;
+                }
+                Some("keySent") => {
+                    l.on_key_sent();
+                    continue;
+                }
+                Some("nack") => {
+                    let seqs: Vec<u16> = s["seqs"].as_array().unwrap_or(&vec![]).iter().map(|x| x.as_u64().unwrap_or(0) as u16).collect();
+                    let idle = l.enqueue(&seqs);
+                    assert_eq!(idle, s["idle"].as_bool().unwrap_or(false), "S-sym-RULE-RTCP-NACK-DOWN-4 대기줄이 비어 있었나 {name} 걸음 {i}");
+                    if idle { l.drain(at, |q| ages.get(&q).map(|a| (*a, ()))) } else { Drained { sent: Vec::new(), refused: Vec::new() } }
+                }
+                _ => l.drain(at, |q| ages.get(&q).map(|a| (*a, ()))),
+            };
+            let sent: Vec<u64> = d.sent.iter().map(|(q, _)| *q as u64).collect();
+            let want: Vec<u64> = s["sent"].as_array().unwrap_or(&vec![]).iter().map(|x| x.as_u64().unwrap_or(0)).collect();
+            assert_eq!(sent, want, "S-sym-RULE-RTCP-NACK-DOWN-4 보낸 seq {name} 걸음 {i}");
+            let refused: Vec<&str> = d.refused.iter().map(|w| w.name()).collect();
+            let want_r: Vec<String> = s["refused"].as_array().unwrap_or(&vec![]).iter().map(|x| x.as_str().unwrap_or("").to_string()).collect();
+            assert_eq!(refused, want_r, "S-sym-RULE-RTCP-NACK-DOWN-4 거른 까닭 {name} 걸음 {i}");
+            assert_eq!(l.queued() as u64, s["queued"].as_u64().unwrap_or(0), "S-sym-RULE-RTCP-NACK-DOWN-4 남은 대기 {name} 걸음 {i}");
+        }
+    }
+}
+
+#[test]
 fn rtcp_nack_up_vectors() {
     use oxsfud::r#pub::{NACK_JUMP, NACK_MAX, NackUp};
     let v = load("rtcp.json");

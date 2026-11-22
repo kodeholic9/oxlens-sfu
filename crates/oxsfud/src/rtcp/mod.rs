@@ -6,7 +6,7 @@ pub mod core;
 pub mod nack;
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -54,6 +54,8 @@ pub struct ConnRtcp {
     pub sr: Mutex<HashMap<u32, Sr>>,
     pub sent: Mutex<VecDeque<Sent>>,
     pub sim: Mutex<crate::sim::ConnSim>,
+    pub rtx_busy: AtomicBool,
+    pub next_rtx: AtomicU64,
 }
 
 fn header(fmt: u8, pt: u8, words: usize) -> Vec<u8> {
@@ -518,6 +520,7 @@ pub fn tick(w: &Arc<Worker>, now_us: u64) {
         if !ups.is_empty() {
             uplink(w, &tr, &ups, now, now_us);
         }
+        rtx_turn(w, &tr, now_us);
         if crate::ops::auto_layer_on()
             && let Some(at) = crate::sim::drive(w, &tr, now, now_us)
         {
@@ -623,7 +626,7 @@ pub fn on_rtcp(w: &Arc<Worker>, tr: &Arc<Transport>, plain: &[u8]) {
                         if row.kind == Kind::Audio {
                             crate::ops::drop_count("nack_audio");
                         } else {
-                            send_rtx(w, &row, &seqs);
+                            on_nack(w, &row, &seqs);
                         }
                     }
                     None => crate::ops::drop_count("rtcp_unresolved"),
@@ -718,60 +721,106 @@ fn on_rr(tr: &Transport, t: &crate::sub::Table, body: &[u8]) {
     }
 }
 
-pub fn send_rtx(w: &Worker, row: &DownRow, seqs: &[u16]) {
+pub fn on_nack(w: &Worker, row: &DownRow, seqs: &[u16]) {
+    if row.rtx_ssrc.is_none() {
+        return;
+    }
+    let idle = match row.nack.lock() {
+        Ok(mut l) => l.enqueue(seqs),
+        Err(_) => return,
+    };
+    if idle {
+        drain_rtx(w, row);
+        row.conn.rtc.next_rtx.store(mono_us() + nack::TURN_MS * 1_000, Ordering::Relaxed);
+    }
+    if row.nack.lock().map(|l| l.queued() > 0).unwrap_or(false) {
+        row.conn.rtc.rtx_busy.store(true, Ordering::Release);
+    }
+}
+
+fn rtx_turn(w: &Worker, tr: &Transport, now_us: u64) {
+    if !tr.rtc.rtx_busy.load(Ordering::Acquire) || !due(&tr.rtc.next_rtx, now_us, nack::TURN_MS * 1_000) {
+        return;
+    }
+    let mut busy = false;
+    if let Some(table) = crate::ops::table_of(tr.id) {
+        for row in table.rows() {
+            if row.nack.lock().map(|l| l.queued() == 0).unwrap_or(true) {
+                continue;
+            }
+            drain_rtx(w, &row);
+            busy |= row.nack.lock().map(|l| l.queued() > 0).unwrap_or(false);
+        }
+    }
+    tr.rtc.rtx_busy.store(busy, Ordering::Release);
+}
+
+struct RtxSrc {
+    track: Arc<PubTrack>,
+    orig: Bytes,
+    ts_off: u32,
+    hlen: usize,
+    ts: u32,
+    marker: bool,
+}
+
+fn rtx_source(row: &DownRow, slot_ep: Option<u64>, out_seq: u16) -> Option<(u64, RtxSrc)> {
+    if slot_ep.is_some_and(|cur| crate::fwd::rtx_closed(row.last_ep.load(Ordering::Acquire), cur)) {
+        crate::ops::drop_count("rtx_gate");
+        return None;
+    }
+    let (src_seq, ts_off, rw_last) = match row.rw.lock() {
+        Ok(rw) => (rw.unmap_nack(out_seq), rw.ts_off, rw.last),
+        Err(_) => return None,
+    };
+    let Some(src_seq) = src_seq else {
+        crate::ops::drop_count("rtx_gate");
+        return None;
+    };
+    let Some(track) = row.src_track.load_full() else {
+        crate::ops::drop_count("rtx_cache_miss");
+        return None;
+    };
+    let Some(orig) = track.cache.lock().ok().and_then(|c| c.get(src_seq)) else {
+        crate::ops::drop_count("rtx_cache_miss");
+        return None;
+    };
+    let (hlen, ts, marker) = parse_rtp(&orig).map(|r| (r.hlen, r.ts, r.marker))?;
+    let age_ms = rw_last.map(|l| l.ts.wrapping_sub(ts.wrapping_add(ts_off)) as u64 * 1000 / row.clock.max(1) as u64).unwrap_or(0);
+    Some((age_ms, RtxSrc { track, orig, ts_off, hlen, ts, marker }))
+}
+
+pub fn drain_rtx(w: &Worker, row: &DownRow) {
     let Some(m) = media() else { return };
     let now = common::now_ms();
     let rtx_pt = row.rtx_pt.load(Ordering::Relaxed);
     let Some(rtx_ssrc) = row.rtx_ssrc else { return };
     let slot_ep = if row.slot { row.room.load().as_deref().and_then(|r| crate::ops::slot_of(r, row.kind)).map(|f| f.episode()) } else { None };
-    for &out_seq in seqs {
-        if slot_ep.is_some_and(|cur| crate::fwd::rtx_closed(row.last_ep.load(Ordering::Acquire), cur)) {
-            crate::ops::drop_count("rtx_gate");
-            continue;
-        }
-        let (src_seq, ts_off, rw_last) = match row.rw.lock() {
-            Ok(rw) => (rw.unmap_nack(out_seq), rw.ts_off, rw.last),
-            Err(_) => continue,
-        };
-        let Some(src_seq) = src_seq else {
-            crate::ops::drop_count("rtx_gate");
-            continue;
-        };
-        let Some(track) = row.src_track.load_full() else {
-            crate::ops::drop_count("rtx_cache_miss");
-            continue;
-        };
-        let Some(orig) = track.cache.lock().ok().and_then(|c| c.get(src_seq)) else {
-            crate::ops::drop_count("rtx_cache_miss");
-            continue;
-        };
-        let Some(rtp) = parse_rtp(&orig) else { continue };
-        let age_ms = rw_last.map(|l| l.ts.wrapping_sub(rtp.ts.wrapping_add(ts_off)) as u64 * 1000 / row.clock.max(1) as u64).unwrap_or(0);
-        let step = match row.nack.lock() {
-            Ok(mut l) => l.step(out_seq, now, age_ms),
-            Err(_) => continue,
-        };
-        if !step.send {
-            crate::ops::drop_count(match step.why {
-                crate::rtcp::nack::Why::WaitKey => "rtx_wait_key",
-                crate::rtcp::nack::Why::Old => "rtx_old",
-                _ => "rtx_repeat",
-            });
-            continue;
-        }
+    let d = match row.nack.lock() {
+        Ok(mut l) => l.drain(now, |out_seq| rtx_source(row, slot_ep, out_seq)),
+        Err(_) => return,
+    };
+    for why in &d.refused {
+        crate::ops::drop_count(match why {
+            nack::Why::WaitKey => "rtx_wait_key",
+            nack::Why::Old => "rtx_old",
+            _ => "rtx_repeat",
+        });
+    }
+    for (out_seq, RtxSrc { track, orig, ts_off, hlen, ts, marker }) in d.sent {
         let rseq = row.rtx_seq.fetch_add(1, Ordering::AcqRel);
-        let mut payload = Vec::with_capacity(orig.len() - rtp.hlen + 2);
+        let mut payload = Vec::with_capacity(orig.len() - hlen + 2);
         payload.extend_from_slice(&out_seq.to_be_bytes());
-        payload.extend_from_slice(&orig[rtp.hlen..]);
+        payload.extend_from_slice(&orig[hlen..]);
         if track.stream.kind == Kind::Video
             && track.stream.codec_name().eq_ignore_ascii_case("VP8")
-            && let Some(d) = crate::fwd::core::vp8_pic(&orig[rtp.hlen..])
+            && let Some(d) = crate::fwd::core::vp8_pic(&orig[hlen..])
         {
             let Ok((pid, tl0)) = row.rw.lock().map(|rw| rw.pic_out(Some(&d))) else { continue };
             crate::fwd::core::vp8_write(&mut payload[2..], &d, pid, tl0);
         }
         let csrc = row.conn.source_tag.then_some(track.stream.csrc);
-        let b = Built { pt: rtx_pt, seq: rseq, ts: rtp.ts.wrapping_add(ts_off), ssrc: rtx_ssrc, csrc, marker: rtp.marker, payload: &payload, padding: false, cluster: 0 };
+        let b = Built { pt: rtx_pt, seq: rseq, ts: ts.wrapping_add(ts_off), ssrc: rtx_ssrc, csrc, marker, payload: &payload, padding: false, cluster: 0 };
         if send_built(w, m, row, b).is_some() {
             row.conn.tx.retransmitted.fetch_add(1, Ordering::Relaxed);
         }
