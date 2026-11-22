@@ -600,7 +600,7 @@ pub fn subscribe_layer(c: &Ctx, body: &Value) -> Result<Value, Failure> {
             continue;
         }
         let (Some(row), Some(any)) = (t.row_of_track(&x.track_id), st.physical().into_iter().next()) else { continue };
-        crate::sim::subscribe_layer(&row, &any, x.spatial, x.paused, x.priority);
+        crate::sim::subscribe_layer(&row, &any, x.spatial, x.temporal, x.paused, x.priority);
     }
     ok(&Empty {})
 }

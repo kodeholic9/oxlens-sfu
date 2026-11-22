@@ -5,6 +5,7 @@
 pub mod alloc;
 pub mod bwe;
 pub mod core;
+pub mod temporal;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -740,9 +741,31 @@ pub fn on_twcc(tr: &Arc<Transport>, _t: &crate::sub::Table, body: &[u8]) {
     apply(tr, &mut s, &sim, &fixed, st, now_ms, now_us);
 }
 
-pub fn subscribe_layer(row: &DownRow, any: &Arc<PubTrack>, spatial: Option<u8>, paused: Option<bool>, priority: Option<u8>) {
+pub fn temporal_keep(row: &DownRow, tl: temporal::Vp8Tl, key: bool) -> bool {
+    let target = temporal::goal(row.t_cap.load(Ordering::Acquire), row.t_auto.load(Ordering::Acquire));
+    let mut s = temporal::TemporalSel::unpack(row.tsel.load(Ordering::Acquire));
+    let before = s.current;
+    let (send, why) = s.step(tl, key, target);
+    row.tsel.store(s.pack(), Ordering::Release);
+    if let Some(w) = why {
+        tracing::info!(
+            kind = "diag", spec = "SV-IMPL-SIM-SWITCH", session = %row.conn.session, user = %row.user,
+            "in.mid" = %row.mid, "in.from" = before, "in.to" = s.current, "in.target" = target, "in.why" = w.name(), "in.tid" = tl.tid, "in.y" = tl.y,
+            "temporal layer → {}", s.current
+        );
+    }
+    if !send {
+        row.tskip.fetch_add(1, Ordering::Relaxed);
+    }
+    send
+}
+
+pub fn subscribe_layer(row: &DownRow, any: &Arc<PubTrack>, spatial: Option<u8>, temporal: Option<u8>, paused: Option<bool>, priority: Option<u8>) {
     if let Some(sp) = spatial {
         row.cap.store(sp.min(1), Ordering::Release);
+    }
+    if let Some(t) = temporal {
+        row.t_cap.store(t.min(temporal::TL_TOP), Ordering::Release);
     }
     if let Some(p) = priority {
         row.priority.store(p, Ordering::Release);

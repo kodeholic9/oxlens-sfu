@@ -60,6 +60,10 @@ pub struct DownRow {
     pub nacks: AtomicU64,
     pub nack: Mutex<crate::rtcp::nack::Ledger>,
     pub drops: AtomicU64,
+    pub tsel: AtomicU64,
+    pub t_cap: AtomicU8,
+    pub t_auto: AtomicU8,
+    pub tskip: AtomicU64,
 }
 
 impl DownRow {
@@ -105,6 +109,10 @@ impl DownRow {
             nacks: AtomicU64::new(0),
             nack: Mutex::new(crate::rtcp::nack::Ledger::default()),
             drops: AtomicU64::new(0),
+            tsel: AtomicU64::new(crate::sim::temporal::TemporalSel::default().pack()),
+            t_cap: AtomicU8::new(crate::sim::temporal::TL_NONE),
+            t_auto: AtomicU8::new(crate::sim::temporal::TL_TOP),
+            tskip: AtomicU64::new(0),
         }
     }
 
@@ -287,6 +295,7 @@ pub struct Pkt {
     pub track: Option<Arc<crate::r#pub::PubTrack>>,
     pub ep: u64,
     pub pic: Option<core::Vp8Pic>,
+    pub tl: Option<crate::sim::temporal::Vp8Tl>,
 }
 
 pub struct Egress {
@@ -591,6 +600,7 @@ fn forward(w: &Arc<Worker>, tr: &Arc<Transport>, track: &Arc<crate::r#pub::PubTr
     let audio_level = if stream.kind == Kind::Audio { ext_get(rtp.ext, ids.audio_level).and_then(|v| v.first().copied()) } else { None };
     let payload = &plain[rtp.hlen..];
     let keyframe = stream.kind == Kind::Video && crate::trk::is_keyframe(stream.codec_name(), payload);
+    let vp8 = stream.kind == Kind::Video && stream.codec_name().eq_ignore_ascii_case("VP8");
     let mut pkt = Pkt {
         data: plain.clone(),
         hlen: rtp.hlen,
@@ -605,7 +615,8 @@ fn forward(w: &Arc<Worker>, tr: &Arc<Transport>, track: &Arc<crate::r#pub::PubTr
         transit: true,
         track: Some(track.clone()),
         ep: 0,
-        pic: if stream.kind == Kind::Video && stream.codec_name().eq_ignore_ascii_case("VP8") { core::vp8_pic(payload) } else { None },
+        pic: if vp8 { core::vp8_pic(payload) } else { None },
+        tl: if vp8 { crate::sim::temporal::vp8_tl(payload) } else { None },
     };
     if keyframe {
         track.last_keyframe_ms.store(now_ms, Ordering::Release);
@@ -732,6 +743,13 @@ pub fn send_down(w: &Worker, row: &DownRow, pkt: &Pkt) {
                 if let Some(t) = &pkt.track {
                     crate::rtcp::request_pli(t, crate::rtcp::PLI_AWAIT_KEY);
                 }
+                return;
+            }
+            if let Some(tl) = pkt.tl
+                && !row.slot
+                && !crate::sim::temporal_keep(row, tl, pkt.keyframe)
+            {
+                rw.skip(pkt.src_key, pkt.seq, pkt.pic.as_ref());
                 return;
             }
             rw.map_pic(pkt.src_key, pkt.seq, pkt.ts, now_ms, pkt.covers, pkt.pic.as_ref())
