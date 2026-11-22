@@ -125,12 +125,31 @@ impl MediaAutolayer {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaLayerStrategy {
+    AllPoints,
+    LowestTemporal,
+    HalveWait,
+}
+
+impl MediaLayerStrategy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MediaLayerStrategy::AllPoints => "all_points",
+            MediaLayerStrategy::LowestTemporal => "lowest_temporal",
+            MediaLayerStrategy::HalveWait => "halve_wait",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Media {
     pub bwe_mode: MediaBwemode,
     pub slot_mid_reserve: u16,
     pub auto_layer: MediaAutolayer,
+    pub layer_strategy: MediaLayerStrategy,
     pub max_bitrate_bps: u32,
     pub pli_throttle_high_ms: u32,
     pub pli_throttle_low_ms: u32,
@@ -141,6 +160,7 @@ impl Default for Media {
             bwe_mode: MediaBwemode::Twcc,
             slot_mid_reserve: 40,
             auto_layer: MediaAutolayer::Off,
+            layer_strategy: MediaLayerStrategy::LowestTemporal,
             max_bitrate_bps: 2_500_000,
             pli_throttle_high_ms: 1_000,
             pli_throttle_low_ms: 500,
@@ -417,6 +437,7 @@ impl Policy {
             ("media.bwe_mode".into(), "twcc".into()),
             ("media.slot_mid_reserve".into(), m.slot_mid_reserve.to_string()),
             ("media.auto_layer".into(), m.auto_layer.as_str().into()),
+            ("media.layer_strategy".into(), m.layer_strategy.as_str().into()),
             ("media.max_bitrate_bps".into(), m.max_bitrate_bps.to_string()),
             ("media.pli_throttle_high_ms".into(), m.pli_throttle_high_ms.to_string()),
             ("media.pli_throttle_low_ms".into(), m.pli_throttle_low_ms.to_string()),

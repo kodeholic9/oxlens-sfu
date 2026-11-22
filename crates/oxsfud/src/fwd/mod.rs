@@ -628,6 +628,12 @@ fn forward(w: &Arc<Worker>, tr: &Arc<Transport>, track: &Arc<crate::r#pub::PubTr
     if keyframe {
         track.last_keyframe_ms.store(now_ms, Ordering::Release);
     }
+    if stream.simulcast
+        && let Ok(mut r) = track.rate_tl.lock()
+        && let Some(w) = r.get_mut(pkt.tl.map(|x| x.tid as usize).unwrap_or(0))
+    {
+        w.add(now_ms, pkt.data.len() as u64);
+    }
     let mut targets: Vec<(Arc<DownRow>, u64)> = Vec::new();
     let mut slot: Option<(Arc<SlotFan>, u64)> = None;
     if stream.is_half() {
@@ -754,7 +760,7 @@ pub fn send_down(w: &Worker, row: &DownRow, pkt: &Pkt) {
             }
             if let Some(tl) = pkt.tl
                 && !row.slot
-                && !crate::sim::temporal_keep(row, tl, pkt.keyframe)
+                && !crate::sim::temporal_keep(row, tl, pkt.keyframe, now_ms)
             {
                 rw.skip(pkt.src_key, pkt.seq, pkt.pic.as_ref());
                 return;

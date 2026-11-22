@@ -321,6 +321,7 @@ pub struct PubTrack {
     pub pt_checked: AtomicBool,
     pub transport: std::sync::Weak<Transport>,
     pub rate: Mutex<crate::sim::LayerRate>,
+    pub rate_tl: Mutex<[crate::sim::LayerRate; crate::sim::strategy::TL_SLOTS]>,
     pub dd: Mutex<Option<crate::sim::dd::DdStructure>>,
 }
 
@@ -349,6 +350,7 @@ impl PubTrack {
             pt_checked: AtomicBool::new(false),
             transport: Arc::downgrade(tr),
             rate: Mutex::new(crate::sim::LayerRate::default()),
+            rate_tl: Mutex::new(Default::default()),
             dd: Mutex::new(None),
         })
     }

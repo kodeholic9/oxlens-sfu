@@ -6,6 +6,7 @@ pub mod alloc;
 pub mod bwe;
 pub mod core;
 pub mod dd;
+pub mod strategy;
 pub mod temporal;
 
 use std::collections::{HashMap, VecDeque};
@@ -18,7 +19,7 @@ use crate::fwd::rt::{Worker, media, mono_us};
 use crate::fwd::{DownRow, LAYER_PAUSE, LAYER_TOP};
 use crate::link::Transport;
 use crate::r#pub::PubTrack;
-use alloc::{Allocator, Candidate, Grant, LAYER_NONE, Point};
+use alloc::{Allocator, Candidate, Grant, Point};
 use bwe::{CONGESTION_PROCESS_US, CONGESTION_START_BPS, Congestion, Fed, Tag};
 use core::{Policy, Signals, Usage};
 
@@ -217,6 +218,8 @@ pub fn request(row: &DownRow, any: &PubTrack) {
 
 pub fn reset(row: &DownRow, now: u64) {
     put(row, LayerState { layer: LAYER_PAUSE, target: want(row), since: now });
+    row.t_auto.store(temporal::TL_TOP, Ordering::Release);
+    row.tsel.store(temporal::TemporalSel::default().pack(), Ordering::Release);
 }
 
 pub fn fall(l: u8, cur: u8, stale: impl Fn(u8) -> Option<bool>) -> bool {
@@ -426,6 +429,7 @@ fn tick_v1(tr: &Arc<Transport>, now: u64) {
     drop(s);
     log_v1(tr, &sig, &d);
     for (r, t) in rows {
+        r.t_auto.store(temporal::TL_TOP, Ordering::Release);
         r.auto_cap.store(level, Ordering::Release);
         adopt(&r, &t, now);
     }
@@ -449,12 +453,20 @@ fn log_step(tr: &Transport, c: &Congestion, st: &bwe::Step) {
     }
 }
 
-fn layer_code(l: u8) -> i8 {
-    if l == LAYER_PAUSE { LAYER_NONE } else { l as i8 }
+fn spatial_of(code: i8) -> u8 {
+    strategy::point_of(code).map(|(s, _)| s).unwrap_or(LAYER_PAUSE)
 }
 
-fn layer_from(l: i8) -> u8 {
-    if l == LAYER_NONE { LAYER_PAUSE } else { l as u8 }
+pub fn layer_strategy() -> common::policy::MediaLayerStrategy {
+    crate::ops::policy().media.layer_strategy
+}
+
+fn price_tl(t: &PubTrack, now_ms: u64) -> [i64; strategy::TL_SLOTS] {
+    t.rate_tl.lock().map(|mut r| std::array::from_fn(|i| r[i].bitrate(now_ms))).unwrap_or([0; strategy::TL_SLOTS])
+}
+
+pub fn current_point(points: &[Point], spatial: u8, temporal: u8) -> Option<usize> {
+    points.iter().rposition(|p| strategy::point_of(p.layer).is_some_and(|(s, t)| s == spatial && t <= temporal))
 }
 
 fn price(t: &PubTrack, now_ms: u64) -> i64 {
@@ -462,7 +474,7 @@ fn price(t: &PubTrack, now_ms: u64) -> i64 {
 }
 
 fn shape(cands: &[Candidate]) -> Vec<u64> {
-    cands.iter().flat_map(|c| c.points.iter().map(|p| c.id.wrapping_mul(4).wrapping_add((p.layer + 1) as u64))).collect()
+    cands.iter().flat_map(|c| c.points.iter().map(|p| c.id.wrapping_mul(16).wrapping_add((p.layer + 1) as u64))).collect()
 }
 
 fn candidates(s: &ConnSim, sim: &Rows, fixed: &Rows, now_ms: u64) -> Vec<Candidate> {
@@ -473,17 +485,16 @@ fn candidates(s: &ConnSim, sim: &Rows, fixed: &Rows, now_ms: u64) -> Vec<Candida
             continue;
         }
         let cap = r.cap.load(Ordering::Acquire);
-        let mut points = vec![Point { bitrate: 0, layer: LAYER_NONE }];
-        for layer in 0..=cap.min(LAYER_TOP) {
-            if let Some(x) = sibling(t, layer) {
-                let b = price(&x, now_ms);
-                if b > 0 {
-                    points.push(Point { bitrate: b, layer: layer as i8 });
-                }
-            }
-        }
-        let now_layer = layer_code(r.auto_cap.load(Ordering::Acquire));
-        let current = if s.allocated.get(&key).copied().unwrap_or(false) { points.iter().position(|p| p.layer == now_layer) } else { None };
+        let raw: Vec<[i64; strategy::TL_SLOTS]> = (0..=LAYER_TOP).map(|l| sibling(t, l).map(|x| price_tl(&x, now_ms)).unwrap_or([0; strategy::TL_SLOTS])).collect();
+        let points = strategy::layer_points(layer_strategy(), &raw, cap, r.t_cap.load(Ordering::Acquire));
+        let now_s = r.auto_cap.load(Ordering::Acquire);
+        let current = if !s.allocated.get(&key).copied().unwrap_or(false) {
+            None
+        } else if now_s == LAYER_PAUSE {
+            Some(0)
+        } else {
+            current_point(&points, now_s, r.t_auto.load(Ordering::Acquire))
+        };
         out.push(Candidate { id: key as u64, weight: 1, points, current });
     }
     for (r, t) in fixed {
@@ -496,9 +507,9 @@ fn candidates(s: &ConnSim, sim: &Rows, fixed: &Rows, now_ms: u64) -> Vec<Candida
 fn log_grant(tr: &Transport, g: &Grant, before: u8, available: i64, left: i64, by: &str) {
     tracing::info!(
         kind = "diag", spec = "SV-RULE-SIM-TICK", session = %tr.session, user = %tr.user,
-        "in.to" = layer_name(layer_from(g.layer)), "in.from" = layer_name(before), "in.target" = available, "in.left" = left, "in.need" = g.need,
+        "in.to" = layer_name(spatial_of(g.layer)), "in.to_t" = strategy::point_of(g.layer).map(|(_, t)| t as i64).unwrap_or(-1), "in.from" = layer_name(before), "in.target" = available, "in.left" = left, "in.need" = g.need,
         "in.reason" = g.reason.name(), "in.by" = by, "in.v2" = true,
-        "auto layer → {}", layer_name(layer_from(g.layer))
+        "auto layer → {}", layer_name(spatial_of(g.layer))
     );
 }
 
@@ -521,7 +532,10 @@ fn distribute(tr: &Transport, s: &mut ConnSim, sim: &Rows, fixed: &Rows, by: &st
     for g in &grants {
         let Some((r, t)) = sim.iter().find(|(r, _)| Arc::as_ptr(r) as usize as u64 == g.id) else { continue };
         s.allocated.insert(g.id as usize, true);
-        let to = layer_from(g.layer);
+        let to = spatial_of(g.layer);
+        if let Some((_, tt)) = strategy::point_of(g.layer) {
+            r.t_auto.store(tt, Ordering::Release);
+        }
         let before = r.auto_cap.swap(to, Ordering::AcqRel);
         if before != to {
             log_grant(tr, g, before, available, left, by);
@@ -779,16 +793,32 @@ pub fn on_twcc(tr: &Arc<Transport>, _t: &crate::sub::Table, body: &[u8]) {
     apply(tr, &mut s, &sim, &fixed, st, now_ms, now_us);
 }
 
-pub fn temporal_keep(row: &DownRow, tl: temporal::Tl, key: bool) -> bool {
-    let target = temporal::goal(row.t_cap.load(Ordering::Acquire), row.t_auto.load(Ordering::Acquire));
+pub fn wait_window_ms(target: u8) -> u64 {
+    let m = &crate::ops::policy().media;
+    2 * if target == 0 { m.pli_throttle_low_ms as u64 } else { m.pli_throttle_high_ms as u64 }
+}
+
+pub fn temporal_keep(row: &DownRow, tl: temporal::Tl, key: bool, now_ms: u64) -> bool {
     let mut s = temporal::TemporalSel::unpack(row.tsel.load(Ordering::Acquire));
+    let ls = layer_state(row);
+    let (auto, wait) = strategy::wait_temporal(
+        layer_strategy(),
+        ls.layer,
+        ls.target,
+        LAYER_PAUSE,
+        now_ms.saturating_sub(ls.since),
+        wait_window_ms(ls.target),
+        s.current,
+        row.t_auto.load(Ordering::Acquire),
+    );
+    let target = temporal::goal(row.t_cap.load(Ordering::Acquire), auto);
     let before = s.current;
     let (send, why) = s.step(tl, key, target);
     row.tsel.store(s.pack(), Ordering::Release);
     if let Some(w) = why {
         tracing::info!(
             kind = "diag", spec = "SV-IMPL-SIM-SWITCH", session = %row.conn.session, user = %row.user,
-            "in.mid" = %row.mid, "in.from" = before, "in.to" = s.current, "in.target" = target, "in.why" = w.name(), "in.tid" = tl.tid, "in.sync" = tl.sync,
+            "in.mid" = %row.mid, "in.from" = before, "in.to" = s.current, "in.target" = target, "in.why" = w.name(), "in.wait" = wait.name(), "in.tid" = tl.tid, "in.sync" = tl.sync,
             "temporal layer → {}", s.current
         );
     }
