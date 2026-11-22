@@ -10,7 +10,7 @@ pub const SUPPORTED_VIDEO: &[&str] = &["VP8", "H264"];
 pub const DEFAULT_AUDIO: &str = "opus";
 pub const DEFAULT_VIDEO: &str = "H264";
 pub const ROOM_H264_PROFILE: &str = "42e0";
-pub const SCALABILITY: &str = "L2T1";
+pub const SCALABILITY: &str = "L3T3";
 pub const FMTP_H264: &str = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f";
 pub const FMTP_OPUS: &str = "minptime=10;useinbandfec=1";
 

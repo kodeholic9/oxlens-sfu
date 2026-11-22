@@ -39,14 +39,14 @@ fn a_layer_request_writes_only_the_input_and_the_row_worker_adopts_it_in_one_ste
     on(&r, LayerState { layer: 1, target: 1, since: 0 });
     r.cap.store(0, Ordering::Release);
     assert_eq!(layer_state(&r), LayerState { layer: 1, target: 1, since: 0 }, "정:IMPL-SIM-SWITCH S-sym-IMPL-SIM-SWITCH-2 the control's request touches only its input cell");
-    let (st, adopted) = judge(&r, 1, false, 50_000, false, |_| false);
+    let (st, adopted) = judge(&r, 1, false, 50_000, false, 0, |_| false);
     assert_eq!(adopted, Some(0), "정:IMPL-SIM-SWITCH the row worker adopts min(cap, auto) as the target");
     assert!(st.fwd, "정:IMPL-SIM-SWITCH the current layer is relayed while pending");
     let s = layer_state(&r);
     assert_eq!((s.target, s.since), (0, 50_000), "정:IMPL-SIM-SWITCH S-sym-IMPL-SIM-SWITCH-2 target and pending start move in one step of the owner");
-    let (st, adopted) = judge(&r, 1, false, 50_001, false, |_| false);
+    let (st, adopted) = judge(&r, 1, false, 50_001, false, 0, |_| false);
     assert!(st.fwd && adopted.is_none() && layer_state(&r).target == 0, "정:IMPL-SIM-SWITCH S-sym-IMPL-SIM-SWITCH-2 the next packet does not read the request as expired");
-    let (st, _) = judge(&r, 0, true, 50_002, false, |_| false);
+    let (st, _) = judge(&r, 0, true, 50_002, false, 0, |_| false);
     assert!(st.fwd && layer_state(&r).layer == 0, "정:IMPL-SIM-SWITCH the target keyframe confirms the switch");
 }
 
@@ -55,7 +55,7 @@ fn the_packet_that_adopts_and_confirms_at_once_asks_no_keyframe() {
     let r = row();
     on(&r, LayerState { layer: 1, target: 1, since: 0 });
     r.cap.store(0, Ordering::Release);
-    let (st, adopted) = judge(&r, 0, true, 50_000, true, |_| false);
+    let (st, adopted) = judge(&r, 0, true, 50_000, true, 0, |_| false);
     assert_eq!(adopted, Some(0), "정:IMPL-SIM-SWITCH the first packet after the request adopts the new target");
     assert!(st.fwd && layer_state(&r).layer == 0, "정:IMPL-SIM-SWITCH the same packet is the target keyframe and confirms the switch");
     assert_eq!(adopt_asks(adopted, layer_state(&r)), None, "정:IMPL-SIM-SWITCH S-sym-IMPL-SIM-SWITCH-4 a switch confirmed by the packet in hand asks no keyframe — the keyframe is already here");
@@ -67,10 +67,10 @@ fn adopting_asks_once_and_the_same_step_does_not_retry() {
     let r = row();
     on(&r, LayerState { layer: 1, target: 1, since: 0 });
     r.cap.store(0, Ordering::Release);
-    let (st, adopted) = judge(&r, 1, false, 50_000, true, |_| false);
+    let (st, adopted) = judge(&r, 1, false, 50_000, true, 0, |_| false);
     assert_eq!(adopt_asks(adopted, layer_state(&r)), Some(0), "정:IMPL-SIM-SWITCH S-sym-IMPL-SIM-SWITCH-4 adopting a target still waiting for its keyframe asks once");
     assert_eq!(st.pli, Pli::None, "정:IMPL-SIM-SWITCH S-sym-IMPL-SIM-SWITCH-4 the adopting step does not also retry — ④ asks again only after waiting");
-    let (st, adopted) = judge(&r, 1, false, 50_300, true, |_| false);
+    let (st, adopted) = judge(&r, 1, false, 50_300, true, 0, |_| false);
     assert!(adopted.is_none(), "정:IMPL-SIM-SWITCH nothing new to adopt");
     assert_eq!(st.pli, Pli::Retry(0), "정:IMPL-SIM-SWITCH ④ the retry comes on a later packet when the wait is due");
 }
@@ -80,7 +80,7 @@ fn adopting_back_the_current_layer_asks_nothing() {
     let r = row();
     on(&r, LayerState { layer: 1, target: 0, since: 0 });
     r.cap.store(1, Ordering::Release);
-    let (_, adopted) = judge(&r, 1, false, 50_000, false, |_| false);
+    let (_, adopted) = judge(&r, 1, false, 50_000, false, 0, |_| false);
     assert_eq!(adopted, Some(1), "정:IMPL-SIM-SWITCH the target goes back to the current layer");
     assert_eq!(adopt_asks(adopted, layer_state(&r)), None, "정:IMPL-SIM-SWITCH S-sym-IMPL-SIM-SWITCH-4 no keyframe is needed to stay on the current layer");
 }
@@ -114,7 +114,7 @@ fn switch_machine_steps_are_unchanged() {
     assert_eq!(step(pending, 1, false, 10_000 + PENDING_MS + 1, false, false).next.map(|n| n.target), Some(1), "정:IMPL-SIM-SWITCH pending expires after 10s");
     let steady = LayerState { layer: 1, target: 1, since: 0 };
     let demote = step(steady, 0, false, 5_000, false, true);
-    assert_eq!((demote.next.map(|n| (n.target, n.since)), demote.fwd, demote.pli), (Some((0, 5_000)), false, Pli::Here), "정:IMPL-SIM-SWITCH in-band demote when h lags");
+    assert_eq!((demote.next.map(|n| (n.target, n.since)), demote.fwd, demote.pli), (Some((0, 5_000)), false, Pli::Here), "정:IMPL-SIM-SWITCH in-band demote when the current layer lags");
     let paused = LayerState { layer: LAYER_PAUSE, target: 1, since: 0 };
     assert!(!step(paused, 0, false, 1, false, false).fwd, "정:IMPL-SIM-SWITCH pause drops");
 }

@@ -77,6 +77,7 @@ pub struct PubStream {
     pub room: ArcSwap<String>,
     pub rows: ArcSwap<Vec<Arc<DownRow>>>,
     pub tracks: Mutex<Vec<Arc<PubTrack>>>,
+    pub layer_at: [AtomicU64; crate::fwd::LAYER_TOP as usize + 1],
     pub first_rtp_ms: AtomicU64,
     pub listed: AtomicBool,
     pub state: Mutex<PublishState>,
@@ -117,6 +118,7 @@ impl PubStream {
             room: ArcSwap::from_pointee(i.room),
             rows: ArcSwap::from_pointee(Vec::new()),
             tracks: Mutex::new(Vec::new()),
+            layer_at: std::array::from_fn(|_| AtomicU64::new(0)),
             first_rtp_ms: AtomicU64::new(0),
             listed: AtomicBool::new(false),
             state: Mutex::new(PublishState::Created),
@@ -381,6 +383,9 @@ impl PubTrack {
             r.add(now_ms, rtp.raw.len() as u64);
         }
         self.last_rtp_ms.store(now_ms, Ordering::Release);
+        if let Some(a) = self.rid.and_then(|r| self.stream.layer_at.get(r as usize)) {
+            a.store(now_ms, Ordering::Release);
+        }
         if self.stream.first_rtp_ms.compare_exchange(0, now_ms, Ordering::AcqRel, Ordering::Acquire).is_ok() {
             crate::ops::first_rtp(&self.stream);
         }
@@ -508,7 +513,8 @@ pub fn index_remove(tr: &Arc<Transport>, stream: &Arc<PubStream>) {
 fn spatial(r: &str) -> Option<u8> {
     match r {
         "l" => Some(0),
-        "h" => Some(1),
+        "m" => Some(1),
+        "h" => Some(crate::fwd::LAYER_TOP),
         _ => None,
     }
 }

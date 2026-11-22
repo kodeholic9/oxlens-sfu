@@ -18,6 +18,7 @@ use core::Rewriter;
 use rt::{Item, Worker, media, mono_us};
 
 pub const LAYER_PAUSE: u8 = 255;
+pub const LAYER_TOP: u8 = 2;
 pub const BLOCKED_NOTIFY_US: u64 = 500_000;
 
 pub struct DownRow {
@@ -93,9 +94,9 @@ impl DownRow {
             bytes: AtomicU64::new(0),
             last_at: AtomicU64::new(0),
             loaded_at: AtomicU64::new(0),
-            lstate: AtomicU64::new(crate::sim::LayerState { layer: LAYER_PAUSE, target: 1, since: 0 }.pack()),
-            cap: AtomicU8::new(1),
-            auto_cap: AtomicU8::new(1),
+            lstate: AtomicU64::new(crate::sim::LayerState { layer: LAYER_PAUSE, target: LAYER_TOP, since: 0 }.pack()),
+            cap: AtomicU8::new(LAYER_TOP),
+            auto_cap: AtomicU8::new(LAYER_TOP),
             pending_pli_at: AtomicU64::new(0),
             paused: AtomicBool::new(false),
             priority: AtomicU8::new(0),

@@ -15,7 +15,7 @@ use std::sync::atomic::Ordering;
 use oxsig::msg::Kind;
 
 use crate::fwd::rt::{Worker, media, mono_us};
-use crate::fwd::{DownRow, LAYER_PAUSE};
+use crate::fwd::{DownRow, LAYER_PAUSE, LAYER_TOP};
 use crate::link::Transport;
 use crate::r#pub::PubTrack;
 use alloc::{Allocator, Candidate, Grant, LAYER_NONE, Point};
@@ -52,7 +52,8 @@ pub fn mode() -> Mode {
 pub fn layer_name(l: u8) -> &'static str {
     match l {
         0 => "l",
-        1 => "h",
+        1 => "m",
+        LAYER_TOP => "h",
         _ => "pause",
     }
 }
@@ -70,12 +71,33 @@ pub struct LayerState {
 
 const SINCE_MASK: u64 = (1 << 60) - 1;
 
+const PAUSE_CODE: u64 = 3;
+
 fn code(l: u8) -> u64 {
-    if l == LAYER_PAUSE { 2 } else { (l & 1) as u64 }
+    if l > LAYER_TOP { PAUSE_CODE } else { l as u64 }
 }
 
 fn layer_of(c: u64) -> u8 {
-    if c == 2 { LAYER_PAUSE } else { c as u8 }
+    if c == PAUSE_CODE { LAYER_PAUSE } else { c as u8 }
+}
+
+pub fn live_layers(at: &[u64], first: u64, now: u64) -> u8 {
+    if first == 0 || now.saturating_sub(first) <= INBAND_MS {
+        return 0;
+    }
+    at.iter().enumerate().filter(|(_, t)| **t != 0 && now.saturating_sub(**t) <= INBAND_MS).fold(0u8, |m, (i, _)| m | (1 << i))
+}
+
+pub fn fit(w: u8, live: u8) -> u8 {
+    let has = |x: u8| live & (1 << x) != 0;
+    if w > LAYER_TOP || live == 0 || has(w) {
+        return w;
+    }
+    (0..w).rev().find(|&x| has(x)).or_else(|| (w + 1..=LAYER_TOP).find(|&x| has(x))).unwrap_or(w)
+}
+
+pub fn v1_layer(level: u8) -> u8 {
+    if level == 0 { 0 } else { LAYER_TOP }
 }
 
 impl LayerState {
@@ -118,7 +140,7 @@ pub struct Step {
     pub pli: Pli,
 }
 
-pub fn step(s: LayerState, l: u8, keyframe: bool, now: u64, retry_due: bool, h_stale: bool) -> Step {
+pub fn step(s: LayerState, l: u8, keyframe: bool, now: u64, retry_due: bool, fall: bool) -> Step {
     let (cur, tgt) = (s.layer, s.target);
     let keep = |fwd, pli| Step { next: None, fwd, pli };
     if cur != tgt {
@@ -143,18 +165,26 @@ pub fn step(s: LayerState, l: u8, keyframe: bool, now: u64, retry_due: bool, h_s
     if l == cur {
         return keep(true, Pli::None);
     }
-    if cur == 1 && l == 0 && h_stale {
+    if cur != LAYER_PAUSE && l < cur && fall {
         if keyframe {
-            return Step { next: Some(LayerState { layer: 0, target: 0, since: now }), fwd: true, pli: Pli::None };
+            return Step { next: Some(LayerState { layer: l, target: l, since: now }), fwd: true, pli: Pli::None };
         }
-        return Step { next: Some(LayerState { target: 0, since: now, ..s }), fwd: false, pli: Pli::Here };
+        return Step { next: Some(LayerState { target: l, since: now, ..s }), fwd: false, pli: Pli::Here };
     }
     keep(false, Pli::None)
 }
 
-pub fn adopt_state(row: &DownRow, now: u64) -> Option<u8> {
+fn layer_at(t: &PubTrack) -> [u64; LAYER_TOP as usize + 1] {
+    std::array::from_fn(|i| t.stream.layer_at[i].load(Ordering::Acquire))
+}
+
+pub fn live(t: &PubTrack, now: u64) -> u8 {
+    live_layers(&layer_at(t), t.stream.first_rtp_ms.load(Ordering::Acquire), now)
+}
+
+pub fn adopt_state(row: &DownRow, now: u64, live: u8) -> Option<u8> {
     let s = layer_state(row);
-    let w = want(row);
+    let w = fit(want(row), live);
     if s.target == w {
         return None;
     }
@@ -167,7 +197,7 @@ pub fn adopt_asks(adopted: Option<u8>, after: LayerState) -> Option<u8> {
 }
 
 pub fn adopt(row: &DownRow, any: &PubTrack, now: u64) {
-    let adopted = adopt_state(row, now);
+    let adopted = adopt_state(row, now, live(any, now));
     if let Some(w) = adopt_asks(adopted, layer_state(row))
         && let Some(t) = sibling(any, w)
     {
@@ -177,7 +207,7 @@ pub fn adopt(row: &DownRow, any: &PubTrack, now: u64) {
 }
 
 pub fn request(row: &DownRow, any: &PubTrack) {
-    let w = want(row);
+    let w = fit(want(row), live(any, common::now_ms()));
     if layer_state(row).target != w
         && let Some(t) = sibling(any, w)
     {
@@ -189,10 +219,19 @@ pub fn reset(row: &DownRow, now: u64) {
     put(row, LayerState { layer: LAYER_PAUSE, target: want(row), since: now });
 }
 
-pub fn judge(row: &DownRow, l: u8, keyframe: bool, now: u64, retry_due: bool, h_stale: impl Fn(LayerState) -> bool) -> (Step, Option<u8>) {
-    let adopted = adopt_state(row, now);
+pub fn fall(l: u8, cur: u8, stale: impl Fn(u8) -> Option<bool>) -> bool {
+    l < cur && stale(cur) == Some(true) && (l + 1..cur).all(|x| stale(x) != Some(false))
+}
+
+fn fall_to(t: &PubTrack, l: u8, cur: u8, now: u64) -> bool {
+    let at = layer_at(t);
+    fall(l, cur, |x| at.get(x as usize).filter(|v| **v != 0).map(|v| now.saturating_sub(*v) > INBAND_MS))
+}
+
+pub fn judge(row: &DownRow, l: u8, keyframe: bool, now: u64, retry_due: bool, live: u8, fall: impl Fn(LayerState) -> bool) -> (Step, Option<u8>) {
+    let adopted = adopt_state(row, now, live);
     let s = layer_state(row);
-    let st = step(s, l, keyframe, now, retry_due && adopted.is_none(), h_stale(s));
+    let st = step(s, l, keyframe, now, retry_due && adopted.is_none(), fall(s));
     if let Some(n) = st.next {
         put(row, n);
     }
@@ -203,11 +242,9 @@ pub fn admit(row: &DownRow, t: &Arc<PubTrack>, keyframe: bool, now: u64) -> bool
     if row.paused.load(Ordering::Acquire) {
         return false;
     }
-    let l = t.rid.unwrap_or(1);
+    let l = t.rid.unwrap_or(LAYER_TOP);
     let retry_due = now.saturating_sub(row.pending_pli_at.load(Ordering::Relaxed)) >= PENDING_PLI_RETRY_MS;
-    let (st, adopted) = judge(row, l, keyframe, now, retry_due, |s| {
-        s.layer == 1 && s.target == 1 && l == 0 && sibling(t, 1).is_some_and(|h| now.saturating_sub(h.last_rtp_ms.load(Ordering::Acquire)) > INBAND_MS)
-    });
+    let (st, adopted) = judge(row, l, keyframe, now, retry_due, live(t, now), |s| s.layer == s.target && s.layer != LAYER_PAUSE && l < s.layer && fall_to(t, l, s.layer, now));
     if let Some(w) = adopt_asks(adopted, layer_state(row))
         && let Some(ts) = sibling(t, w)
     {
@@ -345,7 +382,7 @@ pub fn delta(prev: &mut HashMap<usize, u64>, key: usize, total: u64) -> u64 {
 }
 
 fn log_v1(tr: &Transport, sig: &Signals, d: &core::Decision) {
-    let Some(l) = d.to else { return };
+    let Some(l) = d.to.map(v1_layer) else { return };
     if d.reasons.is_empty() {
         tracing::info!(
             kind = "diag", spec = "SV-RULE-SIM-TICK", session = %tr.session, user = %tr.user,
@@ -385,7 +422,7 @@ fn tick_v1(tr: &Arc<Transport>, now: u64) {
     }
     let sig = Signals { now, loss, sent, repeats: rep, drops };
     let d = s.policy.tick(&sig);
-    let level = s.policy.level;
+    let level = v1_layer(s.policy.level);
     drop(s);
     log_v1(tr, &sig, &d);
     for (r, t) in rows {
@@ -437,7 +474,7 @@ fn candidates(s: &ConnSim, sim: &Rows, fixed: &Rows, now_ms: u64) -> Vec<Candida
         }
         let cap = r.cap.load(Ordering::Acquire);
         let mut points = vec![Point { bitrate: 0, layer: LAYER_NONE }];
-        for layer in 0..=cap.min(1) {
+        for layer in 0..=cap.min(LAYER_TOP) {
             if let Some(x) = sibling(t, layer) {
                 let b = price(&x, now_ms);
                 if b > 0 {
@@ -763,7 +800,7 @@ pub fn temporal_keep(row: &DownRow, tl: temporal::Tl, key: bool) -> bool {
 
 pub fn subscribe_layer(row: &DownRow, any: &Arc<PubTrack>, spatial: Option<u8>, temporal: Option<u8>, paused: Option<bool>, priority: Option<u8>) {
     if let Some(sp) = spatial {
-        row.cap.store(sp.min(1), Ordering::Release);
+        row.cap.store(sp.min(LAYER_TOP), Ordering::Release);
     }
     if let Some(t) = temporal {
         row.t_cap.store(t.min(temporal::TL_TOP), Ordering::Release);
@@ -774,7 +811,7 @@ pub fn subscribe_layer(row: &DownRow, any: &Arc<PubTrack>, spatial: Option<u8>, 
     if let Some(p) = paused {
         let was = row.paused.swap(p, Ordering::AcqRel);
         if was && !p {
-            if let Some(t) = sibling(any, want(row)).or_else(|| Some(any.clone())) {
+            if let Some(t) = sibling(any, fit(want(row), live(any, common::now_ms()))).or_else(|| Some(any.clone())) {
                 crate::rtcp::request_pli(&t, crate::rtcp::PLI_LAYER);
             }
             return;
