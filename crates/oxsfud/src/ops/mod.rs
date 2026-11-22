@@ -57,7 +57,6 @@ pub const DROP_NAMES: &[&str] = &[
     "rtcp_unresolved",
     "rtcp_malformed",
     "pli_throttled",
-    "pli_answered",
     "pli_unbound",
     "nack_audio",
     "rtx_gate",

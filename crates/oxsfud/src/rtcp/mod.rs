@@ -436,8 +436,7 @@ fn pli_tick(w: &Worker, tr: &Transport, t: &PubTrack, now: u64) {
         PliGo::Send => send_rtcp(w, tr, &build_pli(t.ssrc)),
         PliGo::Unbound => crate::ops::drop_count("pli_unbound"),
         PliGo::Throttled => crate::ops::drop_count("pli_throttled"),
-        PliGo::Answered => crate::ops::drop_count("pli_answered"),
-        PliGo::Idle | PliGo::Hold => {}
+        PliGo::Idle | PliGo::Hold | PliGo::Answered => {}
     }
 }
 
