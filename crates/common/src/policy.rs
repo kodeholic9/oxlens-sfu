@@ -154,6 +154,7 @@ pub struct Media {
     pub ingress_remb_max_bps: u32,
     pub pli_throttle_high_ms: u32,
     pub pli_throttle_low_ms: u32,
+    pub pli_reopen_margin_ms: u32,
 }
 impl Default for Media {
     fn default() -> Self {
@@ -166,6 +167,7 @@ impl Default for Media {
             ingress_remb_max_bps: 5_000_000,
             pli_throttle_high_ms: 1_000,
             pli_throttle_low_ms: 500,
+            pli_reopen_margin_ms: 100,
         }
     }
 }
@@ -328,6 +330,9 @@ impl Policy {
         if !(300..=10000).contains(&self.media.pli_throttle_low_ms) {
             return bad(format!("media.pli_throttle_low_ms {} 는 300~10000 밖", self.media.pli_throttle_low_ms));
         }
+        if self.media.pli_reopen_margin_ms > 1000 {
+            return bad(format!("media.pli_reopen_margin_ms {} 는 0~1000 밖", self.media.pli_reopen_margin_ms));
+        }
         if self.floor.queue_max < 1 {
             return bad(format!("floor.queue_max {} 는 1~255 밖", self.floor.queue_max));
         }
@@ -450,6 +455,7 @@ impl Policy {
             ("media.ingress_remb_max_bps".into(), m.ingress_remb_max_bps.to_string()),
             ("media.pli_throttle_high_ms".into(), m.pli_throttle_high_ms.to_string()),
             ("media.pli_throttle_low_ms".into(), m.pli_throttle_low_ms.to_string()),
+            ("media.pli_reopen_margin_ms".into(), m.pli_reopen_margin_ms.to_string()),
         ]
     }
 }
@@ -467,6 +473,10 @@ mod tests {
         assert!(Policy::parse("[media]\ningress_remb_max_bps = 5000001\n").is_err(), "PL-KEY-MEDIA-INGRESS-REMB-MAX-BPS 범위 끝 5,000,000 을 넘으면 기동 실패");
         assert!(Policy::parse("[media]\nmax_bitrate_bps = 800000\n").is_ok(), "PL-KEY-MEDIA-MAX-BITRATE-BPS 인코딩마다의 상한 — 층 합과 안 견준다");
         assert_eq!(Policy::default().media.ingress_remb_max_bps, 5_000_000, "PL-KEY-MEDIA-INGRESS-REMB-MAX-BPS 배포 기본 5,000,000");
+        assert_eq!(Policy::default().media.pli_reopen_margin_ms, 100, "PL-KEY-MEDIA-PLI-REOPEN-MARGIN-MS 배포 기본 100");
+        assert!(Policy::parse("[media]\npli_reopen_margin_ms = 0\n").is_ok(), "PL-KEY-MEDIA-PLI-REOPEN-MARGIN-MS 0 = 엔진 바닥에서 곧바로 · 산다");
+        assert!(Policy::parse("[media]\npli_reopen_margin_ms = 1001\n").is_err(), "PL-KEY-MEDIA-PLI-REOPEN-MARGIN-MS 범위 끝 1,000 을 넘으면 기동 실패");
+        assert!(Policy::parse("[media]\npli_reopen_margin_ms = 1000\n").is_ok(), "PL-KEY-MEDIA-PLI-REOPEN-MARGIN-MS 바닥 + 여유가 창 이상이어도 막지 않는다 — 그 층의 다시 열림만 뜻이 없어진다");
         let p = Policy::parse("[media]\nauto_layer = \"v2\"\n").unwrap();
         assert_eq!(p.media.auto_layer, MediaAutolayer::V2);
     }

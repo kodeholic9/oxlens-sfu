@@ -389,7 +389,13 @@ pub fn held_answered(held_since: Option<u64>, last_key: u64) -> bool {
     held_since.is_some_and(|s| last_key > 0 && last_key >= s)
 }
 
-pub fn pli_decide(p: &mut PliState, want: u16, bound: bool, now: u64, gap: u64, last_key: u64) -> PliGo {
+pub const ENGINE_FLOOR_MS: u64 = 300;
+
+pub fn key_reopens(infra: bool, now: u64, last: u64, last_key: u64, margin: u64) -> bool {
+    infra && last_key > last && now.saturating_sub(last) >= ENGINE_FLOOR_MS + margin
+}
+
+pub fn pli_decide(p: &mut PliState, want: u16, bound: bool, now: u64, gap: u64, last_key: u64, margin: u64) -> PliGo {
     let answered = held_answered(p.held_since, last_key);
     if answered {
         p.held_since = None;
@@ -401,7 +407,8 @@ pub fn pli_decide(p: &mut PliState, want: u16, bound: bool, now: u64, gap: u64, 
         p.held_since = None;
         return PliGo::Unbound;
     }
-    if p.last_ms == 0 || now.saturating_sub(p.last_ms) >= gap {
+    let infra_ask = want & PLI_INFRA != 0 || p.held_since.is_some();
+    if p.last_ms == 0 || now.saturating_sub(p.last_ms) >= gap || key_reopens(infra_ask, now, p.last_ms, last_key, margin) {
         p.last_ms = now;
         p.held_since = None;
         p.sent += 1;
@@ -422,7 +429,8 @@ fn pli_tick(w: &Worker, tr: &Transport, t: &PubTrack, now: u64) {
     }
     let held = p.held_since;
     let last_key = t.last_keyframe_ms.load(Ordering::Acquire);
-    let go = pli_decide(&mut p, want, pli_bound(tr, t), now, throttle_ms(t), last_key);
+    let margin = crate::ops::policy().media.pli_reopen_margin_ms as u64;
+    let go = pli_decide(&mut p, want, pli_bound(tr, t), now, throttle_ms(t), last_key, margin);
     let fresh_hold = go == PliGo::Hold && held.is_none();
     drop(p);
     if matches!(go, PliGo::Send | PliGo::Answered) || fresh_hold {

@@ -496,6 +496,35 @@ fn rtcp_nack_ledger_vectors() {
 }
 
 #[test]
+fn rtcp_pli_decide_vectors() {
+    use oxsfud::r#pub::PliState;
+    use oxsfud::rtcp::{ENGINE_FLOOR_MS, PLI_READY, PLI_USER, pli_decide};
+    let v = load("rtcp.json");
+    let k = &v["pli_constants"];
+    assert_eq!(ENGINE_FLOOR_MS, k["engineFloorMs"].as_u64().unwrap_or(0), "정:IMPL-RTCP-TERMINATE 엔진 바닥 — 원천 FWD.model.EngineFloorMs");
+    let cs = cases(&v, "pli_decide");
+    assert_eq!(common::policy::Policy::default().media.pli_reopen_margin_ms as u64, k["marginMs"].as_u64().unwrap_or(0), "PL-KEY-MEDIA-PLI-REOPEN-MARGIN-MS 원천 FWD.model.ReopenMarginMs = 정책 기본");
+    assert!(cs.len() >= 14, "S-sym-IMPL-RTCP-TERMINATE-11 PLI 판단 판 수");
+    for c in cs {
+        let name = c["name"].as_str().unwrap_or("");
+        let gap = c["gap_ms"].as_u64().unwrap_or(0);
+        let margin = c["margin_ms"].as_u64();
+        assert!(margin.is_some(), "S-sym-IMPL-RTCP-TERMINATE-11 판 {name} 에 margin_ms 가 없다");
+        let margin = margin.unwrap_or(0);
+        let mut p = PliState::default();
+        for (i, s) in c["steps"].as_array().unwrap_or(&vec![]).iter().enumerate() {
+            let w = s["want"].as_str().unwrap_or("-");
+            let want = if w.contains('u') { PLI_USER } else { 0 } | if w.contains('i') { PLI_READY } else { 0 };
+            let go = pli_decide(&mut p, want, s["bound"].as_bool().unwrap_or(true), s["at_ms"].as_u64().unwrap_or(0), gap, s["last_key_ms"].as_u64().unwrap_or(0), margin);
+            assert_eq!(go.name(), s["go"].as_str().unwrap_or(""), "S-sym-IMPL-RTCP-TERMINATE-11 판단 {name} 걸음 {i}");
+            assert_eq!(p.last_ms, s["last_ms"].as_u64().unwrap_or(0), "S-sym-IMPL-RTCP-TERMINATE-12 마지막 PLI {name} 걸음 {i}");
+            assert_eq!(p.held_since, s["held_since"].as_u64(), "S-sym-IMPL-RTCP-TERMINATE-10 미룬 때 {name} 걸음 {i}");
+            assert_eq!(p.sent, s["sent"].as_u64().unwrap_or(0), "S-sym-IMPL-RTCP-TERMINATE-11 넘긴 수 {name} 걸음 {i}");
+        }
+    }
+}
+
+#[test]
 fn rtcp_nack_drain_vectors() {
     use oxsfud::rtcp::nack::*;
     let v = load("rtcp.json");
