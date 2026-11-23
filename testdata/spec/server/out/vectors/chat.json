@@ -1,0 +1,1445 @@
+{
+ "generated": "spec/server/gen/vectors.mts — 손으로 고치지 않는다 · 기대값 = 원천 산수(areas/*/behavior)",
+ "labels": [
+  "정:RULE-CHAT-EXT-SUB"
+ ],
+ "units": {
+  "form": "항목 꼴 all · text · prefix · kind(꼴이 틀리면 null = 기동 실패)",
+  "kind": "메시지 종류(글은 \"\")",
+  "orig": "가리키는 원본의 종류(원본 없음 null · 글 \"\")",
+  "hit": "걸린 갈래 own · orig 와 걸린 항목 차례(subscribe 색인) · 안 걸리면 null"
+ },
+ "ext_items": [
+  {
+   "item": "*",
+   "ok": true,
+   "form": "all"
+  },
+  {
+   "item": "",
+   "ok": true,
+   "form": "text"
+  },
+  {
+   "item": "com.acme.*",
+   "ok": true,
+   "form": "prefix",
+   "prefix": "com.acme."
+  },
+  {
+   "item": "talk",
+   "ok": true,
+   "form": "kind",
+   "kind": "talk"
+  },
+  {
+   "item": "x.*",
+   "ok": true,
+   "form": "prefix",
+   "prefix": "x."
+  },
+  {
+   "item": ".*",
+   "ok": false,
+   "form": null
+  },
+  {
+   "item": "*.x",
+   "ok": false,
+   "form": null
+  },
+  {
+   "item": "a*b",
+   "ok": false,
+   "form": null
+  },
+  {
+   "item": "com.*.x.*",
+   "ok": false,
+   "form": null
+  },
+  {
+   "item": "**",
+   "ok": false,
+   "form": null
+  },
+  {
+   "item": "a.b.c.*",
+   "ok": true,
+   "form": "prefix",
+   "prefix": "a.b.c."
+  },
+  {
+   "item": "edit",
+   "ok": true,
+   "form": "kind",
+   "kind": "edit"
+  }
+ ],
+ "ext_match": [
+  {
+   "name": "글 구독 — 글",
+   "subscribe": [
+    ""
+   ],
+   "kind": "",
+   "orig": null,
+   "follows": false,
+   "hit": {
+    "by": "own",
+    "item": 0
+   }
+  },
+  {
+   "name": "글 구독 — 발언 기록은 안 걸림",
+   "subscribe": [
+    ""
+   ],
+   "kind": "talk",
+   "orig": null,
+   "follows": false,
+   "hit": null
+  },
+  {
+   "name": "모든 종류 — 멤버 변경",
+   "subscribe": [
+    "*"
+   ],
+   "kind": "join",
+   "orig": null,
+   "follows": false,
+   "hit": {
+    "by": "own",
+    "item": 0
+   }
+  },
+  {
+   "name": "모든 종류 — 글",
+   "subscribe": [
+    "*"
+   ],
+   "kind": "",
+   "orig": null,
+   "follows": false,
+   "hit": {
+    "by": "own",
+    "item": 0
+   }
+  },
+  {
+   "name": "접두 — 걸림",
+   "subscribe": [
+    "com.acme.*"
+   ],
+   "kind": "com.acme.vote",
+   "orig": null,
+   "follows": false,
+   "hit": {
+    "by": "own",
+    "item": 0
+   }
+  },
+  {
+   "name": "접두 — 점 경계 밖은 안 걸림",
+   "subscribe": [
+    "com.acme.*"
+   ],
+   "kind": "com.acmex",
+   "orig": null,
+   "follows": false,
+   "hit": null
+  },
+  {
+   "name": "접두 — 접두 자체는 안 걸림",
+   "subscribe": [
+    "com.acme.*"
+   ],
+   "kind": "com.acme",
+   "orig": null,
+   "follows": false,
+   "hit": null
+  },
+  {
+   "name": "종류 하나 — 같음",
+   "subscribe": [
+    "talk"
+   ],
+   "kind": "talk",
+   "orig": null,
+   "follows": false,
+   "hit": {
+    "by": "own",
+    "item": 0
+   }
+  },
+  {
+   "name": "종류 하나 — 다름",
+   "subscribe": [
+    "talk"
+   ],
+   "kind": "talk_update",
+   "orig": null,
+   "follows": true,
+   "hit": null
+  },
+  {
+   "name": "고침 — 글 구독이면 원본 따라 걸림",
+   "subscribe": [
+    ""
+   ],
+   "kind": "edit",
+   "orig": "",
+   "follows": true,
+   "hit": {
+    "by": "orig",
+    "item": 0
+   }
+  },
+  {
+   "name": "지움 — 글 구독이면 원본 따라 걸림",
+   "subscribe": [
+    ""
+   ],
+   "kind": "delete",
+   "orig": "",
+   "follows": true,
+   "hit": {
+    "by": "orig",
+    "item": 0
+   }
+  },
+  {
+   "name": "반응 — 원본을 따라 걸지 않음",
+   "subscribe": [
+    ""
+   ],
+   "kind": "react",
+   "orig": "",
+   "follows": false,
+   "hit": null
+  },
+  {
+   "name": "답장(글)은 자기 종류로 걸림",
+   "subscribe": [
+    ""
+   ],
+   "kind": "",
+   "orig": "",
+   "follows": false,
+   "hit": {
+    "by": "own",
+    "item": 0
+   }
+  },
+  {
+   "name": "발언 기록 갱신 — talk 구독이면 원본 따라 걸림",
+   "subscribe": [
+    "talk"
+   ],
+   "kind": "talk_update",
+   "orig": "talk",
+   "follows": true,
+   "hit": {
+    "by": "orig",
+    "item": 0
+   }
+  },
+  {
+   "name": "발언 기록 갱신 — 글 구독이면 안 걸림",
+   "subscribe": [
+    ""
+   ],
+   "kind": "talk_update",
+   "orig": "talk",
+   "follows": true,
+   "hit": null
+  },
+  {
+   "name": "고침 — 자기 종류가 먼저(edit 항목 · 글 항목 둘)",
+   "subscribe": [
+    "",
+    "edit"
+   ],
+   "kind": "edit",
+   "orig": "",
+   "follows": true,
+   "hit": {
+    "by": "own",
+    "item": 1
+   }
+  },
+  {
+   "name": "고침 — 원본이 없으면(null) 원본 갈래 없음",
+   "subscribe": [
+    ""
+   ],
+   "kind": "edit",
+   "orig": null,
+   "follows": true,
+   "hit": null
+  },
+  {
+   "name": "항목은 적은 차례로 처음 걸린 것",
+   "subscribe": [
+    "com.acme.*",
+    "*"
+   ],
+   "kind": "com.acme.vote",
+   "orig": null,
+   "follows": false,
+   "hit": {
+    "by": "own",
+    "item": 0
+   }
+  },
+  {
+   "name": "꼴이 틀린 항목은 걸지 않음",
+   "subscribe": [
+    "a*b",
+    "talk"
+   ],
+   "kind": "talk",
+   "orig": null,
+   "follows": false,
+   "hit": {
+    "by": "own",
+    "item": 1
+   }
+  },
+  {
+   "name": "빈 구독 — 안 걸림",
+   "subscribe": [],
+   "kind": "",
+   "orig": null,
+   "follows": false,
+   "hit": null
+  }
+ ],
+ "ext_ring": [
+  {
+   "n": 0,
+   "c": 0,
+   "order": []
+  },
+  {
+   "n": 1,
+   "c": 5,
+   "order": [
+    0
+   ]
+  },
+  {
+   "n": 3,
+   "c": 0,
+   "order": [
+    0,
+    1,
+    2
+   ]
+  },
+  {
+   "n": 3,
+   "c": 1,
+   "order": [
+    1,
+    2,
+    0
+   ]
+  },
+  {
+   "n": 3,
+   "c": 4,
+   "order": [
+    1,
+    2,
+    0
+   ]
+  },
+  {
+   "n": 4,
+   "c": 7,
+   "order": [
+    3,
+    0,
+    1,
+    2
+   ]
+  }
+ ],
+ "ext_outbox": [
+  {
+   "name": "창 안이면 바로 꺼낸다 · ACK 로 칸이 빈다",
+   "knobs": {
+    "window": 2,
+    "cap": 1000,
+    "live_max": 300,
+    "close_at": 3
+   },
+   "steps": [
+    {
+     "step": [
+      "offer",
+      true,
+      [
+       "a"
+      ],
+      100
+     ],
+     "got": "queued",
+     "inflight": 0,
+     "queued": 100,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "take"
+     ],
+     "got": {
+      "live": true,
+      "ids": [
+       "a"
+      ],
+      "bytes": 100
+     },
+     "inflight": 1,
+     "queued": 0,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "offer",
+      true,
+      [
+       "b"
+      ],
+      100
+     ],
+     "got": "queued",
+     "inflight": 1,
+     "queued": 100,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "take"
+     ],
+     "got": {
+      "live": true,
+      "ids": [
+       "b"
+      ],
+      "bytes": 100
+     },
+     "inflight": 2,
+     "queued": 0,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "offer",
+      true,
+      [
+       "c"
+      ],
+      100
+     ],
+     "got": "queued",
+     "inflight": 2,
+     "queued": 100,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "take"
+     ],
+     "got": null,
+     "inflight": 2,
+     "queued": 100,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "done",
+      "ack"
+     ],
+     "got": "none",
+     "inflight": 1,
+     "queued": 100,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "take"
+     ],
+     "got": {
+      "live": true,
+      "ids": [
+       "c"
+      ],
+      "bytes": 100
+     },
+     "inflight": 2,
+     "queued": 0,
+     "backlog": false,
+     "streak": 0
+    }
+   ]
+  },
+  {
+   "name": "창이 차면 줄 끝 실시간 묶음에 합친다 · 상한을 넘으면 새 묶음",
+   "knobs": {
+    "window": 1,
+    "cap": 1000,
+    "live_max": 250,
+    "close_at": 3
+   },
+   "steps": [
+    {
+     "step": [
+      "offer",
+      true,
+      [
+       "a"
+      ],
+      100
+     ],
+     "got": "queued",
+     "inflight": 0,
+     "queued": 100,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "take"
+     ],
+     "got": {
+      "live": true,
+      "ids": [
+       "a"
+      ],
+      "bytes": 100
+     },
+     "inflight": 1,
+     "queued": 0,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "offer",
+      true,
+      [
+       "b"
+      ],
+      100
+     ],
+     "got": "queued",
+     "inflight": 1,
+     "queued": 100,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "offer",
+      true,
+      [
+       "c"
+      ],
+      100
+     ],
+     "got": "merged",
+     "inflight": 1,
+     "queued": 200,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "offer",
+      true,
+      [
+       "d"
+      ],
+      100
+     ],
+     "got": "queued",
+     "inflight": 1,
+     "queued": 300,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "done",
+      "ack"
+     ],
+     "got": "none",
+     "inflight": 0,
+     "queued": 300,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "take"
+     ],
+     "got": {
+      "live": true,
+      "ids": [
+       "b",
+       "c"
+      ],
+      "bytes": 200
+     },
+     "inflight": 1,
+     "queued": 100,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "take"
+     ],
+     "got": null,
+     "inflight": 1,
+     "queued": 100,
+     "backlog": false,
+     "streak": 0
+    }
+   ]
+  },
+  {
+   "name": "밀린 몫(live:false)에는 합치지 않는다",
+   "knobs": {
+    "window": 1,
+    "cap": 1000,
+    "live_max": 1000,
+    "close_at": 3
+   },
+   "steps": [
+    {
+     "step": [
+      "offer",
+      true,
+      [
+       "a"
+      ],
+      10
+     ],
+     "got": "queued",
+     "inflight": 0,
+     "queued": 10,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "take"
+     ],
+     "got": {
+      "live": true,
+      "ids": [
+       "a"
+      ],
+      "bytes": 10
+     },
+     "inflight": 1,
+     "queued": 0,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "offer",
+      false,
+      [
+       "b"
+      ],
+      10
+     ],
+     "got": "queued",
+     "inflight": 1,
+     "queued": 10,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "offer",
+      true,
+      [
+       "c"
+      ],
+      10
+     ],
+     "got": "queued",
+     "inflight": 1,
+     "queued": 20,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "offer",
+      false,
+      [
+       "d"
+      ],
+      10
+     ],
+     "got": "queued",
+     "inflight": 1,
+     "queued": 30,
+     "backlog": false,
+     "streak": 0
+    }
+   ]
+  },
+  {
+   "name": "줄 상한을 넘게 되면 밀림 · 그 뒤는 밀림 거절 · 창이 비고 줄이 상한 아래면 풀림",
+   "knobs": {
+    "window": 1,
+    "cap": 250,
+    "live_max": 1000,
+    "close_at": 3
+   },
+   "steps": [
+    {
+     "step": [
+      "offer",
+      false,
+      [
+       "a"
+      ],
+      100
+     ],
+     "got": "queued",
+     "inflight": 0,
+     "queued": 100,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "take"
+     ],
+     "got": {
+      "live": false,
+      "ids": [
+       "a"
+      ],
+      "bytes": 100
+     },
+     "inflight": 1,
+     "queued": 0,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "offer",
+      false,
+      [
+       "b"
+      ],
+      100
+     ],
+     "got": "queued",
+     "inflight": 1,
+     "queued": 100,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "offer",
+      false,
+      [
+       "c"
+      ],
+      100
+     ],
+     "got": "queued",
+     "inflight": 1,
+     "queued": 200,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "offer",
+      false,
+      [
+       "d"
+      ],
+      100
+     ],
+     "got": "refused_full",
+     "inflight": 1,
+     "queued": 200,
+     "backlog": true,
+     "streak": 0
+    },
+    {
+     "step": [
+      "offer",
+      true,
+      [
+       "e"
+      ],
+      10
+     ],
+     "got": "refused_backlog",
+     "inflight": 1,
+     "queued": 200,
+     "backlog": true,
+     "streak": 0
+    },
+    {
+     "step": [
+      "done",
+      "ack"
+     ],
+     "got": "released",
+     "inflight": 0,
+     "queued": 200,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "take"
+     ],
+     "got": {
+      "live": false,
+      "ids": [
+       "b"
+      ],
+      "bytes": 100
+     },
+     "inflight": 1,
+     "queued": 100,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "done",
+      "ack"
+     ],
+     "got": "none",
+     "inflight": 0,
+     "queued": 100,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "take"
+     ],
+     "got": {
+      "live": false,
+      "ids": [
+       "c"
+      ],
+      "bytes": 100
+     },
+     "inflight": 1,
+     "queued": 0,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "done",
+      "ack"
+     ],
+     "got": "none",
+     "inflight": 0,
+     "queued": 0,
+     "backlog": false,
+     "streak": 0
+    }
+   ]
+  },
+  {
+   "name": "시간 넘김 — 칸을 비우고 밀림 · 잇단 수 · ACK 하나가 0 으로",
+   "knobs": {
+    "window": 2,
+    "cap": 1000,
+    "live_max": 300,
+    "close_at": 3
+   },
+   "steps": [
+    {
+     "step": [
+      "offer",
+      true,
+      [
+       "a"
+      ],
+      10
+     ],
+     "got": "queued",
+     "inflight": 0,
+     "queued": 10,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "take"
+     ],
+     "got": {
+      "live": true,
+      "ids": [
+       "a"
+      ],
+      "bytes": 10
+     },
+     "inflight": 1,
+     "queued": 0,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "offer",
+      false,
+      [
+       "b"
+      ],
+      10
+     ],
+     "got": "queued",
+     "inflight": 1,
+     "queued": 10,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "take"
+     ],
+     "got": {
+      "live": false,
+      "ids": [
+       "b"
+      ],
+      "bytes": 10
+     },
+     "inflight": 2,
+     "queued": 0,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "done",
+      "timeout"
+     ],
+     "got": "none",
+     "inflight": 1,
+     "queued": 0,
+     "backlog": true,
+     "streak": 1
+    },
+    {
+     "step": [
+      "offer",
+      true,
+      [
+       "c"
+      ],
+      10
+     ],
+     "got": "refused_backlog",
+     "inflight": 1,
+     "queued": 0,
+     "backlog": true,
+     "streak": 1
+    },
+    {
+     "step": [
+      "done",
+      "ack"
+     ],
+     "got": "released",
+     "inflight": 0,
+     "queued": 0,
+     "backlog": false,
+     "streak": 0
+    }
+   ]
+  },
+  {
+   "name": "잇단 시간 넘김이 닫는 수에 닿으면 닫기",
+   "knobs": {
+    "window": 1,
+    "cap": 1000,
+    "live_max": 300,
+    "close_at": 2
+   },
+   "steps": [
+    {
+     "step": [
+      "offer",
+      true,
+      [
+       "a"
+      ],
+      10
+     ],
+     "got": "queued",
+     "inflight": 0,
+     "queued": 10,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "take"
+     ],
+     "got": {
+      "live": true,
+      "ids": [
+       "a"
+      ],
+      "bytes": 10
+     },
+     "inflight": 1,
+     "queued": 0,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "done",
+      "timeout"
+     ],
+     "got": "released",
+     "inflight": 0,
+     "queued": 0,
+     "backlog": false,
+     "streak": 1
+    },
+    {
+     "step": [
+      "take"
+     ],
+     "got": null,
+     "inflight": 0,
+     "queued": 0,
+     "backlog": false,
+     "streak": 1
+    },
+    {
+     "step": [
+      "done",
+      "fail"
+     ],
+     "got": "none",
+     "inflight": 0,
+     "queued": 0,
+     "backlog": false,
+     "streak": 1
+    },
+    {
+     "step": [
+      "take"
+     ],
+     "got": null,
+     "inflight": 0,
+     "queued": 0,
+     "backlog": false,
+     "streak": 1
+    },
+    {
+     "step": [
+      "done",
+      "timeout"
+     ],
+     "got": "close",
+     "inflight": 0,
+     "queued": 0,
+     "backlog": true,
+     "streak": 2
+    }
+   ]
+  },
+  {
+   "name": "ACK 아님(거절 · 답 없음)은 잇단 시간 넘김을 바꾸지 않는다",
+   "knobs": {
+    "window": 1,
+    "cap": 1000,
+    "live_max": 300,
+    "close_at": 3
+   },
+   "steps": [
+    {
+     "step": [
+      "offer",
+      true,
+      [
+       "a"
+      ],
+      10
+     ],
+     "got": "queued",
+     "inflight": 0,
+     "queued": 10,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "take"
+     ],
+     "got": {
+      "live": true,
+      "ids": [
+       "a"
+      ],
+      "bytes": 10
+     },
+     "inflight": 1,
+     "queued": 0,
+     "backlog": false,
+     "streak": 0
+    },
+    {
+     "step": [
+      "done",
+      "timeout"
+     ],
+     "got": "released",
+     "inflight": 0,
+     "queued": 0,
+     "backlog": false,
+     "streak": 1
+    },
+    {
+     "step": [
+      "done",
+      "fail"
+     ],
+     "got": "none",
+     "inflight": 0,
+     "queued": 0,
+     "backlog": false,
+     "streak": 1
+    },
+    {
+     "step": [
+      "offer",
+      true,
+      [
+       "b"
+      ],
+      10
+     ],
+     "got": "queued",
+     "inflight": 0,
+     "queued": 10,
+     "backlog": false,
+     "streak": 1
+    }
+   ]
+  }
+ ],
+ "ext_drain_pick": [
+  {
+   "name": "빈 줄",
+   "rows": [],
+   "max_msgs": 100,
+   "max_bytes": 1000,
+   "pick": []
+  },
+  {
+   "name": "건수 상한",
+   "rows": [
+    {
+     "id": "a",
+     "bytes": 1,
+     "tries": 0
+    },
+    {
+     "id": "b",
+     "bytes": 1,
+     "tries": 0
+    },
+    {
+     "id": "c",
+     "bytes": 1,
+     "tries": 0
+    }
+   ],
+   "max_msgs": 2,
+   "max_bytes": 1000,
+   "pick": [
+    "a",
+    "b"
+   ]
+  },
+  {
+   "name": "바이트 상한",
+   "rows": [
+    {
+     "id": "a",
+     "bytes": 400,
+     "tries": 0
+    },
+    {
+     "id": "b",
+     "bytes": 400,
+     "tries": 0
+    },
+    {
+     "id": "c",
+     "bytes": 400,
+     "tries": 0
+    }
+   ],
+   "max_msgs": 100,
+   "max_bytes": 1000,
+   "pick": [
+    "a",
+    "b"
+   ]
+  },
+  {
+   "name": "첫 행은 커도 혼자 간다",
+   "rows": [
+    {
+     "id": "a",
+     "bytes": 5000,
+     "tries": 0
+    },
+    {
+     "id": "b",
+     "bytes": 1,
+     "tries": 0
+    }
+   ],
+   "max_msgs": 100,
+   "max_bytes": 1000,
+   "pick": [
+    "a"
+   ]
+  },
+  {
+   "name": "첫 행이 시도된 행이면 그 한 건",
+   "rows": [
+    {
+     "id": "a",
+     "bytes": 1,
+     "tries": 2
+    },
+    {
+     "id": "b",
+     "bytes": 1,
+     "tries": 0
+    }
+   ],
+   "max_msgs": 100,
+   "max_bytes": 1000,
+   "pick": [
+    "a"
+   ]
+  },
+  {
+   "name": "시도된 행을 만나면 그 앞까지",
+   "rows": [
+    {
+     "id": "a",
+     "bytes": 1,
+     "tries": 0
+    },
+    {
+     "id": "b",
+     "bytes": 1,
+     "tries": 0
+    },
+    {
+     "id": "c",
+     "bytes": 1,
+     "tries": 1
+    },
+    {
+     "id": "d",
+     "bytes": 1,
+     "tries": 0
+    }
+   ],
+   "max_msgs": 100,
+   "max_bytes": 1000,
+   "pick": [
+    "a",
+    "b"
+   ]
+  }
+ ],
+ "ext_drain_due": [
+  {
+   "name": "주인이 아니면 안 함",
+   "owner": false,
+   "was_owner": true,
+   "released": true,
+   "now": 100000,
+   "last_sweep": 0,
+   "sweep_ms": 30000,
+   "due": {
+    "mode": "none"
+   }
+  },
+  {
+   "name": "막 주인이 됨 — 전부",
+   "owner": true,
+   "was_owner": false,
+   "released": false,
+   "now": 1000,
+   "last_sweep": 900,
+   "sweep_ms": 30000,
+   "due": {
+    "mode": "all"
+   }
+  },
+  {
+   "name": "밀림이 풀림 — 전부",
+   "owner": true,
+   "was_owner": true,
+   "released": true,
+   "now": 1000,
+   "last_sweep": 900,
+   "sweep_ms": 30000,
+   "due": {
+    "mode": "all"
+   }
+  },
+  {
+   "name": "훑기 주기가 지남 — 주기보다 오래된 행만",
+   "owner": true,
+   "was_owner": true,
+   "released": false,
+   "now": 100000,
+   "last_sweep": 60000,
+   "sweep_ms": 30000,
+   "due": {
+    "mode": "older",
+    "before": 70000
+   }
+  },
+  {
+   "name": "주기 안 — 안 함",
+   "owner": true,
+   "was_owner": true,
+   "released": false,
+   "now": 100000,
+   "last_sweep": 80000,
+   "sweep_ms": 30000,
+   "due": {
+    "mode": "none"
+   }
+  }
+ ],
+ "ext_drain_owner": [
+  {
+   "name": "목록이 비면 없음",
+   "conns": [],
+   "owner": null
+  },
+  {
+   "name": "하나면 그것",
+   "conns": [
+    [
+     "node-b",
+     "019a8f000400ab12cd341"
+    ]
+   ],
+   "owner": 0
+  },
+  {
+   "name": "가장 오래 붙은 연결 — node 차례와 무관",
+   "conns": [
+    [
+     "node-a",
+     "019a8f000400aaaaaaaa1"
+    ],
+    [
+     "node-b",
+     "019a8f000000bbbbbbbb1"
+    ]
+   ],
+   "owner": 1
+  },
+  {
+   "name": "★다시 붙은 연결은 주인이 아니다 — 닫혔다 곧바로 다시 붙은 node-a 는 맨 뒤",
+   "conns": [
+    [
+     "node-a",
+     "019a8f0007d0aaaaaaaa3"
+    ],
+    [
+     "node-b",
+     "019a8f000400bbbbbbbb1"
+    ],
+    [
+     "node-c",
+     "019a8f000400cccccccc1"
+    ]
+   ],
+   "owner": 1
+  },
+  {
+   "name": "같은 시각이면 node 로 가린다",
+   "conns": [
+    [
+     "node-c",
+     "019a8f000000cccccccc1"
+    ],
+    [
+     "node-a",
+     "019a8f000000aaaaaaaa9"
+    ]
+   ],
+   "owner": 1
+  },
+  {
+   "name": "같은 시각 · 같은 node 면 cid 로",
+   "conns": [
+    [
+     "node-a",
+     "019a8f000000aaaaaaaa2"
+    ],
+    [
+     "node-a",
+     "019a8f000000aaaaaaaa1"
+    ]
+   ],
+   "owner": 1
+  },
+  {
+   "name": "앞 12 자리를 못 읽는 cid 는 맨 뒤",
+   "conns": [
+    [
+     "node-a",
+     "e1a"
+    ],
+    [
+     "node-b",
+     "019a8f0007d0bbbbbbbb1"
+    ]
+   ],
+   "owner": 1
+  }
+ ]
+}

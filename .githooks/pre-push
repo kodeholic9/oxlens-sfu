@@ -4,6 +4,10 @@
 # ★막지 않고 알린다(20261106 부장님 「좀 느슨하게 둬」) — wire 변경은 층별로 서버 · 봇이 먼저 나가고 SDK 가 뒤따르므로 막으면 서로 기다린다
 top=$(git rev-parse --show-toplevel)
 rec="$top/../oxlens-sdk-web/.archive/gate-live/latest.json"
+sync="$top/../../context/spec/tools/server_sync.py"
+if [ -f "$sync" ]; then
+  python3 "$sync" --check "$top" || { echo "✗ push 막음 — testdata/spec 이 규격 산출과 어긋난다(context/spec 에서 npm run sync:server)"; exit 1; }
+fi
 zero=0000000000000000000000000000000000000000
 need=0
 while read lref lsha rref rsha; do

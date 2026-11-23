@@ -1,0 +1,8664 @@
+{
+ "generated": "spec/server/gen/vectors.mts — 손으로 고치지 않는다 · 기대값 = 원천 산수(areas/*/behavior)",
+ "labels": [
+  "정:IMPL-FWD-SOURCE-SWITCH",
+  "정:IMPL-SUB-SUBSCRIBER-TABLE",
+  "정:PROP-FWD-SWITCH-SEQ-CONTIGUOUS",
+  "정:PROP-FWD-SWITCH-TS-FORWARD"
+ ],
+ "units": {
+  "seq": "u16",
+  "ts": "u32",
+  "at_ms": "서버 시계 ms",
+  "clock": "Hz"
+ },
+ "rewrite": [
+  {
+   "name": "opus — 처음 실음 · seq · ts 감김을 지난다",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 65530,
+     "ts": 4294967196,
+     "at_ms": 1000,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 65530,
+     "out_ts": 4294967196
+    },
+    {
+     "src": 1,
+     "seq": 65531,
+     "ts": 860,
+     "at_ms": 1020,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 65531,
+     "out_ts": 860
+    },
+    {
+     "src": 1,
+     "seq": 65532,
+     "ts": 1820,
+     "at_ms": 1040,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 65532,
+     "out_ts": 1820
+    },
+    {
+     "src": 1,
+     "seq": 65533,
+     "ts": 2780,
+     "at_ms": 1060,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 65533,
+     "out_ts": 2780
+    },
+    {
+     "src": 1,
+     "seq": 65534,
+     "ts": 3740,
+     "at_ms": 1080,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 65534,
+     "out_ts": 3740
+    },
+    {
+     "src": 1,
+     "seq": 65535,
+     "ts": 4700,
+     "at_ms": 1100,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 65535,
+     "out_ts": 4700
+    },
+    {
+     "src": 1,
+     "seq": 0,
+     "ts": 5660,
+     "at_ms": 1120,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 0,
+     "out_ts": 5660
+    },
+    {
+     "src": 1,
+     "seq": 1,
+     "ts": 6620,
+     "at_ms": 1140,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 1,
+     "out_ts": 6620
+    },
+    {
+     "src": 1,
+     "seq": 2,
+     "ts": 7580,
+     "at_ms": 1160,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 2,
+     "out_ts": 7580
+    },
+    {
+     "src": 1,
+     "seq": 3,
+     "ts": 8540,
+     "at_ms": 1180,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 3,
+     "out_ts": 8540
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 65531,
+     "in_seq": 65531
+    },
+    {
+     "out_seq": 65535,
+     "in_seq": 65535
+    },
+    {
+     "out_seq": 0,
+     "in_seq": 0
+    },
+    {
+     "out_seq": 3,
+     "in_seq": 3
+    }
+   ]
+  },
+  {
+   "name": "opus — 출처 전환 · 경과 40ms → 틱 1920",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 100,
+     "ts": 5000,
+     "at_ms": 1000,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 100,
+     "out_ts": 5000
+    },
+    {
+     "src": 1,
+     "seq": 101,
+     "ts": 5960,
+     "at_ms": 1020,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 101,
+     "out_ts": 5960
+    },
+    {
+     "src": 2,
+     "seq": 9000,
+     "ts": 777000,
+     "at_ms": 1060,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 102,
+     "out_ts": 7880
+    },
+    {
+     "src": 2,
+     "seq": 9001,
+     "ts": 777960,
+     "at_ms": 1080,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 103,
+     "out_ts": 8840
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 100,
+     "in_seq": null
+    },
+    {
+     "out_seq": 101,
+     "in_seq": null
+    },
+    {
+     "out_seq": 102,
+     "in_seq": 9000
+    },
+    {
+     "out_seq": 103,
+     "in_seq": 9001
+    }
+   ]
+  },
+  {
+   "name": "opus — 출처 전환 · 경과 0 → 틱 = 앞 패킷이 덮는 길이 960(경과 하한 1ms 의 48 보다 크다)",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 10,
+     "ts": 1000,
+     "at_ms": 2000,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 10,
+     "out_ts": 1000
+    },
+    {
+     "src": 2,
+     "seq": 50,
+     "ts": 90000,
+     "at_ms": 2000,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 11,
+     "out_ts": 1960
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 10,
+     "in_seq": null
+    },
+    {
+     "out_seq": 11,
+     "in_seq": 50
+    }
+   ]
+  },
+  {
+   "name": "opus — 예열 CN 20ms 뒤 5ms 에 첫 음성 → 틱 960(앞 프레임 안으로 겹치지 않는다 · 실측 20261027 버림 자리)",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 0,
+     "ts": 0,
+     "at_ms": 0,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 0,
+     "out_ts": 0
+    },
+    {
+     "src": 1,
+     "seq": 1,
+     "ts": 960,
+     "at_ms": 20,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 1,
+     "out_ts": 960
+    },
+    {
+     "src": 1,
+     "seq": 2,
+     "ts": 1920,
+     "at_ms": 40,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 2,
+     "out_ts": 1920
+    },
+    {
+     "src": 2,
+     "seq": 7000,
+     "ts": 300000,
+     "at_ms": 45,
+     "payload": "fc01",
+     "covers": 960,
+     "out_seq": 3,
+     "out_ts": 2880
+    },
+    {
+     "src": 2,
+     "seq": 7001,
+     "ts": 300960,
+     "at_ms": 65,
+     "payload": "fc02",
+     "covers": 960,
+     "out_seq": 4,
+     "out_ts": 3840
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 2,
+     "in_seq": null
+    },
+    {
+     "out_seq": 3,
+     "in_seq": 7000
+    }
+   ]
+  },
+  {
+   "name": "opus — 음성 뒤 7ms 에 해제 침묵 → 틱 960",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 400,
+     "ts": 8000,
+     "at_ms": 100,
+     "payload": "fc09",
+     "covers": 960,
+     "out_seq": 400,
+     "out_ts": 8000
+    },
+    {
+     "src": 1,
+     "seq": 401,
+     "ts": 8960,
+     "at_ms": 120,
+     "payload": "fc09",
+     "covers": 960,
+     "out_seq": 401,
+     "out_ts": 8960
+    },
+    {
+     "src": 2,
+     "seq": 0,
+     "ts": 0,
+     "at_ms": 127,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 402,
+     "out_ts": 9920
+    },
+    {
+     "src": 2,
+     "seq": 1,
+     "ts": 960,
+     "at_ms": 147,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 403,
+     "out_ts": 10880
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 401,
+     "in_seq": null
+    },
+    {
+     "out_seq": 402,
+     "in_seq": 0
+    }
+   ]
+  },
+  {
+   "name": "opus — 앞 패킷 SILK 40ms(config 2 · code 0) · 경과 10ms → 틱 1920",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 1,
+     "ts": 100,
+     "at_ms": 0,
+     "payload": "1000",
+     "covers": 1920,
+     "out_seq": 1,
+     "out_ts": 100
+    },
+    {
+     "src": 2,
+     "seq": 9,
+     "ts": 5000,
+     "at_ms": 10,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 2,
+     "out_ts": 2020
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 1,
+     "in_seq": null
+    },
+    {
+     "out_seq": 2,
+     "in_seq": 9
+    }
+   ]
+  },
+  {
+   "name": "opus — 앞 패킷 CELT 20ms 두 프레임(code 1) · 경과 30ms → 틱 1920",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 1,
+     "ts": 100,
+     "at_ms": 0,
+     "payload": "f900",
+     "covers": 1920,
+     "out_seq": 1,
+     "out_ts": 100
+    },
+    {
+     "src": 2,
+     "seq": 9,
+     "ts": 5000,
+     "at_ms": 30,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 2,
+     "out_ts": 2020
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 1,
+     "in_seq": null
+    },
+    {
+     "out_seq": 2,
+     "in_seq": 9
+    }
+   ]
+  },
+  {
+   "name": "opus — 앞 패킷 code 3 세 프레임(둘째 바이트 0x03) 60ms · 경과 30ms → 틱 2880",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 1,
+     "ts": 100,
+     "at_ms": 0,
+     "payload": "fb03",
+     "covers": 2880,
+     "out_seq": 1,
+     "out_ts": 100
+    },
+    {
+     "src": 2,
+     "seq": 9,
+     "ts": 5000,
+     "at_ms": 30,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 2,
+     "out_ts": 2980
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 1,
+     "in_seq": null
+    },
+    {
+     "out_seq": 2,
+     "in_seq": 9
+    }
+   ]
+  },
+  {
+   "name": "opus — 앞 패킷 CELT 10ms(config 30) · 경과 3ms → 틱 480",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 1,
+     "ts": 100,
+     "at_ms": 0,
+     "payload": "f0",
+     "covers": 480,
+     "out_seq": 1,
+     "out_ts": 100
+    },
+    {
+     "src": 2,
+     "seq": 9,
+     "ts": 5000,
+     "at_ms": 3,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 2,
+     "out_ts": 580
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 1,
+     "in_seq": null
+    },
+    {
+     "out_seq": 2,
+     "in_seq": 9
+    }
+   ]
+  },
+  {
+   "name": "opus — 앞 패킷 CELT 2.5ms(config 28) · 경과 1ms → 틱 120",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 1,
+     "ts": 100,
+     "at_ms": 0,
+     "payload": "e0",
+     "covers": 120,
+     "out_seq": 1,
+     "out_ts": 100
+    },
+    {
+     "src": 2,
+     "seq": 9,
+     "ts": 5000,
+     "at_ms": 1,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 2,
+     "out_ts": 220
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 1,
+     "in_seq": null
+    },
+    {
+     "out_seq": 2,
+     "in_seq": 9
+    }
+   ]
+  },
+  {
+   "name": "opus — 앞 패킷 Hybrid 10ms(config 14) · 경과 2ms → 틱 480",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 1,
+     "ts": 100,
+     "at_ms": 0,
+     "payload": "70",
+     "covers": 480,
+     "out_seq": 1,
+     "out_ts": 100
+    },
+    {
+     "src": 2,
+     "seq": 9,
+     "ts": 5000,
+     "at_ms": 2,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 2,
+     "out_ts": 580
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 1,
+     "in_seq": null
+    },
+    {
+     "out_seq": 2,
+     "in_seq": 9
+    }
+   ]
+  },
+  {
+   "name": "opus — 앞 패킷 페이로드 없음 → 하한 1 · 경과 2ms → 틱 96",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 1,
+     "ts": 100,
+     "at_ms": 0,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 1,
+     "out_ts": 100
+    },
+    {
+     "src": 2,
+     "seq": 9,
+     "ts": 5000,
+     "at_ms": 2,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 2,
+     "out_ts": 196
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 1,
+     "in_seq": null
+    },
+    {
+     "out_seq": 2,
+     "in_seq": 9
+    }
+   ]
+  },
+  {
+   "name": "opus — 앞 패킷 code 3 인데 둘째 바이트 없음 → 하한 1 · 경과 2ms → 틱 96",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 1,
+     "ts": 100,
+     "at_ms": 0,
+     "payload": "fb",
+     "covers": 1,
+     "out_seq": 1,
+     "out_ts": 100
+    },
+    {
+     "src": 2,
+     "seq": 9,
+     "ts": 5000,
+     "at_ms": 2,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 2,
+     "out_ts": 196
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 1,
+     "in_seq": null
+    },
+    {
+     "out_seq": 2,
+     "in_seq": 9
+    }
+   ]
+  },
+  {
+   "name": "opus — 늦게 온 패킷의 덮는 길이는 「마지막」을 안 바꾼다 · 그 뒤 전환",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 200,
+     "ts": 0,
+     "at_ms": 0,
+     "payload": "18",
+     "covers": 2880,
+     "out_seq": 200,
+     "out_ts": 0
+    },
+    {
+     "src": 1,
+     "seq": 202,
+     "ts": 5760,
+     "at_ms": 120,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 202,
+     "out_ts": 5760
+    },
+    {
+     "src": 1,
+     "seq": 201,
+     "ts": 2880,
+     "at_ms": 121,
+     "payload": "18",
+     "covers": 2880,
+     "out_seq": 201,
+     "out_ts": 2880
+    },
+    {
+     "src": 2,
+     "seq": 1,
+     "ts": 50000,
+     "at_ms": 125,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 203,
+     "out_ts": 6720
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 202,
+     "in_seq": null
+    },
+    {
+     "out_seq": 203,
+     "in_seq": 1
+    }
+   ]
+  },
+  {
+   "name": "opus — 13시간 쉼 뒤 전환 → 틱 = 경과 × 48 mod 2³²(상한 없음 — serial 로 뒤가 되는 차를 그대로 · 실측 20261027 NetEQ 버림 0)",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 100,
+     "ts": 1000,
+     "at_ms": 0,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 100,
+     "out_ts": 1000
+    },
+    {
+     "src": 2,
+     "seq": 9,
+     "ts": 5000,
+     "at_ms": 46800000,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 101,
+     "out_ts": 2246401000
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 100,
+     "in_seq": null
+    },
+    {
+     "out_seq": 101,
+     "in_seq": 9
+    }
+   ]
+  },
+  {
+   "name": "video — 출처 전환 · 경과 0 → 하한 1 · 경과 하한 1ms → 틱 90",
+   "clock": 90000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 500,
+     "ts": 3000,
+     "at_ms": 0,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 500,
+     "out_ts": 3000
+    },
+    {
+     "src": 2,
+     "seq": 7,
+     "ts": 123456,
+     "at_ms": 0,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 501,
+     "out_ts": 3090
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 500,
+     "in_seq": null
+    },
+    {
+     "out_seq": 501,
+     "in_seq": 7
+    }
+   ]
+  },
+  {
+   "name": "opus — 무작위 판 1(씨앗 20261027)",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 20054,
+     "ts": 555809932,
+     "at_ms": 0,
+     "payload": "e0",
+     "covers": 120,
+     "out_seq": 20054,
+     "out_ts": 555809932
+    },
+    {
+     "src": 2,
+     "seq": 3628,
+     "ts": 2115063400,
+     "at_ms": 26,
+     "payload": "fc01",
+     "covers": 960,
+     "out_seq": 20055,
+     "out_ts": 555811180
+    },
+    {
+     "src": 2,
+     "seq": 3629,
+     "ts": 2115064360,
+     "at_ms": 52,
+     "payload": "f900",
+     "covers": 1920,
+     "out_seq": 20056,
+     "out_ts": 555812140
+    },
+    {
+     "src": 2,
+     "seq": 3630,
+     "ts": 2115066280,
+     "at_ms": 57,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 20057,
+     "out_ts": 555814060
+    },
+    {
+     "src": 2,
+     "seq": 3631,
+     "ts": 2115066281,
+     "at_ms": 88,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 20058,
+     "out_ts": 555814061
+    },
+    {
+     "src": 2,
+     "seq": 3632,
+     "ts": 2115066282,
+     "at_ms": 101,
+     "payload": "08",
+     "covers": 960,
+     "out_seq": 20059,
+     "out_ts": 555814062
+    },
+    {
+     "src": 2,
+     "seq": 3633,
+     "ts": 2115067242,
+     "at_ms": 112,
+     "payload": "e0",
+     "covers": 120,
+     "out_seq": 20060,
+     "out_ts": 555815022
+    },
+    {
+     "src": 3,
+     "seq": 48281,
+     "ts": 1369091052,
+     "at_ms": 132,
+     "payload": "18",
+     "covers": 2880,
+     "out_seq": 20061,
+     "out_ts": 555815982
+    },
+    {
+     "src": 3,
+     "seq": 48282,
+     "ts": 1369093932,
+     "at_ms": 132,
+     "payload": "fc01",
+     "covers": 960,
+     "out_seq": 20062,
+     "out_ts": 555818862
+    },
+    {
+     "src": 3,
+     "seq": 48283,
+     "ts": 1369094892,
+     "at_ms": 149,
+     "payload": "08",
+     "covers": 960,
+     "out_seq": 20063,
+     "out_ts": 555819822
+    },
+    {
+     "src": 4,
+     "seq": 10949,
+     "ts": 1307977832,
+     "at_ms": 183,
+     "payload": "fb04",
+     "covers": 3840,
+     "out_seq": 20064,
+     "out_ts": 555821454
+    },
+    {
+     "src": 5,
+     "seq": 47970,
+     "ts": 3994151314,
+     "at_ms": 216,
+     "payload": "18",
+     "covers": 2880,
+     "out_seq": 20065,
+     "out_ts": 555825294
+    },
+    {
+     "src": 5,
+     "seq": 47971,
+     "ts": 3994154194,
+     "at_ms": 240,
+     "payload": "fb02",
+     "covers": 1920,
+     "out_seq": 20066,
+     "out_ts": 555828174
+    },
+    {
+     "src": 5,
+     "seq": 47972,
+     "ts": 3994156114,
+     "at_ms": 264,
+     "payload": "fb04",
+     "covers": 3840,
+     "out_seq": 20067,
+     "out_ts": 555830094
+    },
+    {
+     "src": 5,
+     "seq": 47973,
+     "ts": 3994159954,
+     "at_ms": 286,
+     "payload": "18",
+     "covers": 2880,
+     "out_seq": 20068,
+     "out_ts": 555833934
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 20054,
+     "in_seq": null
+    }
+   ]
+  },
+  {
+   "name": "opus — 무작위 판 2(씨앗 20261027)",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 18779,
+     "ts": 160460116,
+     "at_ms": 0,
+     "payload": "f900",
+     "covers": 1920,
+     "out_seq": 18779,
+     "out_ts": 160460116
+    },
+    {
+     "src": 1,
+     "seq": 18780,
+     "ts": 160462036,
+     "at_ms": 21,
+     "payload": "08",
+     "covers": 960,
+     "out_seq": 18780,
+     "out_ts": 160462036
+    },
+    {
+     "src": 1,
+     "seq": 18781,
+     "ts": 160462996,
+     "at_ms": 60,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 18781,
+     "out_ts": 160462996
+    },
+    {
+     "src": 2,
+     "seq": 3182,
+     "ts": 549030916,
+     "at_ms": 93,
+     "payload": "fb02",
+     "covers": 1920,
+     "out_seq": 18782,
+     "out_ts": 160464580
+    },
+    {
+     "src": 3,
+     "seq": 34882,
+     "ts": 965081575,
+     "at_ms": 112,
+     "payload": "fb02",
+     "covers": 1920,
+     "out_seq": 18783,
+     "out_ts": 160466500
+    },
+    {
+     "src": 3,
+     "seq": 34883,
+     "ts": 965083495,
+     "at_ms": 152,
+     "payload": "fc01",
+     "covers": 960,
+     "out_seq": 18784,
+     "out_ts": 160468420
+    },
+    {
+     "src": 3,
+     "seq": 34884,
+     "ts": 965084455,
+     "at_ms": 186,
+     "payload": "1000",
+     "covers": 1920,
+     "out_seq": 18785,
+     "out_ts": 160469380
+    },
+    {
+     "src": 3,
+     "seq": 34885,
+     "ts": 965086375,
+     "at_ms": 207,
+     "payload": "18",
+     "covers": 2880,
+     "out_seq": 18786,
+     "out_ts": 160471300
+    },
+    {
+     "src": 4,
+     "seq": 15280,
+     "ts": 1719785764,
+     "at_ms": 232,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 18787,
+     "out_ts": 160474180
+    },
+    {
+     "src": 4,
+     "seq": 15281,
+     "ts": 1719785765,
+     "at_ms": 250,
+     "payload": "70",
+     "covers": 480,
+     "out_seq": 18788,
+     "out_ts": 160474181
+    },
+    {
+     "src": 5,
+     "seq": 9734,
+     "ts": 2006931613,
+     "at_ms": 283,
+     "payload": "f900",
+     "covers": 1920,
+     "out_seq": 18789,
+     "out_ts": 160475765
+    },
+    {
+     "src": 5,
+     "seq": 9735,
+     "ts": 2006933533,
+     "at_ms": 313,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 18790,
+     "out_ts": 160477685
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 18779,
+     "in_seq": null
+    }
+   ]
+  },
+  {
+   "name": "opus — 무작위 판 3(씨앗 20261027)",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 7722,
+     "ts": 1449677933,
+     "at_ms": 0,
+     "payload": "fc01",
+     "covers": 960,
+     "out_seq": 7722,
+     "out_ts": 1449677933
+    },
+    {
+     "src": 2,
+     "seq": 59613,
+     "ts": 1242422772,
+     "at_ms": 32,
+     "payload": "e0",
+     "covers": 120,
+     "out_seq": 7723,
+     "out_ts": 1449679469
+    },
+    {
+     "src": 2,
+     "seq": 59614,
+     "ts": 1242422892,
+     "at_ms": 66,
+     "payload": "fb04",
+     "covers": 3840,
+     "out_seq": 7724,
+     "out_ts": 1449679589
+    },
+    {
+     "src": 3,
+     "seq": 4541,
+     "ts": 1079868533,
+     "at_ms": 88,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 7725,
+     "out_ts": 1449683429
+    },
+    {
+     "src": 3,
+     "seq": 4542,
+     "ts": 1079868534,
+     "at_ms": 109,
+     "payload": "f900",
+     "covers": 1920,
+     "out_seq": 7726,
+     "out_ts": 1449683430
+    },
+    {
+     "src": 3,
+     "seq": 4543,
+     "ts": 1079870454,
+     "at_ms": 119,
+     "payload": "e0",
+     "covers": 120,
+     "out_seq": 7727,
+     "out_ts": 1449685350
+    },
+    {
+     "src": 3,
+     "seq": 4544,
+     "ts": 1079870574,
+     "at_ms": 119,
+     "payload": "e0",
+     "covers": 120,
+     "out_seq": 7728,
+     "out_ts": 1449685470
+    },
+    {
+     "src": 4,
+     "seq": 62219,
+     "ts": 2520316725,
+     "at_ms": 142,
+     "payload": "fc01",
+     "covers": 960,
+     "out_seq": 7729,
+     "out_ts": 1449686574
+    },
+    {
+     "src": 5,
+     "seq": 46672,
+     "ts": 1707346851,
+     "at_ms": 151,
+     "payload": "fb04",
+     "covers": 3840,
+     "out_seq": 7730,
+     "out_ts": 1449687534
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 7722,
+     "in_seq": null
+    }
+   ]
+  },
+  {
+   "name": "opus — 무작위 판 4(씨앗 20261027)",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 42541,
+     "ts": 2232477671,
+     "at_ms": 0,
+     "payload": "e0",
+     "covers": 120,
+     "out_seq": 42541,
+     "out_ts": 2232477671
+    },
+    {
+     "src": 1,
+     "seq": 42542,
+     "ts": 2232477791,
+     "at_ms": 11,
+     "payload": "fb04",
+     "covers": 3840,
+     "out_seq": 42542,
+     "out_ts": 2232477791
+    },
+    {
+     "src": 2,
+     "seq": 23107,
+     "ts": 2082409779,
+     "at_ms": 34,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 42543,
+     "out_ts": 2232481631
+    },
+    {
+     "src": 2,
+     "seq": 23108,
+     "ts": 2082410739,
+     "at_ms": 43,
+     "payload": "18",
+     "covers": 2880,
+     "out_seq": 42544,
+     "out_ts": 2232482591
+    },
+    {
+     "src": 2,
+     "seq": 23109,
+     "ts": 2082413619,
+     "at_ms": 53,
+     "payload": "f0",
+     "covers": 480,
+     "out_seq": 42545,
+     "out_ts": 2232485471
+    },
+    {
+     "src": 2,
+     "seq": 23110,
+     "ts": 2082414099,
+     "at_ms": 64,
+     "payload": "fc01",
+     "covers": 960,
+     "out_seq": 42546,
+     "out_ts": 2232485951
+    },
+    {
+     "src": 2,
+     "seq": 23111,
+     "ts": 2082415059,
+     "at_ms": 88,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 42547,
+     "out_ts": 2232486911
+    },
+    {
+     "src": 2,
+     "seq": 23112,
+     "ts": 2082415060,
+     "at_ms": 107,
+     "payload": "fc01",
+     "covers": 960,
+     "out_seq": 42548,
+     "out_ts": 2232486912
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 42541,
+     "in_seq": null
+    }
+   ]
+  },
+  {
+   "name": "opus — 무작위 판 5(씨앗 20261027)",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 41548,
+     "ts": 1174164146,
+     "at_ms": 0,
+     "payload": "1000",
+     "covers": 1920,
+     "out_seq": 41548,
+     "out_ts": 1174164146
+    },
+    {
+     "src": 2,
+     "seq": 20938,
+     "ts": 3388463624,
+     "at_ms": 26,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 41549,
+     "out_ts": 1174166066
+    },
+    {
+     "src": 2,
+     "seq": 20939,
+     "ts": 3388463625,
+     "at_ms": 46,
+     "payload": "08",
+     "covers": 960,
+     "out_seq": 41550,
+     "out_ts": 1174166067
+    },
+    {
+     "src": 2,
+     "seq": 20940,
+     "ts": 3388464585,
+     "at_ms": 52,
+     "payload": "70",
+     "covers": 480,
+     "out_seq": 41551,
+     "out_ts": 1174167027
+    },
+    {
+     "src": 2,
+     "seq": 20941,
+     "ts": 3388465065,
+     "at_ms": 80,
+     "payload": "f0",
+     "covers": 480,
+     "out_seq": 41552,
+     "out_ts": 1174167507
+    },
+    {
+     "src": 2,
+     "seq": 20942,
+     "ts": 3388465545,
+     "at_ms": 107,
+     "payload": "fc01",
+     "covers": 960,
+     "out_seq": 41553,
+     "out_ts": 1174167987
+    },
+    {
+     "src": 3,
+     "seq": 11580,
+     "ts": 941183469,
+     "at_ms": 114,
+     "payload": "f0",
+     "covers": 480,
+     "out_seq": 41554,
+     "out_ts": 1174168947
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 41548,
+     "in_seq": null
+    }
+   ]
+  },
+  {
+   "name": "opus — 무작위 판 6(씨앗 20261027)",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 22761,
+     "ts": 742235115,
+     "at_ms": 0,
+     "payload": "18",
+     "covers": 2880,
+     "out_seq": 22761,
+     "out_ts": 742235115
+    },
+    {
+     "src": 1,
+     "seq": 22762,
+     "ts": 742237995,
+     "at_ms": 22,
+     "payload": "f900",
+     "covers": 1920,
+     "out_seq": 22762,
+     "out_ts": 742237995
+    },
+    {
+     "src": 1,
+     "seq": 22763,
+     "ts": 742239915,
+     "at_ms": 36,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 22763,
+     "out_ts": 742239915
+    },
+    {
+     "src": 2,
+     "seq": 23845,
+     "ts": 85479978,
+     "at_ms": 49,
+     "payload": "f900",
+     "covers": 1920,
+     "out_seq": 22764,
+     "out_ts": 742240875
+    },
+    {
+     "src": 3,
+     "seq": 38998,
+     "ts": 4169661130,
+     "at_ms": 51,
+     "payload": "18",
+     "covers": 2880,
+     "out_seq": 22765,
+     "out_ts": 742242795
+    },
+    {
+     "src": 3,
+     "seq": 38999,
+     "ts": 4169664010,
+     "at_ms": 84,
+     "payload": "08",
+     "covers": 960,
+     "out_seq": 22766,
+     "out_ts": 742245675
+    },
+    {
+     "src": 3,
+     "seq": 39000,
+     "ts": 4169664970,
+     "at_ms": 112,
+     "payload": "fb04",
+     "covers": 3840,
+     "out_seq": 22767,
+     "out_ts": 742246635
+    },
+    {
+     "src": 4,
+     "seq": 64660,
+     "ts": 530835814,
+     "at_ms": 149,
+     "payload": "fb02",
+     "covers": 1920,
+     "out_seq": 22768,
+     "out_ts": 742250475
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 22761,
+     "in_seq": null
+    }
+   ]
+  },
+  {
+   "name": "opus — 무작위 판 7(씨앗 20261027)",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 59801,
+     "ts": 704356255,
+     "at_ms": 0,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 59801,
+     "out_ts": 704356255
+    },
+    {
+     "src": 1,
+     "seq": 59802,
+     "ts": 704357215,
+     "at_ms": 14,
+     "payload": "70",
+     "covers": 480,
+     "out_seq": 59802,
+     "out_ts": 704357215
+    },
+    {
+     "src": 1,
+     "seq": 59803,
+     "ts": 704357695,
+     "at_ms": 23,
+     "payload": "e0",
+     "covers": 120,
+     "out_seq": 59803,
+     "out_ts": 704357695
+    },
+    {
+     "src": 1,
+     "seq": 59804,
+     "ts": 704357815,
+     "at_ms": 32,
+     "payload": "1000",
+     "covers": 1920,
+     "out_seq": 59804,
+     "out_ts": 704357815
+    },
+    {
+     "src": 1,
+     "seq": 59805,
+     "ts": 704359735,
+     "at_ms": 54,
+     "payload": "70",
+     "covers": 480,
+     "out_seq": 59805,
+     "out_ts": 704359735
+    },
+    {
+     "src": 2,
+     "seq": 39442,
+     "ts": 1360635882,
+     "at_ms": 82,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 59806,
+     "out_ts": 704361079
+    },
+    {
+     "src": 2,
+     "seq": 39443,
+     "ts": 1360636842,
+     "at_ms": 98,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 59807,
+     "out_ts": 704362039
+    },
+    {
+     "src": 3,
+     "seq": 59338,
+     "ts": 3022911759,
+     "at_ms": 133,
+     "payload": "18",
+     "covers": 2880,
+     "out_seq": 59808,
+     "out_ts": 704363719
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 59801,
+     "in_seq": null
+    }
+   ]
+  },
+  {
+   "name": "opus — 무작위 판 8(씨앗 20261027)",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 25006,
+     "ts": 2741508982,
+     "at_ms": 0,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 25006,
+     "out_ts": 2741508982
+    },
+    {
+     "src": 1,
+     "seq": 25007,
+     "ts": 2741508983,
+     "at_ms": 24,
+     "payload": "08",
+     "covers": 960,
+     "out_seq": 25007,
+     "out_ts": 2741508983
+    },
+    {
+     "src": 1,
+     "seq": 25008,
+     "ts": 2741509943,
+     "at_ms": 60,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 25008,
+     "out_ts": 2741509943
+    },
+    {
+     "src": 1,
+     "seq": 25009,
+     "ts": 2741509944,
+     "at_ms": 62,
+     "payload": "fb02",
+     "covers": 1920,
+     "out_seq": 25009,
+     "out_ts": 2741509944
+    },
+    {
+     "src": 2,
+     "seq": 37433,
+     "ts": 4146060663,
+     "at_ms": 91,
+     "payload": "f900",
+     "covers": 1920,
+     "out_seq": 25010,
+     "out_ts": 2741511864
+    },
+    {
+     "src": 2,
+     "seq": 37434,
+     "ts": 4146062583,
+     "at_ms": 99,
+     "payload": "f900",
+     "covers": 1920,
+     "out_seq": 25011,
+     "out_ts": 2741513784
+    },
+    {
+     "src": 2,
+     "seq": 37435,
+     "ts": 4146064503,
+     "at_ms": 115,
+     "payload": "1000",
+     "covers": 1920,
+     "out_seq": 25012,
+     "out_ts": 2741515704
+    },
+    {
+     "src": 3,
+     "seq": 25530,
+     "ts": 3810512807,
+     "at_ms": 151,
+     "payload": "e0",
+     "covers": 120,
+     "out_seq": 25013,
+     "out_ts": 2741517624
+    },
+    {
+     "src": 4,
+     "seq": 15269,
+     "ts": 682555841,
+     "at_ms": 184,
+     "payload": "18",
+     "covers": 2880,
+     "out_seq": 25014,
+     "out_ts": 2741519208
+    },
+    {
+     "src": 4,
+     "seq": 15270,
+     "ts": 682558721,
+     "at_ms": 187,
+     "payload": "fc01",
+     "covers": 960,
+     "out_seq": 25015,
+     "out_ts": 2741522088
+    },
+    {
+     "src": 4,
+     "seq": 15271,
+     "ts": 682559681,
+     "at_ms": 213,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 25016,
+     "out_ts": 2741523048
+    },
+    {
+     "src": 4,
+     "seq": 15272,
+     "ts": 682559682,
+     "at_ms": 251,
+     "payload": "18",
+     "covers": 2880,
+     "out_seq": 25017,
+     "out_ts": 2741523049
+    },
+    {
+     "src": 5,
+     "seq": 17129,
+     "ts": 1534965745,
+     "at_ms": 263,
+     "payload": "fb02",
+     "covers": 1920,
+     "out_seq": 25018,
+     "out_ts": 2741525929
+    },
+    {
+     "src": 5,
+     "seq": 17130,
+     "ts": 1534967665,
+     "at_ms": 296,
+     "payload": "e0",
+     "covers": 120,
+     "out_seq": 25019,
+     "out_ts": 2741527849
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 25006,
+     "in_seq": null
+    }
+   ]
+  },
+  {
+   "name": "opus — 무작위 판 9(씨앗 20261027)",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 29346,
+     "ts": 2450916490,
+     "at_ms": 0,
+     "payload": "fc01",
+     "covers": 960,
+     "out_seq": 29346,
+     "out_ts": 2450916490
+    },
+    {
+     "src": 1,
+     "seq": 29347,
+     "ts": 2450917450,
+     "at_ms": 7,
+     "payload": "fc01",
+     "covers": 960,
+     "out_seq": 29347,
+     "out_ts": 2450917450
+    },
+    {
+     "src": 2,
+     "seq": 51269,
+     "ts": 1271713438,
+     "at_ms": 35,
+     "payload": "f900",
+     "covers": 1920,
+     "out_seq": 29348,
+     "out_ts": 2450918794
+    },
+    {
+     "src": 3,
+     "seq": 53439,
+     "ts": 1980731671,
+     "at_ms": 56,
+     "payload": "f900",
+     "covers": 1920,
+     "out_seq": 29349,
+     "out_ts": 2450920714
+    },
+    {
+     "src": 3,
+     "seq": 53440,
+     "ts": 1980733591,
+     "at_ms": 59,
+     "payload": "fb02",
+     "covers": 1920,
+     "out_seq": 29350,
+     "out_ts": 2450922634
+    },
+    {
+     "src": 3,
+     "seq": 53441,
+     "ts": 1980735511,
+     "at_ms": 89,
+     "payload": "70",
+     "covers": 480,
+     "out_seq": 29351,
+     "out_ts": 2450924554
+    },
+    {
+     "src": 4,
+     "seq": 9501,
+     "ts": 4250249900,
+     "at_ms": 124,
+     "payload": "18",
+     "covers": 2880,
+     "out_seq": 29352,
+     "out_ts": 2450926234
+    },
+    {
+     "src": 4,
+     "seq": 9502,
+     "ts": 4250252780,
+     "at_ms": 144,
+     "payload": "18",
+     "covers": 2880,
+     "out_seq": 29353,
+     "out_ts": 2450929114
+    },
+    {
+     "src": 4,
+     "seq": 9503,
+     "ts": 4250255660,
+     "at_ms": 158,
+     "payload": "f900",
+     "covers": 1920,
+     "out_seq": 29354,
+     "out_ts": 2450931994
+    },
+    {
+     "src": 4,
+     "seq": 9504,
+     "ts": 4250257580,
+     "at_ms": 192,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 29355,
+     "out_ts": 2450933914
+    },
+    {
+     "src": 5,
+     "seq": 2632,
+     "ts": 3386840773,
+     "at_ms": 198,
+     "payload": "08",
+     "covers": 960,
+     "out_seq": 29356,
+     "out_ts": 2450934874
+    },
+    {
+     "src": 6,
+     "seq": 37107,
+     "ts": 2805110907,
+     "at_ms": 221,
+     "payload": "f900",
+     "covers": 1920,
+     "out_seq": 29357,
+     "out_ts": 2450935978
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 29346,
+     "in_seq": null
+    }
+   ]
+  },
+  {
+   "name": "opus — 무작위 판 10(씨앗 20261027)",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 56836,
+     "ts": 2335359990,
+     "at_ms": 0,
+     "payload": "1000",
+     "covers": 1920,
+     "out_seq": 56836,
+     "out_ts": 2335359990
+    },
+    {
+     "src": 2,
+     "seq": 14865,
+     "ts": 1423862960,
+     "at_ms": 25,
+     "payload": "70",
+     "covers": 480,
+     "out_seq": 56837,
+     "out_ts": 2335361910
+    },
+    {
+     "src": 3,
+     "seq": 6214,
+     "ts": 1442897146,
+     "at_ms": 36,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 56838,
+     "out_ts": 2335362438
+    },
+    {
+     "src": 4,
+     "seq": 824,
+     "ts": 2176122171,
+     "at_ms": 68,
+     "payload": "fb02",
+     "covers": 1920,
+     "out_seq": 56839,
+     "out_ts": 2335363974
+    },
+    {
+     "src": 4,
+     "seq": 825,
+     "ts": 2176124091,
+     "at_ms": 107,
+     "payload": "e0",
+     "covers": 120,
+     "out_seq": 56840,
+     "out_ts": 2335365894
+    },
+    {
+     "src": 4,
+     "seq": 826,
+     "ts": 2176124211,
+     "at_ms": 111,
+     "payload": "70",
+     "covers": 480,
+     "out_seq": 56841,
+     "out_ts": 2335366014
+    },
+    {
+     "src": 4,
+     "seq": 827,
+     "ts": 2176124691,
+     "at_ms": 127,
+     "payload": "e0",
+     "covers": 120,
+     "out_seq": 56842,
+     "out_ts": 2335366494
+    },
+    {
+     "src": 5,
+     "seq": 19366,
+     "ts": 3149844574,
+     "at_ms": 137,
+     "payload": "18",
+     "covers": 2880,
+     "out_seq": 56843,
+     "out_ts": 2335366974
+    },
+    {
+     "src": 6,
+     "seq": 5037,
+     "ts": 2034217324,
+     "at_ms": 142,
+     "payload": "f0",
+     "covers": 480,
+     "out_seq": 56844,
+     "out_ts": 2335369854
+    },
+    {
+     "src": 7,
+     "seq": 29659,
+     "ts": 2712835212,
+     "at_ms": 167,
+     "payload": "fc01",
+     "covers": 960,
+     "out_seq": 56845,
+     "out_ts": 2335371054
+    },
+    {
+     "src": 7,
+     "seq": 29660,
+     "ts": 2712836172,
+     "at_ms": 181,
+     "payload": "1000",
+     "covers": 1920,
+     "out_seq": 56846,
+     "out_ts": 2335372014
+    },
+    {
+     "src": 8,
+     "seq": 13813,
+     "ts": 2454539455,
+     "at_ms": 207,
+     "payload": "70",
+     "covers": 480,
+     "out_seq": 56847,
+     "out_ts": 2335373934
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 56836,
+     "in_seq": null
+    }
+   ]
+  },
+  {
+   "name": "opus — 무작위 판 11(씨앗 20261027)",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 38811,
+     "ts": 3900380592,
+     "at_ms": 0,
+     "payload": "f0",
+     "covers": 480,
+     "out_seq": 38811,
+     "out_ts": 3900380592
+    },
+    {
+     "src": 2,
+     "seq": 54197,
+     "ts": 590271197,
+     "at_ms": 2,
+     "payload": "fb02",
+     "covers": 1920,
+     "out_seq": 38812,
+     "out_ts": 3900381072
+    },
+    {
+     "src": 3,
+     "seq": 37201,
+     "ts": 1630714179,
+     "at_ms": 13,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 38813,
+     "out_ts": 3900382992
+    },
+    {
+     "src": 3,
+     "seq": 37202,
+     "ts": 1630715139,
+     "at_ms": 46,
+     "payload": "fb04",
+     "covers": 3840,
+     "out_seq": 38814,
+     "out_ts": 3900383952
+    },
+    {
+     "src": 4,
+     "seq": 32362,
+     "ts": 2469646751,
+     "at_ms": 46,
+     "payload": "fb02",
+     "covers": 1920,
+     "out_seq": 38815,
+     "out_ts": 3900387792
+    },
+    {
+     "src": 5,
+     "seq": 5004,
+     "ts": 2745731693,
+     "at_ms": 85,
+     "payload": "08",
+     "covers": 960,
+     "out_seq": 38816,
+     "out_ts": 3900389712
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 38811,
+     "in_seq": null
+    }
+   ]
+  },
+  {
+   "name": "opus — 무작위 판 12(씨앗 20261027)",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 64254,
+     "ts": 1458204448,
+     "at_ms": 0,
+     "payload": "08",
+     "covers": 960,
+     "out_seq": 64254,
+     "out_ts": 1458204448
+    },
+    {
+     "src": 1,
+     "seq": 64255,
+     "ts": 1458205408,
+     "at_ms": 38,
+     "payload": "f900",
+     "covers": 1920,
+     "out_seq": 64255,
+     "out_ts": 1458205408
+    },
+    {
+     "src": 2,
+     "seq": 29378,
+     "ts": 3272055371,
+     "at_ms": 57,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 64256,
+     "out_ts": 1458207328
+    },
+    {
+     "src": 2,
+     "seq": 29379,
+     "ts": 3272056331,
+     "at_ms": 57,
+     "payload": "1000",
+     "covers": 1920,
+     "out_seq": 64257,
+     "out_ts": 1458208288
+    },
+    {
+     "src": 3,
+     "seq": 501,
+     "ts": 3313883904,
+     "at_ms": 72,
+     "payload": "f0",
+     "covers": 480,
+     "out_seq": 64258,
+     "out_ts": 1458210208
+    },
+    {
+     "src": 3,
+     "seq": 502,
+     "ts": 3313884384,
+     "at_ms": 99,
+     "payload": "08",
+     "covers": 960,
+     "out_seq": 64259,
+     "out_ts": 1458210688
+    },
+    {
+     "src": 3,
+     "seq": 503,
+     "ts": 3313885344,
+     "at_ms": 139,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 64260,
+     "out_ts": 1458211648
+    },
+    {
+     "src": 4,
+     "seq": 32159,
+     "ts": 2843462813,
+     "at_ms": 148,
+     "payload": "fc01",
+     "covers": 960,
+     "out_seq": 64261,
+     "out_ts": 1458212080
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 64254,
+     "in_seq": null
+    }
+   ]
+  },
+  {
+   "name": "opus — 무작위 판 13(씨앗 20261027)",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 49836,
+     "ts": 2948171948,
+     "at_ms": 0,
+     "payload": "f0",
+     "covers": 480,
+     "out_seq": 49836,
+     "out_ts": 2948171948
+    },
+    {
+     "src": 1,
+     "seq": 49837,
+     "ts": 2948172428,
+     "at_ms": 1,
+     "payload": "fb04",
+     "covers": 3840,
+     "out_seq": 49837,
+     "out_ts": 2948172428
+    },
+    {
+     "src": 1,
+     "seq": 49838,
+     "ts": 2948176268,
+     "at_ms": 23,
+     "payload": "18",
+     "covers": 2880,
+     "out_seq": 49838,
+     "out_ts": 2948176268
+    },
+    {
+     "src": 2,
+     "seq": 7315,
+     "ts": 3150773729,
+     "at_ms": 46,
+     "payload": "f900",
+     "covers": 1920,
+     "out_seq": 49839,
+     "out_ts": 2948179148
+    },
+    {
+     "src": 2,
+     "seq": 7316,
+     "ts": 3150775649,
+     "at_ms": 74,
+     "payload": "08",
+     "covers": 960,
+     "out_seq": 49840,
+     "out_ts": 2948181068
+    },
+    {
+     "src": 3,
+     "seq": 48289,
+     "ts": 1077910283,
+     "at_ms": 105,
+     "payload": "f0",
+     "covers": 480,
+     "out_seq": 49841,
+     "out_ts": 2948182556
+    },
+    {
+     "src": 3,
+     "seq": 48290,
+     "ts": 1077910763,
+     "at_ms": 110,
+     "payload": "fb02",
+     "covers": 1920,
+     "out_seq": 49842,
+     "out_ts": 2948183036
+    },
+    {
+     "src": 4,
+     "seq": 62053,
+     "ts": 2828505076,
+     "at_ms": 118,
+     "payload": "18",
+     "covers": 2880,
+     "out_seq": 49843,
+     "out_ts": 2948184956
+    },
+    {
+     "src": 5,
+     "seq": 25675,
+     "ts": 736048796,
+     "at_ms": 143,
+     "payload": "18",
+     "covers": 2880,
+     "out_seq": 49844,
+     "out_ts": 2948187836
+    },
+    {
+     "src": 6,
+     "seq": 61733,
+     "ts": 261025691,
+     "at_ms": 176,
+     "payload": "08",
+     "covers": 960,
+     "out_seq": 49845,
+     "out_ts": 2948190716
+    },
+    {
+     "src": 7,
+     "seq": 31342,
+     "ts": 897353821,
+     "at_ms": 187,
+     "payload": "fc01",
+     "covers": 960,
+     "out_seq": 49846,
+     "out_ts": 2948191676
+    },
+    {
+     "src": 8,
+     "seq": 16719,
+     "ts": 3635574601,
+     "at_ms": 220,
+     "payload": "e0",
+     "covers": 120,
+     "out_seq": 49847,
+     "out_ts": 2948193260
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 49836,
+     "in_seq": null
+    }
+   ]
+  },
+  {
+   "name": "opus — 무작위 판 14(씨앗 20261027)",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 24841,
+     "ts": 3781383473,
+     "at_ms": 0,
+     "payload": "1000",
+     "covers": 1920,
+     "out_seq": 24841,
+     "out_ts": 3781383473
+    },
+    {
+     "src": 1,
+     "seq": 24842,
+     "ts": 3781385393,
+     "at_ms": 25,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 24842,
+     "out_ts": 3781385393
+    },
+    {
+     "src": 1,
+     "seq": 24843,
+     "ts": 3781385394,
+     "at_ms": 58,
+     "payload": "08",
+     "covers": 960,
+     "out_seq": 24843,
+     "out_ts": 3781385394
+    },
+    {
+     "src": 1,
+     "seq": 24844,
+     "ts": 3781386354,
+     "at_ms": 71,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 24844,
+     "out_ts": 3781386354
+    },
+    {
+     "src": 1,
+     "seq": 24845,
+     "ts": 3781387314,
+     "at_ms": 90,
+     "payload": "fc01",
+     "covers": 960,
+     "out_seq": 24845,
+     "out_ts": 3781387314
+    },
+    {
+     "src": 1,
+     "seq": 24846,
+     "ts": 3781388274,
+     "at_ms": 95,
+     "payload": "f0",
+     "covers": 480,
+     "out_seq": 24846,
+     "out_ts": 3781388274
+    },
+    {
+     "src": 1,
+     "seq": 24847,
+     "ts": 3781388754,
+     "at_ms": 100,
+     "payload": "f0",
+     "covers": 480,
+     "out_seq": 24847,
+     "out_ts": 3781388754
+    },
+    {
+     "src": 1,
+     "seq": 24848,
+     "ts": 3781389234,
+     "at_ms": 134,
+     "payload": "1000",
+     "covers": 1920,
+     "out_seq": 24848,
+     "out_ts": 3781389234
+    },
+    {
+     "src": 1,
+     "seq": 24849,
+     "ts": 3781391154,
+     "at_ms": 147,
+     "payload": "fb04",
+     "covers": 3840,
+     "out_seq": 24849,
+     "out_ts": 3781391154
+    },
+    {
+     "src": 1,
+     "seq": 24850,
+     "ts": 3781394994,
+     "at_ms": 176,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 24850,
+     "out_ts": 3781394994
+    },
+    {
+     "src": 1,
+     "seq": 24851,
+     "ts": 3781395954,
+     "at_ms": 188,
+     "payload": "08",
+     "covers": 960,
+     "out_seq": 24851,
+     "out_ts": 3781395954
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 24841,
+     "in_seq": 24841
+    }
+   ]
+  },
+  {
+   "name": "opus — 무작위 판 15(씨앗 20261027)",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 52989,
+     "ts": 3050906755,
+     "at_ms": 0,
+     "payload": "18",
+     "covers": 2880,
+     "out_seq": 52989,
+     "out_ts": 3050906755
+    },
+    {
+     "src": 1,
+     "seq": 52990,
+     "ts": 3050909635,
+     "at_ms": 18,
+     "payload": "18",
+     "covers": 2880,
+     "out_seq": 52990,
+     "out_ts": 3050909635
+    },
+    {
+     "src": 2,
+     "seq": 63697,
+     "ts": 2656912512,
+     "at_ms": 24,
+     "payload": "08",
+     "covers": 960,
+     "out_seq": 52991,
+     "out_ts": 3050912515
+    },
+    {
+     "src": 2,
+     "seq": 63698,
+     "ts": 2656913472,
+     "at_ms": 56,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 52992,
+     "out_ts": 3050913475
+    },
+    {
+     "src": 2,
+     "seq": 63699,
+     "ts": 2656914432,
+     "at_ms": 79,
+     "payload": "e0",
+     "covers": 120,
+     "out_seq": 52993,
+     "out_ts": 3050914435
+    },
+    {
+     "src": 2,
+     "seq": 63700,
+     "ts": 2656914552,
+     "at_ms": 107,
+     "payload": "70",
+     "covers": 480,
+     "out_seq": 52994,
+     "out_ts": 3050914555
+    },
+    {
+     "src": 2,
+     "seq": 63701,
+     "ts": 2656915032,
+     "at_ms": 145,
+     "payload": "08",
+     "covers": 960,
+     "out_seq": 52995,
+     "out_ts": 3050915035
+    },
+    {
+     "src": 2,
+     "seq": 63702,
+     "ts": 2656915992,
+     "at_ms": 183,
+     "payload": "f0",
+     "covers": 480,
+     "out_seq": 52996,
+     "out_ts": 3050915995
+    },
+    {
+     "src": 2,
+     "seq": 63703,
+     "ts": 2656916472,
+     "at_ms": 194,
+     "payload": "f900",
+     "covers": 1920,
+     "out_seq": 52997,
+     "out_ts": 3050916475
+    },
+    {
+     "src": 3,
+     "seq": 52230,
+     "ts": 860195084,
+     "at_ms": 207,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 52998,
+     "out_ts": 3050918395
+    },
+    {
+     "src": 3,
+     "seq": 52231,
+     "ts": 860195085,
+     "at_ms": 243,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 52999,
+     "out_ts": 3050918396
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 52989,
+     "in_seq": null
+    }
+   ]
+  },
+  {
+   "name": "opus — 무작위 판 16(씨앗 20261027)",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 50203,
+     "ts": 3189988615,
+     "at_ms": 0,
+     "payload": "fc01",
+     "covers": 960,
+     "out_seq": 50203,
+     "out_ts": 3189988615
+    },
+    {
+     "src": 1,
+     "seq": 50204,
+     "ts": 3189989575,
+     "at_ms": 14,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 50204,
+     "out_ts": 3189989575
+    },
+    {
+     "src": 2,
+     "seq": 43762,
+     "ts": 2470792663,
+     "at_ms": 31,
+     "payload": "1000",
+     "covers": 1920,
+     "out_seq": 50205,
+     "out_ts": 3189990535
+    },
+    {
+     "src": 2,
+     "seq": 43763,
+     "ts": 2470794583,
+     "at_ms": 35,
+     "payload": "08",
+     "covers": 960,
+     "out_seq": 50206,
+     "out_ts": 3189992455
+    },
+    {
+     "src": 3,
+     "seq": 38951,
+     "ts": 518526158,
+     "at_ms": 73,
+     "payload": "e0",
+     "covers": 120,
+     "out_seq": 50207,
+     "out_ts": 3189994279
+    },
+    {
+     "src": 4,
+     "seq": 20556,
+     "ts": 1217273079,
+     "at_ms": 75,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 50208,
+     "out_ts": 3189994399
+    },
+    {
+     "src": 5,
+     "seq": 51256,
+     "ts": 2881757370,
+     "at_ms": 114,
+     "payload": "18",
+     "covers": 2880,
+     "out_seq": 50209,
+     "out_ts": 3189996271
+    },
+    {
+     "src": 5,
+     "seq": 51257,
+     "ts": 2881760250,
+     "at_ms": 143,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 50210,
+     "out_ts": 3189999151
+    },
+    {
+     "src": 5,
+     "seq": 51258,
+     "ts": 2881760251,
+     "at_ms": 181,
+     "payload": "fc01",
+     "covers": 960,
+     "out_seq": 50211,
+     "out_ts": 3189999152
+    },
+    {
+     "src": 5,
+     "seq": 51259,
+     "ts": 2881761211,
+     "at_ms": 189,
+     "payload": "fb02",
+     "covers": 1920,
+     "out_seq": 50212,
+     "out_ts": 3190000112
+    },
+    {
+     "src": 5,
+     "seq": 51260,
+     "ts": 2881763131,
+     "at_ms": 206,
+     "payload": "fc01",
+     "covers": 960,
+     "out_seq": 50213,
+     "out_ts": 3190002032
+    },
+    {
+     "src": 6,
+     "seq": 58132,
+     "ts": 2958591554,
+     "at_ms": 232,
+     "payload": "1000",
+     "covers": 1920,
+     "out_seq": 50214,
+     "out_ts": 3190003280
+    },
+    {
+     "src": 6,
+     "seq": 58133,
+     "ts": 2958593474,
+     "at_ms": 267,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 50215,
+     "out_ts": 3190005200
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 50203,
+     "in_seq": null
+    }
+   ]
+  },
+  {
+   "name": "opus — 무작위 판 17(씨앗 20261027)",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 33502,
+     "ts": 1924582269,
+     "at_ms": 0,
+     "payload": "fb04",
+     "covers": 3840,
+     "out_seq": 33502,
+     "out_ts": 1924582269
+    },
+    {
+     "src": 1,
+     "seq": 33503,
+     "ts": 1924586109,
+     "at_ms": 18,
+     "payload": "f0",
+     "covers": 480,
+     "out_seq": 33503,
+     "out_ts": 1924586109
+    },
+    {
+     "src": 1,
+     "seq": 33504,
+     "ts": 1924586589,
+     "at_ms": 49,
+     "payload": "08",
+     "covers": 960,
+     "out_seq": 33504,
+     "out_ts": 1924586589
+    },
+    {
+     "src": 2,
+     "seq": 17463,
+     "ts": 1366691256,
+     "at_ms": 51,
+     "payload": "18",
+     "covers": 2880,
+     "out_seq": 33505,
+     "out_ts": 1924587549
+    },
+    {
+     "src": 3,
+     "seq": 42918,
+     "ts": 3389934529,
+     "at_ms": 57,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 33506,
+     "out_ts": 1924590429
+    },
+    {
+     "src": 4,
+     "seq": 62578,
+     "ts": 631984451,
+     "at_ms": 59,
+     "payload": "08",
+     "covers": 960,
+     "out_seq": 33507,
+     "out_ts": 1924590525
+    },
+    {
+     "src": 5,
+     "seq": 28656,
+     "ts": 662693550,
+     "at_ms": 67,
+     "payload": "fc01",
+     "covers": 960,
+     "out_seq": 33508,
+     "out_ts": 1924591485
+    },
+    {
+     "src": 5,
+     "seq": 28657,
+     "ts": 662694510,
+     "at_ms": 105,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 33509,
+     "out_ts": 1924592445
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 33502,
+     "in_seq": null
+    }
+   ]
+  },
+  {
+   "name": "opus — 무작위 판 18(씨앗 20261027)",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 43111,
+     "ts": 457920709,
+     "at_ms": 0,
+     "payload": "fb02",
+     "covers": 1920,
+     "out_seq": 43111,
+     "out_ts": 457920709
+    },
+    {
+     "src": 1,
+     "seq": 43112,
+     "ts": 457922629,
+     "at_ms": 37,
+     "payload": "18",
+     "covers": 2880,
+     "out_seq": 43112,
+     "out_ts": 457922629
+    },
+    {
+     "src": 1,
+     "seq": 43113,
+     "ts": 457925509,
+     "at_ms": 69,
+     "payload": "fb04",
+     "covers": 3840,
+     "out_seq": 43113,
+     "out_ts": 457925509
+    },
+    {
+     "src": 1,
+     "seq": 43114,
+     "ts": 457929349,
+     "at_ms": 81,
+     "payload": "f0",
+     "covers": 480,
+     "out_seq": 43114,
+     "out_ts": 457929349
+    },
+    {
+     "src": 1,
+     "seq": 43115,
+     "ts": 457929829,
+     "at_ms": 83,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 43115,
+     "out_ts": 457929829
+    },
+    {
+     "src": 2,
+     "seq": 36314,
+     "ts": 4233335894,
+     "at_ms": 90,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 43116,
+     "out_ts": 457930789
+    },
+    {
+     "src": 2,
+     "seq": 36315,
+     "ts": 4233336854,
+     "at_ms": 119,
+     "payload": "fb04",
+     "covers": 3840,
+     "out_seq": 43117,
+     "out_ts": 457931749
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 43111,
+     "in_seq": null
+    }
+   ]
+  },
+  {
+   "name": "opus — 무작위 판 19(씨앗 20261027)",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 63261,
+     "ts": 1647843688,
+     "at_ms": 0,
+     "payload": "f0",
+     "covers": 480,
+     "out_seq": 63261,
+     "out_ts": 1647843688
+    },
+    {
+     "src": 1,
+     "seq": 63262,
+     "ts": 1647844168,
+     "at_ms": 2,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 63262,
+     "out_ts": 1647844168
+    },
+    {
+     "src": 1,
+     "seq": 63263,
+     "ts": 1647845128,
+     "at_ms": 29,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 63263,
+     "out_ts": 1647845128
+    },
+    {
+     "src": 2,
+     "seq": 26113,
+     "ts": 1673469947,
+     "at_ms": 59,
+     "payload": "f900",
+     "covers": 1920,
+     "out_seq": 63264,
+     "out_ts": 1647846568
+    },
+    {
+     "src": 2,
+     "seq": 26114,
+     "ts": 1673471867,
+     "at_ms": 67,
+     "payload": "e0",
+     "covers": 120,
+     "out_seq": 63265,
+     "out_ts": 1647848488
+    },
+    {
+     "src": 3,
+     "seq": 2002,
+     "ts": 1038507389,
+     "at_ms": 101,
+     "payload": "1000",
+     "covers": 1920,
+     "out_seq": 63266,
+     "out_ts": 1647850120
+    },
+    {
+     "src": 3,
+     "seq": 2003,
+     "ts": 1038509309,
+     "at_ms": 107,
+     "payload": "70",
+     "covers": 480,
+     "out_seq": 63267,
+     "out_ts": 1647852040
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 63261,
+     "in_seq": null
+    }
+   ]
+  },
+  {
+   "name": "opus — 무작위 판 20(씨앗 20261027)",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 32546,
+     "ts": 1297409073,
+     "at_ms": 0,
+     "payload": "fb02",
+     "covers": 1920,
+     "out_seq": 32546,
+     "out_ts": 1297409073
+    },
+    {
+     "src": 2,
+     "seq": 4326,
+     "ts": 4119742332,
+     "at_ms": 15,
+     "payload": "f900",
+     "covers": 1920,
+     "out_seq": 32547,
+     "out_ts": 1297410993
+    },
+    {
+     "src": 2,
+     "seq": 4327,
+     "ts": 4119744252,
+     "at_ms": 49,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 32548,
+     "out_ts": 1297412913
+    },
+    {
+     "src": 3,
+     "seq": 60928,
+     "ts": 1293488552,
+     "at_ms": 74,
+     "payload": "1000",
+     "covers": 1920,
+     "out_seq": 32549,
+     "out_ts": 1297414113
+    },
+    {
+     "src": 3,
+     "seq": 60929,
+     "ts": 1293490472,
+     "at_ms": 88,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 32550,
+     "out_ts": 1297416033
+    },
+    {
+     "src": 4,
+     "seq": 32679,
+     "ts": 1722082994,
+     "at_ms": 124,
+     "payload": "f0",
+     "covers": 480,
+     "out_seq": 32551,
+     "out_ts": 1297417761
+    },
+    {
+     "src": 5,
+     "seq": 46569,
+     "ts": 1078709356,
+     "at_ms": 142,
+     "payload": "e0",
+     "covers": 120,
+     "out_seq": 32552,
+     "out_ts": 1297418625
+    },
+    {
+     "src": 5,
+     "seq": 46570,
+     "ts": 1078709476,
+     "at_ms": 163,
+     "payload": "fb02",
+     "covers": 1920,
+     "out_seq": 32553,
+     "out_ts": 1297418745
+    },
+    {
+     "src": 5,
+     "seq": 46571,
+     "ts": 1078711396,
+     "at_ms": 190,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 32554,
+     "out_ts": 1297420665
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 32546,
+     "in_seq": null
+    }
+   ]
+  },
+  {
+   "name": "opus — 무작위 판 21(씨앗 20261027)",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 48812,
+     "ts": 3560458475,
+     "at_ms": 0,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 48812,
+     "out_ts": 3560458475
+    },
+    {
+     "src": 1,
+     "seq": 48813,
+     "ts": 3560458476,
+     "at_ms": 27,
+     "payload": "f0",
+     "covers": 480,
+     "out_seq": 48813,
+     "out_ts": 3560458476
+    },
+    {
+     "src": 2,
+     "seq": 44751,
+     "ts": 142937902,
+     "at_ms": 51,
+     "payload": "08",
+     "covers": 960,
+     "out_seq": 48814,
+     "out_ts": 3560459628
+    },
+    {
+     "src": 3,
+     "seq": 17652,
+     "ts": 282400772,
+     "at_ms": 51,
+     "payload": "1000",
+     "covers": 1920,
+     "out_seq": 48815,
+     "out_ts": 3560460588
+    },
+    {
+     "src": 3,
+     "seq": 17653,
+     "ts": 282402692,
+     "at_ms": 90,
+     "payload": "fb04",
+     "covers": 3840,
+     "out_seq": 48816,
+     "out_ts": 3560462508
+    },
+    {
+     "src": 4,
+     "seq": 6118,
+     "ts": 768472533,
+     "at_ms": 109,
+     "payload": "f900",
+     "covers": 1920,
+     "out_seq": 48817,
+     "out_ts": 3560466348
+    },
+    {
+     "src": 4,
+     "seq": 6119,
+     "ts": 768474453,
+     "at_ms": 124,
+     "payload": "f900",
+     "covers": 1920,
+     "out_seq": 48818,
+     "out_ts": 3560468268
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 48812,
+     "in_seq": null
+    }
+   ]
+  },
+  {
+   "name": "opus — 무작위 판 22(씨앗 20261027)",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 64910,
+     "ts": 1201305989,
+     "at_ms": 0,
+     "payload": "e0",
+     "covers": 120,
+     "out_seq": 64910,
+     "out_ts": 1201305989
+    },
+    {
+     "src": 2,
+     "seq": 19893,
+     "ts": 3725952730,
+     "at_ms": 4,
+     "payload": "fc01",
+     "covers": 960,
+     "out_seq": 64911,
+     "out_ts": 1201306181
+    },
+    {
+     "src": 3,
+     "seq": 40331,
+     "ts": 1474790173,
+     "at_ms": 38,
+     "payload": "f900",
+     "covers": 1920,
+     "out_seq": 64912,
+     "out_ts": 1201307813
+    },
+    {
+     "src": 3,
+     "seq": 40332,
+     "ts": 1474792093,
+     "at_ms": 77,
+     "payload": "fc01",
+     "covers": 960,
+     "out_seq": 64913,
+     "out_ts": 1201309733
+    },
+    {
+     "src": 4,
+     "seq": 61895,
+     "ts": 2956872545,
+     "at_ms": 110,
+     "payload": "f900",
+     "covers": 1920,
+     "out_seq": 64914,
+     "out_ts": 1201311317
+    },
+    {
+     "src": 5,
+     "seq": 24738,
+     "ts": 628711351,
+     "at_ms": 144,
+     "payload": "f900",
+     "covers": 1920,
+     "out_seq": 64915,
+     "out_ts": 1201313237
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 64910,
+     "in_seq": null
+    }
+   ]
+  },
+  {
+   "name": "opus — 무작위 판 23(씨앗 20261027)",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 34826,
+     "ts": 1825322954,
+     "at_ms": 0,
+     "payload": "fb02",
+     "covers": 1920,
+     "out_seq": 34826,
+     "out_ts": 1825322954
+    },
+    {
+     "src": 1,
+     "seq": 34827,
+     "ts": 1825324874,
+     "at_ms": 25,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 34827,
+     "out_ts": 1825324874
+    },
+    {
+     "src": 1,
+     "seq": 34828,
+     "ts": 1825324875,
+     "at_ms": 31,
+     "payload": "e0",
+     "covers": 120,
+     "out_seq": 34828,
+     "out_ts": 1825324875
+    },
+    {
+     "src": 1,
+     "seq": 34829,
+     "ts": 1825324995,
+     "at_ms": 43,
+     "payload": "f0",
+     "covers": 480,
+     "out_seq": 34829,
+     "out_ts": 1825324995
+    },
+    {
+     "src": 1,
+     "seq": 34830,
+     "ts": 1825325475,
+     "at_ms": 82,
+     "payload": "18",
+     "covers": 2880,
+     "out_seq": 34830,
+     "out_ts": 1825325475
+    },
+    {
+     "src": 1,
+     "seq": 34831,
+     "ts": 1825328355,
+     "at_ms": 104,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 34831,
+     "out_ts": 1825328355
+    },
+    {
+     "src": 1,
+     "seq": 34832,
+     "ts": 1825328356,
+     "at_ms": 107,
+     "payload": "fb02",
+     "covers": 1920,
+     "out_seq": 34832,
+     "out_ts": 1825328356
+    },
+    {
+     "src": 2,
+     "seq": 49355,
+     "ts": 3222761200,
+     "at_ms": 138,
+     "payload": "e0",
+     "covers": 120,
+     "out_seq": 34833,
+     "out_ts": 1825330276
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 34826,
+     "in_seq": null
+    }
+   ]
+  },
+  {
+   "name": "opus — 무작위 판 24(씨앗 20261027)",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 26428,
+     "ts": 647130082,
+     "at_ms": 0,
+     "payload": "70",
+     "covers": 480,
+     "out_seq": 26428,
+     "out_ts": 647130082
+    },
+    {
+     "src": 1,
+     "seq": 26429,
+     "ts": 647130562,
+     "at_ms": 29,
+     "payload": "1000",
+     "covers": 1920,
+     "out_seq": 26429,
+     "out_ts": 647130562
+    },
+    {
+     "src": 1,
+     "seq": 26430,
+     "ts": 647132482,
+     "at_ms": 65,
+     "payload": "1000",
+     "covers": 1920,
+     "out_seq": 26430,
+     "out_ts": 647132482
+    },
+    {
+     "src": 1,
+     "seq": 26431,
+     "ts": 647134402,
+     "at_ms": 83,
+     "payload": "f0",
+     "covers": 480,
+     "out_seq": 26431,
+     "out_ts": 647134402
+    },
+    {
+     "src": 2,
+     "seq": 27618,
+     "ts": 1475093729,
+     "at_ms": 88,
+     "payload": "fc01",
+     "covers": 960,
+     "out_seq": 26432,
+     "out_ts": 647134882
+    },
+    {
+     "src": 2,
+     "seq": 27619,
+     "ts": 1475094689,
+     "at_ms": 95,
+     "payload": "fb02",
+     "covers": 1920,
+     "out_seq": 26433,
+     "out_ts": 647135842
+    },
+    {
+     "src": 2,
+     "seq": 27620,
+     "ts": 1475096609,
+     "at_ms": 130,
+     "payload": "fb02",
+     "covers": 1920,
+     "out_seq": 26434,
+     "out_ts": 647137762
+    },
+    {
+     "src": 3,
+     "seq": 42684,
+     "ts": 3574142858,
+     "at_ms": 141,
+     "payload": "1000",
+     "covers": 1920,
+     "out_seq": 26435,
+     "out_ts": 647139682
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 26428,
+     "in_seq": null
+    }
+   ]
+  },
+  {
+   "name": "video — 출처 전환 · 경과 33ms → 틱 2970",
+   "clock": 90000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 500,
+     "ts": 3000,
+     "at_ms": 0,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 500,
+     "out_ts": 3000
+    },
+    {
+     "src": 1,
+     "seq": 501,
+     "ts": 6000,
+     "at_ms": 33,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 501,
+     "out_ts": 6000
+    },
+    {
+     "src": 2,
+     "seq": 7,
+     "ts": 123456,
+     "at_ms": 66,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 502,
+     "out_ts": 8970
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 500,
+     "in_seq": null
+    },
+    {
+     "out_seq": 501,
+     "in_seq": null
+    },
+    {
+     "out_seq": 502,
+     "in_seq": 7
+    }
+   ]
+  },
+  {
+   "name": "opus — 순서 바뀜 · 늦게 온 것은 그 순서로 나가고 「마지막」은 안 바뀐다 · 그 뒤 전환",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 200,
+     "ts": 0,
+     "at_ms": 0,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 200,
+     "out_ts": 0
+    },
+    {
+     "src": 1,
+     "seq": 202,
+     "ts": 1920,
+     "at_ms": 40,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 202,
+     "out_ts": 1920
+    },
+    {
+     "src": 1,
+     "seq": 201,
+     "ts": 960,
+     "at_ms": 45,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 201,
+     "out_ts": 960
+    },
+    {
+     "src": 2,
+     "seq": 1,
+     "ts": 50000,
+     "at_ms": 100,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 203,
+     "out_ts": 4800
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 200,
+     "in_seq": null
+    },
+    {
+     "out_seq": 201,
+     "in_seq": null
+    },
+    {
+     "out_seq": 202,
+     "in_seq": null
+    },
+    {
+     "out_seq": 203,
+     "in_seq": 1
+    }
+   ]
+  },
+  {
+   "name": "opus — 전환 경계가 seq 감김 위",
+   "clock": 48000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 65534,
+     "ts": 10,
+     "at_ms": 0,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 65534,
+     "out_ts": 10
+    },
+    {
+     "src": 1,
+     "seq": 65535,
+     "ts": 970,
+     "at_ms": 20,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 65535,
+     "out_ts": 970
+    },
+    {
+     "src": 2,
+     "seq": 300,
+     "ts": 40,
+     "at_ms": 40,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 0,
+     "out_ts": 1930
+    },
+    {
+     "src": 2,
+     "seq": 301,
+     "ts": 1000,
+     "at_ms": 60,
+     "payload": "f8",
+     "covers": 960,
+     "out_seq": 1,
+     "out_ts": 2890
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 65535,
+     "in_seq": null
+    },
+    {
+     "out_seq": 0,
+     "in_seq": 300
+    },
+    {
+     "out_seq": 1,
+     "in_seq": 301
+    }
+   ]
+  },
+  {
+   "name": "video — 전환 뒤 새 출처의 경계 앞 번호(#29 가 키프레임 #30 뒤에 옴)는 버린다 — 앞 출처 마지막 seq 와 겹친다(2층 관찰 20261107c)",
+   "clock": 90000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 100,
+     "ts": 3000,
+     "at_ms": 0,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 100,
+     "out_ts": 3000
+    },
+    {
+     "src": 1,
+     "seq": 101,
+     "ts": 6000,
+     "at_ms": 33,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 101,
+     "out_ts": 6000
+    },
+    {
+     "src": 2,
+     "seq": 30,
+     "ts": 90000,
+     "at_ms": 66,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 102,
+     "out_ts": 8970
+    },
+    {
+     "src": 2,
+     "seq": 29,
+     "ts": 87000,
+     "at_ms": 67,
+     "payload": "",
+     "covers": 1,
+     "out_seq": null,
+     "out_ts": null
+    },
+    {
+     "src": 2,
+     "seq": 31,
+     "ts": 93000,
+     "at_ms": 99,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 103,
+     "out_ts": 11970
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 101,
+     "in_seq": null
+    },
+    {
+     "out_seq": 102,
+     "in_seq": 30
+    },
+    {
+     "out_seq": 103,
+     "in_seq": 31
+    }
+   ]
+  },
+  {
+   "name": "video — 처음 실을 때도 경계 앞 번호는 버린다",
+   "clock": 90000,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 30,
+     "ts": 90000,
+     "at_ms": 0,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 30,
+     "out_ts": 90000
+    },
+    {
+     "src": 1,
+     "seq": 29,
+     "ts": 87000,
+     "at_ms": 1,
+     "payload": "",
+     "covers": 1,
+     "out_seq": null,
+     "out_ts": null
+    },
+    {
+     "src": 1,
+     "seq": 31,
+     "ts": 93000,
+     "at_ms": 33,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 31,
+     "out_ts": 93000
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 29,
+     "in_seq": null
+    },
+    {
+     "out_seq": 30,
+     "in_seq": 30
+    },
+    {
+     "out_seq": 31,
+     "in_seq": 31
+    }
+   ]
+  },
+  {
+   "name": "video — 전환 경계 창: 창 안 경계 앞 NACK 은 버림 · 2¹⁵ 넘게 흐른 뒤 방금 나간 seq 의 NACK 은 되돌림(serial 이 뒤집히는 차)",
+   "clock": 90000,
+   "window": 16384,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 1000,
+     "ts": 0,
+     "at_ms": 0,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 1000,
+     "out_ts": 0
+    },
+    {
+     "src": 2,
+     "seq": 5000,
+     "ts": 0,
+     "at_ms": 1,
+     "payload": "",
+     "covers": 1,
+     "out_seq": 1001,
+     "out_ts": 90
+    }
+   ],
+   "early_nack": {
+    "out_seq": 1000,
+    "in_seq": null
+   },
+   "flow": {
+    "src": 2,
+    "seq0": 5001,
+    "n": 40000,
+    "ts0": 3000,
+    "ts_step": 3000,
+    "at0": 2,
+    "at_step": 1
+   },
+   "nack": [
+    {
+     "out_seq": 41001,
+     "in_seq": 45000
+    }
+   ]
+  }
+ ],
+ "vp8": [
+  {
+   "name": "VP8 — 층 전환: 새 출처 키프레임의 picture ID · TL0PICIDX 가 「마지막」 + 1 로 이어진다(F4 전환 뒤 멈춤 D1)",
+   "clock": 90000,
+   "vp8": true,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 100,
+     "ts": 0,
+     "at_ms": 0,
+     "payload": "90c09b58289d",
+     "out_seq": 100,
+     "out_ts": 0,
+     "out_pid": 7000,
+     "out_tl0": 40,
+     "out_payload": "90c09b58289d"
+    },
+    {
+     "src": 1,
+     "seq": 101,
+     "ts": 3000,
+     "at_ms": 33,
+     "payload": "90c09b59289d",
+     "out_seq": 101,
+     "out_ts": 3000,
+     "out_pid": 7001,
+     "out_tl0": 40,
+     "out_payload": "90c09b59289d"
+    },
+    {
+     "src": 1,
+     "seq": 102,
+     "ts": 6000,
+     "at_ms": 66,
+     "payload": "90c09b5a299d",
+     "out_seq": 102,
+     "out_ts": 6000,
+     "out_pid": 7002,
+     "out_tl0": 41,
+     "out_payload": "90c09b5a299d"
+    },
+    {
+     "src": 2,
+     "seq": 9000,
+     "ts": 9000,
+     "at_ms": 99,
+     "payload": "90c08078039d",
+     "out_seq": 103,
+     "out_ts": 8970,
+     "out_pid": 7003,
+     "out_tl0": 42,
+     "out_payload": "90c09b5b2a9d"
+    },
+    {
+     "src": 2,
+     "seq": 9001,
+     "ts": 12000,
+     "at_ms": 132,
+     "payload": "90c08079039d",
+     "out_seq": 104,
+     "out_ts": 11970,
+     "out_pid": 7004,
+     "out_tl0": 42,
+     "out_payload": "90c09b5c2a9d"
+    },
+    {
+     "src": 2,
+     "seq": 9002,
+     "ts": 15000,
+     "at_ms": 165,
+     "payload": "90c0807a049d",
+     "out_seq": 105,
+     "out_ts": 14970,
+     "out_pid": 7005,
+     "out_tl0": 43,
+     "out_payload": "90c09b5d2b9d"
+    },
+    {
+     "src": 1,
+     "seq": 103,
+     "ts": 18000,
+     "at_ms": 198,
+     "payload": "90c09b5b299d",
+     "out_seq": 106,
+     "out_ts": 17940,
+     "out_pid": 7006,
+     "out_tl0": 44,
+     "out_payload": "90c09b5e2c9d"
+    },
+    {
+     "src": 1,
+     "seq": 104,
+     "ts": 21000,
+     "at_ms": 231,
+     "payload": "90c09b5c2a9d",
+     "out_seq": 107,
+     "out_ts": 20940,
+     "out_pid": 7007,
+     "out_tl0": 45,
+     "out_payload": "90c09b5f2d9d"
+    }
+   ],
+   "nack": [],
+   "rtx": [
+    {
+     "out_seq": 105,
+     "in_seq": null,
+     "payload": "90c0807a049d",
+     "out_pid": null,
+     "out_tl0": null,
+     "out_payload": null
+    },
+    {
+     "out_seq": 107,
+     "in_seq": 104,
+     "payload": "90c09b5c2a9d",
+     "out_pid": 7007,
+     "out_tl0": 45,
+     "out_payload": "90c09b5f2d9d"
+    }
+   ]
+  },
+  {
+   "name": "VP8 — 감김: picture ID 32767 · TL0PICIDX 255 다음은 0 · 0",
+   "clock": 90000,
+   "vp8": true,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 10,
+     "ts": 0,
+     "at_ms": 0,
+     "payload": "90c0fffefe9d",
+     "out_seq": 10,
+     "out_ts": 0,
+     "out_pid": 32766,
+     "out_tl0": 254,
+     "out_payload": "90c0fffefe9d"
+    },
+    {
+     "src": 1,
+     "seq": 11,
+     "ts": 3000,
+     "at_ms": 33,
+     "payload": "90c0ffffff9d",
+     "out_seq": 11,
+     "out_ts": 3000,
+     "out_pid": 32767,
+     "out_tl0": 255,
+     "out_payload": "90c0ffffff9d"
+    },
+    {
+     "src": 2,
+     "seq": 500,
+     "ts": 6000,
+     "at_ms": 66,
+     "payload": "90c08fa0119d",
+     "out_seq": 12,
+     "out_ts": 5970,
+     "out_pid": 0,
+     "out_tl0": 0,
+     "out_payload": "90c08000009d"
+    },
+    {
+     "src": 2,
+     "seq": 501,
+     "ts": 9000,
+     "at_ms": 99,
+     "payload": "90c08fa1119d",
+     "out_seq": 13,
+     "out_ts": 8970,
+     "out_pid": 1,
+     "out_tl0": 0,
+     "out_payload": "90c08001009d"
+    }
+   ],
+   "nack": [],
+   "rtx": [
+    {
+     "out_seq": 11,
+     "in_seq": null,
+     "payload": "90c0ffffff9d",
+     "out_pid": null,
+     "out_tl0": null,
+     "out_payload": null
+    },
+    {
+     "out_seq": 13,
+     "in_seq": 501,
+     "payload": "90c08fa1119d",
+     "out_pid": 1,
+     "out_tl0": 0,
+     "out_payload": "90c08001009d"
+    }
+   ]
+  },
+  {
+   "name": "VP8 — 7비트 picture ID(M = 0) · TL0PICIDX 없음: 폭은 원본 그대로 · 아래 7비트로 감긴다",
+   "clock": 90000,
+   "vp8": true,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 1,
+     "ts": 0,
+     "at_ms": 0,
+     "payload": "90807e9d",
+     "out_seq": 1,
+     "out_ts": 0,
+     "out_pid": 126,
+     "out_tl0": null,
+     "out_payload": "90807e9d"
+    },
+    {
+     "src": 1,
+     "seq": 2,
+     "ts": 3000,
+     "at_ms": 33,
+     "payload": "90807f9d",
+     "out_seq": 2,
+     "out_ts": 3000,
+     "out_pid": 127,
+     "out_tl0": null,
+     "out_payload": "90807f9d"
+    },
+    {
+     "src": 2,
+     "seq": 300,
+     "ts": 6000,
+     "at_ms": 66,
+     "payload": "9080059d",
+     "out_seq": 3,
+     "out_ts": 5970,
+     "out_pid": 128,
+     "out_tl0": null,
+     "out_payload": "9080009d"
+    },
+    {
+     "src": 2,
+     "seq": 301,
+     "ts": 9000,
+     "at_ms": 99,
+     "payload": "9080069d",
+     "out_seq": 4,
+     "out_ts": 8970,
+     "out_pid": 129,
+     "out_tl0": null,
+     "out_payload": "9080019d"
+    }
+   ],
+   "nack": [],
+   "rtx": []
+  },
+  {
+   "name": "VP8 — 늦게 온 패킷은 「마지막」을 바꾸지 않는다(전환은 가장 앞선 것에서 잇는다)",
+   "clock": 90000,
+   "vp8": true,
+   "steps": [
+    {
+     "src": 1,
+     "seq": 50,
+     "ts": 0,
+     "at_ms": 0,
+     "payload": "90c080c8099d",
+     "out_seq": 50,
+     "out_ts": 0,
+     "out_pid": 200,
+     "out_tl0": 9,
+     "out_payload": "90c080c8099d"
+    },
+    {
+     "src": 1,
+     "seq": 52,
+     "ts": 3000,
+     "at_ms": 33,
+     "payload": "90c080ca0a9d",
+     "out_seq": 52,
+     "out_ts": 3000,
+     "out_pid": 202,
+     "out_tl0": 10,
+     "out_payload": "90c080ca0a9d"
+    },
+    {
+     "src": 1,
+     "seq": 51,
+     "ts": 6000,
+     "at_ms": 66,
+     "payload": "90c080c9099d",
+     "out_seq": 51,
+     "out_ts": 6000,
+     "out_pid": 201,
+     "out_tl0": 9,
+     "out_payload": "90c080c9099d"
+    },
+    {
+     "src": 2,
+     "seq": 7,
+     "ts": 9000,
+     "at_ms": 99,
+     "payload": "90c083843c9d",
+     "out_seq": 53,
+     "out_ts": 8940,
+     "out_pid": 203,
+     "out_tl0": 11,
+     "out_payload": "90c080cb0b9d"
+    }
+   ],
+   "nack": [],
+   "rtx": []
+  }
+ ],
+ "drop": [
+  {
+   "name": "VP8 — 시간 층 뺌: T0 T2 T1 T2 T0 에서 T2 둘을 빼면 나가는 seq · picture ID 가 구멍 없이 잇는다(TL0PICIDX 는 그대로)",
+   "clock": 90000,
+   "vp8": true,
+   "steps": [
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 100,
+     "ts": 0,
+     "at_ms": 0,
+     "payload": "90c09b58289d",
+     "out_seq": 100,
+     "out_ts": 0,
+     "out_pid": 7000,
+     "out_tl0": 40
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 101,
+     "ts": 3000,
+     "at_ms": 33,
+     "payload": "90c09b59289d",
+     "runs": 1
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 102,
+     "ts": 6000,
+     "at_ms": 66,
+     "payload": "90c09b5a289d",
+     "out_seq": 101,
+     "out_ts": 6000,
+     "out_pid": 7001,
+     "out_tl0": 40
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 103,
+     "ts": 9000,
+     "at_ms": 99,
+     "payload": "90c09b5b289d",
+     "runs": 2
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 104,
+     "ts": 12000,
+     "at_ms": 132,
+     "payload": "90c09b5c299d",
+     "out_seq": 102,
+     "out_ts": 12000,
+     "out_pid": 7002,
+     "out_tl0": 41
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 105,
+     "ts": 15000,
+     "at_ms": 165,
+     "payload": "90c09b5d299d",
+     "out_seq": 103,
+     "out_ts": 15000,
+     "out_pid": 7003,
+     "out_tl0": 41
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 100,
+     "in_seq": 100,
+     "out_pid": 7000,
+     "out_tl0": 40
+    },
+    {
+     "out_seq": 101,
+     "in_seq": 102,
+     "out_pid": 7001,
+     "out_tl0": 40
+    },
+    {
+     "out_seq": 102,
+     "in_seq": 104,
+     "out_pid": 7002,
+     "out_tl0": 41
+    },
+    {
+     "out_seq": 103,
+     "in_seq": 105,
+     "out_pid": 7003,
+     "out_tl0": 41
+    }
+   ],
+   "runs": [
+    [
+     101,
+     1,
+     7001,
+     1
+    ],
+    [
+     103,
+     1,
+     7003,
+     1
+    ]
+   ],
+   "seq_off": 0,
+   "pid_off": 0,
+   "boundary": 100
+  },
+  {
+   "name": "VP8 — 세 패킷 프레임을 빼면 seq 런 3 · picture ID 런 1",
+   "clock": 90000,
+   "vp8": true,
+   "steps": [
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 10,
+     "ts": 0,
+     "at_ms": 0,
+     "payload": "90c0812c059d",
+     "out_seq": 10,
+     "out_ts": 0,
+     "out_pid": 300,
+     "out_tl0": 5
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 11,
+     "ts": 3000,
+     "at_ms": 33,
+     "payload": "90c0812c059d",
+     "out_seq": 11,
+     "out_ts": 3000,
+     "out_pid": 300,
+     "out_tl0": 5
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 12,
+     "ts": 6000,
+     "at_ms": 66,
+     "payload": "90c0812d059d",
+     "runs": 1
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 13,
+     "ts": 9000,
+     "at_ms": 99,
+     "payload": "90c0812d059d",
+     "runs": 1
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 14,
+     "ts": 12000,
+     "at_ms": 132,
+     "payload": "90c0812d059d",
+     "runs": 1
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 15,
+     "ts": 15000,
+     "at_ms": 165,
+     "payload": "90c0812e059d",
+     "out_seq": 12,
+     "out_ts": 15000,
+     "out_pid": 301,
+     "out_tl0": 5
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 16,
+     "ts": 18000,
+     "at_ms": 198,
+     "payload": "90c0812e059d",
+     "out_seq": 13,
+     "out_ts": 18000,
+     "out_pid": 301,
+     "out_tl0": 5
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 10,
+     "in_seq": 10,
+     "out_pid": 300,
+     "out_tl0": 5
+    },
+    {
+     "out_seq": 11,
+     "in_seq": 11,
+     "out_pid": 300,
+     "out_tl0": 5
+    },
+    {
+     "out_seq": 12,
+     "in_seq": 15,
+     "out_pid": 301,
+     "out_tl0": 5
+    },
+    {
+     "out_seq": 13,
+     "in_seq": 16,
+     "out_pid": 301,
+     "out_tl0": 5
+    }
+   ],
+   "runs": [
+    [
+     12,
+     3,
+     301,
+     1
+    ]
+   ],
+   "seq_off": 0,
+   "pid_off": 0,
+   "boundary": 10
+  },
+  {
+   "name": "VP8 — 이어 뺀 프레임 셋(T0 만 남김)은 런 하나로 합친다",
+   "clock": 90000,
+   "vp8": true,
+   "steps": [
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 200,
+     "ts": 0,
+     "at_ms": 0,
+     "payload": "90c08384019d",
+     "out_seq": 200,
+     "out_ts": 0,
+     "out_pid": 900,
+     "out_tl0": 1
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 201,
+     "ts": 3000,
+     "at_ms": 33,
+     "payload": "90c08385019d",
+     "runs": 1
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 202,
+     "ts": 6000,
+     "at_ms": 66,
+     "payload": "90c08386019d",
+     "runs": 1
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 203,
+     "ts": 9000,
+     "at_ms": 99,
+     "payload": "90c08387019d",
+     "runs": 1
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 204,
+     "ts": 12000,
+     "at_ms": 132,
+     "payload": "90c08388029d",
+     "out_seq": 201,
+     "out_ts": 12000,
+     "out_pid": 901,
+     "out_tl0": 2
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 200,
+     "in_seq": 200,
+     "out_pid": 900,
+     "out_tl0": 1
+    },
+    {
+     "out_seq": 201,
+     "in_seq": 204,
+     "out_pid": 901,
+     "out_tl0": 2
+    },
+    {
+     "out_seq": 202,
+     "in_seq": 205,
+     "out_pid": null,
+     "out_tl0": null
+    }
+   ],
+   "runs": [
+    [
+     201,
+     3,
+     901,
+     3
+    ]
+   ],
+   "seq_off": 0,
+   "pid_off": 0,
+   "boundary": 200
+  },
+  {
+   "name": "VP8 — 늦은 패킷: 뒤 번호가 나간 뒤 온 앞 번호를 빼면 기록하지 않는다(구멍 하나) · 상류 손실 뒤 늦게 와서 내는 패킷은 제때 번호로",
+   "clock": 90000,
+   "vp8": true,
+   "steps": [
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 50,
+     "ts": 0,
+     "at_ms": 0,
+     "payload": "90c08064039d",
+     "out_seq": 50,
+     "out_ts": 0,
+     "out_pid": 100,
+     "out_tl0": 3
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 52,
+     "ts": 3000,
+     "at_ms": 33,
+     "payload": "90c08066039d",
+     "out_seq": 52,
+     "out_ts": 3000,
+     "out_pid": 102,
+     "out_tl0": 3
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 51,
+     "ts": 6000,
+     "at_ms": 66,
+     "payload": "90c08065039d",
+     "runs": 0
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 53,
+     "ts": 9000,
+     "at_ms": 99,
+     "payload": "90c08067039d",
+     "runs": 1
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 54,
+     "ts": 12000,
+     "at_ms": 132,
+     "payload": "90c08068049d",
+     "out_seq": 53,
+     "out_ts": 12000,
+     "out_pid": 103,
+     "out_tl0": 4
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 56,
+     "ts": 15000,
+     "at_ms": 165,
+     "payload": "90c0806a049d",
+     "runs": 2
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 55,
+     "ts": 18000,
+     "at_ms": 198,
+     "payload": "90c08069049d",
+     "out_seq": 54,
+     "out_ts": 18000,
+     "out_pid": 104,
+     "out_tl0": 4
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 57,
+     "ts": 21000,
+     "at_ms": 231,
+     "payload": "90c0806b049d",
+     "out_seq": 55,
+     "out_ts": 21000,
+     "out_pid": 105,
+     "out_tl0": 4
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 50,
+     "in_seq": 50,
+     "out_pid": 100,
+     "out_tl0": 3
+    },
+    {
+     "out_seq": 51,
+     "in_seq": 51,
+     "out_pid": 101,
+     "out_tl0": 3
+    },
+    {
+     "out_seq": 52,
+     "in_seq": 52,
+     "out_pid": 102,
+     "out_tl0": 3
+    },
+    {
+     "out_seq": 53,
+     "in_seq": 54,
+     "out_pid": 103,
+     "out_tl0": 4
+    },
+    {
+     "out_seq": 54,
+     "in_seq": 55,
+     "out_pid": 104,
+     "out_tl0": 4
+    },
+    {
+     "out_seq": 55,
+     "in_seq": 57,
+     "out_pid": 105,
+     "out_tl0": 4
+    }
+   ],
+   "runs": [
+    [
+     53,
+     1,
+     103,
+     1
+    ],
+    [
+     56,
+     1,
+     106,
+     1
+    ]
+   ],
+   "seq_off": 0,
+   "pid_off": 0,
+   "boundary": 50
+  },
+  {
+   "name": "VP8 — 뺀 뒤 출처 전환: 런을 비우고 새 출처 첫 seq = 마지막 + 1 · 새 출처 seq 가 옛 런과 같은 수치여도 역행 없음(모형 판 drops_kept 의 반례 자리)",
+   "clock": 90000,
+   "vp8": true,
+   "steps": [
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 100,
+     "ts": 0,
+     "at_ms": 0,
+     "payload": "90c09b58289d",
+     "out_seq": 100,
+     "out_ts": 0,
+     "out_pid": 7000,
+     "out_tl0": 40
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 101,
+     "ts": 3000,
+     "at_ms": 33,
+     "payload": "90c09b59289d",
+     "runs": 1
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 102,
+     "ts": 6000,
+     "at_ms": 66,
+     "payload": "90c09b5a289d",
+     "out_seq": 101,
+     "out_ts": 6000,
+     "out_pid": 7001,
+     "out_tl0": 40
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 103,
+     "ts": 9000,
+     "at_ms": 99,
+     "payload": "90c09b5b289d",
+     "runs": 2
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 104,
+     "ts": 12000,
+     "at_ms": 132,
+     "payload": "90c09b5c299d",
+     "out_seq": 102,
+     "out_ts": 12000,
+     "out_pid": 7002,
+     "out_tl0": 41
+    },
+    {
+     "op": "map",
+     "src": 2,
+     "seq": 101,
+     "ts": 15000,
+     "at_ms": 165,
+     "payload": "90c08032099d",
+     "out_seq": 103,
+     "out_ts": 14970,
+     "out_pid": 7003,
+     "out_tl0": 42
+    },
+    {
+     "op": "map",
+     "src": 2,
+     "seq": 102,
+     "ts": 18000,
+     "at_ms": 198,
+     "payload": "90c08033099d",
+     "out_seq": 104,
+     "out_ts": 17970,
+     "out_pid": 7004,
+     "out_tl0": 42
+    },
+    {
+     "op": "map",
+     "src": 2,
+     "seq": 103,
+     "ts": 21000,
+     "at_ms": 231,
+     "payload": "90c08034099d",
+     "out_seq": 105,
+     "out_ts": 20970,
+     "out_pid": 7005,
+     "out_tl0": 42
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 102,
+     "in_seq": null,
+     "out_pid": null,
+     "out_tl0": null
+    },
+    {
+     "out_seq": 103,
+     "in_seq": 101,
+     "out_pid": 7003,
+     "out_tl0": 42
+    },
+    {
+     "out_seq": 104,
+     "in_seq": 102,
+     "out_pid": 7004,
+     "out_tl0": 42
+    },
+    {
+     "out_seq": 105,
+     "in_seq": 103,
+     "out_pid": 7005,
+     "out_tl0": 42
+    }
+   ],
+   "runs": [],
+   "seq_off": 2,
+   "pid_off": 6953,
+   "boundary": 103
+  },
+  {
+   "name": "VP8 — 뺀 번호가 다시 오면(중복 · 발행자 재전송) 내지 않는다 · 다른 출처 · 실은 적 없을 때의 빼기는 아무것도 안 한다",
+   "clock": 90000,
+   "vp8": true,
+   "steps": [
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 9,
+     "ts": 0,
+     "at_ms": 0,
+     "payload": "90c08031019d",
+     "runs": 0
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 10,
+     "ts": 3000,
+     "at_ms": 33,
+     "payload": "90c08032019d",
+     "out_seq": 10,
+     "out_ts": 3000,
+     "out_pid": 50,
+     "out_tl0": 1
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 11,
+     "ts": 6000,
+     "at_ms": 66,
+     "payload": "90c08033019d",
+     "runs": 1
+    },
+    {
+     "op": "skip",
+     "src": 2,
+     "seq": 12,
+     "ts": 9000,
+     "at_ms": 99,
+     "payload": "90c08384079d",
+     "runs": 1
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 12,
+     "ts": 12000,
+     "at_ms": 132,
+     "payload": "90c08034019d",
+     "out_seq": 11,
+     "out_ts": 12000,
+     "out_pid": 51,
+     "out_tl0": 1
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 11,
+     "ts": 15000,
+     "at_ms": 165,
+     "payload": "90c08033019d",
+     "out_seq": null,
+     "out_ts": null,
+     "out_pid": null,
+     "out_tl0": null
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 13,
+     "ts": 18000,
+     "at_ms": 198,
+     "payload": "90c08035029d",
+     "out_seq": 12,
+     "out_ts": 18000,
+     "out_pid": 52,
+     "out_tl0": 2
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 10,
+     "in_seq": 10,
+     "out_pid": 50,
+     "out_tl0": 1
+    },
+    {
+     "out_seq": 11,
+     "in_seq": 12,
+     "out_pid": 51,
+     "out_tl0": 1
+    },
+    {
+     "out_seq": 12,
+     "in_seq": 13,
+     "out_pid": 52,
+     "out_tl0": 2
+    }
+   ],
+   "runs": [
+    [
+     11,
+     1,
+     51,
+     1
+    ]
+   ],
+   "seq_off": 0,
+   "pid_off": 0,
+   "boundary": 10
+  },
+  {
+   "name": "VP8 — 감김: seq 65535 → 0 · picture ID 32767 → 0 을 지나는 런",
+   "clock": 90000,
+   "vp8": true,
+   "steps": [
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 65534,
+     "ts": 0,
+     "at_ms": 0,
+     "payload": "90c0fffeff9d",
+     "out_seq": 65534,
+     "out_ts": 0,
+     "out_pid": 32766,
+     "out_tl0": 255
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 65535,
+     "ts": 3000,
+     "at_ms": 33,
+     "payload": "90c0ffffff9d",
+     "runs": 1
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 0,
+     "ts": 6000,
+     "at_ms": 66,
+     "payload": "90c08000009d",
+     "out_seq": 65535,
+     "out_ts": 6000,
+     "out_pid": 32767,
+     "out_tl0": 0
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1,
+     "ts": 9000,
+     "at_ms": 99,
+     "payload": "90c08001009d",
+     "runs": 2
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 2,
+     "ts": 12000,
+     "at_ms": 132,
+     "payload": "90c08002019d",
+     "out_seq": 0,
+     "out_ts": 12000,
+     "out_pid": 0,
+     "out_tl0": 1
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 65534,
+     "in_seq": 65534,
+     "out_pid": 32766,
+     "out_tl0": 255
+    },
+    {
+     "out_seq": 65535,
+     "in_seq": 0,
+     "out_pid": 32767,
+     "out_tl0": 0
+    },
+    {
+     "out_seq": 0,
+     "in_seq": 2,
+     "out_pid": 0,
+     "out_tl0": 1
+    }
+   ],
+   "runs": [
+    [
+     65535,
+     1,
+     32767,
+     1
+    ],
+    [
+     1,
+     1,
+     1,
+     1
+    ]
+   ],
+   "seq_off": 0,
+   "pid_off": 0,
+   "boundary": 65534
+  },
+  {
+   "name": "VP8 — 뺀 런이 128 를 넘으면 가장 오래된 런을 접는다 · 접힌 앞 번호의 NACK 은 경계 앞 버림 · 그 뒤는 되돌림",
+   "clock": 90000,
+   "vp8": true,
+   "steps": [
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1000,
+     "ts": 0,
+     "at_ms": 0,
+     "payload": "90c081f4009d",
+     "out_seq": 1000,
+     "out_ts": 0,
+     "out_pid": 500,
+     "out_tl0": 0
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1001,
+     "ts": 3000,
+     "at_ms": 33,
+     "payload": "90c081f5009d",
+     "runs": 1
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1002,
+     "ts": 6000,
+     "at_ms": 66,
+     "payload": "90c081f6019d",
+     "out_seq": 1001,
+     "out_ts": 6000,
+     "out_pid": 501,
+     "out_tl0": 1
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1003,
+     "ts": 9000,
+     "at_ms": 99,
+     "payload": "90c081f7019d",
+     "runs": 2
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1004,
+     "ts": 12000,
+     "at_ms": 132,
+     "payload": "90c081f8029d",
+     "out_seq": 1002,
+     "out_ts": 12000,
+     "out_pid": 502,
+     "out_tl0": 2
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1005,
+     "ts": 15000,
+     "at_ms": 165,
+     "payload": "90c081f9029d",
+     "runs": 3
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1006,
+     "ts": 18000,
+     "at_ms": 198,
+     "payload": "90c081fa039d",
+     "out_seq": 1003,
+     "out_ts": 18000,
+     "out_pid": 503,
+     "out_tl0": 3
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1007,
+     "ts": 21000,
+     "at_ms": 231,
+     "payload": "90c081fb039d",
+     "runs": 4
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1008,
+     "ts": 24000,
+     "at_ms": 264,
+     "payload": "90c081fc049d",
+     "out_seq": 1004,
+     "out_ts": 24000,
+     "out_pid": 504,
+     "out_tl0": 4
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1009,
+     "ts": 27000,
+     "at_ms": 297,
+     "payload": "90c081fd049d",
+     "runs": 5
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1010,
+     "ts": 30000,
+     "at_ms": 330,
+     "payload": "90c081fe059d",
+     "out_seq": 1005,
+     "out_ts": 30000,
+     "out_pid": 505,
+     "out_tl0": 5
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1011,
+     "ts": 33000,
+     "at_ms": 363,
+     "payload": "90c081ff059d",
+     "runs": 6
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1012,
+     "ts": 36000,
+     "at_ms": 396,
+     "payload": "90c08200069d",
+     "out_seq": 1006,
+     "out_ts": 36000,
+     "out_pid": 506,
+     "out_tl0": 6
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1013,
+     "ts": 39000,
+     "at_ms": 429,
+     "payload": "90c08201069d",
+     "runs": 7
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1014,
+     "ts": 42000,
+     "at_ms": 462,
+     "payload": "90c08202079d",
+     "out_seq": 1007,
+     "out_ts": 42000,
+     "out_pid": 507,
+     "out_tl0": 7
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1015,
+     "ts": 45000,
+     "at_ms": 495,
+     "payload": "90c08203079d",
+     "runs": 8
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1016,
+     "ts": 48000,
+     "at_ms": 528,
+     "payload": "90c08204089d",
+     "out_seq": 1008,
+     "out_ts": 48000,
+     "out_pid": 508,
+     "out_tl0": 8
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1017,
+     "ts": 51000,
+     "at_ms": 561,
+     "payload": "90c08205089d",
+     "runs": 9
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1018,
+     "ts": 54000,
+     "at_ms": 594,
+     "payload": "90c08206099d",
+     "out_seq": 1009,
+     "out_ts": 54000,
+     "out_pid": 509,
+     "out_tl0": 9
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1019,
+     "ts": 57000,
+     "at_ms": 627,
+     "payload": "90c08207099d",
+     "runs": 10
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1020,
+     "ts": 60000,
+     "at_ms": 660,
+     "payload": "90c082080a9d",
+     "out_seq": 1010,
+     "out_ts": 60000,
+     "out_pid": 510,
+     "out_tl0": 10
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1021,
+     "ts": 63000,
+     "at_ms": 693,
+     "payload": "90c082090a9d",
+     "runs": 11
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1022,
+     "ts": 66000,
+     "at_ms": 726,
+     "payload": "90c0820a0b9d",
+     "out_seq": 1011,
+     "out_ts": 66000,
+     "out_pid": 511,
+     "out_tl0": 11
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1023,
+     "ts": 69000,
+     "at_ms": 759,
+     "payload": "90c0820b0b9d",
+     "runs": 12
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1024,
+     "ts": 72000,
+     "at_ms": 792,
+     "payload": "90c0820c0c9d",
+     "out_seq": 1012,
+     "out_ts": 72000,
+     "out_pid": 512,
+     "out_tl0": 12
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1025,
+     "ts": 75000,
+     "at_ms": 825,
+     "payload": "90c0820d0c9d",
+     "runs": 13
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1026,
+     "ts": 78000,
+     "at_ms": 858,
+     "payload": "90c0820e0d9d",
+     "out_seq": 1013,
+     "out_ts": 78000,
+     "out_pid": 513,
+     "out_tl0": 13
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1027,
+     "ts": 81000,
+     "at_ms": 891,
+     "payload": "90c0820f0d9d",
+     "runs": 14
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1028,
+     "ts": 84000,
+     "at_ms": 924,
+     "payload": "90c082100e9d",
+     "out_seq": 1014,
+     "out_ts": 84000,
+     "out_pid": 514,
+     "out_tl0": 14
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1029,
+     "ts": 87000,
+     "at_ms": 957,
+     "payload": "90c082110e9d",
+     "runs": 15
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1030,
+     "ts": 90000,
+     "at_ms": 990,
+     "payload": "90c082120f9d",
+     "out_seq": 1015,
+     "out_ts": 90000,
+     "out_pid": 515,
+     "out_tl0": 15
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1031,
+     "ts": 93000,
+     "at_ms": 1023,
+     "payload": "90c082130f9d",
+     "runs": 16
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1032,
+     "ts": 96000,
+     "at_ms": 1056,
+     "payload": "90c08214109d",
+     "out_seq": 1016,
+     "out_ts": 96000,
+     "out_pid": 516,
+     "out_tl0": 16
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1033,
+     "ts": 99000,
+     "at_ms": 1089,
+     "payload": "90c08215109d",
+     "runs": 17
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1034,
+     "ts": 102000,
+     "at_ms": 1122,
+     "payload": "90c08216119d",
+     "out_seq": 1017,
+     "out_ts": 102000,
+     "out_pid": 517,
+     "out_tl0": 17
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1035,
+     "ts": 105000,
+     "at_ms": 1155,
+     "payload": "90c08217119d",
+     "runs": 18
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1036,
+     "ts": 108000,
+     "at_ms": 1188,
+     "payload": "90c08218129d",
+     "out_seq": 1018,
+     "out_ts": 108000,
+     "out_pid": 518,
+     "out_tl0": 18
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1037,
+     "ts": 111000,
+     "at_ms": 1221,
+     "payload": "90c08219129d",
+     "runs": 19
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1038,
+     "ts": 114000,
+     "at_ms": 1254,
+     "payload": "90c0821a139d",
+     "out_seq": 1019,
+     "out_ts": 114000,
+     "out_pid": 519,
+     "out_tl0": 19
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1039,
+     "ts": 117000,
+     "at_ms": 1287,
+     "payload": "90c0821b139d",
+     "runs": 20
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1040,
+     "ts": 120000,
+     "at_ms": 1320,
+     "payload": "90c0821c149d",
+     "out_seq": 1020,
+     "out_ts": 120000,
+     "out_pid": 520,
+     "out_tl0": 20
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1041,
+     "ts": 123000,
+     "at_ms": 1353,
+     "payload": "90c0821d149d",
+     "runs": 21
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1042,
+     "ts": 126000,
+     "at_ms": 1386,
+     "payload": "90c0821e159d",
+     "out_seq": 1021,
+     "out_ts": 126000,
+     "out_pid": 521,
+     "out_tl0": 21
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1043,
+     "ts": 129000,
+     "at_ms": 1419,
+     "payload": "90c0821f159d",
+     "runs": 22
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1044,
+     "ts": 132000,
+     "at_ms": 1452,
+     "payload": "90c08220169d",
+     "out_seq": 1022,
+     "out_ts": 132000,
+     "out_pid": 522,
+     "out_tl0": 22
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1045,
+     "ts": 135000,
+     "at_ms": 1485,
+     "payload": "90c08221169d",
+     "runs": 23
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1046,
+     "ts": 138000,
+     "at_ms": 1518,
+     "payload": "90c08222179d",
+     "out_seq": 1023,
+     "out_ts": 138000,
+     "out_pid": 523,
+     "out_tl0": 23
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1047,
+     "ts": 141000,
+     "at_ms": 1551,
+     "payload": "90c08223179d",
+     "runs": 24
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1048,
+     "ts": 144000,
+     "at_ms": 1584,
+     "payload": "90c08224189d",
+     "out_seq": 1024,
+     "out_ts": 144000,
+     "out_pid": 524,
+     "out_tl0": 24
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1049,
+     "ts": 147000,
+     "at_ms": 1617,
+     "payload": "90c08225189d",
+     "runs": 25
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1050,
+     "ts": 150000,
+     "at_ms": 1650,
+     "payload": "90c08226199d",
+     "out_seq": 1025,
+     "out_ts": 150000,
+     "out_pid": 525,
+     "out_tl0": 25
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1051,
+     "ts": 153000,
+     "at_ms": 1683,
+     "payload": "90c08227199d",
+     "runs": 26
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1052,
+     "ts": 156000,
+     "at_ms": 1716,
+     "payload": "90c082281a9d",
+     "out_seq": 1026,
+     "out_ts": 156000,
+     "out_pid": 526,
+     "out_tl0": 26
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1053,
+     "ts": 159000,
+     "at_ms": 1749,
+     "payload": "90c082291a9d",
+     "runs": 27
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1054,
+     "ts": 162000,
+     "at_ms": 1782,
+     "payload": "90c0822a1b9d",
+     "out_seq": 1027,
+     "out_ts": 162000,
+     "out_pid": 527,
+     "out_tl0": 27
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1055,
+     "ts": 165000,
+     "at_ms": 1815,
+     "payload": "90c0822b1b9d",
+     "runs": 28
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1056,
+     "ts": 168000,
+     "at_ms": 1848,
+     "payload": "90c0822c1c9d",
+     "out_seq": 1028,
+     "out_ts": 168000,
+     "out_pid": 528,
+     "out_tl0": 28
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1057,
+     "ts": 171000,
+     "at_ms": 1881,
+     "payload": "90c0822d1c9d",
+     "runs": 29
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1058,
+     "ts": 174000,
+     "at_ms": 1914,
+     "payload": "90c0822e1d9d",
+     "out_seq": 1029,
+     "out_ts": 174000,
+     "out_pid": 529,
+     "out_tl0": 29
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1059,
+     "ts": 177000,
+     "at_ms": 1947,
+     "payload": "90c0822f1d9d",
+     "runs": 30
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1060,
+     "ts": 180000,
+     "at_ms": 1980,
+     "payload": "90c082301e9d",
+     "out_seq": 1030,
+     "out_ts": 180000,
+     "out_pid": 530,
+     "out_tl0": 30
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1061,
+     "ts": 183000,
+     "at_ms": 2013,
+     "payload": "90c082311e9d",
+     "runs": 31
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1062,
+     "ts": 186000,
+     "at_ms": 2046,
+     "payload": "90c082321f9d",
+     "out_seq": 1031,
+     "out_ts": 186000,
+     "out_pid": 531,
+     "out_tl0": 31
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1063,
+     "ts": 189000,
+     "at_ms": 2079,
+     "payload": "90c082331f9d",
+     "runs": 32
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1064,
+     "ts": 192000,
+     "at_ms": 2112,
+     "payload": "90c08234209d",
+     "out_seq": 1032,
+     "out_ts": 192000,
+     "out_pid": 532,
+     "out_tl0": 32
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1065,
+     "ts": 195000,
+     "at_ms": 2145,
+     "payload": "90c08235209d",
+     "runs": 33
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1066,
+     "ts": 198000,
+     "at_ms": 2178,
+     "payload": "90c08236219d",
+     "out_seq": 1033,
+     "out_ts": 198000,
+     "out_pid": 533,
+     "out_tl0": 33
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1067,
+     "ts": 201000,
+     "at_ms": 2211,
+     "payload": "90c08237219d",
+     "runs": 34
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1068,
+     "ts": 204000,
+     "at_ms": 2244,
+     "payload": "90c08238229d",
+     "out_seq": 1034,
+     "out_ts": 204000,
+     "out_pid": 534,
+     "out_tl0": 34
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1069,
+     "ts": 207000,
+     "at_ms": 2277,
+     "payload": "90c08239229d",
+     "runs": 35
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1070,
+     "ts": 210000,
+     "at_ms": 2310,
+     "payload": "90c0823a239d",
+     "out_seq": 1035,
+     "out_ts": 210000,
+     "out_pid": 535,
+     "out_tl0": 35
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1071,
+     "ts": 213000,
+     "at_ms": 2343,
+     "payload": "90c0823b239d",
+     "runs": 36
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1072,
+     "ts": 216000,
+     "at_ms": 2376,
+     "payload": "90c0823c249d",
+     "out_seq": 1036,
+     "out_ts": 216000,
+     "out_pid": 536,
+     "out_tl0": 36
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1073,
+     "ts": 219000,
+     "at_ms": 2409,
+     "payload": "90c0823d249d",
+     "runs": 37
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1074,
+     "ts": 222000,
+     "at_ms": 2442,
+     "payload": "90c0823e259d",
+     "out_seq": 1037,
+     "out_ts": 222000,
+     "out_pid": 537,
+     "out_tl0": 37
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1075,
+     "ts": 225000,
+     "at_ms": 2475,
+     "payload": "90c0823f259d",
+     "runs": 38
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1076,
+     "ts": 228000,
+     "at_ms": 2508,
+     "payload": "90c08240269d",
+     "out_seq": 1038,
+     "out_ts": 228000,
+     "out_pid": 538,
+     "out_tl0": 38
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1077,
+     "ts": 231000,
+     "at_ms": 2541,
+     "payload": "90c08241269d",
+     "runs": 39
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1078,
+     "ts": 234000,
+     "at_ms": 2574,
+     "payload": "90c08242279d",
+     "out_seq": 1039,
+     "out_ts": 234000,
+     "out_pid": 539,
+     "out_tl0": 39
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1079,
+     "ts": 237000,
+     "at_ms": 2607,
+     "payload": "90c08243279d",
+     "runs": 40
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1080,
+     "ts": 240000,
+     "at_ms": 2640,
+     "payload": "90c08244289d",
+     "out_seq": 1040,
+     "out_ts": 240000,
+     "out_pid": 540,
+     "out_tl0": 40
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1081,
+     "ts": 243000,
+     "at_ms": 2673,
+     "payload": "90c08245289d",
+     "runs": 41
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1082,
+     "ts": 246000,
+     "at_ms": 2706,
+     "payload": "90c08246299d",
+     "out_seq": 1041,
+     "out_ts": 246000,
+     "out_pid": 541,
+     "out_tl0": 41
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1083,
+     "ts": 249000,
+     "at_ms": 2739,
+     "payload": "90c08247299d",
+     "runs": 42
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1084,
+     "ts": 252000,
+     "at_ms": 2772,
+     "payload": "90c082482a9d",
+     "out_seq": 1042,
+     "out_ts": 252000,
+     "out_pid": 542,
+     "out_tl0": 42
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1085,
+     "ts": 255000,
+     "at_ms": 2805,
+     "payload": "90c082492a9d",
+     "runs": 43
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1086,
+     "ts": 258000,
+     "at_ms": 2838,
+     "payload": "90c0824a2b9d",
+     "out_seq": 1043,
+     "out_ts": 258000,
+     "out_pid": 543,
+     "out_tl0": 43
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1087,
+     "ts": 261000,
+     "at_ms": 2871,
+     "payload": "90c0824b2b9d",
+     "runs": 44
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1088,
+     "ts": 264000,
+     "at_ms": 2904,
+     "payload": "90c0824c2c9d",
+     "out_seq": 1044,
+     "out_ts": 264000,
+     "out_pid": 544,
+     "out_tl0": 44
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1089,
+     "ts": 267000,
+     "at_ms": 2937,
+     "payload": "90c0824d2c9d",
+     "runs": 45
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1090,
+     "ts": 270000,
+     "at_ms": 2970,
+     "payload": "90c0824e2d9d",
+     "out_seq": 1045,
+     "out_ts": 270000,
+     "out_pid": 545,
+     "out_tl0": 45
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1091,
+     "ts": 273000,
+     "at_ms": 3003,
+     "payload": "90c0824f2d9d",
+     "runs": 46
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1092,
+     "ts": 276000,
+     "at_ms": 3036,
+     "payload": "90c082502e9d",
+     "out_seq": 1046,
+     "out_ts": 276000,
+     "out_pid": 546,
+     "out_tl0": 46
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1093,
+     "ts": 279000,
+     "at_ms": 3069,
+     "payload": "90c082512e9d",
+     "runs": 47
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1094,
+     "ts": 282000,
+     "at_ms": 3102,
+     "payload": "90c082522f9d",
+     "out_seq": 1047,
+     "out_ts": 282000,
+     "out_pid": 547,
+     "out_tl0": 47
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1095,
+     "ts": 285000,
+     "at_ms": 3135,
+     "payload": "90c082532f9d",
+     "runs": 48
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1096,
+     "ts": 288000,
+     "at_ms": 3168,
+     "payload": "90c08254309d",
+     "out_seq": 1048,
+     "out_ts": 288000,
+     "out_pid": 548,
+     "out_tl0": 48
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1097,
+     "ts": 291000,
+     "at_ms": 3201,
+     "payload": "90c08255309d",
+     "runs": 49
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1098,
+     "ts": 294000,
+     "at_ms": 3234,
+     "payload": "90c08256319d",
+     "out_seq": 1049,
+     "out_ts": 294000,
+     "out_pid": 549,
+     "out_tl0": 49
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1099,
+     "ts": 297000,
+     "at_ms": 3267,
+     "payload": "90c08257319d",
+     "runs": 50
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1100,
+     "ts": 300000,
+     "at_ms": 3300,
+     "payload": "90c08258329d",
+     "out_seq": 1050,
+     "out_ts": 300000,
+     "out_pid": 550,
+     "out_tl0": 50
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1101,
+     "ts": 303000,
+     "at_ms": 3333,
+     "payload": "90c08259329d",
+     "runs": 51
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1102,
+     "ts": 306000,
+     "at_ms": 3366,
+     "payload": "90c0825a339d",
+     "out_seq": 1051,
+     "out_ts": 306000,
+     "out_pid": 551,
+     "out_tl0": 51
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1103,
+     "ts": 309000,
+     "at_ms": 3399,
+     "payload": "90c0825b339d",
+     "runs": 52
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1104,
+     "ts": 312000,
+     "at_ms": 3432,
+     "payload": "90c0825c349d",
+     "out_seq": 1052,
+     "out_ts": 312000,
+     "out_pid": 552,
+     "out_tl0": 52
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1105,
+     "ts": 315000,
+     "at_ms": 3465,
+     "payload": "90c0825d349d",
+     "runs": 53
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1106,
+     "ts": 318000,
+     "at_ms": 3498,
+     "payload": "90c0825e359d",
+     "out_seq": 1053,
+     "out_ts": 318000,
+     "out_pid": 553,
+     "out_tl0": 53
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1107,
+     "ts": 321000,
+     "at_ms": 3531,
+     "payload": "90c0825f359d",
+     "runs": 54
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1108,
+     "ts": 324000,
+     "at_ms": 3564,
+     "payload": "90c08260369d",
+     "out_seq": 1054,
+     "out_ts": 324000,
+     "out_pid": 554,
+     "out_tl0": 54
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1109,
+     "ts": 327000,
+     "at_ms": 3597,
+     "payload": "90c08261369d",
+     "runs": 55
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1110,
+     "ts": 330000,
+     "at_ms": 3630,
+     "payload": "90c08262379d",
+     "out_seq": 1055,
+     "out_ts": 330000,
+     "out_pid": 555,
+     "out_tl0": 55
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1111,
+     "ts": 333000,
+     "at_ms": 3663,
+     "payload": "90c08263379d",
+     "runs": 56
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1112,
+     "ts": 336000,
+     "at_ms": 3696,
+     "payload": "90c08264389d",
+     "out_seq": 1056,
+     "out_ts": 336000,
+     "out_pid": 556,
+     "out_tl0": 56
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1113,
+     "ts": 339000,
+     "at_ms": 3729,
+     "payload": "90c08265389d",
+     "runs": 57
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1114,
+     "ts": 342000,
+     "at_ms": 3762,
+     "payload": "90c08266399d",
+     "out_seq": 1057,
+     "out_ts": 342000,
+     "out_pid": 557,
+     "out_tl0": 57
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1115,
+     "ts": 345000,
+     "at_ms": 3795,
+     "payload": "90c08267399d",
+     "runs": 58
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1116,
+     "ts": 348000,
+     "at_ms": 3828,
+     "payload": "90c082683a9d",
+     "out_seq": 1058,
+     "out_ts": 348000,
+     "out_pid": 558,
+     "out_tl0": 58
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1117,
+     "ts": 351000,
+     "at_ms": 3861,
+     "payload": "90c082693a9d",
+     "runs": 59
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1118,
+     "ts": 354000,
+     "at_ms": 3894,
+     "payload": "90c0826a3b9d",
+     "out_seq": 1059,
+     "out_ts": 354000,
+     "out_pid": 559,
+     "out_tl0": 59
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1119,
+     "ts": 357000,
+     "at_ms": 3927,
+     "payload": "90c0826b3b9d",
+     "runs": 60
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1120,
+     "ts": 360000,
+     "at_ms": 3960,
+     "payload": "90c0826c3c9d",
+     "out_seq": 1060,
+     "out_ts": 360000,
+     "out_pid": 560,
+     "out_tl0": 60
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1121,
+     "ts": 363000,
+     "at_ms": 3993,
+     "payload": "90c0826d3c9d",
+     "runs": 61
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1122,
+     "ts": 366000,
+     "at_ms": 4026,
+     "payload": "90c0826e3d9d",
+     "out_seq": 1061,
+     "out_ts": 366000,
+     "out_pid": 561,
+     "out_tl0": 61
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1123,
+     "ts": 369000,
+     "at_ms": 4059,
+     "payload": "90c0826f3d9d",
+     "runs": 62
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1124,
+     "ts": 372000,
+     "at_ms": 4092,
+     "payload": "90c082703e9d",
+     "out_seq": 1062,
+     "out_ts": 372000,
+     "out_pid": 562,
+     "out_tl0": 62
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1125,
+     "ts": 375000,
+     "at_ms": 4125,
+     "payload": "90c082713e9d",
+     "runs": 63
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1126,
+     "ts": 378000,
+     "at_ms": 4158,
+     "payload": "90c082723f9d",
+     "out_seq": 1063,
+     "out_ts": 378000,
+     "out_pid": 563,
+     "out_tl0": 63
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1127,
+     "ts": 381000,
+     "at_ms": 4191,
+     "payload": "90c082733f9d",
+     "runs": 64
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1128,
+     "ts": 384000,
+     "at_ms": 4224,
+     "payload": "90c08274409d",
+     "out_seq": 1064,
+     "out_ts": 384000,
+     "out_pid": 564,
+     "out_tl0": 64
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1129,
+     "ts": 387000,
+     "at_ms": 4257,
+     "payload": "90c08275409d",
+     "runs": 65
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1130,
+     "ts": 390000,
+     "at_ms": 4290,
+     "payload": "90c08276419d",
+     "out_seq": 1065,
+     "out_ts": 390000,
+     "out_pid": 565,
+     "out_tl0": 65
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1131,
+     "ts": 393000,
+     "at_ms": 4323,
+     "payload": "90c08277419d",
+     "runs": 66
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1132,
+     "ts": 396000,
+     "at_ms": 4356,
+     "payload": "90c08278429d",
+     "out_seq": 1066,
+     "out_ts": 396000,
+     "out_pid": 566,
+     "out_tl0": 66
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1133,
+     "ts": 399000,
+     "at_ms": 4389,
+     "payload": "90c08279429d",
+     "runs": 67
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1134,
+     "ts": 402000,
+     "at_ms": 4422,
+     "payload": "90c0827a439d",
+     "out_seq": 1067,
+     "out_ts": 402000,
+     "out_pid": 567,
+     "out_tl0": 67
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1135,
+     "ts": 405000,
+     "at_ms": 4455,
+     "payload": "90c0827b439d",
+     "runs": 68
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1136,
+     "ts": 408000,
+     "at_ms": 4488,
+     "payload": "90c0827c449d",
+     "out_seq": 1068,
+     "out_ts": 408000,
+     "out_pid": 568,
+     "out_tl0": 68
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1137,
+     "ts": 411000,
+     "at_ms": 4521,
+     "payload": "90c0827d449d",
+     "runs": 69
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1138,
+     "ts": 414000,
+     "at_ms": 4554,
+     "payload": "90c0827e459d",
+     "out_seq": 1069,
+     "out_ts": 414000,
+     "out_pid": 569,
+     "out_tl0": 69
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1139,
+     "ts": 417000,
+     "at_ms": 4587,
+     "payload": "90c0827f459d",
+     "runs": 70
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1140,
+     "ts": 420000,
+     "at_ms": 4620,
+     "payload": "90c08280469d",
+     "out_seq": 1070,
+     "out_ts": 420000,
+     "out_pid": 570,
+     "out_tl0": 70
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1141,
+     "ts": 423000,
+     "at_ms": 4653,
+     "payload": "90c08281469d",
+     "runs": 71
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1142,
+     "ts": 426000,
+     "at_ms": 4686,
+     "payload": "90c08282479d",
+     "out_seq": 1071,
+     "out_ts": 426000,
+     "out_pid": 571,
+     "out_tl0": 71
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1143,
+     "ts": 429000,
+     "at_ms": 4719,
+     "payload": "90c08283479d",
+     "runs": 72
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1144,
+     "ts": 432000,
+     "at_ms": 4752,
+     "payload": "90c08284489d",
+     "out_seq": 1072,
+     "out_ts": 432000,
+     "out_pid": 572,
+     "out_tl0": 72
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1145,
+     "ts": 435000,
+     "at_ms": 4785,
+     "payload": "90c08285489d",
+     "runs": 73
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1146,
+     "ts": 438000,
+     "at_ms": 4818,
+     "payload": "90c08286499d",
+     "out_seq": 1073,
+     "out_ts": 438000,
+     "out_pid": 573,
+     "out_tl0": 73
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1147,
+     "ts": 441000,
+     "at_ms": 4851,
+     "payload": "90c08287499d",
+     "runs": 74
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1148,
+     "ts": 444000,
+     "at_ms": 4884,
+     "payload": "90c082884a9d",
+     "out_seq": 1074,
+     "out_ts": 444000,
+     "out_pid": 574,
+     "out_tl0": 74
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1149,
+     "ts": 447000,
+     "at_ms": 4917,
+     "payload": "90c082894a9d",
+     "runs": 75
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1150,
+     "ts": 450000,
+     "at_ms": 4950,
+     "payload": "90c0828a4b9d",
+     "out_seq": 1075,
+     "out_ts": 450000,
+     "out_pid": 575,
+     "out_tl0": 75
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1151,
+     "ts": 453000,
+     "at_ms": 4983,
+     "payload": "90c0828b4b9d",
+     "runs": 76
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1152,
+     "ts": 456000,
+     "at_ms": 5016,
+     "payload": "90c0828c4c9d",
+     "out_seq": 1076,
+     "out_ts": 456000,
+     "out_pid": 576,
+     "out_tl0": 76
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1153,
+     "ts": 459000,
+     "at_ms": 5049,
+     "payload": "90c0828d4c9d",
+     "runs": 77
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1154,
+     "ts": 462000,
+     "at_ms": 5082,
+     "payload": "90c0828e4d9d",
+     "out_seq": 1077,
+     "out_ts": 462000,
+     "out_pid": 577,
+     "out_tl0": 77
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1155,
+     "ts": 465000,
+     "at_ms": 5115,
+     "payload": "90c0828f4d9d",
+     "runs": 78
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1156,
+     "ts": 468000,
+     "at_ms": 5148,
+     "payload": "90c082904e9d",
+     "out_seq": 1078,
+     "out_ts": 468000,
+     "out_pid": 578,
+     "out_tl0": 78
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1157,
+     "ts": 471000,
+     "at_ms": 5181,
+     "payload": "90c082914e9d",
+     "runs": 79
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1158,
+     "ts": 474000,
+     "at_ms": 5214,
+     "payload": "90c082924f9d",
+     "out_seq": 1079,
+     "out_ts": 474000,
+     "out_pid": 579,
+     "out_tl0": 79
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1159,
+     "ts": 477000,
+     "at_ms": 5247,
+     "payload": "90c082934f9d",
+     "runs": 80
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1160,
+     "ts": 480000,
+     "at_ms": 5280,
+     "payload": "90c08294509d",
+     "out_seq": 1080,
+     "out_ts": 480000,
+     "out_pid": 580,
+     "out_tl0": 80
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1161,
+     "ts": 483000,
+     "at_ms": 5313,
+     "payload": "90c08295509d",
+     "runs": 81
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1162,
+     "ts": 486000,
+     "at_ms": 5346,
+     "payload": "90c08296519d",
+     "out_seq": 1081,
+     "out_ts": 486000,
+     "out_pid": 581,
+     "out_tl0": 81
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1163,
+     "ts": 489000,
+     "at_ms": 5379,
+     "payload": "90c08297519d",
+     "runs": 82
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1164,
+     "ts": 492000,
+     "at_ms": 5412,
+     "payload": "90c08298529d",
+     "out_seq": 1082,
+     "out_ts": 492000,
+     "out_pid": 582,
+     "out_tl0": 82
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1165,
+     "ts": 495000,
+     "at_ms": 5445,
+     "payload": "90c08299529d",
+     "runs": 83
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1166,
+     "ts": 498000,
+     "at_ms": 5478,
+     "payload": "90c0829a539d",
+     "out_seq": 1083,
+     "out_ts": 498000,
+     "out_pid": 583,
+     "out_tl0": 83
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1167,
+     "ts": 501000,
+     "at_ms": 5511,
+     "payload": "90c0829b539d",
+     "runs": 84
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1168,
+     "ts": 504000,
+     "at_ms": 5544,
+     "payload": "90c0829c549d",
+     "out_seq": 1084,
+     "out_ts": 504000,
+     "out_pid": 584,
+     "out_tl0": 84
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1169,
+     "ts": 507000,
+     "at_ms": 5577,
+     "payload": "90c0829d549d",
+     "runs": 85
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1170,
+     "ts": 510000,
+     "at_ms": 5610,
+     "payload": "90c0829e559d",
+     "out_seq": 1085,
+     "out_ts": 510000,
+     "out_pid": 585,
+     "out_tl0": 85
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1171,
+     "ts": 513000,
+     "at_ms": 5643,
+     "payload": "90c0829f559d",
+     "runs": 86
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1172,
+     "ts": 516000,
+     "at_ms": 5676,
+     "payload": "90c082a0569d",
+     "out_seq": 1086,
+     "out_ts": 516000,
+     "out_pid": 586,
+     "out_tl0": 86
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1173,
+     "ts": 519000,
+     "at_ms": 5709,
+     "payload": "90c082a1569d",
+     "runs": 87
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1174,
+     "ts": 522000,
+     "at_ms": 5742,
+     "payload": "90c082a2579d",
+     "out_seq": 1087,
+     "out_ts": 522000,
+     "out_pid": 587,
+     "out_tl0": 87
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1175,
+     "ts": 525000,
+     "at_ms": 5775,
+     "payload": "90c082a3579d",
+     "runs": 88
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1176,
+     "ts": 528000,
+     "at_ms": 5808,
+     "payload": "90c082a4589d",
+     "out_seq": 1088,
+     "out_ts": 528000,
+     "out_pid": 588,
+     "out_tl0": 88
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1177,
+     "ts": 531000,
+     "at_ms": 5841,
+     "payload": "90c082a5589d",
+     "runs": 89
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1178,
+     "ts": 534000,
+     "at_ms": 5874,
+     "payload": "90c082a6599d",
+     "out_seq": 1089,
+     "out_ts": 534000,
+     "out_pid": 589,
+     "out_tl0": 89
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1179,
+     "ts": 537000,
+     "at_ms": 5907,
+     "payload": "90c082a7599d",
+     "runs": 90
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1180,
+     "ts": 540000,
+     "at_ms": 5940,
+     "payload": "90c082a85a9d",
+     "out_seq": 1090,
+     "out_ts": 540000,
+     "out_pid": 590,
+     "out_tl0": 90
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1181,
+     "ts": 543000,
+     "at_ms": 5973,
+     "payload": "90c082a95a9d",
+     "runs": 91
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1182,
+     "ts": 546000,
+     "at_ms": 6006,
+     "payload": "90c082aa5b9d",
+     "out_seq": 1091,
+     "out_ts": 546000,
+     "out_pid": 591,
+     "out_tl0": 91
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1183,
+     "ts": 549000,
+     "at_ms": 6039,
+     "payload": "90c082ab5b9d",
+     "runs": 92
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1184,
+     "ts": 552000,
+     "at_ms": 6072,
+     "payload": "90c082ac5c9d",
+     "out_seq": 1092,
+     "out_ts": 552000,
+     "out_pid": 592,
+     "out_tl0": 92
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1185,
+     "ts": 555000,
+     "at_ms": 6105,
+     "payload": "90c082ad5c9d",
+     "runs": 93
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1186,
+     "ts": 558000,
+     "at_ms": 6138,
+     "payload": "90c082ae5d9d",
+     "out_seq": 1093,
+     "out_ts": 558000,
+     "out_pid": 593,
+     "out_tl0": 93
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1187,
+     "ts": 561000,
+     "at_ms": 6171,
+     "payload": "90c082af5d9d",
+     "runs": 94
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1188,
+     "ts": 564000,
+     "at_ms": 6204,
+     "payload": "90c082b05e9d",
+     "out_seq": 1094,
+     "out_ts": 564000,
+     "out_pid": 594,
+     "out_tl0": 94
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1189,
+     "ts": 567000,
+     "at_ms": 6237,
+     "payload": "90c082b15e9d",
+     "runs": 95
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1190,
+     "ts": 570000,
+     "at_ms": 6270,
+     "payload": "90c082b25f9d",
+     "out_seq": 1095,
+     "out_ts": 570000,
+     "out_pid": 595,
+     "out_tl0": 95
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1191,
+     "ts": 573000,
+     "at_ms": 6303,
+     "payload": "90c082b35f9d",
+     "runs": 96
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1192,
+     "ts": 576000,
+     "at_ms": 6336,
+     "payload": "90c082b4609d",
+     "out_seq": 1096,
+     "out_ts": 576000,
+     "out_pid": 596,
+     "out_tl0": 96
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1193,
+     "ts": 579000,
+     "at_ms": 6369,
+     "payload": "90c082b5609d",
+     "runs": 97
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1194,
+     "ts": 582000,
+     "at_ms": 6402,
+     "payload": "90c082b6619d",
+     "out_seq": 1097,
+     "out_ts": 582000,
+     "out_pid": 597,
+     "out_tl0": 97
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1195,
+     "ts": 585000,
+     "at_ms": 6435,
+     "payload": "90c082b7619d",
+     "runs": 98
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1196,
+     "ts": 588000,
+     "at_ms": 6468,
+     "payload": "90c082b8629d",
+     "out_seq": 1098,
+     "out_ts": 588000,
+     "out_pid": 598,
+     "out_tl0": 98
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1197,
+     "ts": 591000,
+     "at_ms": 6501,
+     "payload": "90c082b9629d",
+     "runs": 99
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1198,
+     "ts": 594000,
+     "at_ms": 6534,
+     "payload": "90c082ba639d",
+     "out_seq": 1099,
+     "out_ts": 594000,
+     "out_pid": 599,
+     "out_tl0": 99
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1199,
+     "ts": 597000,
+     "at_ms": 6567,
+     "payload": "90c082bb639d",
+     "runs": 100
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1200,
+     "ts": 600000,
+     "at_ms": 6600,
+     "payload": "90c082bc649d",
+     "out_seq": 1100,
+     "out_ts": 600000,
+     "out_pid": 600,
+     "out_tl0": 100
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1201,
+     "ts": 603000,
+     "at_ms": 6633,
+     "payload": "90c082bd649d",
+     "runs": 101
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1202,
+     "ts": 606000,
+     "at_ms": 6666,
+     "payload": "90c082be659d",
+     "out_seq": 1101,
+     "out_ts": 606000,
+     "out_pid": 601,
+     "out_tl0": 101
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1203,
+     "ts": 609000,
+     "at_ms": 6699,
+     "payload": "90c082bf659d",
+     "runs": 102
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1204,
+     "ts": 612000,
+     "at_ms": 6732,
+     "payload": "90c082c0669d",
+     "out_seq": 1102,
+     "out_ts": 612000,
+     "out_pid": 602,
+     "out_tl0": 102
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1205,
+     "ts": 615000,
+     "at_ms": 6765,
+     "payload": "90c082c1669d",
+     "runs": 103
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1206,
+     "ts": 618000,
+     "at_ms": 6798,
+     "payload": "90c082c2679d",
+     "out_seq": 1103,
+     "out_ts": 618000,
+     "out_pid": 603,
+     "out_tl0": 103
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1207,
+     "ts": 621000,
+     "at_ms": 6831,
+     "payload": "90c082c3679d",
+     "runs": 104
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1208,
+     "ts": 624000,
+     "at_ms": 6864,
+     "payload": "90c082c4689d",
+     "out_seq": 1104,
+     "out_ts": 624000,
+     "out_pid": 604,
+     "out_tl0": 104
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1209,
+     "ts": 627000,
+     "at_ms": 6897,
+     "payload": "90c082c5689d",
+     "runs": 105
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1210,
+     "ts": 630000,
+     "at_ms": 6930,
+     "payload": "90c082c6699d",
+     "out_seq": 1105,
+     "out_ts": 630000,
+     "out_pid": 605,
+     "out_tl0": 105
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1211,
+     "ts": 633000,
+     "at_ms": 6963,
+     "payload": "90c082c7699d",
+     "runs": 106
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1212,
+     "ts": 636000,
+     "at_ms": 6996,
+     "payload": "90c082c86a9d",
+     "out_seq": 1106,
+     "out_ts": 636000,
+     "out_pid": 606,
+     "out_tl0": 106
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1213,
+     "ts": 639000,
+     "at_ms": 7029,
+     "payload": "90c082c96a9d",
+     "runs": 107
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1214,
+     "ts": 642000,
+     "at_ms": 7062,
+     "payload": "90c082ca6b9d",
+     "out_seq": 1107,
+     "out_ts": 642000,
+     "out_pid": 607,
+     "out_tl0": 107
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1215,
+     "ts": 645000,
+     "at_ms": 7095,
+     "payload": "90c082cb6b9d",
+     "runs": 108
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1216,
+     "ts": 648000,
+     "at_ms": 7128,
+     "payload": "90c082cc6c9d",
+     "out_seq": 1108,
+     "out_ts": 648000,
+     "out_pid": 608,
+     "out_tl0": 108
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1217,
+     "ts": 651000,
+     "at_ms": 7161,
+     "payload": "90c082cd6c9d",
+     "runs": 109
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1218,
+     "ts": 654000,
+     "at_ms": 7194,
+     "payload": "90c082ce6d9d",
+     "out_seq": 1109,
+     "out_ts": 654000,
+     "out_pid": 609,
+     "out_tl0": 109
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1219,
+     "ts": 657000,
+     "at_ms": 7227,
+     "payload": "90c082cf6d9d",
+     "runs": 110
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1220,
+     "ts": 660000,
+     "at_ms": 7260,
+     "payload": "90c082d06e9d",
+     "out_seq": 1110,
+     "out_ts": 660000,
+     "out_pid": 610,
+     "out_tl0": 110
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1221,
+     "ts": 663000,
+     "at_ms": 7293,
+     "payload": "90c082d16e9d",
+     "runs": 111
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1222,
+     "ts": 666000,
+     "at_ms": 7326,
+     "payload": "90c082d26f9d",
+     "out_seq": 1111,
+     "out_ts": 666000,
+     "out_pid": 611,
+     "out_tl0": 111
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1223,
+     "ts": 669000,
+     "at_ms": 7359,
+     "payload": "90c082d36f9d",
+     "runs": 112
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1224,
+     "ts": 672000,
+     "at_ms": 7392,
+     "payload": "90c082d4709d",
+     "out_seq": 1112,
+     "out_ts": 672000,
+     "out_pid": 612,
+     "out_tl0": 112
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1225,
+     "ts": 675000,
+     "at_ms": 7425,
+     "payload": "90c082d5709d",
+     "runs": 113
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1226,
+     "ts": 678000,
+     "at_ms": 7458,
+     "payload": "90c082d6719d",
+     "out_seq": 1113,
+     "out_ts": 678000,
+     "out_pid": 613,
+     "out_tl0": 113
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1227,
+     "ts": 681000,
+     "at_ms": 7491,
+     "payload": "90c082d7719d",
+     "runs": 114
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1228,
+     "ts": 684000,
+     "at_ms": 7524,
+     "payload": "90c082d8729d",
+     "out_seq": 1114,
+     "out_ts": 684000,
+     "out_pid": 614,
+     "out_tl0": 114
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1229,
+     "ts": 687000,
+     "at_ms": 7557,
+     "payload": "90c082d9729d",
+     "runs": 115
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1230,
+     "ts": 690000,
+     "at_ms": 7590,
+     "payload": "90c082da739d",
+     "out_seq": 1115,
+     "out_ts": 690000,
+     "out_pid": 615,
+     "out_tl0": 115
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1231,
+     "ts": 693000,
+     "at_ms": 7623,
+     "payload": "90c082db739d",
+     "runs": 116
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1232,
+     "ts": 696000,
+     "at_ms": 7656,
+     "payload": "90c082dc749d",
+     "out_seq": 1116,
+     "out_ts": 696000,
+     "out_pid": 616,
+     "out_tl0": 116
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1233,
+     "ts": 699000,
+     "at_ms": 7689,
+     "payload": "90c082dd749d",
+     "runs": 117
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1234,
+     "ts": 702000,
+     "at_ms": 7722,
+     "payload": "90c082de759d",
+     "out_seq": 1117,
+     "out_ts": 702000,
+     "out_pid": 617,
+     "out_tl0": 117
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1235,
+     "ts": 705000,
+     "at_ms": 7755,
+     "payload": "90c082df759d",
+     "runs": 118
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1236,
+     "ts": 708000,
+     "at_ms": 7788,
+     "payload": "90c082e0769d",
+     "out_seq": 1118,
+     "out_ts": 708000,
+     "out_pid": 618,
+     "out_tl0": 118
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1237,
+     "ts": 711000,
+     "at_ms": 7821,
+     "payload": "90c082e1769d",
+     "runs": 119
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1238,
+     "ts": 714000,
+     "at_ms": 7854,
+     "payload": "90c082e2779d",
+     "out_seq": 1119,
+     "out_ts": 714000,
+     "out_pid": 619,
+     "out_tl0": 119
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1239,
+     "ts": 717000,
+     "at_ms": 7887,
+     "payload": "90c082e3779d",
+     "runs": 120
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1240,
+     "ts": 720000,
+     "at_ms": 7920,
+     "payload": "90c082e4789d",
+     "out_seq": 1120,
+     "out_ts": 720000,
+     "out_pid": 620,
+     "out_tl0": 120
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1241,
+     "ts": 723000,
+     "at_ms": 7953,
+     "payload": "90c082e5789d",
+     "runs": 121
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1242,
+     "ts": 726000,
+     "at_ms": 7986,
+     "payload": "90c082e6799d",
+     "out_seq": 1121,
+     "out_ts": 726000,
+     "out_pid": 621,
+     "out_tl0": 121
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1243,
+     "ts": 729000,
+     "at_ms": 8019,
+     "payload": "90c082e7799d",
+     "runs": 122
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1244,
+     "ts": 732000,
+     "at_ms": 8052,
+     "payload": "90c082e87a9d",
+     "out_seq": 1122,
+     "out_ts": 732000,
+     "out_pid": 622,
+     "out_tl0": 122
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1245,
+     "ts": 735000,
+     "at_ms": 8085,
+     "payload": "90c082e97a9d",
+     "runs": 123
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1246,
+     "ts": 738000,
+     "at_ms": 8118,
+     "payload": "90c082ea7b9d",
+     "out_seq": 1123,
+     "out_ts": 738000,
+     "out_pid": 623,
+     "out_tl0": 123
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1247,
+     "ts": 741000,
+     "at_ms": 8151,
+     "payload": "90c082eb7b9d",
+     "runs": 124
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1248,
+     "ts": 744000,
+     "at_ms": 8184,
+     "payload": "90c082ec7c9d",
+     "out_seq": 1124,
+     "out_ts": 744000,
+     "out_pid": 624,
+     "out_tl0": 124
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1249,
+     "ts": 747000,
+     "at_ms": 8217,
+     "payload": "90c082ed7c9d",
+     "runs": 125
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1250,
+     "ts": 750000,
+     "at_ms": 8250,
+     "payload": "90c082ee7d9d",
+     "out_seq": 1125,
+     "out_ts": 750000,
+     "out_pid": 625,
+     "out_tl0": 125
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1251,
+     "ts": 753000,
+     "at_ms": 8283,
+     "payload": "90c082ef7d9d",
+     "runs": 126
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1252,
+     "ts": 756000,
+     "at_ms": 8316,
+     "payload": "90c082f07e9d",
+     "out_seq": 1126,
+     "out_ts": 756000,
+     "out_pid": 626,
+     "out_tl0": 126
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1253,
+     "ts": 759000,
+     "at_ms": 8349,
+     "payload": "90c082f17e9d",
+     "runs": 127
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1254,
+     "ts": 762000,
+     "at_ms": 8382,
+     "payload": "90c082f27f9d",
+     "out_seq": 1127,
+     "out_ts": 762000,
+     "out_pid": 627,
+     "out_tl0": 127
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1255,
+     "ts": 765000,
+     "at_ms": 8415,
+     "payload": "90c082f37f9d",
+     "runs": 128
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1256,
+     "ts": 768000,
+     "at_ms": 8448,
+     "payload": "90c082f4809d",
+     "out_seq": 1128,
+     "out_ts": 768000,
+     "out_pid": 628,
+     "out_tl0": 128
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1257,
+     "ts": 771000,
+     "at_ms": 8481,
+     "payload": "90c082f5809d",
+     "runs": 128
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1258,
+     "ts": 774000,
+     "at_ms": 8514,
+     "payload": "90c082f6819d",
+     "out_seq": 1129,
+     "out_ts": 774000,
+     "out_pid": 629,
+     "out_tl0": 129
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1259,
+     "ts": 777000,
+     "at_ms": 8547,
+     "payload": "90c082f7819d",
+     "runs": 128
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1260,
+     "ts": 780000,
+     "at_ms": 8580,
+     "payload": "90c082f8829d",
+     "out_seq": 1130,
+     "out_ts": 780000,
+     "out_pid": 630,
+     "out_tl0": 130
+    },
+    {
+     "op": "skip",
+     "src": 1,
+     "seq": 1261,
+     "ts": 783000,
+     "at_ms": 8613,
+     "payload": "90c082f9829d",
+     "runs": 128
+    },
+    {
+     "op": "map",
+     "src": 1,
+     "seq": 1262,
+     "ts": 786000,
+     "at_ms": 8646,
+     "payload": "90c082fa009d",
+     "out_seq": 1131,
+     "out_ts": 786000,
+     "out_pid": 631,
+     "out_tl0": 0
+    }
+   ],
+   "nack": [
+    {
+     "out_seq": 1000,
+     "in_seq": null,
+     "out_pid": null,
+     "out_tl0": null
+    },
+    {
+     "out_seq": 1001,
+     "in_seq": null,
+     "out_pid": null,
+     "out_tl0": null
+    },
+    {
+     "out_seq": 1002,
+     "in_seq": null,
+     "out_pid": null,
+     "out_tl0": null
+    },
+    {
+     "out_seq": 1003,
+     "in_seq": 1006,
+     "out_pid": 503,
+     "out_tl0": 3
+    },
+    {
+     "out_seq": 1004,
+     "in_seq": 1008,
+     "out_pid": 504,
+     "out_tl0": 4
+    },
+    {
+     "out_seq": 1005,
+     "in_seq": 1010,
+     "out_pid": 505,
+     "out_tl0": 5
+    },
+    {
+     "out_seq": 1006,
+     "in_seq": 1012,
+     "out_pid": 506,
+     "out_tl0": 6
+    },
+    {
+     "out_seq": 1007,
+     "in_seq": 1014,
+     "out_pid": 507,
+     "out_tl0": 7
+    },
+    {
+     "out_seq": 1008,
+     "in_seq": 1016,
+     "out_pid": 508,
+     "out_tl0": 8
+    },
+    {
+     "out_seq": 1130,
+     "in_seq": 1260,
+     "out_pid": 630,
+     "out_tl0": 130
+    }
+   ],
+   "runs": [
+    [
+     1007,
+     1,
+     507,
+     1
+    ],
+    [
+     1009,
+     1,
+     509,
+     1
+    ],
+    [
+     1011,
+     1,
+     511,
+     1
+    ],
+    [
+     1013,
+     1,
+     513,
+     1
+    ],
+    [
+     1015,
+     1,
+     515,
+     1
+    ],
+    [
+     1017,
+     1,
+     517,
+     1
+    ],
+    [
+     1019,
+     1,
+     519,
+     1
+    ],
+    [
+     1021,
+     1,
+     521,
+     1
+    ],
+    [
+     1023,
+     1,
+     523,
+     1
+    ],
+    [
+     1025,
+     1,
+     525,
+     1
+    ],
+    [
+     1027,
+     1,
+     527,
+     1
+    ],
+    [
+     1029,
+     1,
+     529,
+     1
+    ],
+    [
+     1031,
+     1,
+     531,
+     1
+    ],
+    [
+     1033,
+     1,
+     533,
+     1
+    ],
+    [
+     1035,
+     1,
+     535,
+     1
+    ],
+    [
+     1037,
+     1,
+     537,
+     1
+    ],
+    [
+     1039,
+     1,
+     539,
+     1
+    ],
+    [
+     1041,
+     1,
+     541,
+     1
+    ],
+    [
+     1043,
+     1,
+     543,
+     1
+    ],
+    [
+     1045,
+     1,
+     545,
+     1
+    ],
+    [
+     1047,
+     1,
+     547,
+     1
+    ],
+    [
+     1049,
+     1,
+     549,
+     1
+    ],
+    [
+     1051,
+     1,
+     551,
+     1
+    ],
+    [
+     1053,
+     1,
+     553,
+     1
+    ],
+    [
+     1055,
+     1,
+     555,
+     1
+    ],
+    [
+     1057,
+     1,
+     557,
+     1
+    ],
+    [
+     1059,
+     1,
+     559,
+     1
+    ],
+    [
+     1061,
+     1,
+     561,
+     1
+    ],
+    [
+     1063,
+     1,
+     563,
+     1
+    ],
+    [
+     1065,
+     1,
+     565,
+     1
+    ],
+    [
+     1067,
+     1,
+     567,
+     1
+    ],
+    [
+     1069,
+     1,
+     569,
+     1
+    ],
+    [
+     1071,
+     1,
+     571,
+     1
+    ],
+    [
+     1073,
+     1,
+     573,
+     1
+    ],
+    [
+     1075,
+     1,
+     575,
+     1
+    ],
+    [
+     1077,
+     1,
+     577,
+     1
+    ],
+    [
+     1079,
+     1,
+     579,
+     1
+    ],
+    [
+     1081,
+     1,
+     581,
+     1
+    ],
+    [
+     1083,
+     1,
+     583,
+     1
+    ],
+    [
+     1085,
+     1,
+     585,
+     1
+    ],
+    [
+     1087,
+     1,
+     587,
+     1
+    ],
+    [
+     1089,
+     1,
+     589,
+     1
+    ],
+    [
+     1091,
+     1,
+     591,
+     1
+    ],
+    [
+     1093,
+     1,
+     593,
+     1
+    ],
+    [
+     1095,
+     1,
+     595,
+     1
+    ],
+    [
+     1097,
+     1,
+     597,
+     1
+    ],
+    [
+     1099,
+     1,
+     599,
+     1
+    ],
+    [
+     1101,
+     1,
+     601,
+     1
+    ],
+    [
+     1103,
+     1,
+     603,
+     1
+    ],
+    [
+     1105,
+     1,
+     605,
+     1
+    ],
+    [
+     1107,
+     1,
+     607,
+     1
+    ],
+    [
+     1109,
+     1,
+     609,
+     1
+    ],
+    [
+     1111,
+     1,
+     611,
+     1
+    ],
+    [
+     1113,
+     1,
+     613,
+     1
+    ],
+    [
+     1115,
+     1,
+     615,
+     1
+    ],
+    [
+     1117,
+     1,
+     617,
+     1
+    ],
+    [
+     1119,
+     1,
+     619,
+     1
+    ],
+    [
+     1121,
+     1,
+     621,
+     1
+    ],
+    [
+     1123,
+     1,
+     623,
+     1
+    ],
+    [
+     1125,
+     1,
+     625,
+     1
+    ],
+    [
+     1127,
+     1,
+     627,
+     1
+    ],
+    [
+     1129,
+     1,
+     629,
+     1
+    ],
+    [
+     1131,
+     1,
+     631,
+     1
+    ],
+    [
+     1133,
+     1,
+     633,
+     1
+    ],
+    [
+     1135,
+     1,
+     635,
+     1
+    ],
+    [
+     1137,
+     1,
+     637,
+     1
+    ],
+    [
+     1139,
+     1,
+     639,
+     1
+    ],
+    [
+     1141,
+     1,
+     641,
+     1
+    ],
+    [
+     1143,
+     1,
+     643,
+     1
+    ],
+    [
+     1145,
+     1,
+     645,
+     1
+    ],
+    [
+     1147,
+     1,
+     647,
+     1
+    ],
+    [
+     1149,
+     1,
+     649,
+     1
+    ],
+    [
+     1151,
+     1,
+     651,
+     1
+    ],
+    [
+     1153,
+     1,
+     653,
+     1
+    ],
+    [
+     1155,
+     1,
+     655,
+     1
+    ],
+    [
+     1157,
+     1,
+     657,
+     1
+    ],
+    [
+     1159,
+     1,
+     659,
+     1
+    ],
+    [
+     1161,
+     1,
+     661,
+     1
+    ],
+    [
+     1163,
+     1,
+     663,
+     1
+    ],
+    [
+     1165,
+     1,
+     665,
+     1
+    ],
+    [
+     1167,
+     1,
+     667,
+     1
+    ],
+    [
+     1169,
+     1,
+     669,
+     1
+    ],
+    [
+     1171,
+     1,
+     671,
+     1
+    ],
+    [
+     1173,
+     1,
+     673,
+     1
+    ],
+    [
+     1175,
+     1,
+     675,
+     1
+    ],
+    [
+     1177,
+     1,
+     677,
+     1
+    ],
+    [
+     1179,
+     1,
+     679,
+     1
+    ],
+    [
+     1181,
+     1,
+     681,
+     1
+    ],
+    [
+     1183,
+     1,
+     683,
+     1
+    ],
+    [
+     1185,
+     1,
+     685,
+     1
+    ],
+    [
+     1187,
+     1,
+     687,
+     1
+    ],
+    [
+     1189,
+     1,
+     689,
+     1
+    ],
+    [
+     1191,
+     1,
+     691,
+     1
+    ],
+    [
+     1193,
+     1,
+     693,
+     1
+    ],
+    [
+     1195,
+     1,
+     695,
+     1
+    ],
+    [
+     1197,
+     1,
+     697,
+     1
+    ],
+    [
+     1199,
+     1,
+     699,
+     1
+    ],
+    [
+     1201,
+     1,
+     701,
+     1
+    ],
+    [
+     1203,
+     1,
+     703,
+     1
+    ],
+    [
+     1205,
+     1,
+     705,
+     1
+    ],
+    [
+     1207,
+     1,
+     707,
+     1
+    ],
+    [
+     1209,
+     1,
+     709,
+     1
+    ],
+    [
+     1211,
+     1,
+     711,
+     1
+    ],
+    [
+     1213,
+     1,
+     713,
+     1
+    ],
+    [
+     1215,
+     1,
+     715,
+     1
+    ],
+    [
+     1217,
+     1,
+     717,
+     1
+    ],
+    [
+     1219,
+     1,
+     719,
+     1
+    ],
+    [
+     1221,
+     1,
+     721,
+     1
+    ],
+    [
+     1223,
+     1,
+     723,
+     1
+    ],
+    [
+     1225,
+     1,
+     725,
+     1
+    ],
+    [
+     1227,
+     1,
+     727,
+     1
+    ],
+    [
+     1229,
+     1,
+     729,
+     1
+    ],
+    [
+     1231,
+     1,
+     731,
+     1
+    ],
+    [
+     1233,
+     1,
+     733,
+     1
+    ],
+    [
+     1235,
+     1,
+     735,
+     1
+    ],
+    [
+     1237,
+     1,
+     737,
+     1
+    ],
+    [
+     1239,
+     1,
+     739,
+     1
+    ],
+    [
+     1241,
+     1,
+     741,
+     1
+    ],
+    [
+     1243,
+     1,
+     743,
+     1
+    ],
+    [
+     1245,
+     1,
+     745,
+     1
+    ],
+    [
+     1247,
+     1,
+     747,
+     1
+    ],
+    [
+     1249,
+     1,
+     749,
+     1
+    ],
+    [
+     1251,
+     1,
+     751,
+     1
+    ],
+    [
+     1253,
+     1,
+     753,
+     1
+    ],
+    [
+     1255,
+     1,
+     755,
+     1
+    ],
+    [
+     1257,
+     1,
+     757,
+     1
+    ],
+    [
+     1259,
+     1,
+     759,
+     1
+    ],
+    [
+     1261,
+     1,
+     761,
+     1
+    ]
+   ],
+   "seq_off": 65533,
+   "pid_off": 32765,
+   "boundary": 1003
+  }
+ ],
+ "drop_runs": 128,
+ "serial": [
+  {
+   "a": 1,
+   "b": 0,
+   "after": true
+  },
+  {
+   "a": 0,
+   "b": 1,
+   "after": false
+  },
+  {
+   "a": 0,
+   "b": 65535,
+   "after": true
+  },
+  {
+   "a": 65535,
+   "b": 0,
+   "after": false
+  },
+  {
+   "a": 32767,
+   "b": 0,
+   "after": true
+  },
+  {
+   "a": 32768,
+   "b": 0,
+   "after": false
+  },
+  {
+   "a": 0,
+   "b": 32768,
+   "after": false
+  },
+  {
+   "a": 100,
+   "b": 100,
+   "after": false
+  },
+  {
+   "a": 5,
+   "b": 65530,
+   "after": true
+  }
+ ],
+ "pt_byte1": [
+  {
+   "byte1": 111,
+   "pt": 96,
+   "out": 96
+  },
+  {
+   "byte1": 239,
+   "pt": 96,
+   "out": 224
+  },
+  {
+   "byte1": 96,
+   "pt": 111,
+   "out": 111
+  },
+  {
+   "byte1": 224,
+   "pt": 102,
+   "out": 230
+  },
+  {
+   "byte1": 128,
+   "pt": 0,
+   "out": 128
+  },
+  {
+   "byte1": 127,
+   "pt": 127,
+   "out": 127
+  }
+ ],
+ "sr": [
+  {
+   "in": {
+    "ssrc": 286331153,
+    "ntp": 16762875842209904135,
+    "rtp_ts": 123456
+   },
+   "downlink_ssrc": 3735928559,
+   "ts_off": 1000,
+   "out": {
+    "ssrc": 3735928559,
+    "ntp": 16762875842209904135,
+    "rtp_ts": 124456
+   }
+  },
+  {
+   "in": {
+    "ssrc": 572662306,
+    "ntp": 16762875842209904135,
+    "rtp_ts": 4294967286
+   },
+   "downlink_ssrc": 42,
+   "ts_off": 100,
+   "out": {
+    "ssrc": 42,
+    "ntp": 16762875842209904135,
+    "rtp_ts": 90
+   }
+  }
+ ],
+ "ext": [
+  {
+   "name": "2pc audio — mid · 음량 · abs · twcc(one-byte)",
+   "table": {
+    "mid": 1,
+    "audio_level": 4,
+    "abs_send_time": 5,
+    "twcc": 6
+   },
+   "mid": "3",
+   "audio_level_in": 159,
+   "t_us": 1000000,
+   "twcc_counter": 7,
+   "form": "one",
+   "elements": [
+    {
+     "id": 1,
+     "hex": "33"
+    },
+    {
+     "id": 4,
+     "hex": "9f"
+    },
+    {
+     "id": 5,
+     "hex": "040000"
+    },
+    {
+     "id": 6,
+     "hex": "0007"
+    }
+   ],
+   "words": 3,
+   "hex": "bede00031033409f5204000061000700"
+  },
+  {
+   "name": "표에 mid 없음 · abs 63.999999초 · twcc 계수기 65536 → 0",
+   "table": {
+    "abs_send_time": 5,
+    "twcc": 6
+   },
+   "mid": "2",
+   "audio_level_in": null,
+   "t_us": 63999999,
+   "twcc_counter": 65536,
+   "form": "one",
+   "elements": [
+    {
+     "id": 5,
+     "hex": "ffffff"
+    },
+    {
+     "id": 6,
+     "hex": "0000"
+    }
+   ],
+   "words": 2,
+   "hex": "bede000252ffffff61000000"
+  },
+  {
+   "name": "abs-send-time 64초 감김 경계",
+   "table": {
+    "abs_send_time": 5
+   },
+   "mid": "0",
+   "audio_level_in": null,
+   "t_us": 64000000,
+   "twcc_counter": 0,
+   "form": "one",
+   "elements": [
+    {
+     "id": 5,
+     "hex": "000000"
+    }
+   ],
+   "words": 1,
+   "hex": "bede000152000000"
+  },
+  {
+   "name": "벽시계 epoch µs",
+   "table": {
+    "abs_send_time": 5,
+    "twcc": 6
+   },
+   "mid": "0",
+   "audio_level_in": null,
+   "t_us": 1792757125260586,
+   "twcc_counter": 42,
+   "form": "one",
+   "elements": [
+    {
+     "id": 5,
+     "hex": "150ad7"
+    },
+    {
+     "id": 6,
+     "hex": "002a"
+    }
+   ],
+   "words": 2,
+   "hex": "bede000252150ad761002a00"
+  },
+  {
+   "name": "1pc — 표에 ID 15 가 있다(two-byte 스트림)",
+   "table": {
+    "mid": 15,
+    "abs_send_time": 3,
+    "twcc": 4
+   },
+   "mid": "12",
+   "audio_level_in": null,
+   "t_us": 2000000,
+   "twcc_counter": 1,
+   "form": "two",
+   "elements": [
+    {
+     "id": 15,
+     "hex": "3132"
+    },
+    {
+     "id": 3,
+     "hex": "080000"
+    },
+    {
+     "id": 4,
+     "hex": "0001"
+    }
+   ],
+   "words": 4,
+   "hex": "100000040f023132030308000004020001000000"
+  },
+  {
+   "name": "1pc — 같은 스트림 · mid 를 안 싣는 패킷도 two-byte(섞지 않는다)",
+   "table": {
+    "mid": 15,
+    "abs_send_time": 3,
+    "twcc": 4
+   },
+   "mid": null,
+   "audio_level_in": null,
+   "t_us": 2020000,
+   "twcc_counter": 2,
+   "form": "two",
+   "elements": [
+    {
+     "id": 3,
+     "hex": "08147a"
+    },
+    {
+     "id": 4,
+     "hex": "0002"
+    }
+   ],
+   "words": 3,
+   "hex": "10000003030308147a04020002000000"
+  }
+ ]
+}

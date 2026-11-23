@@ -133,7 +133,7 @@ cargo build --manifest-path crates/oxtapd/Cargo.toml --target-dir target
 
 | 층 | 무엇 | 어디 |
 |---|---|---|
-| 1 — 단위 | `cargo test --workspace` — 규격이 낸 벡터(출처 전환 재기록 · RTCP · 발언권 미디어 결합 · 시뮬캐스트)와 맹검 독립 시험 포함 | 이 저장소 |
+| 1 — 단위 | `cargo test --workspace` — 규격이 낸 벡터(출처 전환 재기록 · RTCP · 발언권 미디어 결합 · 시뮬캐스트)와 맹검 독립 시험 포함 · 벡터는 `testdata/spec/` 에 실린 규격 산출 사본이라 이 저장소만 받아도 돈다 | 이 저장소 |
 | 2 — 헤드리스 | 봇 하네스가 실서버를 몬다 — 프로토콜 계약 실증 · 시나리오 120 여 개 · 스모크 · 패킷 덤프 위 등식 | 별도 저장소(아직 비공개) |
 | 3 — 브라우저 | Playwright(크로뮴)로 실서버와 웹 SDK 를 함께 | [oxlens-sdk-web](https://github.com/kodeholic9/oxlens-sdk-web) `qa/live` |
 | 모형 검사 | TLA+ / TLC — 프로토콜 상태기(세션 · 방 · 연결 · 발행 · 구독 · 트랙 · 소속 · 발언권 · 다서버) 판 93 · 서버(node 버스 · 메시 · 소유 · 실행 · 미디어 경로 · 권위) 판 99(그중 보류 7) | 규격 저장소 |

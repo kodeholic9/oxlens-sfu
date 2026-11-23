@@ -673,7 +673,7 @@ fn spec_dir() -> PathBuf {
     if let Ok(p) = std::env::var("OXLENS_SPEC") {
         return PathBuf::from(p);
     }
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../context/spec")
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/spec")
 }
 
 #[test]

@@ -1,0 +1,3272 @@
+{
+ "generated": "spec/server/gen/vectors.mts — 손으로 고치지 않는다 · 기대값 = 원천 산수(areas/*/behavior)",
+ "labels": [
+  "정:IMPL-FLR-MEDIA-BIND",
+  "정:IMPL-FLR-LOCK"
+ ],
+ "units": {
+  "g": "grant_no(허가마다 1 증가 · 0 에서)",
+  "order": "판정 열의 집행 차례(색인)",
+  "applied": "그 차례로 집행할 때 효과마다 적용 여부",
+  "bound": "끝 슬롯 [사람, g] 또는 null"
+ },
+ "media_bind": [
+  {
+   "name": "앞 화자 해제 → 새 화자 결합(놓음 뒤 허가)",
+   "decided": [
+    [
+     "bind",
+     "A",
+     0
+    ],
+    [
+     "release",
+     0
+    ],
+    [
+     "bind",
+     "B",
+     1
+    ]
+   ],
+   "bound": [
+    "B",
+    1
+   ],
+   "orders": [
+    {
+     "order": [
+      0,
+      1,
+      2
+     ],
+     "applied": [
+      true,
+      true,
+      true
+     ],
+     "bound": [
+      "B",
+      1
+     ]
+    },
+    {
+     "order": [
+      0,
+      2,
+      1
+     ],
+     "applied": [
+      true,
+      true,
+      false
+     ],
+     "bound": [
+      "B",
+      1
+     ]
+    },
+    {
+     "order": [
+      1,
+      0,
+      2
+     ],
+     "applied": [
+      false,
+      false,
+      true
+     ],
+     "bound": [
+      "B",
+      1
+     ]
+    },
+    {
+     "order": [
+      1,
+      2,
+      0
+     ],
+     "applied": [
+      false,
+      true,
+      false
+     ],
+     "bound": [
+      "B",
+      1
+     ]
+    },
+    {
+     "order": [
+      2,
+      0,
+      1
+     ],
+     "applied": [
+      true,
+      false,
+      false
+     ],
+     "bound": [
+      "B",
+      1
+     ]
+    },
+    {
+     "order": [
+      2,
+      1,
+      0
+     ],
+     "applied": [
+      true,
+      false,
+      false
+     ],
+     "bound": [
+      "B",
+      1
+     ]
+    }
+   ],
+   "targetless_differs": 4
+  },
+  {
+   "name": "승계 — 해제 없이 다음 결합",
+   "decided": [
+    [
+     "bind",
+     "A",
+     0
+    ],
+    [
+     "bind",
+     "B",
+     1
+    ]
+   ],
+   "bound": [
+    "B",
+    1
+   ],
+   "orders": [
+    {
+     "order": [
+      0,
+      1
+     ],
+     "applied": [
+      true,
+      true
+     ],
+     "bound": [
+      "B",
+      1
+     ]
+    },
+    {
+     "order": [
+      1,
+      0
+     ],
+     "applied": [
+      true,
+      false
+     ],
+     "bound": [
+      "B",
+      1
+     ]
+    }
+   ],
+   "targetless_differs": 1
+  },
+  {
+   "name": "같은 사람 다시 허가 — 옛 해제가 새 결합을 비우지 않는다",
+   "decided": [
+    [
+     "bind",
+     "A",
+     0
+    ],
+    [
+     "release",
+     0
+    ],
+    [
+     "bind",
+     "A",
+     1
+    ]
+   ],
+   "bound": [
+    "A",
+    1
+   ],
+   "orders": [
+    {
+     "order": [
+      0,
+      1,
+      2
+     ],
+     "applied": [
+      true,
+      true,
+      true
+     ],
+     "bound": [
+      "A",
+      1
+     ]
+    },
+    {
+     "order": [
+      0,
+      2,
+      1
+     ],
+     "applied": [
+      true,
+      true,
+      false
+     ],
+     "bound": [
+      "A",
+      1
+     ]
+    },
+    {
+     "order": [
+      1,
+      0,
+      2
+     ],
+     "applied": [
+      false,
+      false,
+      true
+     ],
+     "bound": [
+      "A",
+      1
+     ]
+    },
+    {
+     "order": [
+      1,
+      2,
+      0
+     ],
+     "applied": [
+      false,
+      true,
+      false
+     ],
+     "bound": [
+      "A",
+      1
+     ]
+    },
+    {
+     "order": [
+      2,
+      0,
+      1
+     ],
+     "applied": [
+      true,
+      false,
+      false
+     ],
+     "bound": [
+      "A",
+      1
+     ]
+    },
+    {
+     "order": [
+      2,
+      1,
+      0
+     ],
+     "applied": [
+      true,
+      false,
+      false
+     ],
+     "bound": [
+      "A",
+      1
+     ]
+    }
+   ],
+   "targetless_differs": 4
+  },
+  {
+   "name": "허가 직후 반환 — 결합이 해제보다 늦게 닿아도 되살아나지 않는다",
+   "decided": [
+    [
+     "bind",
+     "A",
+     0
+    ],
+    [
+     "release",
+     0
+    ]
+   ],
+   "bound": null,
+   "orders": [
+    {
+     "order": [
+      0,
+      1
+     ],
+     "applied": [
+      true,
+      true
+     ],
+     "bound": null
+    },
+    {
+     "order": [
+      1,
+      0
+     ],
+     "applied": [
+      false,
+      false
+     ],
+     "bound": null
+    }
+   ],
+   "targetless_differs": 1
+  },
+  {
+   "name": "셋 차례 — 마지막은 C 결합",
+   "decided": [
+    [
+     "bind",
+     "A",
+     0
+    ],
+    [
+     "release",
+     0
+    ],
+    [
+     "bind",
+     "B",
+     1
+    ],
+    [
+     "release",
+     1
+    ],
+    [
+     "bind",
+     "C",
+     2
+    ]
+   ],
+   "bound": [
+    "C",
+    2
+   ],
+   "orders": [
+    {
+     "order": [
+      0,
+      1,
+      2,
+      3,
+      4
+     ],
+     "applied": [
+      true,
+      true,
+      true,
+      true,
+      true
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      0,
+      1,
+      2,
+      4,
+      3
+     ],
+     "applied": [
+      true,
+      true,
+      true,
+      true,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      0,
+      1,
+      3,
+      2,
+      4
+     ],
+     "applied": [
+      true,
+      true,
+      false,
+      false,
+      true
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      0,
+      1,
+      3,
+      4,
+      2
+     ],
+     "applied": [
+      true,
+      true,
+      false,
+      true,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      0,
+      1,
+      4,
+      2,
+      3
+     ],
+     "applied": [
+      true,
+      true,
+      true,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      0,
+      1,
+      4,
+      3,
+      2
+     ],
+     "applied": [
+      true,
+      true,
+      true,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      0,
+      2,
+      1,
+      3,
+      4
+     ],
+     "applied": [
+      true,
+      true,
+      false,
+      true,
+      true
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      0,
+      2,
+      1,
+      4,
+      3
+     ],
+     "applied": [
+      true,
+      true,
+      false,
+      true,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      0,
+      2,
+      3,
+      1,
+      4
+     ],
+     "applied": [
+      true,
+      true,
+      true,
+      false,
+      true
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      0,
+      2,
+      3,
+      4,
+      1
+     ],
+     "applied": [
+      true,
+      true,
+      true,
+      true,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      0,
+      2,
+      4,
+      1,
+      3
+     ],
+     "applied": [
+      true,
+      true,
+      true,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      0,
+      2,
+      4,
+      3,
+      1
+     ],
+     "applied": [
+      true,
+      true,
+      true,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      0,
+      3,
+      1,
+      2,
+      4
+     ],
+     "applied": [
+      true,
+      true,
+      false,
+      false,
+      true
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      0,
+      3,
+      1,
+      4,
+      2
+     ],
+     "applied": [
+      true,
+      true,
+      false,
+      true,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      0,
+      3,
+      2,
+      1,
+      4
+     ],
+     "applied": [
+      true,
+      true,
+      false,
+      false,
+      true
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      0,
+      3,
+      2,
+      4,
+      1
+     ],
+     "applied": [
+      true,
+      true,
+      false,
+      true,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      0,
+      3,
+      4,
+      1,
+      2
+     ],
+     "applied": [
+      true,
+      true,
+      true,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      0,
+      3,
+      4,
+      2,
+      1
+     ],
+     "applied": [
+      true,
+      true,
+      true,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      0,
+      4,
+      1,
+      2,
+      3
+     ],
+     "applied": [
+      true,
+      true,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      0,
+      4,
+      1,
+      3,
+      2
+     ],
+     "applied": [
+      true,
+      true,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      0,
+      4,
+      2,
+      1,
+      3
+     ],
+     "applied": [
+      true,
+      true,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      0,
+      4,
+      2,
+      3,
+      1
+     ],
+     "applied": [
+      true,
+      true,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      0,
+      4,
+      3,
+      1,
+      2
+     ],
+     "applied": [
+      true,
+      true,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      0,
+      4,
+      3,
+      2,
+      1
+     ],
+     "applied": [
+      true,
+      true,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      1,
+      0,
+      2,
+      3,
+      4
+     ],
+     "applied": [
+      false,
+      false,
+      true,
+      true,
+      true
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      1,
+      0,
+      2,
+      4,
+      3
+     ],
+     "applied": [
+      false,
+      false,
+      true,
+      true,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      1,
+      0,
+      3,
+      2,
+      4
+     ],
+     "applied": [
+      false,
+      false,
+      false,
+      false,
+      true
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      1,
+      0,
+      3,
+      4,
+      2
+     ],
+     "applied": [
+      false,
+      false,
+      false,
+      true,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      1,
+      0,
+      4,
+      2,
+      3
+     ],
+     "applied": [
+      false,
+      false,
+      true,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      1,
+      0,
+      4,
+      3,
+      2
+     ],
+     "applied": [
+      false,
+      false,
+      true,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      1,
+      2,
+      0,
+      3,
+      4
+     ],
+     "applied": [
+      false,
+      true,
+      false,
+      true,
+      true
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      1,
+      2,
+      0,
+      4,
+      3
+     ],
+     "applied": [
+      false,
+      true,
+      false,
+      true,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      1,
+      2,
+      3,
+      0,
+      4
+     ],
+     "applied": [
+      false,
+      true,
+      true,
+      false,
+      true
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      1,
+      2,
+      3,
+      4,
+      0
+     ],
+     "applied": [
+      false,
+      true,
+      true,
+      true,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      1,
+      2,
+      4,
+      0,
+      3
+     ],
+     "applied": [
+      false,
+      true,
+      true,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      1,
+      2,
+      4,
+      3,
+      0
+     ],
+     "applied": [
+      false,
+      true,
+      true,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      1,
+      3,
+      0,
+      2,
+      4
+     ],
+     "applied": [
+      false,
+      false,
+      false,
+      false,
+      true
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      1,
+      3,
+      0,
+      4,
+      2
+     ],
+     "applied": [
+      false,
+      false,
+      false,
+      true,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      1,
+      3,
+      2,
+      0,
+      4
+     ],
+     "applied": [
+      false,
+      false,
+      false,
+      false,
+      true
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      1,
+      3,
+      2,
+      4,
+      0
+     ],
+     "applied": [
+      false,
+      false,
+      false,
+      true,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      1,
+      3,
+      4,
+      0,
+      2
+     ],
+     "applied": [
+      false,
+      false,
+      true,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      1,
+      3,
+      4,
+      2,
+      0
+     ],
+     "applied": [
+      false,
+      false,
+      true,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      1,
+      4,
+      0,
+      2,
+      3
+     ],
+     "applied": [
+      false,
+      true,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      1,
+      4,
+      0,
+      3,
+      2
+     ],
+     "applied": [
+      false,
+      true,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      1,
+      4,
+      2,
+      0,
+      3
+     ],
+     "applied": [
+      false,
+      true,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      1,
+      4,
+      2,
+      3,
+      0
+     ],
+     "applied": [
+      false,
+      true,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      1,
+      4,
+      3,
+      0,
+      2
+     ],
+     "applied": [
+      false,
+      true,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      1,
+      4,
+      3,
+      2,
+      0
+     ],
+     "applied": [
+      false,
+      true,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      2,
+      0,
+      1,
+      3,
+      4
+     ],
+     "applied": [
+      true,
+      false,
+      false,
+      true,
+      true
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      2,
+      0,
+      1,
+      4,
+      3
+     ],
+     "applied": [
+      true,
+      false,
+      false,
+      true,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      2,
+      0,
+      3,
+      1,
+      4
+     ],
+     "applied": [
+      true,
+      false,
+      true,
+      false,
+      true
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      2,
+      0,
+      3,
+      4,
+      1
+     ],
+     "applied": [
+      true,
+      false,
+      true,
+      true,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      2,
+      0,
+      4,
+      1,
+      3
+     ],
+     "applied": [
+      true,
+      false,
+      true,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      2,
+      0,
+      4,
+      3,
+      1
+     ],
+     "applied": [
+      true,
+      false,
+      true,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      2,
+      1,
+      0,
+      3,
+      4
+     ],
+     "applied": [
+      true,
+      false,
+      false,
+      true,
+      true
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      2,
+      1,
+      0,
+      4,
+      3
+     ],
+     "applied": [
+      true,
+      false,
+      false,
+      true,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      2,
+      1,
+      3,
+      0,
+      4
+     ],
+     "applied": [
+      true,
+      false,
+      true,
+      false,
+      true
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      2,
+      1,
+      3,
+      4,
+      0
+     ],
+     "applied": [
+      true,
+      false,
+      true,
+      true,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      2,
+      1,
+      4,
+      0,
+      3
+     ],
+     "applied": [
+      true,
+      false,
+      true,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      2,
+      1,
+      4,
+      3,
+      0
+     ],
+     "applied": [
+      true,
+      false,
+      true,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      2,
+      3,
+      0,
+      1,
+      4
+     ],
+     "applied": [
+      true,
+      true,
+      false,
+      false,
+      true
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      2,
+      3,
+      0,
+      4,
+      1
+     ],
+     "applied": [
+      true,
+      true,
+      false,
+      true,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      2,
+      3,
+      1,
+      0,
+      4
+     ],
+     "applied": [
+      true,
+      true,
+      false,
+      false,
+      true
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      2,
+      3,
+      1,
+      4,
+      0
+     ],
+     "applied": [
+      true,
+      true,
+      false,
+      true,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      2,
+      3,
+      4,
+      0,
+      1
+     ],
+     "applied": [
+      true,
+      true,
+      true,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      2,
+      3,
+      4,
+      1,
+      0
+     ],
+     "applied": [
+      true,
+      true,
+      true,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      2,
+      4,
+      0,
+      1,
+      3
+     ],
+     "applied": [
+      true,
+      true,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      2,
+      4,
+      0,
+      3,
+      1
+     ],
+     "applied": [
+      true,
+      true,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      2,
+      4,
+      1,
+      0,
+      3
+     ],
+     "applied": [
+      true,
+      true,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      2,
+      4,
+      1,
+      3,
+      0
+     ],
+     "applied": [
+      true,
+      true,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      2,
+      4,
+      3,
+      0,
+      1
+     ],
+     "applied": [
+      true,
+      true,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      2,
+      4,
+      3,
+      1,
+      0
+     ],
+     "applied": [
+      true,
+      true,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      3,
+      0,
+      1,
+      2,
+      4
+     ],
+     "applied": [
+      false,
+      false,
+      false,
+      false,
+      true
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      3,
+      0,
+      1,
+      4,
+      2
+     ],
+     "applied": [
+      false,
+      false,
+      false,
+      true,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      3,
+      0,
+      2,
+      1,
+      4
+     ],
+     "applied": [
+      false,
+      false,
+      false,
+      false,
+      true
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      3,
+      0,
+      2,
+      4,
+      1
+     ],
+     "applied": [
+      false,
+      false,
+      false,
+      true,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      3,
+      0,
+      4,
+      1,
+      2
+     ],
+     "applied": [
+      false,
+      false,
+      true,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      3,
+      0,
+      4,
+      2,
+      1
+     ],
+     "applied": [
+      false,
+      false,
+      true,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      3,
+      1,
+      0,
+      2,
+      4
+     ],
+     "applied": [
+      false,
+      false,
+      false,
+      false,
+      true
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      3,
+      1,
+      0,
+      4,
+      2
+     ],
+     "applied": [
+      false,
+      false,
+      false,
+      true,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      3,
+      1,
+      2,
+      0,
+      4
+     ],
+     "applied": [
+      false,
+      false,
+      false,
+      false,
+      true
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      3,
+      1,
+      2,
+      4,
+      0
+     ],
+     "applied": [
+      false,
+      false,
+      false,
+      true,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      3,
+      1,
+      4,
+      0,
+      2
+     ],
+     "applied": [
+      false,
+      false,
+      true,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      3,
+      1,
+      4,
+      2,
+      0
+     ],
+     "applied": [
+      false,
+      false,
+      true,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      3,
+      2,
+      0,
+      1,
+      4
+     ],
+     "applied": [
+      false,
+      false,
+      false,
+      false,
+      true
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      3,
+      2,
+      0,
+      4,
+      1
+     ],
+     "applied": [
+      false,
+      false,
+      false,
+      true,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      3,
+      2,
+      1,
+      0,
+      4
+     ],
+     "applied": [
+      false,
+      false,
+      false,
+      false,
+      true
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      3,
+      2,
+      1,
+      4,
+      0
+     ],
+     "applied": [
+      false,
+      false,
+      false,
+      true,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      3,
+      2,
+      4,
+      0,
+      1
+     ],
+     "applied": [
+      false,
+      false,
+      true,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      3,
+      2,
+      4,
+      1,
+      0
+     ],
+     "applied": [
+      false,
+      false,
+      true,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      3,
+      4,
+      0,
+      1,
+      2
+     ],
+     "applied": [
+      false,
+      true,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      3,
+      4,
+      0,
+      2,
+      1
+     ],
+     "applied": [
+      false,
+      true,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      3,
+      4,
+      1,
+      0,
+      2
+     ],
+     "applied": [
+      false,
+      true,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      3,
+      4,
+      1,
+      2,
+      0
+     ],
+     "applied": [
+      false,
+      true,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      3,
+      4,
+      2,
+      0,
+      1
+     ],
+     "applied": [
+      false,
+      true,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      3,
+      4,
+      2,
+      1,
+      0
+     ],
+     "applied": [
+      false,
+      true,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      4,
+      0,
+      1,
+      2,
+      3
+     ],
+     "applied": [
+      true,
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      4,
+      0,
+      1,
+      3,
+      2
+     ],
+     "applied": [
+      true,
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      4,
+      0,
+      2,
+      1,
+      3
+     ],
+     "applied": [
+      true,
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      4,
+      0,
+      2,
+      3,
+      1
+     ],
+     "applied": [
+      true,
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      4,
+      0,
+      3,
+      1,
+      2
+     ],
+     "applied": [
+      true,
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      4,
+      0,
+      3,
+      2,
+      1
+     ],
+     "applied": [
+      true,
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      4,
+      1,
+      0,
+      2,
+      3
+     ],
+     "applied": [
+      true,
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      4,
+      1,
+      0,
+      3,
+      2
+     ],
+     "applied": [
+      true,
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      4,
+      1,
+      2,
+      0,
+      3
+     ],
+     "applied": [
+      true,
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      4,
+      1,
+      2,
+      3,
+      0
+     ],
+     "applied": [
+      true,
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      4,
+      1,
+      3,
+      0,
+      2
+     ],
+     "applied": [
+      true,
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      4,
+      1,
+      3,
+      2,
+      0
+     ],
+     "applied": [
+      true,
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      4,
+      2,
+      0,
+      1,
+      3
+     ],
+     "applied": [
+      true,
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      4,
+      2,
+      0,
+      3,
+      1
+     ],
+     "applied": [
+      true,
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      4,
+      2,
+      1,
+      0,
+      3
+     ],
+     "applied": [
+      true,
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      4,
+      2,
+      1,
+      3,
+      0
+     ],
+     "applied": [
+      true,
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      4,
+      2,
+      3,
+      0,
+      1
+     ],
+     "applied": [
+      true,
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      4,
+      2,
+      3,
+      1,
+      0
+     ],
+     "applied": [
+      true,
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      4,
+      3,
+      0,
+      1,
+      2
+     ],
+     "applied": [
+      true,
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      4,
+      3,
+      0,
+      2,
+      1
+     ],
+     "applied": [
+      true,
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      4,
+      3,
+      1,
+      0,
+      2
+     ],
+     "applied": [
+      true,
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      4,
+      3,
+      1,
+      2,
+      0
+     ],
+     "applied": [
+      true,
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      4,
+      3,
+      2,
+      0,
+      1
+     ],
+     "applied": [
+      true,
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    },
+    {
+     "order": [
+      4,
+      3,
+      2,
+      1,
+      0
+     ],
+     "applied": [
+      true,
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": [
+      "C",
+      2
+     ]
+    }
+   ],
+   "targetless_differs": 96
+  },
+  {
+   "name": "회수 뒤 대기자 · 다시 반환",
+   "decided": [
+    [
+     "bind",
+     "A",
+     0
+    ],
+    [
+     "release",
+     0
+    ],
+    [
+     "bind",
+     "B",
+     1
+    ],
+    [
+     "release",
+     1
+    ]
+   ],
+   "bound": null,
+   "orders": [
+    {
+     "order": [
+      0,
+      1,
+      2,
+      3
+     ],
+     "applied": [
+      true,
+      true,
+      true,
+      true
+     ],
+     "bound": null
+    },
+    {
+     "order": [
+      0,
+      1,
+      3,
+      2
+     ],
+     "applied": [
+      true,
+      true,
+      false,
+      false
+     ],
+     "bound": null
+    },
+    {
+     "order": [
+      0,
+      2,
+      1,
+      3
+     ],
+     "applied": [
+      true,
+      true,
+      false,
+      true
+     ],
+     "bound": null
+    },
+    {
+     "order": [
+      0,
+      2,
+      3,
+      1
+     ],
+     "applied": [
+      true,
+      true,
+      true,
+      false
+     ],
+     "bound": null
+    },
+    {
+     "order": [
+      0,
+      3,
+      1,
+      2
+     ],
+     "applied": [
+      true,
+      true,
+      false,
+      false
+     ],
+     "bound": null
+    },
+    {
+     "order": [
+      0,
+      3,
+      2,
+      1
+     ],
+     "applied": [
+      true,
+      true,
+      false,
+      false
+     ],
+     "bound": null
+    },
+    {
+     "order": [
+      1,
+      0,
+      2,
+      3
+     ],
+     "applied": [
+      false,
+      false,
+      true,
+      true
+     ],
+     "bound": null
+    },
+    {
+     "order": [
+      1,
+      0,
+      3,
+      2
+     ],
+     "applied": [
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": null
+    },
+    {
+     "order": [
+      1,
+      2,
+      0,
+      3
+     ],
+     "applied": [
+      false,
+      true,
+      false,
+      true
+     ],
+     "bound": null
+    },
+    {
+     "order": [
+      1,
+      2,
+      3,
+      0
+     ],
+     "applied": [
+      false,
+      true,
+      true,
+      false
+     ],
+     "bound": null
+    },
+    {
+     "order": [
+      1,
+      3,
+      0,
+      2
+     ],
+     "applied": [
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": null
+    },
+    {
+     "order": [
+      1,
+      3,
+      2,
+      0
+     ],
+     "applied": [
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": null
+    },
+    {
+     "order": [
+      2,
+      0,
+      1,
+      3
+     ],
+     "applied": [
+      true,
+      false,
+      false,
+      true
+     ],
+     "bound": null
+    },
+    {
+     "order": [
+      2,
+      0,
+      3,
+      1
+     ],
+     "applied": [
+      true,
+      false,
+      true,
+      false
+     ],
+     "bound": null
+    },
+    {
+     "order": [
+      2,
+      1,
+      0,
+      3
+     ],
+     "applied": [
+      true,
+      false,
+      false,
+      true
+     ],
+     "bound": null
+    },
+    {
+     "order": [
+      2,
+      1,
+      3,
+      0
+     ],
+     "applied": [
+      true,
+      false,
+      true,
+      false
+     ],
+     "bound": null
+    },
+    {
+     "order": [
+      2,
+      3,
+      0,
+      1
+     ],
+     "applied": [
+      true,
+      true,
+      false,
+      false
+     ],
+     "bound": null
+    },
+    {
+     "order": [
+      2,
+      3,
+      1,
+      0
+     ],
+     "applied": [
+      true,
+      true,
+      false,
+      false
+     ],
+     "bound": null
+    },
+    {
+     "order": [
+      3,
+      0,
+      1,
+      2
+     ],
+     "applied": [
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": null
+    },
+    {
+     "order": [
+      3,
+      0,
+      2,
+      1
+     ],
+     "applied": [
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": null
+    },
+    {
+     "order": [
+      3,
+      1,
+      0,
+      2
+     ],
+     "applied": [
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": null
+    },
+    {
+     "order": [
+      3,
+      1,
+      2,
+      0
+     ],
+     "applied": [
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": null
+    },
+    {
+     "order": [
+      3,
+      2,
+      0,
+      1
+     ],
+     "applied": [
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": null
+    },
+    {
+     "order": [
+      3,
+      2,
+      1,
+      0
+     ],
+     "applied": [
+      false,
+      false,
+      false,
+      false
+     ],
+     "bound": null
+    }
+   ],
+   "targetless_differs": 12
+  },
+  {
+   "name": "승계 뒤 해제 — 해제가 승계 앞 결합보다 먼저 닿아도 그것을 비운다",
+   "decided": [
+    [
+     "bind",
+     "A",
+     0
+    ],
+    [
+     "bind",
+     "B",
+     1
+    ],
+    [
+     "release",
+     1
+    ]
+   ],
+   "bound": null,
+   "orders": [
+    {
+     "order": [
+      0,
+      1,
+      2
+     ],
+     "applied": [
+      true,
+      true,
+      true
+     ],
+     "bound": null
+    },
+    {
+     "order": [
+      0,
+      2,
+      1
+     ],
+     "applied": [
+      true,
+      true,
+      false
+     ],
+     "bound": null
+    },
+    {
+     "order": [
+      1,
+      0,
+      2
+     ],
+     "applied": [
+      true,
+      false,
+      true
+     ],
+     "bound": null
+    },
+    {
+     "order": [
+      1,
+      2,
+      0
+     ],
+     "applied": [
+      true,
+      true,
+      false
+     ],
+     "bound": null
+    },
+    {
+     "order": [
+      2,
+      0,
+      1
+     ],
+     "applied": [
+      false,
+      false,
+      false
+     ],
+     "bound": null
+    },
+    {
+     "order": [
+      2,
+      1,
+      0
+     ],
+     "applied": [
+      false,
+      false,
+      false
+     ],
+     "bound": null
+    }
+   ],
+   "targetless_differs": 4
+  }
+ ]
+}

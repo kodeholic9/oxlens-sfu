@@ -9,7 +9,7 @@ fn spec_dir() -> PathBuf {
     if let Ok(p) = std::env::var("OXLENS_SPEC") {
         return PathBuf::from(p);
     }
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../context/spec")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/spec")
 }
 
 struct Deps {

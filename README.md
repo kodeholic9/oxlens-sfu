@@ -135,7 +135,7 @@ The core stores and delivers messages. Anything more attaches in one of two ways
 
 | Layer | What | Where |
 |---|---|---|
-| 1 — unit | `cargo test --workspace`, including spec-generated vectors (source-switch rewriting · RTCP · floor/media binding · simulcast) and blind independent tests | this repository |
+| 1 — unit | `cargo test --workspace`, including spec-generated vectors (source-switch rewriting · RTCP · floor/media binding · simulcast) and blind independent tests; the vectors are a copy of the spec output kept in `testdata/spec/`, so a fresh clone runs them on its own | this repository |
 | 2 — headless | A bot harness drives the real server: protocol contract checks, over 120 scenarios, smoke tests, equations over packet dumps | separate repository (not public yet) |
 | 3 — browser | Playwright with Chromium against the real server and the web SDK | [oxlens-sdk-web](https://github.com/kodeholic9/oxlens-sdk-web) `qa/live` |
 | Model checking | TLA+ / TLC — 93 configurations over the protocol state machines (session · room · link · publish · subscribe · tracks · affiliation · floor · multi-server) and 99 over the server (node bus · mesh · ownership · execution · media path · authority — 7 of them on hold) | specification repository |

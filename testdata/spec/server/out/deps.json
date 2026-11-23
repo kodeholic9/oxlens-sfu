@@ -1,0 +1,179 @@
+{
+ "generated": "spec/tools/deps.py — 손으로 고치지 않는다",
+ "set": "server",
+ "side": "server",
+ "rule": "불러도 되는 영역 = 관계의 직접 대상 ∪ 이음매의 직접 대상(닫힘 아님) · 가로지르는 것은 표 밖(재생성이 잰다)",
+ "concepts": [
+  "SES",
+  "LINK",
+  "ROOM",
+  "AFF",
+  "PUB",
+  "TRK",
+  "SUB",
+  "FLR",
+  "BUS",
+  "CHAT"
+ ],
+ "aspects": [
+  "DOC",
+  "CONC",
+  "FWD",
+  "SIM",
+  "RTCP",
+  "AUX",
+  "OPS",
+  "GC",
+  "CFG",
+  "ERR",
+  "MESH"
+ ],
+ "fold": {},
+ "relation_cycles": [],
+ "areas": {
+  "AFF": {
+   "relation": [
+    "LINK",
+    "ROOM"
+   ],
+   "seam": [
+    "FLR",
+    "PUB",
+    "TRK"
+   ],
+   "may_use": [
+    "FLR",
+    "LINK",
+    "PUB",
+    "ROOM",
+    "TRK"
+   ],
+   "known_area": true
+  },
+  "BUS": {
+   "relation": [],
+   "seam": [],
+   "may_use": [],
+   "known_area": true
+  },
+  "CHAT": {
+   "relation": [
+    "BUS"
+   ],
+   "seam": [],
+   "may_use": [
+    "BUS"
+   ],
+   "known_area": true
+  },
+  "FLR": {
+   "relation": [
+    "ROOM"
+   ],
+   "seam": [],
+   "may_use": [
+    "ROOM"
+   ],
+   "known_area": true
+  },
+  "LINK": {
+   "relation": [
+    "SES"
+   ],
+   "seam": [
+    "PUB"
+   ],
+   "may_use": [
+    "PUB",
+    "SES"
+   ],
+   "known_area": true
+  },
+  "PUB": {
+   "relation": [
+    "AFF",
+    "FLR",
+    "LINK"
+   ],
+   "seam": [
+    "TRK"
+   ],
+   "may_use": [
+    "AFF",
+    "FLR",
+    "LINK",
+    "TRK"
+   ],
+   "known_area": true
+  },
+  "ROOM": {
+   "relation": [
+    "BUS",
+    "LINK"
+   ],
+   "seam": [
+    "AFF",
+    "FLR",
+    "LINK",
+    "PUB",
+    "SUB"
+   ],
+   "may_use": [
+    "AFF",
+    "BUS",
+    "FLR",
+    "LINK",
+    "PUB",
+    "SUB"
+   ],
+   "known_area": true
+  },
+  "SES": {
+   "relation": [
+    "BUS",
+    "CHAT"
+   ],
+   "seam": [
+    "ROOM"
+   ],
+   "may_use": [
+    "BUS",
+    "CHAT",
+    "ROOM"
+   ],
+   "known_area": true
+  },
+  "SUB": {
+   "relation": [
+    "LINK",
+    "TRK"
+   ],
+   "seam": [
+    "FLR",
+    "LINK"
+   ],
+   "may_use": [
+    "FLR",
+    "LINK",
+    "TRK"
+   ],
+   "known_area": true
+  },
+  "TRK": {
+   "relation": [
+    "PUB",
+    "ROOM"
+   ],
+   "seam": [
+    "LINK",
+    "ROOM"
+   ],
+   "may_use": [
+    "LINK",
+    "PUB",
+    "ROOM"
+   ],
+   "known_area": true
+  }
+ }
+}
