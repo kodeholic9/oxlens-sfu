@@ -97,6 +97,11 @@ curl http://127.0.0.1:1974/healthz/ready
 - `system.toml` 의 시연 계정(`ox_k_demo` / `ox_s_demo`)과 `jwt_secret = "change-me-in-production"` 은 로컬 개발용입니다.
 - 기본 `system.toml` 에서는 채팅이 꺼져 있습니다. `[chat]` 에 `db = "memory:"` · `"sqlite:<경로>"` · `"postgres://…"` 중 하나를 주면 켜집니다.
 - 3-node 개발 형상은 `dev/` 에 있습니다. `dev/gen_nodes.py` 가 `dev/system.node-*.toml` 을 짓고, 채팅 · 녹음 유닛 · 확장 입구까지 켭니다. `dev/pki` 의 키는 로컬 시험용 PKI 입니다.
+- 녹음 유닛 `oxtapd` 는 기본 빌드에 들지 않습니다. 서버사이드 SDK `oxlens-sdk-peer` 를 쓰므로, 그 저장소가 이 저장소 옆에 있을 때 같은 `target/` 에 따로 짓습니다(`dev/` 형상은 녹음 유닛이 있어야 뜹니다).
+
+```bash
+cargo build --manifest-path crates/oxtapd/Cargo.toml --target-dir target
+```
 
 ## 설정
 

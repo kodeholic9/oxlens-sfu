@@ -99,6 +99,12 @@ Chat is off in the default `system.toml`. Add `[chat]` with `db = "memory:"`, `"
 
 A three-node development layout is in `dev/`. `dev/gen_nodes.py` generates `dev/system.node-*.toml`, with chat, a recording unit and the extension entry turned on. The keys in `dev/pki` are a test PKI for local use only.
 
+The recording unit `oxtapd` is not part of the default build. It depends on the server-side SDK `oxlens-sdk-peer`, which must be checked out next to this repository. With it in place, build the unit into the same `target/` (the `dev/` layout needs it):
+
+```bash
+cargo build --manifest-path crates/oxtapd/Cargo.toml --target-dir target
+```
+
 ## Configuration
 
 Every value lives in exactly one of three places, and the boot banner prints the final value of all of them. The banner spans several log lines (`part` / `parts`), so nothing is truncated.
