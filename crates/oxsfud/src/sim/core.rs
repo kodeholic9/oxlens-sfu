@@ -167,7 +167,7 @@ impl Aimd {
         };
         self.cap = Some(c);
         let err = c - sample;
-        self.dev = ((1.0 - CAP_ALPHA) * self.dev + (CAP_ALPHA * err * err) / c.max(1.0)).max(CAP_MIN_DEV).min(CAP_MAX_DEV);
+        self.dev = ((1.0 - CAP_ALPHA) * self.dev + (CAP_ALPHA * err * err) / c.max(1.0)).clamp(CAP_MIN_DEV, CAP_MAX_DEV);
     }
 
     fn near_rate(&self) -> i64 {

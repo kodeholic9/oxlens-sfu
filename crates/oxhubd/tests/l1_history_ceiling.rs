@@ -34,7 +34,7 @@ fn fill(d: &Path, every: u64) -> u64 {
     w.write_all(boot.as_bytes()).expect("write");
     let mut i = 1u64;
     while size < CEILING {
-        let room = if i % every == 0 { "busy".to_string() } else { format!("r-{}", i % 997) };
+        let room = if i.is_multiple_of(every) { "busy".to_string() } else { format!("r-{}", i % 997) };
         let kind = ["ev", "diag", "stat"][(i % 3) as usize];
         let line = format!(
             "ts={} mono={i} node=node-a proc=sfu kind={kind} spec=SV-RULE-SIM-TICK session=s{} room={room} user=bot{}~scenario epoch=e1 in.target=2890491 in.cluster={i} msg=\"probe judged\"\n",

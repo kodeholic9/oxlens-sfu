@@ -323,6 +323,7 @@ impl LayerRate {
     }
 }
 
+#[derive(Default)]
 pub struct ConnSim {
     pub policy: Policy,
     pub prev_rep: HashMap<usize, u64>,
@@ -337,26 +338,6 @@ pub struct ConnSim {
     pub usage_seen: UsageSeen,
     pub padding: bool,
     pub twccless: bool,
-}
-
-impl Default for ConnSim {
-    fn default() -> Self {
-        ConnSim {
-            policy: Policy::default(),
-            prev_rep: HashMap::new(),
-            prev_sent: HashMap::new(),
-            prev_drops: HashMap::new(),
-            congestion: None,
-            alloc: Allocator::default(),
-            priced: Vec::new(),
-            allocated: HashMap::new(),
-            tags: VecDeque::new(),
-            next_process_us: 0,
-            usage_seen: UsageSeen::default(),
-            padding: false,
-            twccless: false,
-        }
-    }
 }
 
 type Rows = Vec<(Arc<DownRow>, Arc<PubTrack>)>;

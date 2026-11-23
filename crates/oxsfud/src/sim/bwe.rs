@@ -729,12 +729,12 @@ struct Hold {
 }
 
 fn loss_probability(inherent: f64, limit: i64, rate: i64) -> f64 {
-    let inherent = inherent.max(0.0).min(1.0);
+    let inherent = inherent.clamp(0.0, 1.0);
     let mut p = inherent;
     if rate > 0 && limit > 0 && rate > limit {
         p += ((1.0 - inherent) * (rate - limit) as f64) / rate as f64;
     }
-    p.max(1.0e-6).min(1.0 - 1.0e-6)
+    p.clamp(1.0e-6, 1.0 - 1.0e-6)
 }
 
 #[derive(Debug, Clone)]
@@ -1088,7 +1088,7 @@ impl LossController {
             return 0;
         }
         r.sort();
-        if r.len() % 2 == 0 { (r[r.len() / 2 - 1] + r[r.len() / 2]) / 2 } else { r[(r.len() - 1) / 2] }
+        if r.len().is_multiple_of(2) { (r[r.len() / 2 - 1] + r[r.len() / 2]) / 2 } else { r[(r.len() - 1) / 2] }
     }
 }
 
