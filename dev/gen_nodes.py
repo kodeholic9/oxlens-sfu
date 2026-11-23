@@ -88,7 +88,7 @@ kind = "process"
 order = 3
 role = "rec"
 addr = "127.0.0.1:{50161 + i}"
-cmd = ["./target/debug/oxrecd", "--grpc-listen", "127.0.0.1:{50161 + i}"]
+cmd = ["./target/debug/oxtapd", "--grpc-listen", "127.0.0.1:{50161 + i}"]
 
 [data]
 root = "{DATA_ROOT}"

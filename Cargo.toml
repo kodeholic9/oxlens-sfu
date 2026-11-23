@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/oxsig", "crates/common", "crates/oxmesh", "crates/oxhubd", "crates/oxsfud", "crates/oxadmin", "crates/oxrecd"]
+members = ["crates/oxsig", "crates/common", "crates/oxmesh", "crates/oxhubd", "crates/oxsfud", "crates/oxadmin", "crates/oxtapd"]
 resolver = "3"
 
 [workspace.package]

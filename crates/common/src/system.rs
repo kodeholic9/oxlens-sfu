@@ -582,7 +582,7 @@ mod tests {
 
     #[test]
     fn rec_unit_needs_data_root_and_process() {
-        let rec = "[[unit]]\nid = \"r1\"\nkind = \"process\"\norder = 3\nrole = \"rec\"\ncmd = [\"oxrecd\"]\n";
+        let rec = "[[unit]]\nid = \"r1\"\nkind = \"process\"\norder = 3\nrole = \"rec\"\ncmd = [\"oxtapd\"]\n";
         assert!(System::parse(&format!("{MIN}{rec}")).is_err());
         let s = System::parse(&format!("{MIN}{rec}[data]\nroot = \"/d\"\n")).unwrap();
         assert_eq!((s.data_root(), s.rec_keep_days()), (Some("/d"), 30));

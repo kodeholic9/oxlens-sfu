@@ -14,8 +14,8 @@ use common::log::{Setup, Sink};
 use common::talk::Report;
 use oxpeer::record::{Pipeline, Policy, RecordConfig};
 use oxpeer::{Client, Config, Event};
-use oxrecd::bus::Bus;
-use oxrecd::{Hub, Layout};
+use oxtapd::bus::Bus;
+use oxtapd::{Hub, Layout};
 use tokio::sync::mpsc;
 
 struct Args {
@@ -73,7 +73,7 @@ async fn main() {
     let a = match args() {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("oxrecd: {e}");
+            eprintln!("oxtapd: {e}");
             std::process::exit(2);
         }
     };
@@ -93,35 +93,35 @@ async fn run(a: Args) -> i32 {
         Some(p) => match std::fs::read(p) {
             Ok(b) => Some(b),
             Err(e) => {
-                eprintln!("oxrecd: --hub-ca {}: {e}", p.display());
+                eprintln!("oxtapd: --hub-ca {}: {e}", p.display());
                 return 2;
             }
         },
         None => None,
     };
-    let Some(hub) = oxrecd::hub_of(&a.hub_base, ca.as_deref()) else {
-        eprintln!("oxrecd: --hub-base must be http(s)://host:port/base (https needs --hub-ca)");
+    let Some(hub) = oxtapd::hub_of(&a.hub_base, ca.as_deref()) else {
+        eprintln!("oxtapd: --hub-base must be http(s)://host:port/base (https needs --hub-ca)");
         return 2;
     };
     let drops = Arc::new(AtomicU64::new(0));
-    let svc = oxrecd::Svc { epoch, build: common::ident::build_id(common::ident::COMPILED, Some(&a.build)), drops: drops.clone() };
+    let svc = oxtapd::Svc { epoch, build: common::ident::build_id(common::ident::COMPILED, Some(&a.build)), drops: drops.clone() };
     let addr = a.grpc;
     tokio::spawn(async move {
         if let Err(e) = tonic::transport::Server::builder().add_service(common::envelope::handle::handle_server::HandleServer::new(svc)).serve(addr).await {
-            eprintln!("oxrecd: --grpc-listen {addr}: {e}");
+            eprintln!("oxtapd: --grpc-listen {addr}: {e}");
             common::log::drain(Duration::from_millis(200));
             std::process::exit(2);
         }
     });
     let layout = Arc::new(Layout::new(&a.root));
     if let Err(e) = layout.clear_staging() {
-        eprintln!("oxrecd: staging {}: {e}", layout.staging().display());
+        eprintln!("oxtapd: staging {}: {e}", layout.staging().display());
         return 2;
     }
     let bus = match Bus::open(&a.node, &a.ns, &a.connect).await {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("oxrecd: bus: {e}");
+            eprintln!("oxtapd: bus: {e}");
             return 2;
         }
     };
@@ -133,10 +133,10 @@ async fn run(a: Args) -> i32 {
     });
     let (sweep_root, keep) = (a.root.clone(), a.keep_days);
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(oxrecd::DAY);
+        let mut tick = tokio::time::interval(oxtapd::DAY);
         loop {
             tick.tick().await;
-            match oxrecd::sweep(&sweep_root, keep, std::time::SystemTime::now()) {
+            match oxtapd::sweep(&sweep_root, keep, std::time::SystemTime::now()) {
                 Ok(n) if n > 0 => tracing::info!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", removed = n, "rec files past keep days removed"),
                 Ok(_) => {}
                 Err(e) => tracing::warn!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", "rec sweep: {e}"),
@@ -146,7 +146,7 @@ async fn run(a: Args) -> i32 {
     let (rep_tx, rep_rx) = mpsc::unbounded_channel::<Report>();
     let (b2, d2) = (bus.clone(), drops.clone());
     tokio::spawn(async move {
-        oxrecd::report_line(
+        oxtapd::report_line(
             rep_rx,
             common::talk::RETRY_FOR,
             |p| {
@@ -159,7 +159,7 @@ async fn run(a: Args) -> i32 {
     });
     let (room_tx, mut room_rx) = mpsc::unbounded_channel::<RoomCmd>();
     if let Err(e) = discover(&bus, hub, a.token.clone(), room_tx).await {
-        eprintln!("oxrecd: bus watch: {e}");
+        eprintln!("oxtapd: bus watch: {e}");
         return 2;
     }
     let mut cfg = Config::new(&a.hub_base, &a.token);
@@ -174,10 +174,10 @@ async fn run(a: Args) -> i32 {
     };
     let mut records = client.records(1 << 16);
     let mut pipe = Pipeline::new(Policy::Utterance);
-    let mut talks = match oxrecd::Talks::new(Layout::new(&a.root)) {
+    let mut talks = match oxtapd::Talks::new(Layout::new(&a.root)) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("oxrecd: staging: {e}");
+            eprintln!("oxtapd: staging: {e}");
             return 2;
         }
     };
@@ -251,8 +251,8 @@ async fn discover(bus: &Bus, hub: Hub, token: String, tx: mpsc::UnboundedSender<
                 (false, true) => {
                     let (hub, token, tx) = (hub.clone(), token.clone(), tx.clone());
                     tokio::spawn(async move {
-                        match oxrecd::get_json(&hub, &format!("/rooms/{room}"), &token).await {
-                            Some((200, body)) if oxrecd::recorded(&body) => {
+                        match oxtapd::get_json(&hub, &format!("/rooms/{room}"), &token).await {
+                            Some((200, body)) if oxtapd::recorded(&body) => {
                                 let _ = tx.send(RoomCmd::Join(room));
                             }
                             Some(_) => {}

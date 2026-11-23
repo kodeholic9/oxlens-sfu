@@ -28,7 +28,7 @@
 | Text chat — spaces · messages · catch-up after a reconnect · messages that point to another one (reply · edit · reaction · delete) · stores: in-memory, SQLite or PostgreSQL · off unless `[chat]` is configured | ✅ |
 | Chat extensions — client-side app data (`ext`) and third-party services that subscribe to chat (see [Extending chat](#extending-chat)) | ✅ |
 | PTT talk record — when a chat space exists for the room, each utterance is written to it under the speaker's user id; in a room marked for recording, the recording is attached to it | ✅ |
-| Recording unit `oxrecd` — a process the hub supervises; joins rooms marked for recording and writes one file per utterance (Matroska when it has video, Ogg for audio only) | ✅ |
+| Recording unit `oxtapd` — a process the hub supervises; joins rooms marked for recording and writes one file per utterance (Matroska when it has video, Ogg for audio only) | ✅ |
 | Operations — `oxadmin` CLI · `/admin/*` read and control · `/healthz/live` · `/healthz/ready` · logfmt logging to one file per node · boot banner with every resolved setting | ✅ |
 | Video PTT (video floor) | ⏸ shelved — the browser send pacer cannot be controlled from here |
 | Outbound hooks (webhooks / events to a third-party server) | ⏳ specified, not implemented |
@@ -43,7 +43,7 @@ flowchart LR
   subgraph N1["node"]
     H["oxhubd — gateway<br/>sessions · routing · HTTP/WS<br/>chat · /admin · supervisor · logger"]
     S["oxsfud — media server<br/>rooms · peers · floor<br/>RTP / RTCP · simulcast"]
-    R["oxrecd — recording unit<br/>(optional)"]
+    R["oxtapd — recording unit<br/>(optional)"]
     H -- "local gRPC" --- S
     H -- "local gRPC" --- R
   end
@@ -62,7 +62,7 @@ flowchart LR
 | `oxhubd` | Gateway: sessions, room placement and routing, HTTP / WebSocket, chat (store, fan-out to the nodes where members are connected, the entry for third-party services), `/admin`, the process supervisor, the in-process logger |
 | `oxsfud` | Media server: rooms, peers, publish / subscribe, floor control, forwarding, RTCP, simulcast |
 | `oxmesh` | The node bus — routers in a direct one-hop mesh, session identity (generation), four lanes, tokens · subscriptions · queries (the hub is a router, the media server a client) |
-| `oxrecd` | Recording unit — joins rooms marked for recording as a participant and writes the files |
+| `oxtapd` | Recording unit — joins rooms marked for recording as a participant and writes the files |
 | `oxadmin` | Operator CLI over `/admin/*` |
 
 ## Quick start

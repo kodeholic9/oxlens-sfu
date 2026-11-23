@@ -95,7 +95,7 @@ fn mesh_reads_split() {
 fn mesh_only_in_bus_owners() {
     let root = crates_dir();
     let crates = crate_names();
-    assert!(crates.iter().any(|c| c == "oxrecd") && crates.iter().any(|c| c == "oxsfud"), "크레이트 목록을 못 읽었다(안 쟀다) {crates:?}");
+    assert!(crates.iter().any(|c| c == "oxtapd") && crates.iter().any(|c| c == "oxsfud"), "크레이트 목록을 못 읽었다(안 쟀다) {crates:?}");
     let mut leaks = Vec::new();
     let mut scanned = 0usize;
     let mut owner_uses = 0usize;

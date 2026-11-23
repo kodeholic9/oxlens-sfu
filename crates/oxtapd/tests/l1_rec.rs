@@ -10,13 +10,13 @@ use common::envelope::Reply;
 use common::talk::Report;
 use oxmesh::{Config, Mesh};
 use oxpeer::record::OggFile;
-use oxrecd::{Layout, PART_DIR};
+use oxtapd::{Layout, PART_DIR};
 use tokio::sync::mpsc;
 
 const TALK: &str = "81330e4c0190a1b2c3d4e5f60718293a4b5c";
 
 fn root(tag: &str) -> std::path::PathBuf {
-    let d = std::env::temp_dir().join(format!("oxrecd-l1-{tag}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("oxtapd-l1-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     d
 }
@@ -69,7 +69,7 @@ fn one_file_per_talk_mkv_with_video_else_ogg() {
     use oxpeer::record::{Channel, Pipeline, Policy};
     let l = Layout::new(root("one-per-talk"));
     l.clear_staging().expect("staging");
-    let mut talks = oxrecd::Talks::new(Layout::new(&l.root)).expect("talks");
+    let mut talks = oxtapd::Talks::new(Layout::new(&l.root)).expect("talks");
     let tracks = serde_json::json!({
         "room": "r",
         "tracks": [{ "track_id": "slot-a", "kind": "audio" }, { "track_id": "slot-v", "kind": "video" }],
@@ -138,23 +138,23 @@ fn the_sweep_removes_only_files_past_the_keep_days() {
         let f = std::fs::File::options().write(true).open(&p).expect("open");
         f.set_modified(now - Duration::from_secs(age_days * 86_400)).expect("mtime");
     }
-    assert_eq!(oxrecd::sweep(&l.root, 30, now).expect("sweep"), 1, "정:IMPL-OPS-REC-UNIT 보관 — [data] rec_keep_days(30)");
+    assert_eq!(oxtapd::sweep(&l.root, 30, now).expect("sweep"), 1, "정:IMPL-OPS-REC-UNIT 보관 — [data] rec_keep_days(30)");
     let mut left = files_under(&dir);
     left.sort();
     assert_eq!(left, vec!["edge.ogg".to_string(), "new.ogg".to_string()]);
-    assert_eq!(oxrecd::sweep(&l.root, 1, now).expect("sweep"), 1, "a shorter keep removes more");
+    assert_eq!(oxtapd::sweep(&l.root, 1, now).expect("sweep"), 1, "a shorter keep removes more");
 }
 
 #[test]
 fn the_room_detail_record_flag_decides() {
-    assert!(oxrecd::recorded(&serde_json::json!({ "room_id": "r", "record": true })), "연:ROOM.http.CREATE_ROOM record");
-    assert!(!oxrecd::recorded(&serde_json::json!({ "room_id": "r", "record": false })));
-    assert!(!oxrecd::recorded(&serde_json::json!({ "room_id": "r" })), "an older gateway without the field = not recorded");
-    let h = oxrecd::hub_of("http://127.0.0.1:1974/media", None).expect("hub");
+    assert!(oxtapd::recorded(&serde_json::json!({ "room_id": "r", "record": true })), "연:ROOM.http.CREATE_ROOM record");
+    assert!(!oxtapd::recorded(&serde_json::json!({ "room_id": "r", "record": false })));
+    assert!(!oxtapd::recorded(&serde_json::json!({ "room_id": "r" })), "an older gateway without the field = not recorded");
+    let h = oxtapd::hub_of("http://127.0.0.1:1974/media", None).expect("hub");
     assert_eq!((h.host.as_str(), h.port, h.path.as_str(), h.tls.is_none()), ("127.0.0.1", 1974, "/media", true), "정:IMPL-OPS-REC-UNIT 로컬 게이트웨이 — --hub-base");
-    assert!(oxrecd::hub_of("https://127.0.0.1:1974/media", None).is_none(), "TLS needs --hub-ca (no system trust store)");
-    let (st, body) = oxrecd::parse_reply(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\nb\r\n{\"record\":t\r\n4\r\nrue}\r\n0\r\n\r\n").expect("parse");
-    assert!(st == 200 && oxrecd::recorded(&body), "a chunked body is read whole");
+    assert!(oxtapd::hub_of("https://127.0.0.1:1974/media", None).is_none(), "TLS needs --hub-ca (no system trust store)");
+    let (st, body) = oxtapd::parse_reply(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\nb\r\n{\"record\":t\r\n4\r\nrue}\r\n0\r\n\r\n").expect("parse");
+    assert!(st == 200 && oxtapd::recorded(&body), "a chunked body is read whole");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -190,11 +190,11 @@ async fn over_tls_the_room_detail_is_read_with_the_hub_certificate_only() {
         }
     });
     let base = format!("https://127.0.0.1:{port}/media");
-    let hub = oxrecd::hub_of(&base, Some(&pem)).expect("hub");
-    let (st, body) = oxrecd::get_json(&hub, "/rooms/ch-1", "tok").await.expect("read over TLS on loopback — no name check");
-    assert!(st == 200 && oxrecd::recorded(&body), "정:IMPL-OPS-REC-UNIT 로컬 게이트웨이 — --hub-ca 의 인증서 하나로 검증");
-    let wrong = oxrecd::hub_of(&base, Some(&other)).expect("hub");
-    assert!(oxrecd::get_json(&wrong, "/rooms/ch-1", "tok").await.is_none(), "another certificate is refused");
+    let hub = oxtapd::hub_of(&base, Some(&pem)).expect("hub");
+    let (st, body) = oxtapd::get_json(&hub, "/rooms/ch-1", "tok").await.expect("read over TLS on loopback — no name check");
+    assert!(st == 200 && oxtapd::recorded(&body), "정:IMPL-OPS-REC-UNIT 로컬 게이트웨이 — --hub-ca 의 인증서 하나로 검증");
+    let wrong = oxtapd::hub_of(&base, Some(&other)).expect("hub");
+    assert!(oxtapd::get_json(&wrong, "/rooms/ch-1", "tok").await.is_none(), "another certificate is refused");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -207,7 +207,7 @@ async fn the_unit_answers_hello_and_drops_over_its_handle() {
     let addr = probe.local_addr().expect("addr");
     drop(probe);
     let drops = std::sync::Arc::new(AtomicU64::new(0));
-    let svc = oxrecd::Svc { epoch: "e-rec".into(), build: "b1".into(), drops: drops.clone() };
+    let svc = oxtapd::Svc { epoch: "e-rec".into(), build: "b1".into(), drops: drops.clone() };
     tokio::spawn(tonic::transport::Server::builder().add_service(HandleServer::new(svc)).serve(addr));
     let mut c = None;
     for _ in 0..50 {
@@ -246,7 +246,7 @@ async fn a_closed_recording_is_reported_to_the_gateway_over_the_bus() {
         }
     });
     let at = hub.bound()[0].to_string();
-    let unit = oxrecd::bus::Bus::open("n1", "t", &at).await.expect("client");
+    let unit = oxtapd::bus::Bus::open("n1", "t", &at).await.expect("client");
     tokio::time::sleep(Duration::from_millis(300)).await;
     let drops = AtomicU64::new(0);
     let (tx, rx) = mpsc::unbounded_channel();
@@ -254,7 +254,7 @@ async fn a_closed_recording_is_reported_to_the_gateway_over_the_bus() {
     tx.send(rec.clone()).expect("queue");
     drop(tx);
     let u2 = unit.clone();
-    oxrecd::report_line(
+    oxtapd::report_line(
         rx,
         Duration::from_secs(10),
         |p| {
@@ -267,11 +267,11 @@ async fn a_closed_recording_is_reported_to_the_gateway_over_the_bus() {
     let (k, r) = tokio::time::timeout(Duration::from_secs(5), got_rx.recv()).await.expect("in time").expect("arrived");
     assert_eq!((k.as_str(), r), ("ox/t/int/q/node/n1/talk", rec), "정:IMPL-OPS-REC-UNIT 알림 — rec goes to q/node/{{node}}/talk");
     assert_eq!(drops.load(Ordering::Relaxed), 0);
-    let dead = oxrecd::bus::Bus::open("n9", "t", &at).await.expect("client");
+    let dead = oxtapd::bus::Bus::open("n9", "t", &at).await.expect("client");
     let (tx, rx) = mpsc::unbounded_channel();
     tx.send(Report::Rec { talk_id: TALK.into(), path: "rec/x/y".into(), size: 1, mime: "audio/ogg".into(), duration_ms: 1 }).expect("queue");
     drop(tx);
-    oxrecd::report_line(
+    oxtapd::report_line(
         rx,
         Duration::from_millis(400),
         |p| {

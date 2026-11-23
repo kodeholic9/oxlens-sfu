@@ -2358,22 +2358,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "oxrecd"
-version = "0.1.0"
-dependencies = [
- "common",
- "oxmesh",
- "oxpeer",
- "oxsig",
- "rcgen",
- "serde_json",
- "tokio",
- "tokio-rustls",
- "tonic",
- "tracing",
-]
-
-[[package]]
 name = "oxsfud"
 version = "0.1.0"
 dependencies = [
@@ -2412,6 +2396,22 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "oxtapd"
+version = "0.1.0"
+dependencies = [
+ "common",
+ "oxmesh",
+ "oxpeer",
+ "oxsig",
+ "rcgen",
+ "serde_json",
+ "tokio",
+ "tokio-rustls",
+ "tonic",
+ "tracing",
 ]
 
 [[package]]

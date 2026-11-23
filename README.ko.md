@@ -28,7 +28,7 @@
 | 문자 채팅 — 공간 · 메시지 · 다시 붙은 뒤 따라잡기 · 다른 메시지를 가리키는 메시지(답장 · 고침 · 반응 · 지움) · 저장소는 메모리 · SQLite · PostgreSQL 중 하나 · `[chat]` 을 주지 않으면 꺼짐 | ✅ |
 | 채팅 확장 — 클라 쪽 앱 칸(`ext`)과, 채팅을 구독하는 외부 서비스([채팅 확장](#채팅-확장) 참고) | ✅ |
 | 무전 발언 기록 — 그 방 id 의 채팅 공간이 있으면 발언마다 화자의 `user_id` 로 남김 · 녹음하기로 한 방이면 녹음 파일을 거기에 붙임 | ✅ |
-| 녹음 유닛 `oxrecd` — hub 가 띄우고 지키는 프로세스 · 녹음하기로 한 방에 들어가 발언마다 파일 하나(영상이 있으면 Matroska · 음성만이면 Ogg) | ✅ |
+| 녹음 유닛 `oxtapd` — hub 가 띄우고 지키는 프로세스 · 녹음하기로 한 방에 들어가 발언마다 파일 하나(영상이 있으면 Matroska · 음성만이면 Ogg) | ✅ |
 | 운영 — `oxadmin` CLI · `/admin/*` 읽기와 제어 · `/healthz/live` · `/healthz/ready` · node 마다 logfmt 로그 파일 하나 · 해석된 설정 전량을 남기는 기동 배너 | ✅ |
 | 영상 무전(영상 발언권) | ⏸ 보류 — 브라우저 송신 pacer 를 이쪽에서 쥘 수 없다 |
 | 대외 발행(webhook · 사건을 제3 서버로) | ⏳ 규격만 있고 미구현 |
@@ -43,7 +43,7 @@ flowchart LR
   subgraph N1["node"]
     H["oxhubd — 게이트웨이<br/>세션 · 라우팅 · HTTP/WS<br/>채팅 · /admin · supervisor · 로거"]
     S["oxsfud — 미디어 서버<br/>방 · Peer · 발언권<br/>RTP / RTCP · 시뮬캐스트"]
-    R["oxrecd — 녹음 유닛<br/>(선택)"]
+    R["oxtapd — 녹음 유닛<br/>(선택)"]
     H -- "로컬 gRPC" --- S
     H -- "로컬 gRPC" --- R
   end
@@ -62,7 +62,7 @@ flowchart LR
 | `oxhubd` | 게이트웨이 — 세션 · 방 배치와 라우팅 · HTTP / WebSocket · 채팅(저장 · 멤버가 붙은 node 로 뿌리기 · 외부 서비스 입구) · `/admin` · 프로세스 supervisor · 프로세스 안 로거 |
 | `oxsfud` | 미디어 서버 — 방 · Peer · 발행 / 구독 · 발언권 · 전달 · RTCP · 시뮬캐스트 |
 | `oxmesh` | node 버스 — router 직접 그물 한 홉 · 세션 신원(세대) · 레인 넷 · 토큰 · 구독 · 질의(hub 가 router · 미디어 서버가 client) |
-| `oxrecd` | 녹음 유닛 — 녹음하기로 한 방에 참가자로 들어가 파일을 씀 |
+| `oxtapd` | 녹음 유닛 — 녹음하기로 한 방에 참가자로 들어가 파일을 씀 |
 | `oxadmin` | `/admin/*` 를 부르는 운영 CLI |
 
 ## 빠른 시작
