@@ -578,7 +578,7 @@ fn uplink(w: &Worker, tr: &Arc<Transport>, ups: &[Arc<PubTrack>], now: u64, now_
         }
     }
     if due(&tr.rtc.next_remb, now, REMB_MS) {
-        let max = crate::ops::policy().media.max_bitrate_bps as u64;
+        let max = crate::ops::policy().media.ingress_remb_max_bps as u64;
         let ssrcs: Vec<u32> = ups.iter().map(|t| t.ssrc).collect();
         send_rtcp(w, tr, &build_remb(max, &ssrcs));
     }

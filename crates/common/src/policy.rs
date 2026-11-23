@@ -151,6 +151,7 @@ pub struct Media {
     pub auto_layer: MediaAutolayer,
     pub layer_strategy: MediaLayerStrategy,
     pub max_bitrate_bps: u32,
+    pub ingress_remb_max_bps: u32,
     pub pli_throttle_high_ms: u32,
     pub pli_throttle_low_ms: u32,
 }
@@ -162,6 +163,7 @@ impl Default for Media {
             auto_layer: MediaAutolayer::Off,
             layer_strategy: MediaLayerStrategy::LowestTemporal,
             max_bitrate_bps: 2_500_000,
+            ingress_remb_max_bps: 5_000_000,
             pli_throttle_high_ms: 1_000,
             pli_throttle_low_ms: 500,
         }
@@ -317,6 +319,9 @@ impl Policy {
         if !(100000..=5000000).contains(&self.media.max_bitrate_bps) {
             return bad(format!("media.max_bitrate_bps {} 는 100000~5000000 밖", self.media.max_bitrate_bps));
         }
+        if !(100000..=5000000).contains(&self.media.ingress_remb_max_bps) {
+            return bad(format!("media.ingress_remb_max_bps {} 는 100000~5000000 밖", self.media.ingress_remb_max_bps));
+        }
         if !(300..=10000).contains(&self.media.pli_throttle_high_ms) {
             return bad(format!("media.pli_throttle_high_ms {} 는 300~10000 밖", self.media.pli_throttle_high_ms));
         }
@@ -356,8 +361,11 @@ impl Policy {
         if self.media.auto_layer == MediaAutolayer::V2 && self.media.bwe_mode != MediaBwemode::Twcc {
             return bad("v2-twcc: media.auto_layer = v2 면 media.bwe_mode = twcc");
         }
-        if self.media.max_bitrate_bps < 2_260_000 {
-            return bad("bitrate-layers: media.max_bitrate_bps ≥ 2,260,000");
+        if self.media.ingress_remb_max_bps < 2_260_000 {
+            return bad("bitrate-layers: media.ingress_remb_max_bps ≥ 2,260,000");
+        }
+        if self.media.ingress_remb_max_bps < self.media.max_bitrate_bps {
+            return bad("remb-ge-encoder: media.ingress_remb_max_bps ≥ media.max_bitrate_bps");
         }
         if self.hook.retry_max as usize > self.hook.retry_backoff_ms.len() {
             return bad("hook-retry: hook.retry_max ≤ hook.retry_backoff_ms 길이");
@@ -439,6 +447,7 @@ impl Policy {
             ("media.auto_layer".into(), m.auto_layer.as_str().into()),
             ("media.layer_strategy".into(), m.layer_strategy.as_str().into()),
             ("media.max_bitrate_bps".into(), m.max_bitrate_bps.to_string()),
+            ("media.ingress_remb_max_bps".into(), m.ingress_remb_max_bps.to_string()),
             ("media.pli_throttle_high_ms".into(), m.pli_throttle_high_ms.to_string()),
             ("media.pli_throttle_low_ms".into(), m.pli_throttle_low_ms.to_string()),
         ]
@@ -453,7 +462,11 @@ mod tests {
     fn defaults_valid_unknown_key_fails() {
         Policy::default().validate().unwrap();
         assert!(Policy::parse("[media]\nnope = 1\n").is_err());
-        assert!(Policy::parse("[media]\nmax_bitrate_bps = 800000\n").is_err());
+        assert!(Policy::parse("[media]\ningress_remb_max_bps = 800000\n").is_err(), "PL-KEY-MEDIA-INGRESS-REMB-MAX-BPS bitrate-layers 층 합 2,260,000 아래는 기동 실패");
+        assert!(Policy::parse("[media]\ningress_remb_max_bps = 2400000\nmax_bitrate_bps = 2500000\n").is_err(), "PL-KEY-MEDIA-INGRESS-REMB-MAX-BPS remb-ge-encoder 클라 인코더 상한 아래는 기동 실패");
+        assert!(Policy::parse("[media]\ningress_remb_max_bps = 5000001\n").is_err(), "PL-KEY-MEDIA-INGRESS-REMB-MAX-BPS 범위 끝 5,000,000 을 넘으면 기동 실패");
+        assert!(Policy::parse("[media]\nmax_bitrate_bps = 800000\n").is_ok(), "PL-KEY-MEDIA-MAX-BITRATE-BPS 인코딩마다의 상한 — 층 합과 안 견준다");
+        assert_eq!(Policy::default().media.ingress_remb_max_bps, 5_000_000, "PL-KEY-MEDIA-INGRESS-REMB-MAX-BPS 배포 기본 5,000,000");
         let p = Policy::parse("[media]\nauto_layer = \"v2\"\n").unwrap();
         assert_eq!(p.media.auto_layer, MediaAutolayer::V2);
     }
