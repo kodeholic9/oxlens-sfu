@@ -256,7 +256,7 @@ sequenceDiagram
 | LiveKit(`livekit §5-3`) | 같은 신원이 또 오면 옛 참가자를 `DUPLICATE_IDENTITY` 로 내보내고 close 알림을 생략(깜빡임 방지) | 새 `BIND` 가 이기고 옛 WS 는 `LEAVE 2010` | 옛 기기가 「붙지 마라」를 번호로 안다 | 옛 세션 끝 줄(`cause=evict`)과 `LEAVE` 줄을 시각으로 이어 읽어야 한다(§4-3) |
 | LiveKit(`livekit §12-2`) | node 한도(트랙 수 · 초당 바이트)를 넘으면 입장 거부 | 방 정원 4001(`details.capacity`) · 요청당 8 · 사람당 16 개수 한계 4002 · 과부하 억제 4009 | 거절 이유와 한도를 `details` 로 준다 | node 전체 대역으로 거르는 축은 이 회차로 확인하지 않았다 |
 
-## 7. 운영에서 보는 법
+## 7. 관측하는 법
 
 | 무엇 | 줄 · 표면 |
 |---|---|

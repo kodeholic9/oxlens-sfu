@@ -77,6 +77,7 @@ ts=2026-11-09T14:37:24.212246+09:00 mono=1248680495 node=node-b proc=sfu kind=ev
 
 - `CP-OP-ROOM-JOIN … msg=ok` 는 게이트웨이가 받은 요청의 결과다. 실패면 `CP-CODE-<이름>` 이다.
 - `diag` 는 판단 근거다. `spec` 이 달린 진단 줄은 문맥으로 읽히라고 이력 기본에 든다. `stat` 은 `spec` 이 없고, 비트레이트는 두 줄의 `bytes_*` 차로 구한다.
+- `proc` 에는 `hub` · `sfu` 말고 `peer` 도 있다. 서버사이드 SDK(oxpeer)와 그 위 앱이 같은 꼴로 낸다([16 §7](16_OXPEER.md)). `proc=peer` 진단 줄의 `spec` 은 `SD-` + SDK 규격 라벨이다(SDK 와 앱 모두). 예: AI 에이전트 브리지의 `spec=SD-RULE-PLAT-AGENT-SILENCE … what=reply_truncated_silence msg="quiet_ms=3000"`([19 §7](19_AGENT_BRIDGE.md)).
 
 ### 3-2. 세션 지문
 
@@ -407,7 +408,7 @@ ts=2026-11-09T13:48:22.757590+09:00 mono=1257047415 … spec=FLR.S.G.IDLE.T7 …
 | 손실 일으켜 보기 | JVB 는 서버 파이프라인 안에서 균등 · 버스트로 떨군다(`JVB §12-4`) | 2층 봇 쪽 fault 주입(`conf_audio_fault`) | 서버 코드에 시험 손잡이가 없다 | 서버 단독으로는 못 만든다 |
 
 
-## 7. 운영에서 보는 법
+## 7. 관측하는 법
 
 이벤트 이력은 「지난 일」이고, 나머지 운영 표면은 「지금」이다. 무엇을 묻느냐로 고른다.
 
@@ -436,7 +437,7 @@ node-c  0f4b9cb5c7e13cf1  row_gate          3
 - 게이트웨이 `code_*` 행이 없다(같은 기간 `CP-CODE` 줄도 0). 로거의 버림(`log_queue_full` · `log_spool_full`)도 없어 기동 이래 로그 줄을 잃지 않았다.
 - `drops` 는 붙은 게이트웨이와 그 node 의 SFU 것만 보인다. 다른 node 는 `oxadmin --hub <그 node 의 게이트웨이> drops` 로 묻는다.
 
-다른 장의 사건이 찍히는 줄은 각 장 7 절에 있다. 세션 · 재개는 [10](10_RECOVERY.md) · 정체는 [11](11_STALL_RESYNC.md) · 코드는 [12](12_ERRORS.md) · floor control 은 [07](07_FLOOR.md) · 유닛 · 버스는 [14](14_OXMESH.md) · 녹음기는 [16](16_OXPEER.md)이 집이다. 클라 쪽 전이 라벨이 어디서 오나는 [15](15_SDK_INSIDE.md)가 본다.
+다른 장의 사건이 찍히는 줄은 각 장 7 절에 있다. 세션 · 재개는 [10](10_RECOVERY.md) · 정체는 [11](11_STALL_RESYNC.md) · 코드는 [12](12_ERRORS.md) · floor control 은 [07](07_FLOOR.md) · 유닛 · 버스는 [14](14_OXMESH.md) · 녹음기는 [16](16_OXPEER.md) · AI 에이전트 브리지의 진단 줄과 끝 요약은 [19](19_AGENT_BRIDGE.md)가 집이다. 클라 쪽 전이 라벨이 어디서 오나는 [15](15_SDK_INSIDE.md)가 본다.
 
 ## 8. 소스 · 규격 좌표
 

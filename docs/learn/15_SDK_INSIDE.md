@@ -352,7 +352,7 @@ sequenceDiagram
 | 규칙을 검사기로 | webrtc-rs 의 시간 경계 CI job(위) | `arch_check` — 층 방향 · 콜백 주입 · 영역 거울을 빌드 실패로 | 「콜백 주입 금지」가 문장이 아니라 장치다 | 판정표(예외)를 관리해야 한다 |
 
 
-## 7. 운영에서 보는 법
+## 7. 관측하는 법
 
 | 무엇 | 어디서 | 실제 줄(이 회차) |
 |---|---|---|
@@ -377,7 +377,7 @@ sequenceDiagram
 | floor control arming | `src/domain/flr/core.ts` `arm` · 효과 `mic.open` → `src/domain/pub/registry.ts` `floorOpen` |
 | 구조 가드 | `tools/arch_check.mjs` · `tools/arch_known.tsv` · 1층 `test/seams.test.ts` · `test/link.test.ts`(`K-sym-IMPL-LINK-PROJECTION-1` · `SD-ENTRY-LINK-ONLINE`) |
 | 게이트 | `scripts/gate.mjs`(첫 걸음 「생성본」) |
-| oxpeer | `oxlens-sdk-peer/src/generated/`(`link_client.rs` `online`) · `src/core/mod.rs` `record` · `impossible` · `diag_send` · `src/api.rs` `Transition` · `Client::transitions` · `src/vectors_test.rs` · `tests/vectors/*.json` |
+| oxpeer | `oxlens-sdk-peer/crates/oxpeer/src/generated/`(`link_client.rs` `online`) · `src/core/mod.rs` `record` · `impossible` · `diag_send` · `src/api.rs` `Transition` · `Client::transitions` · `src/vectors_test.rs` · `tests/vectors/*.json` |
 | 서버 | `oxlens-sfu/crates/oxsfud/tests/vectors.rs` · `crates/oxsfud/src/flr/core.rs` |
 | 규격 | [연:RULE-SUB-READY-PROC](../protocol/08-sub.md#RULE-SUB-READY-PROC) · [연:RULE-SUB-TABLE-PROC](../protocol/08-sub.md#RULE-SUB-TABLE-PROC) · [연:RULE-LINK-SDP-RENEGOTIATE](../protocol/09-link.md#RULE-LINK-SDP-RENEGOTIATE) · [연:RULE-SES-RESUME-PROC](../protocol/03-ses.md#RULE-SES-RESUME-PROC) · [연:RULE-LINK-RECOVERY-WS-FIRST](../protocol/09-link.md#RULE-LINK-RECOVERY-WS-FIRST) · [연:RULE-LINK-RECOVERY-UNIT](../protocol/09-link.md#RULE-LINK-RECOVERY-UNIT) |
 

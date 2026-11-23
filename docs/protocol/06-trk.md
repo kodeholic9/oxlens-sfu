@@ -31,7 +31,7 @@
 | `active` | bool? | individual: ✔ · slot: ★없다 | ★`false` 면 지금은 안 온다 — 회의→무전 전환으로 ★**쉬는** individual 트랙이다(`TRACK_SET{duplex}` 가 적용되면 그 방 전원에게 `TRACK_EVENT{add}` 로 항목이 교체된다, §4-2-6). ★★**쉬는 트랙은 배정표에 줄이 없다** — full → half 순간 서버가 그 자리를 놓고(PROP-LINK-ROW-ONLY-RECEIVED) 그 줄은 빈 줄이 된다(§8-3-1). 서버가 그 줄을 같은 `kind` 의 다른 트랙에 주면 다음 표가 자리를 채운다. 복귀(`true`)는 `TRACK_EVENT{add}` 와 ★**그 트랙의 줄이 붙은 표**(`MLINE_EVENT`)로 온다. ★*"지워라"* 가 아니다 — m-line 을 두고 화면만 내린다 |
 | ★`muted` | bool? | individual: ✔ · slot: ★없다 | ★**그 트랙이 음소거인가** — `TRACK_STATE{muted}`(§4-2-6)와 같은 값이다. 슬롯은 주인이 없어 *"누구의 음소거인가"* 가 정의되지 않는다(반이중에는 mute 가 없다, §7-1-2). ★**스냅샷에 있어야 복구된다**(아래 ★) |
 | `simulcast` | bool? | individual: video · slot: ★없다 | 시뮬캐스트인가 |
-| ★`scalability` | string? | individual: video · slot: ★없다 | ★**`"L{spatial}T{temporal}"`** — 레이어가 몇인가(예: `"L2T3"` = 공간 레이어 둘 · 시간 레이어 셋). ★**시뮬캐스트/SVC 일 때만.** 클라는 이 값으로 §7-1-2 의 상한을 고른다. ★이 세대의 시뮬캐스트는 업링크 스트림 둘(`l`·`h`) 고정(§9-4-10)이라 값은 **`"L2T1"`** 이다 |
+| ★`scalability` | string? | individual: video · slot: ★없다 | ★**`"L{spatial}T{temporal}"`** — 레이어가 몇인가(예: `"L2T3"` = 공간 레이어 둘 · 시간 레이어 셋). ★**시뮬캐스트/SVC 일 때만.** 클라는 이 값으로 §7-1-2 의 상한을 고른다. ★시뮬캐스트는 값이 **`"L3T3"`** 이다 — rid 고정 번호 `l`=0 · `m`=1 · `h`=2 와 시간 층 셋(§7-1-2) · 지목할 수 있는 칸이지 발행자가 다 낸다는 뜻이 아니다 |
 
 <a id="RULE-TRK-FOUR-PATHS"></a>**RULE-TRK-FOUR-PATHS** · 규칙 — `TrackEntry` — 받을 트랙 하나
 
@@ -152,7 +152,7 @@
 
 ★★**출처 번호(`csrc`)는 발행 트랙의 값이다** — 트랙을 받는 미디어 서버가 그 트랙이 생길 때 내고 ★**트랙이 사는 동안 바꾸지 않는다**(시뮬캐스트 레이어에도 같다 — `track_id` 와 수명이 같다). ★최상위 비트 0 · 0 아님 · ★그 미디어 서버 안에서 트랙마다 다르다(한 연결이 그 서버의 여러 방을 받으므로 방이 아니라 서버 안에서 가른다). 받는 쪽은 패킷의 CSRC 를 그 연결이 붙은 서버의 방 트랙 목록(`csrc`)에서 찾아 `track_id` · `user_id` 를 안다.
 - ★**발언권 화자 통지와 맞대지 않는다** — 화자 통지는 미디어와 순서 약속이 없어(§10-4-35) 경계 패킷이 틀린다. 패킷마다 실린 CSRC 가 발행 신원의 정본이다
-- ★**CSRC 가 없는 패킷**(켠 연결에서) = 서버가 지은 패킷(예열 · 해제 침묵) — 어느 발행 트랙에도 넣지 않는다
+- ★**CSRC 가 없는 패킷**(켠 연결에서) = 서버가 지은 패킷 — 대역 probe 패딩(RTX · 페이로드 없음)뿐이다. 어느 발행 트랙에도 넣지 않는다. ★서버는 미디어 프레임(무전 슬롯의 예열 · 해제 침묵 등)을 짓지 않는다(20261111 폐기)
 
 → 구조 — [`TRK.type.TrackEntry`](#TRK.type.TrackEntry)
 
@@ -176,7 +176,7 @@
 
 | 칸 | 처음 | 뜻 |
 |---|---|---|
-| `lay` | `{A: 'NONE', B: 'NONE', S: 'ACTIVE'}` | 트랙 층 — 받은 항목으로 통째 교체한다 |
+| `lay` | `{A: 'NONE', B: 'NONE', S: 'ACTIVE'}` | 트랙 층 — 받은 항목으로 통째 교체한다 · ★받을 트랙만 — 내 개인 트랙은 넣지 않는다(델타 길 mine_other · 스냅샷은 내 것을 빼고 넘긴다 — ③-2) |
 | `muted` | `{A: false, B: false, S: false}` | 트랙 층의 muted — TRACK_STATE 와 항목 교체가 고친다 |
 
 ##### 상태 — 서버
@@ -196,8 +196,8 @@
 | 어느 상태 | TRACK_EVENT 를 받았다 — 트랙 목록(보기용)을 고친다(RULE-TRK-STORE-UPDATE · 키 = track_id) · mine = 내 track_id(★ROOM 이 받은 델타만 온다 — version 판정은 ROOM 한 곳 · trk.delta · RULE-TRK-TRACK-EVENT-PROC) · ★배정표는 건드리지 않는다 | `NONE` | `TRK.C.any.remove` |
 | 어느 상태 | TRACK_EVENT 를 받았다 — 트랙 목록(보기용)을 고친다(RULE-TRK-STORE-UPDATE · 키 = track_id) · mine = 내 track_id(★ROOM 이 받은 델타만 온다 — version 판정은 ROOM 한 곳 · trk.delta · RULE-TRK-TRACK-EVENT-PROC) · ★배정표는 건드리지 않는다 | — | `TRK.C.any.track_event` |
 | 어느 상태 | TRACK_STATE 를 받았다(★ROOM 이 받은 델타만 온다 — trk.delta) — track_id 가 식별 키(RULE-TRK-TRACK-STATE-PROC) · muted 는 트랙 층이라 보관본의 그 값이 바뀐다(아직 구독하지 않은 트랙도 · RULE-TRK-TRACK-STATE-TO-ALL) | — | `TRK.C.any.track_state` |
-| 어느 상태 | 스냅샷(입장 응답 · RESUME · GET)의 tracks 를 받았다 — 그 방 트랙 목록 전부다(보기용 · RULE-TRK-FOUR-PATHS · RULE-TRK-PER-PATH) · ★배정표는 실려 오지 않는다(입장 응답 · RESUME 의 표는 MLINE_EVENT 와 같은 길로 받는다) | — | `TRK.C.any.snapshot` |
-| 어느 상태 | 스냅샷(입장 응답 · RESUME · GET)의 tracks 를 받았다 — 그 방 트랙 목록 전부다(보기용 · RULE-TRK-FOUR-PATHS · RULE-TRK-PER-PATH) · ★배정표는 실려 오지 않는다(입장 응답 · RESUME 의 표는 MLINE_EVENT 와 같은 길로 받는다) | — | `TRK.C.any.snapshot_same` |
+| 어느 상태 | 스냅샷(입장 응답 · RESUME · GET)의 tracks 를 받았다 — 그 방 트랙 목록 전부다(보기용 · RULE-TRK-FOUR-PATHS · RULE-TRK-PER-PATH) · ★sLay · sMuted 는 내 개인 트랙을 뺀 것이다 — 받을 트랙이 아니다(델타 길 mine_other 와 같은 보관본 · ③-2) · ★배정표는 실려 오지 않는다(입장 응답 · RESUME 의 표는 MLINE_EVENT 와 같은 길로 받는다) | — | `TRK.C.any.snapshot` |
+| 어느 상태 | 스냅샷(입장 응답 · RESUME · GET)의 tracks 를 받았다 — 그 방 트랙 목록 전부다(보기용 · RULE-TRK-FOUR-PATHS · RULE-TRK-PER-PATH) · ★sLay · sMuted 는 내 개인 트랙을 뺀 것이다 — 받을 트랙이 아니다(델타 길 mine_other 와 같은 보관본 · ③-2) · ★배정표는 실려 오지 않는다(입장 응답 · RESUME 의 표는 MLINE_EVENT 와 같은 길로 받는다) | — | `TRK.C.any.snapshot_same` |
 | 어느 상태 | 그 방을 떠났다 · 내렸다 — 그 방 트랙 목록 보관본을 버린다(RULE-ROOM-LEAVE-RES) · 배정표는 연결의 것이라 서버가 새 표(MLINE_EVENT)로 고친다 | — | `TRK.C.any.store_drop` |
 
 <a id="TRK.C"></a>
@@ -296,7 +296,7 @@
 
 <a id="PROP-TRK-STORE-AGREES"></a>**PROP-TRK-STORE-AGREES** · 성질
 
-통로가 비면 보관본의 트랙 층이 서버 트랙 층이다 — 넷이 같은 보관본 하나에 들어간다(RULE-TRK-FOUR-PATHS · RULE-TRK-STORE-UPDATE).
+통로가 비면 보관본의 트랙 층이 서버 트랙 층이다 — 넷이 같은 보관본 하나에 들어간다(RULE-TRK-FOUR-PATHS · RULE-TRK-STORE-UPDATE). ★받는 쪽 보관본(트랙 층)은 받을 트랙만 갖는다 — 내 개인 트랙은 델타로 와도(mine_other) 스냅샷으로 와도 넣지 않는다. 받을 트랙의 칸끼리 같다.
 
 *식: TK1 · 깨지면: 쉬는 트랙을 받는 트랙으로 알거나 없어진 트랙을 붙잡는다 — 구독 SDP 가 서버와 다른 목록으로 지어진다*
 

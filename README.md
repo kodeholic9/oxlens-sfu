@@ -19,7 +19,7 @@
 | PTT floor control — request · grant · queue · release · revoke · preemption · timers (MCPTT-style binary messages over a DataChannel) | ✅ |
 | Multi-room listening · one talk room per session (switchable) | ✅ |
 | Full-duplex audio / video conferencing | ✅ |
-| Simulcast — three spatial layers (l / m / h), each with temporal layers (VP8 from the payload, H264 from the dependency descriptor) · manual layer selection · automatic layer control (v1 REMB + loss, v2 send-side estimation over TWCC — off by default in code, turned on in the sample `policy.toml`) · three layer strategies (`media.layer_strategy`) | ✅ |
+| Simulcast — three spatial layers (l / m / h), each with temporal layers (VP8 from the payload, H264 from the dependency descriptor) · manual layer selection · automatic layer control (v1 RR loss · repeated NACKs · drops, v2 send-side estimation over TWCC — off by default in code, turned on in the sample `policy.toml`) · three layer strategies (`media.layer_strategy`) | ✅ |
 | One or two PeerConnections per session (`1pc` / `2pc`) | ✅ |
 | ICE-lite · ICE over UDP and TCP · DTLS-SRTP · SCTP DataChannel | ✅ |
 | Server-terminated RTCP — RR · TWCC feedback · REMB · NACK / RTX with paced downlink retransmission · PLI throttling (policy knobs) | ✅ |
@@ -177,7 +177,7 @@ In round 6, blind independent tests caught 50 of 52 planted symptoms (96 %). Tes
 |---|---|---|
 | [Client protocol](docs/protocol/README.md) | The client ↔ server contract — wire messages, state machines, timers, flows, error codes, floor control | Generated from the spec sources |
 | [Server architecture](docs/architecture.md) | Static structure — processes, threads, shared data, the path of one packet | Hand-written from the source (the base commit is stated at the top) |
-| [Learning guide](docs/learn/00_INDEX.md) | Measured flows in 18 chapters — what the server and the SDKs actually exchange (WebSocket frames, SDP, packets, logs), in time order, with failure paths, comparison with other SFUs and the trade-offs of each design choice | Written from one run of a browser probe; re-running the probe checks that the shape of the flow has not changed |
+| [Learning guide](docs/learn/00_INDEX.md) | Measured flows in 21 chapters (plus an index) — what the server and the SDKs actually exchange (WebSocket frames, SDP, packets, logs), in time order, with failure paths, comparison with other SFUs and the trade-offs of each design choice; includes recording, the AI agent bridge, chat and the PTT talk record | Written from browser probes and 2-layer harness runs; re-running a probe checks that the shape of the flow has not changed |
 
 The documents are in Korean. The published documents are rebuilt for every version tag.
 

@@ -51,7 +51,7 @@
 
 ##### TLV 규칙
 
-- `len` 이 1바이트라 ★**값은 255바이트 이하**다. ★**문자열 값은 UTF-8** 이다(`SPEAKER` · `PREV` · `REASON` · `ROOM` — 꼴 utf8 · user)
+- `len` 이 1바이트라 ★**값은 255바이트 이하**다. ★**문자열 값은 UTF-8** 이다(`SPEAKER` · `PREV` · `REASON` · `ROOM` · `TALK` — 꼴 utf8 · user)
 - ★**모르는 `id` 는 무시한다** — 담아 두고 쓰는 쪽이 무시한다(나중에 필드를 더해도 구버전이 안 깨진다)
 - ★**순서는 상관없다** — 순서를 계약으로 삼지 않는다
 - 잘렸으면 ★**거기까지 읽고 멈춘다** — 그때까지 읽은 것은 유효하다
@@ -71,6 +71,7 @@
 | `26` | `PREV` | user | 직전에 말한 사람 | DEV-FLR-TLV-EXT | `IDLE`? |  |
 | `27` | `REASON` | utf8 | 사유 설명 | DEV-FLR-TLV-EXT | `DENY`? · `REVOKE`? |  |
 | `29` | `ROOM` | utf8 | 방(room_id) | DEV-FLR-TLV-EXT | `REQUEST` · `GRANTED` · `TAKEN` · `DENY` · `RELEASE` · `IDLE` · `REVOKE` · `QPOS_REQ` · `QINFO` · `ACK` | UTF-8 255바이트 이하 |
+| `32` | `TALK` | utf8 | 발언 id | DEV-FLR-TLV-EXT | `GRANTED`? · `TAKEN`? | UTF-8 64바이트 이하 · 발언 기록의 msg_id(연:RULE-CHAT-TALK) · 재허가는 같은 값 |
 | `31` | `SOURCES` | u32list | 화자의 출처 번호 | DEV-FLR-TLV-EXT | `TAKEN`? | 화자 반이중 발행 트랙마다 출처 번호(CSRC) 하나 · 4바이트 큰 끝 · 길이 = 4 × 개수(RULE-FLR-SLOT-SOURCES) |
 
 ##### 메시지
@@ -78,8 +79,8 @@
 | 종류 | 원문 subtype | 이름 | 원문 | 방향 | 원문 `A` | ★우리 `A` | 칸 | 뜻 |
 |---|---|---|---|---|---|---|---|---|
 | `0` | `00000` | `REQUEST` · `FLOOR_REQUEST` | Floor Request 8.2.4 | C→S | 못 쓴다 | — | priority(PRIORITY?) · room(ROOM — gate) | 0 — 말하게 해달라. 우선순위는 보통(0)과 다를 때만 싣는다(원문 6.2.4 · 8.2.3.2) |
-| `1` | `x0001` | `GRANTED` · `FLOOR_GRANTED` | Floor Granted 8.2.5 | S→C | 쓸 수 있다 | ★세운다 | priority(PRIORITY) · duration(DURATION) · room(ROOM — gate) | 1 — 말해라 |
-| `2` | `x0010` | `TAKEN` · `FLOOR_TAKEN` | Floor Taken 8.2.9 | S→C | 쓸 수 있다 | ★세운다 | speaker(SPEAKER) · sources(SOURCES?) · seq(SEQ — seq) · room(ROOM — gate) | 2 — 누가 말하고 있다 |
+| `1` | `x0001` | `GRANTED` · `FLOOR_GRANTED` | Floor Granted 8.2.5 | S→C | 쓸 수 있다 | ★세운다 | priority(PRIORITY) · duration(DURATION) · room(ROOM — gate) · talk(TALK?) | 1 — 말해라 |
+| `2` | `x0010` | `TAKEN` · `FLOOR_TAKEN` | Floor Taken 8.2.9 | S→C | 쓸 수 있다 | ★세운다 | speaker(SPEAKER) · sources(SOURCES?) · seq(SEQ — seq) · room(ROOM — gate) · talk(TALK?) | 2 — 누가 말하고 있다 |
 | `3` | `x0011` | `DENY` · `FLOOR_DENY` | Floor Deny 8.2.6 | S→C | 쓸 수 있다 | ★세운다 | cause(CAUSE) · reason(REASON?) · room(ROOM — gate) | 3 — 안 된다 |
 | `4` | `x0100` | `RELEASE` · `FLOOR_RELEASE` | Floor Release 8.2.7 | C→S | 쓸 수 있다 | ★세운다 | room(ROOM — gate) | 4 — 다 말했다 |
 | `5` | `x0101` | `IDLE` · `FLOOR_IDLE` | Floor Idle 8.2.8 | S→C | 쓸 수 있다 | 안 세운다 | prev(PREV?) · seq(SEQ — seq) · room(ROOM — gate) | 5 — 아무도 안 말한다 |
@@ -131,7 +132,7 @@
 | `T2` | Stop talking | **30초** | — | 서버 | `g == 'TAKEN' && firstRtp` |  |
 | `T3` | Stop talking grace | **3초** | — | 서버 | `g == 'PREVOKE'` | 원문 기본값 |
 | `T7` | Floor Idle | **1초** | `C7` **10회** | 서버 | `g == 'IDLE' && idleBcast && c7 < Cap('C7')` | `C7`=10 은 원문 Table 11.2.3-1 기본값. ★`T7` 은 원문에 기본값이 **없다**("RAN 특성에 따름") → **우리 값 1초** |
-| `T8` | Floor Revoke | **1초** | `C8` **3회** | 서버(참가자마다) | `(part[u] == 'PREVOKE' \|\| part[u] == 'NPSENDS') && c8[u] < Cap('C8')` | 원문 기본값 · ★`C8` **3회**(우리 값) |
+| `T8` | Floor Revoke | **1초** | `C8` **3회** | 서버(참가자마다) | `(part[u] == 'PREVOKE' && c8[u] < Cap('C8')) \|\| (part[u] == 'NPSENDS' && c8[u] <= Cap('C8'))` | 원문 기본값 · ★`C8` **3회**(우리 값) |
 | `T20` | Floor Granted | **1초** | `C20` **3회** | 서버 | `g == 'TAKEN' && succ && !rtpSeen && c20 <= Cap('C20')` | 둘 다 원문 기본값 |
 | `T9` | Retry-after | **3초** | — | 서버(참가자마다) | `retry[u]` | ★**원문에 값이 없다**(§10-4-32) |
 | `T21` | TAKEN 재전송(자체 — DEV-FLR-TAKEN-ACK) | **1초** | `C21` **3회** | 서버(참가자마다) | `part[u] == 'NP_TAKEN' && c21[u] >= 1 && c21[u] <= Cap('C21')` |  |
@@ -227,6 +228,8 @@
 | <a id="FLR.C.NOPERM.rtp_rx"></a>`FLR.C.NOPERM.rtp_rx` | cs == 'NOPERM' | 효과 media.render | 6.2.4.3.4 |
 | <a id="FLR.C.NOPERM.rx_TAKEN"></a>`FLR.C.NOPERM.rx_TAKEN` | cs == 'NOPERM' && m.t == 'TAKEN' | shown ← m.a · ack TAKEN · 효과 app.speaker | 6.2.4.3.3 |
 | <a id="FLR.C.NOPERM.rx_IDLE"></a>`FLR.C.NOPERM.rx_IDLE` | cs == 'NOPERM' && m.t == 'IDLE' | shown ← none · 효과 app.speaker_none | 6.2.4.3.2 R-FLR-NO-T103 |
+| <a id="FLR.C.NOPERM.rx_REVOKE_release"></a>`FLR.C.NOPERM.rx_REVOKE_release` | cs == 'NOPERM' && m.t == 'REVOKE' && m.n == Revoke.NO_PERMISSION | 보낸다 RELEASE | x:6.2.4.6.2 x:6.2.4.6.7 DEV-FLR-NOPERM-REVOKE-RELEASE R-FLR-NOPERM-REVOKE-RELEASE — 사유 3 — 서버가 나를 허가 없이 보낸다고 본다(NPSENDS) — 놓기 한 번으로 꺼낸다 · 상태는 그대로(원문 pending Release 의 T100 재전송 몫) |
+| <a id="FLR.C.NOPERM.rx_REVOKE_other"></a>`FLR.C.NOPERM.rx_REVOKE_other` | cs == 'NOPERM' && m.t == 'REVOKE' | — | 6.2.4.1 — 다른 사유는 지난 허가의 늦은 회수다 — 버린다 |
 | <a id="FLR.C.NOPERM.rx_other"></a>`FLR.C.NOPERM.rx_other` | cs == 'NOPERM' | — | 6.2.4.1 |
 
 <a id="FLR.C.any"></a>
@@ -264,7 +267,7 @@
 
 | 라벨 | 언제 | 하는 일 | 원문 · 근거 |
 |---|---|---|---|
-| <a id="FLR.C.PERM.release"></a>`FLR.C.PERM.release` | 받는 상태 cs == 'PREQ' \|\| cs == 'PERM' \|\| cs == 'QUEUED' · cs == 'PERM' | cs ← 'PREL'; want ← false; c100 ← 1 · 보낸다 RELEASE · 효과 mic.close → PUB.C.SENDING.floor_close · PUB.C.any.floor_close_other | 6.2.4.5.3 |
+| <a id="FLR.C.PERM.release"></a>`FLR.C.PERM.release` | 받는 상태 cs == 'PREQ' \|\| cs == 'PERM' \|\| cs == 'QUEUED' · cs == 'PERM' | cs ← 'PREL'; want ← false; c100 ← 1 · 효과 mic.close → PUB.C.SENDING.floor_close · PUB.C.any.floor_close_other · 보낸다 RELEASE | 6.2.4.5.3 R-FLR-RELEASE-AFTER-MIC — 송출을 먼저 멈추고 RELEASE — 집행은 게이트 닫기가 끝난 뒤에 RELEASE 를 보낸다(RULE-FLR-MSG-RELEASE) |
 | <a id="FLR.C.PERM.rtp_tx"></a>`FLR.C.PERM.rtp_tx` | 나머지 | — | 6.2.4.5.2 |
 | <a id="FLR.C.PERM.rtp_rx"></a>`FLR.C.PERM.rtp_rx` | cs == 'PERM' | 효과 media.render | 6.2.4.5.6 |
 | <a id="FLR.C.PERM.rx_REVOKE"></a>`FLR.C.PERM.rx_REVOKE` | cs == 'PERM' && m.t == 'REVOKE' | cs ← 'PREL'; want ← false; c100 ← 1 · 효과 mic.close → PUB.C.SENDING.floor_close · PUB.C.any.floor_close_other · 효과 app.revoked · 보낸다 RELEASE | 6.2.4.5.4 R-FLR-REVOKE-MIC R-FLR-CAUSE-SPLIT |
@@ -428,7 +431,9 @@
 | <a id="FLR.S.P.NP_TAKEN.req_full"></a>`FLR.S.P.NP_TAKEN.req_full` | len(queue) >= QMax | send u DENY Deny.QUEUE_FULL | 6.3.5.4.4 DEV-FLR-QUEUE-MAX R-FLR-CAUSE-SPLIT |
 | <a id="FLR.S.P.NP_TAKEN.req_enqueue"></a>`FLR.S.P.NP_TAKEN.req_enqueue` | 나머지 | queue ← insert(queue, {u: u, p: p, pre: false}) · send u QINFO Pos(u) p | 6.3.5.4.4 R-FLR-QUEUE-ALWAYS |
 | <a id="FLR.S.P.PREVOKE.T8"></a>`FLR.S.P.PREVOKE.T8` | part[u] == 'PREVOKE' | c8[u] ← c8[u] + 1 · send u REVOKE rcause[u] | 6.3.5.6.3 |
-| <a id="FLR.S.P.NPSENDS.T8"></a>`FLR.S.P.NPSENDS.T8` | 나머지 | c8[u] ← c8[u] + 1 · send u REVOKE Revoke.NO_PERMISSION | 6.3.5.7.3 |
+| <a id="FLR.S.P.NPSENDS.T8"></a>`FLR.S.P.NPSENDS.T8` | c8[u] < Cap('C8') | c8[u] ← c8[u] + 1 · send u REVOKE Revoke.NO_PERMISSION | 6.3.5.7.3 |
+| <a id="FLR.S.P.NPSENDS.T8_giveup_taken"></a>`FLR.S.P.NPSENDS.T8_giveup_taken` | gTaken[u] | send u TAKEN Holder() NP_TAKEN | x:6.3.5.7.3 DEV-FLR-T8-GIVEUP R-FLR-T8-GIVEUP |
+| <a id="FLR.S.P.NPSENDS.T8_giveup_idle"></a>`FLR.S.P.NPSENDS.T8_giveup_idle` | 나머지 | send u IDLE prev NP_IDLE | x:6.3.5.7.3 DEV-FLR-T8-GIVEUP R-FLR-T8-GIVEUP |
 | <a id="FLR.S.P.NP_TAKEN.T21"></a>`FLR.S.P.NP_TAKEN.T21` | c21[u] < Cap('C21') | c21[u] ← c21[u] + 1 · send u TAKEN Holder() | DEV-FLR-TAKEN-ACK R-FLR-TAKEN-ACK |
 | <a id="FLR.S.P.NP_TAKEN.T21_exhaust"></a>`FLR.S.P.NP_TAKEN.T21_exhaust` | 나머지 | c21[u] ← c21[u] + 1 | DEV-FLR-TAKEN-ACK |
 
@@ -476,7 +481,7 @@
 | `T100` | client | `cs == 'PREL'` | `CT100` | 반환 재전송 |
 | `T104` | client | `cs == 'QUEUED' && sub == 'QUERY'` | `CT104` | 순번 질의 재전송 |
 | `T132` | client | `cs == 'QUEUED' && sub == 'GRANTED'` | `CT132` | 승계 의지 대기 |
-| `T8` | participant | `(part[u] == 'PREVOKE' \|\| part[u] == 'NPSENDS') && c8[u] < Cap('C8')` | `SrvT8` | REVOKE 재전송 |
+| `T8` | participant | `(part[u] == 'PREVOKE' && c8[u] < Cap('C8')) \|\| (part[u] == 'NPSENDS' && c8[u] <= Cap('C8'))` | `SrvT8` | REVOKE 재전송 |
 | `T9` | participant | `retry[u]` | `SrvT9` | Retry-after |
 | `T21` | participant | `part[u] == 'NP_TAKEN' && c21[u] >= 1 && c21[u] <= Cap('C21')` | `SrvT21` | TAKEN 재전송(ACK 없음) |
 | `T1` | server | `g == 'TAKEN' \|\| g == 'PREVOKE'` | `SrvT1` | RTP 없음 |
@@ -1017,6 +1022,7 @@ TS 24.379(SIP 호 제어)·TS 23.379(참조 구조)는 ★**미채택**이라 �
 | ★`8` | ★**메시지 일련번호** | u16 BE | `IDLE` · `TAKEN` 에만 · 보낼 때마다 **1 증가**(재전송도 새로 보내는 것이다) · ★**클라는 보지 않는다**(원문 6.2.4 — §10-4-31) |
 | ★`0x1D` | ★★**방** (`room_id`) | 문자열 | ★ACK(대상 것 에코, §10-4-30) |
 | ★`0x1F` | ★**화자의 출처 번호** | u32 BE 여럿(길이 = 4 × 개수) | `TAKEN` 에만 · 있을 때만 — 화자 반이중 발행 트랙마다 출처 번호 하나(§10-4-35) |
+| ★`0x20` | ★**발언 id** | 문자열(UTF-8 64바이트 이하) | `GRANTED` · `TAKEN` — 서버가 허가마다 짓는 값 = 그 발언 기록의 `msg_id`(§14-1-5). ★서버는 늘 싣는다 — 받는 쪽은 없는 경우(이 필드 전의 서버)를 견딘다(그래서 모형에서는 선택 칸이다) · ★재허가(같은 허가를 다시 준 `GRANTED`)는 같은 값 · 같은 개념이라 두 메시지가 한 필드를 쓴다(§10-4-31 ②) · 모르는 클라는 읽지 않는다(④) |
 
 
 ★**성립 조건** — 우선순위(`0`)는 ★**요청이 실은 값이 전부**다. 이 규정은 상한을 씌우는 축이 없는 동안 참이다 — 상한 축(토큰 클레임·협상 값)을 다시 들이면 `GRANTED`·선점 판정이 먼저 깨진다.
@@ -1246,6 +1252,8 @@ TLV `1` 에 실려 온다**(§1-2-6). 클라는 ★**받은 값을 쓰고 표의
 | ★방을 잃었다 — 강퇴 · 방 닫힘 · `RESUME` 스냅샷에 없는 방 | ★**그 방 `ROOM_LEAVE` 와 같다**(DEV-FLR-ROOM-GONE) — 반환하고 큐가 있으면 승계 · 대기 철회. 클라는 그 방을 `has no permission` 으로 내리고 반이중 송출을 멈춘다(R-FLR-MIC-CLOSE-ON-LOSS) |
 | 큐 대기 중인 방을 `pub_deselect`(또는 다른 방 `pub_select`)했다 | ★**대기도 빠진다** — 대기는 `pub_room` 에서만 걸린다(§10-4-30). 통지는 없고 클라는 응답 뒤 그 방을 `has no permission` 으로 내린다 |
 
+★**발언권이 끝나는 행마다 발언 기록의 상태가 정해진다** — 반환과 같은 행은 `ok`(짧으면 `short`) · 방을 잃은 행과 세션이 지워진 칸은 `lost`(§14-1-5).
+
 ★**WS 가 끊겨도 발언권은 유지된다.** 발언권은 ★**데이터 채널(미디어 연결) 위로** 가고
 WS 는 시그널링일 뿐이다 — 미디어가 살아 있으면 발언권도 살아 있다.
 
@@ -1330,6 +1338,8 @@ WS 는 시그널링일 뿐이다 — 미디어가 살아 있으면 발언권도 
 <a id="RULE-FLR-MSG-RELEASE"></a>**RULE-FLR-MSG-RELEASE** · 규칙 — `4 FLOOR_RELEASE` — 다 말했다   **C→S**
 
 **절차**
+
+- 클라 ★**반이중 송출을 멈춘 뒤 `RELEASE` 를 보낸다** — 놓을 때(뗌 `FLR.C.PERM.release` · 회수 `FLR.C.PERM.rx_REVOKE`) 같은 걸음의 `mic.close` 가 끝난 뒤(송출 게이트가 닫힌 뒤)에 보낸다. 원문은 RTP 와 발언권 메시지(RTCP APP · UDP — 4.3.2) 사이의 차례를 보장하지 않는다 — 놓기 전 RTP 가 놓기보다 늦게 닿는 일은 원문 세계에도 있고, 원문은 그 회수를 `pending Release` 의 `T100` 재전송으로 흡수한다(6.2.4.6.2 · 6.2.4.6.7 · 6.3.5.7.4). 송출을 먼저 멈추는 것은 꼬리를 줄이는 몫이다(§10-5-12 — 흡수는 §10-4-36 · §10-4-36).
 
 ★**증상** — 안 보내면 ★**`T2` 가 다 될 때까지 남들이 못 말한다.**
 
@@ -1528,7 +1538,7 @@ DC 는 ★**미디어 서버당 하나**(§2-1-3)이고 배정표도 ★**서버
 
 <a id="DEV-FLR-TLV-EXT"></a>**DEV-FLR-TLV-EXT** · 자체 확장
 
-TLV 0x1A 직전 화자 · 0x1B 사유 설명 · 0x1D 방 · 0x1F 화자의 출처 번호 — 원문 미사용 번호(026~191). DC 하나에 방 여럿을 얹은 대체 · 0x1F 는 슬롯 패킷의 CSRC 를 화자로 잇는 재료(RULE-FLR-SLOT-SOURCES — 걷어내도 원문 그대로 돈다)
+TLV 0x1A 직전 화자 · 0x1B 사유 설명 · 0x1D 방 · 0x1F 화자의 출처 번호 · 0x20 발언 id(발언 기록과 녹취를 잇는 값 — RULE-CHAT-TALK) — 원문 미사용 번호(026~191). DC 하나에 방 여럿을 얹은 대체 · 0x1F 는 슬롯 패킷의 CSRC 를 화자로 잇는 재료(RULE-FLR-SLOT-SOURCES — 걷어내도 원문 그대로 돈다)
 
 *근거: R-FLR-ROOM-TLV*
 
@@ -1552,7 +1562,7 @@ T9(Retry-after) 의 값 3초와 시작 조건 — 원문은 이름만 있다(거
 
 <a id="DEV-FLR-DENY-255"></a>**DEV-FLR-DENY-255** · 자체 확장
 
-미입장 방의 요청은 DENY(255, 0x1B = not_in_room). 그 밖의 프레임은 버린다
+미입장 방의 요청은 DENY(255, 0x1B = not_in_room). 그 밖의 프레임은 버린다 — ★떠나기 전 보낸 REQUEST · RELEASE 가 떠남 뒤 닿는 것도 이 갈래다(WS `ROOM_LEAVE` 와 DC 는 다른 통로 · 같은 서버에 남은 방이 있으면 DC 가 산다). 그 DENY 는 떠난 클라에게는 받을 방이 없고, 그 사이 다시 든 클라는 `has no permission` 이라 버린다(6.2.4.1 — 검증 판 `f_leave_flight` · ③-5). 다시 들어 새로 누른 요청과 겹치는 창은 늦은 메시지 경주와 같다(ASM-FLR-STALE-GUARD — 누를 때 자기 통이 비어 있다)
 
 *근거: R-FLR-PERM-AXIS*
 
@@ -1670,6 +1680,18 @@ RELEASE 에 A 비트를 세우고(원문 6.2.4.5.3 · 6.2.4.6.2 의 may) `U: pen
 
 *근거: R-FLR-RELEASE-ACK*
 
+<a id="DEV-FLR-T8-GIVEUP"></a>**DEV-FLR-T8-GIVEUP** · 자체 확장
+
+`T8` 회수 재전송(`C8`)을 다 쓴 뒤 그 참가자를 끊지 않고 지금 발언권 상태로 다시 맞춘다 — 화자가 있으면 `TAKEN` 을 보내고 `U: not permitted and Floor Taken` · 없으면 `IDLE` 을 보내고 `U: not permitted and Floor Idle`(원문 6.3.5.7.4 의 RELEASE 처리와 같은 걸음 · ACK 없음). 원문은 포기 뒤 동작을 구현 선택으로 두고 끊기를 권한다(6.3.5.7.3 NOTE)
+
+*근거: R-FLR-T8-GIVEUP*
+
+<a id="DEV-FLR-NOPERM-REVOKE-RELEASE"></a>**DEV-FLR-NOPERM-REVOKE-RELEASE** · 자체 확장
+
+`has no permission` 에서 사유 3(No permission to send a Media Burst)의 `REVOKE` 를 받으면 `RELEASE` 를 한 번 보낸다(상태는 그대로 · 다른 사유는 버린다) — 원문 6.2.4.3 에 절이 없다. ★`pending Request` 에서는 하지 않는다 — 아직 못 받은 허가의 정상 회수(선점 등)와 가를 수 없어 놓기가 새 허가를 지운다(검증 모형 core H7 반례) · 그 경우는 §10-4-36 가 받는다. 원문 `pending Release` 가 `REVOKE` 를 받고도 머물며 `T100` 으로 `RELEASE` 를 다시 보내 서버를 `U: not permitted but sends media` 에서 꺼내던 몫(6.2.4.6.2 · 6.2.4.6.7 · 6.3.5.7.4)을, `ACK` 로 `pending Release` 를 일찍 끝내는 우리 클라(DEV-FLR-RELEASE-ACK)가 짊어진다
+
+*근거: R-FLR-NOPERM-REVOKE-RELEASE*
+
 <a id="DEV-FLR-ACK-DROP"></a>**DEV-FLR-ACK-DROP** · 자체 확장
 
 서버는 FLOOR_ACK 에 답하지 않고 도달 관측에만 쓴다(원문은 ACK 처리를 구현 선택으로 둔다, 6.3.5.3.5 NOTE) · 직접 허가·거절은 재전송하지 않는다
@@ -1714,9 +1736,9 @@ T8 마지막 재전송은 받는 이가 승계 의지 대기 중이면 미뤄진
 
 <a id="ASM-FLR-RTP-INSTANT"></a>**ASM-FLR-RTP-INSTANT** · 가정
 
-has permission 클라의 RTP 는 곧바로 서버 참가자에 닿는다
+has permission 클라의 RTP 는 곧바로 서버 참가자에 닿는다 — ★손잡이 `EnRtpLag` 판(`f_rtplag`)은 이 가정을 풀어 RTP 하나가 DC 와 순서 없이 늦게 닿게 한다(놓기보다 늦게 닿는 꼬리 RTP · 이 가정이 그 결함을 가렸다)
 
-*식: K3 · 조건: RTP 지연은 범위 밖*
+*식: K3 · 조건: RTP 지연은 범위 밖(EnRtpLag 판 밖)*
 
 <a id="ASM-FLR-HUMAN-SPEED"></a>**ASM-FLR-HUMAN-SPEED** · 가정
 
@@ -1802,6 +1824,12 @@ queued 클라는 서버 큐에 있거나 서버 화자다
 
 *식: H11 · 깨지면: 발언권을 쥐었는데 RTP 가 나가지 않아 T1 이 회수한다(ASM-FLR-SPEAKER-RTP 가 무너진다)*
 
+<a id="PROP-FLR-NPSENDS-SENDS"></a>**PROP-FLR-NPSENDS-SENDS** · 성질
+
+서버가 「허가 없이 보낸다」(`U: not permitted but sends media`)로 보는 사람은 정말 보내는 중이다(통이 비고 재전송이 멎은 안정 상태에서)
+
+*식: H12 · 깨지면: 놓기보다 늦게 닿은 RTP 로 회수가 났는데 클라가 이미 허가 없음이라 회수를 버리면 그 사람의 요청이 영영 답 없이 버려진다(실측 20261113 폰 · §10-4-36 가 막는다)*
+
 <a id="PROP-FLR-REQUEST-ENDS"></a>**PROP-FLR-REQUEST-ENDS** · 성질
 
 요청은 끝난다 — Pending Request 는 결국 has permission · queued · has no permission 중 하나가 된다(재전송이 바닥나면 포기 — RULE-FLR-PROC-PREQ-T101 · DEV-FLR-CLIENT-RETX · ★활성 성질 — 통 · 타이머 · RTP · 승계 의지에 공정성 · 사람 조작 · 결정자 · 장애는 결국 멎는다)
@@ -1872,7 +1900,7 @@ queued 승계 의지 대기 중의 선점 — REVOKE 를 queued 가 버린다(6.
 
 DC 만 끊긴 사이 승계·선점·회수가 지나가면 다시 열린 뒤에도 클라가 옛 상태에 굳는다(queued 고착 · 회수 모른 채 has permission) — 처음 알리기는 화자만 고치고, 순번 질의의 254(큐에 없음)에도 원문은 queued 에 머문다(6.2.4.9.7)
 
-*비고: (DC 끊김 판에서만 — R-FLR-DC-ONLY-DOWN 이 드러난 것) · 깨는 성질: PROP-FLR-QUEUED-IN-QUEUE PROP-FLR-ONE-SPEAKER*
+*비고: (DC 끊김 판에서만 — R-FLR-DC-ONLY-DOWN 이 드러난 것) · ★20261113 — 「회수 모른 채 has permission」 반쪽은 §10-4-36 뒤 풀린다: 서버가 재전송을 다 쓰면 다시 맞추고 굳은 화자의 RTP 가 다시 회수를 불러 다시 열린 DC 로 닿는다(판 `f_dc` H1 반례가 사라짐 · 안전 판이라 「결국 풀림」은 증명 안 함). queued 고착 반쪽은 그대로 · 깨는 성질: PROP-FLR-QUEUED-IN-QUEUE PROP-FLR-ONE-SPEAKER*
 
 <a id="RACE-FLR-LOST-GRANTED-PREEMPT"></a>**RACE-FLR-LOST-GRANTED-PREEMPT** · 알려진 경주
 
@@ -1930,7 +1958,7 @@ DC 만 끊긴 사이 승계·선점·회수가 지나가면 다시 열린 뒤에
 
 <a id="DEV-FLR-JOIN-FRESH"></a>**DEV-FLR-JOIN-FRESH** · 자체 확장
 
-방에 들 때(처음 · 다시 입장 — ROOM 효과 `floor.join`) 클라의 그 방 발언권 칸을 처음 값으로 둔다 — 요청 없음 · 누름 의지 없음 · 발행 방 아님(`isPub` — 전환 응답이 따로 온다) · 화자 표시 없음(READY 의 첫 알림이 채운다 — DEV-FLR-FIRST-NOTIFY). 서버는 참가자 기록을 원문 6.3.5.2.2 대로 만든다(`FLR.S.ws.join`)
+방에 들 때(처음 · 다시 입장 — ROOM 효과 `floor.join`) 클라의 그 방 발언권 칸을 처음 값으로 둔다 — 요청 없음 · 누름 의지 없음 · 발행 방 아님(`isPub` — 전환 응답이 따로 온다 · ★select:true 입장이면 같은 응답의 소속 몫이 입장 ★뒤에 발행 방을 연다: 입장 응답 효과는 `floor.join` → `aff.implicit` 차례 · 서버도 입장 → 발행 방 차례 — 거꾸로면 입장이 막 연 발행 방 사본을 덮는다(③-6)) · 화자 표시 없음(READY 의 첫 알림이 채운다 — DEV-FLR-FIRST-NOTIFY). 서버는 참가자 기록을 원문 6.3.5.2.2 대로 만든다(`FLR.S.ws.join`)
 
 *근거: R-FLR-JOIN-FRESH*
 
@@ -2145,6 +2173,24 @@ RTP 수신은 강제 권위(prefan 게이트)를 통과한 것만 센다
 놓은 사람의 「끝남」 신호가 첫 RELEASE 에 오게 한다 — 서버는 놓은 사람에게 IDLE 을 보내지 않는다(원문 6.3.5.5.4). 원문 상태도에는 `U: pending Release` 를 Floor Ack 으로 빠져나가는 화살표가 있었는데, 본문에 그 갈래가 없어 2021 정정(C1-210598 · NIST · FirstNet · Rel-17)이 상태도의 화살표를 지웠다 — 서버 쪽 shall ACK 과 짝이던 길이다
 
 *없으면: 놓은 사람이 매번 `T100`(500ms) 동안 「놓는 중」에 머물고 그동안의 누름이 버려진다(DEV-FLR-PRESS-DROP) — 실측 놓음 → 다시 누름 100ms 뒤 `press_drop`, RELEASE 재전송 뒤 512ms 에야 쉼*
+
+<a id="R-FLR-T8-GIVEUP"></a>**R-FLR-T8-GIVEUP** · 근거
+
+`U: not permitted but sends media` 를 나가는 원문의 길은 클라의 `RELEASE` 하나다(6.3.5.7.4) — 놓기보다 늦게 닿은 RTP 로 회수가 났는데 클라가 이미 `has no permission` 이면 회수를 버려(원문 6.2.4.3 에 절이 없다) `RELEASE` 가 오지 않는다. 원문은 RTP 와 발언권 메시지 사이의 차례를 보장하지 않는다(UDP 위 RTCP APP — 4.3.2) — 원문의 흡수 장치는 놓은 사람에게 IDLE 을 안 보내(6.3.5.5.4) `pending Release` 에 남기고 `T100` 재전송 `RELEASE` 가 서버를 꺼내는 고리인데(6.2.4.6.2 · 6.2.4.6.7), 우리 클라는 `ACK` 로 그 상태를 일찍 끝내(DEV-FLR-RELEASE-ACK) 그 고리를 끊었다(서버 안 제어 · 미디어 길이 갈라 꼬리가 잦은 것은 덤). 그 고리 밖으로 새는 경우(놓기 뒤 승계 TAKEN 으로 PREL 이 끝난 뒤의 꼬리 — 원문 그대로의 길)는 원문도 포기 뒤 동작으로 남긴다(6.3.5.7.3 NOTE). 원문 권장인 끊기는 그 사람의 방 · 전송로까지 다시 세우게 한다 — 상태만 다시 맞추면 최대 `C8`×`T8` 뒤 풀린다
+
+*없으면: 그 사람의 요청이 영영 답 없이 버려진다 — 버튼이 안 먹는다(실측 20261113 폰 · 놓기 83 번 중 4 번 · 검증 모형 `f_rtplag` H12)*
+
+<a id="R-FLR-RELEASE-AFTER-MIC"></a>**R-FLR-RELEASE-AFTER-MIC** · 근거
+
+놓기 전에 보낸 RTP 가 놓기보다 늦게 닿으면 서버는 놓은 뒤 송신으로 보고 회수한다(원문 6.3.5.3.8 · 6.3.5.4.6) — RELEASE 를 먼저 보내고 마이크를 닫으면 그 사이 프레임이 실제로 놓기 뒤에 나간다(실측 20261113 — 놓기 처리 1.5 ~ 18ms 뒤 꼬리 RTP · 2층 `ptt_release_trail`)
+
+*없으면: 놓을 때마다 꼬리 RTP 가 회수를 부르고 그 사람의 다음 요청이 회수가 풀릴 때까지 버려진다*
+
+<a id="R-FLR-NOPERM-REVOKE-RELEASE"></a>**R-FLR-NOPERM-REVOKE-RELEASE** · 근거
+
+송출을 멈춘 뒤 놓아도(R-FLR-RELEASE-AFTER-MIC) 브라우저는 이미 인코딩해 송출 큐에 넣은 패킷을 `replaceTrack(null)` 이 끝난 뒤에 내보낸다 — 놓기보다 늦게 닿는 꼬리가 남는다(실측 20261113 3층 PTT-R2 25 번 중 1 번 · 놓기 처리 3.9ms 뒤). 원문은 그 꼬리의 회수를 `pending Release` 의 `T100` 재전송이 흡수하는데 우리는 `ACK` 로 그 상태를 일찍 끝낸다(DEV-FLR-RELEASE-ACK) — 편차가 끊은 원문 장치의 몫을 편차가 짊어진다
+
+*없으면: 회수를 버린 클라 때문에 서버가 `C8`×`T8` 뒤에야 다시 맞추고(DEV-FLR-T8-GIVEUP) 그 사이 누름이 버려진다*
 
 <a id="R-FLR-ACK-NO-REPLY"></a>**R-FLR-ACK-NO-REPLY** · 근거
 

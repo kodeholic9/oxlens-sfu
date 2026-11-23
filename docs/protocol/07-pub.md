@@ -84,7 +84,7 @@
 
 <a id="RULE-PUB-RID-TO-SPATIAL"></a>**RULE-PUB-RID-TO-SPATIAL** · 규칙
 
-★★**`rid` → spatial 인덱스 사상은 서버가 한다.** 발행 항목은 트랙 하나이고 `rid` 를 싣지 않는다 — 서버는 ★**RTP 의 rid 확장으로 업링크 스트림을 배운다**(`rid_extmap_id`). 이 세대의 시뮬캐스트는 업링크 스트림 둘(`l`·`h`) 고정(§9-4-10)이라 ★**낮은 화질부터 `0`**(l=0, h=1)이고, ★**`TrackEntry.scalability` 는 `"L2T1"`**(§6-1-1)로 구독자에게 알린다. 구독자는 ★**그 인덱스로만 지목**하고(§7-1-2 `SUBSCRIBE_LAYER`)
+★★**`rid` → spatial 인덱스 사상은 서버가 한다.** 발행 항목은 트랙 하나이고 `rid` 를 싣지 않는다 — 서버는 ★**RTP 의 rid 확장으로 업링크 스트림을 배운다**(`rid_extmap_id`). ★**rid 표는 고정 번호다 — 낮은 화질부터 `l`=0 · `m`=1 · `h`=2**. 발행자가 층을 몇 개 내든 같은 번호가 같은 화질이다(선례 LiveKit 고정 등급 LOW · MEDIUM · HIGH) — 카메라 발행은 셋(`l`·`m`·`h` — SDK 기본값)이고 둘(`l`·`h`)만 내는 발행자도 받는다(§9-4-10). ★**`TrackEntry.scalability` 는 `"L3T3"`**(§6-1-1) — 구독자가 지목할 수 있는 칸(공간 셋 · 시간 셋)이고 발행자가 그 층을 다 낸다는 뜻이 아니다. 지목은 상한이다 — 지금 오지 않는 층을 지목하면 그 아래에서 오고 있는 가장 높은 층을 받고, 아래에 오는 층이 없으면 위에서 가장 낮은 층을 받는다(발행 첫 1초 안에는 지목한 층을 기다린다). 구독자는 ★**그 인덱스로만 지목**하고(§7-1-2 `SUBSCRIBE_LAYER`)
 ★**`rid` 를 쓰지 않는다** — 보내는 쪽 이름을 받는 쪽 제어에 끌어들이지 않는다.
 
 <a id="PUB.op.PUBLISH_TRACKS"></a>
@@ -106,6 +106,7 @@
 | `repair_rid_extmap_id` | u8 | 확정본(answer)의 그 m-line 에 그 URI 가 있으면 |  |
 | `mid_extmap_id` | u8 | 확정본(answer)의 그 m-line 에 그 URI 가 있으면 |  |
 | `audio_level_extmap_id` | u8 | 확정본(answer)의 그 m-line 에 그 URI 가 있으면 |  |
+| `dd_extmap_id` | u8 | — | dependency-descriptor 확장의 협상 번호(offer 것). ★선택이다 — 실으면 서버가 영상 RTP 의 그 확장으로 H264 시간 층을 안다(시간 층 상한 `SUBSCRIBE_LAYER.temporal` 이 H264 에도 듣는다) · 안 실으면 H264 는 시간 층을 고르지 않는다(나머지 동작은 같다). VP8 은 페이로드가 시간 층을 실어 이 칸이 필요 없다. ★Chrome 은 이 확장을 기본으로 offer 에 싣지 않는다(실측 Chrome 153 — 방향 stopped) — 협상하려면 클라가 발행 video 트랜시버에서 켠다(W3C RTP Header Extension Control `setHeaderExtensionsToNegotiate` · 선례 LiveKit 은 offer SDP 에 끼워 넣는다 `PCTransport.ts` ensureVideoDDExtensionForSVC) |
 
 `action` = `remove`
 

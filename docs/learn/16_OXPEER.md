@@ -24,14 +24,14 @@ flowchart LR
 
 | 이름 | 값(2층 `e2e-20261109-132317`) | 무엇 |
 |---|---|---|
-| 녹음기 | `oxpeer~peer_recorder` · 토큰 `participant_type:1` · `hidden:true` | 예제 `examples/recorder` — 시그널링 게이트웨이 세션 플래그 `hidden+live+bound` |
-| 에이전트 | `agent~peer_agent_echo` · `participant_type:2` · `hidden:false` | 예제 `examples/agent` — 세션 플래그 `live+bound` |
+| 녹음기 | `oxpeer~peer_recorder` · 토큰 `participant_type:1` · `hidden:true` | 녹음기 `oxrec`(`crates/oxrec`) — 시그널링 게이트웨이 세션 플래그 `hidden+live+bound` |
+| 에이전트 | `agent~peer_agent_echo` · `participant_type:2` · `hidden:false` | 예제 `agent_echo`(`crates/oxpeer/examples/agent_echo`) — 세션 플래그 `live+bound` |
 | 녹화기 | `oxrec~peer_record_*` | 같은 예제 `--video` — 트랙마다 Matroska 하나 |
 | `pc_mode` | `2pc` | SFU 로그에 Peer 키가 둘(`key=publish` · `key=subscribe`) |
 | CSRC 선언 | BIND `source_tag: true`(늘 켬) | 이 연결에만 다운링크 CSRC 가 실린다 |
 | 발행 출처(`peer_recorder`) | botA `82` · botB `83` | Floor Taken 의 `sources` = 녹음 파일의 `csrc` |
 | 녹음 파일 | 001 botA seq 1 ~ 137 · 137 패킷 / 002 botB seq 142 ~ 256 · 115 패킷 | 봇이 보낸 수: botA 137 · botB 115 |
-| 출처 없는 패킷 | 8 — 전부 Opus 침묵 프레임 | 서버가 지은 패킷(Floor Granted 뒤 예열 · 해제 무음). 어느 파일에도 안 든다 |
+| 출처 없는 패킷 | 8 — 전부 Opus 침묵 프레임 | 이 회차 서버가 지은 패킷(Floor Granted 뒤 예열 · 반환 뒤 해제 무음 — 20261111 에 걷어냈다). 어느 파일에도 안 든다. 지금 서버가 짓는 CSRC 없는 패킷은 대역 probe 패딩뿐이다 |
 | 전이 통 | 에이전트 판 11 · 걸음 29 ~ 96 · `impossible` 0 | `Client::transitions()`(20261109 새로 — §3-5) |
 | 녹화 커버리지 | 녹화기 요약 7 · `not_recorded` 0 · 늦게 실린 트랙 1(`peer_record_reassign` b19 · 4,678ms) | 요약 `coverage` · `not_recorded`(20261109 새로 — §4-3) |
 | 2층 판정 | oxpeer 시나리오 24 · 빨강 0 · 격리 0 | 녹음 7 · 녹화 6 · 에이전트 11 |
@@ -72,13 +72,10 @@ sequenceDiagram
   A->>S: 2.176 Floor Request
   S-->>A: 2.179 Floor Granted
   S-->>R: Floor Taken botA sources 82(DC)
-  S->>R: 예열 침묵 seq 0 · CSRC 없음
   A->>S: 2.198 ~ 5.162 RTP 137
   S->>R: 다운링크 seq 1 ~ 137 · CSRC 82
   Note over R: 출처 82 — 파일 001 botA 열기 · 137 패킷
   A->>S: 5.175 Floor Release
-  S->>R: 침묵 프레임 · CSRC 없음
-  Note over R: 출처 없음 — 열린 파일 닫기 · 버림 셈
   S-->>R: 5.178 Floor Idle
   B->>S: 5.675 Floor Request
   S-->>R: 5.679 Floor Taken botB sources 83
@@ -88,7 +85,8 @@ sequenceDiagram
 ```
 
 - 시각은 봇 덤프 경과(초)다. 청취 봇 botC 가 같은 PTT 슬롯에서 받은 오디오는 seq 0 ~ 259 · 260 개다. 녹음기의 137 + 115 + 출처 없음 8 과 같다.
-- ★파일을 자르는 것은 화자 사건이 아니라 패킷이다. `examples/recorder/main.rs` 는 출처가 앞 파일과 다르면 닫고 새로 열고, 출처가 없으면 열린 파일을 닫는다. 화자 사건(`Speaker`)은 미디어와 차례 약속이 없어 경계 밖 기록용으로만 쓴다([연:RULE-TRK-CSRC](../protocol/06-trk.md#RULE-TRK-CSRC)).
+- 출처 없음 8(seq 0 · 138 ~ 141 · 257 ~ 259 — 그림의 seq 가 건너뛰는 곳)은 이 회차 서버(`1ef7265`)가 지은 예열 · 해제 무음이다. 녹음기는 출처 없는 패킷이 오면 열린 파일을 닫고 그 패킷을 버림으로 셌다. 예열 · 해제 무음은 20261111 에 걷어냈다([08 §3-1](08_SLOT_SPEAKER.md)). 지금 슬롯 줄에는 화자 RTP 만 흐른다. 코드상(`record/pipeline.rs` `split` — 출처가 바뀌면 `source` 로 닫는다)으로는 파일 001 이 출처가 83 으로 바뀌는 곳에서 닫힌다 — 걷어낸 뒤 회차로는 아직 안 쟀다([18 §3-3](18_RECORDING.md)).
+- ★파일을 자르는 것은 화자 사건이 아니라 패킷이다. 발언 경계는 이제 SDK 녹음 파이프라인(발언 정책)이 정한다 — 집은 [18](18_RECORDING.md). 화자 사건(`Speaker`)은 미디어와 차례 약속이 없어 경계 밖 기록용으로만 쓴다([연:RULE-TRK-CSRC](../protocol/06-trk.md#RULE-TRK-CSRC)).
 - 출처 번호 → 사람은 둘로 푼다. PTT 슬롯이면 Floor Taken 의 `SOURCES`([연:RULE-FLR-SLOT-SOURCES](../protocol/10-flr.md#RULE-FLR-SLOT-SOURCES)), 개인 트랙이면 트랙 목록의 `csrc` 다. 서버가 다운링크에 CSRC 를 싣는 꼴(켠 연결만 CC = 1)은 [08](08_SLOT_SPEAKER.md)이 집이다.
 - 파일은 Ogg Opus(다시 인코딩 없음 · RFC 7845)다. 이 회차는 2층 등식 넷이 초록이었다 — `peer_utterance_speakers`(화자 차례 = Floor Granted 차례) · `peer_payload_identity` · `peer_count_twin` · `peer_boundary`.
 
@@ -113,7 +111,7 @@ sequenceDiagram
 | botA · botB 오디오 Opus | 465 · 465 | — | 390 · 390 | 9,280ms |
 
 - 첫 SR 이 오기 전 프레임은 받은 시각을 단다(`synced:false`). 녹화기는 파일 시작 벽시계를 첫 동기 프레임에서 거꾸로 셈해, 닫을 때 고쳐 쓴다. 등식 `peer_record_wallclock`(봇 SR 로 셈한 값과 ±3ms)이 초록이다.
-- 받는 단위는 트랙마다 고른다. 패킷(받은 차례 그대로) 또는 프레임(H264 는 Annex-B · VP8 은 서술자 뗀 것 · 영상은 키프레임부터)이다. 조립은 디코딩이 아니다.
+- 앱이 받는 단위는 트랙마다 고른다. 패킷(받은 차례 그대로) 또는 프레임(H264 는 Annex-B · VP8 은 서술자 뗀 것 · 영상은 키프레임부터)이다. 조립은 디코딩이 아니다. 녹화기는 이 프레임 통을 쓰지 않는다 — 녹음과 같은 레코드 흐름 + 파이프라인 위에서 Matroska 결과물을 짓는다(집은 [18](18_RECORDING.md)).
 
 ### 3-4. 말하기 — 무전 되울림 에이전트(`peer_agent_echo`)
 
@@ -136,10 +134,11 @@ sequenceDiagram
   S-->>C: 6.784 Floor Idle prev agent
 ```
 
-- 에이전트 요약은 `heard 115` · `sent 115` · `granted true` · 게이트에 버린 프레임 0 · 들은 패킷의 주인 `botA` 다. 청취 botC 는 PTT 슬롯 오디오 236 개(원래 115 + 되울림 115 + 침묵 6)를 받았다.
+- 에이전트 요약은 `heard 115` · `sent 115` · `granted true` · 게이트에 버린 프레임 0 · 들은 패킷의 주인 `botA` 다. 청취 botC 는 PTT 슬롯 오디오 236 개(원래 115 + 되울림 115 + 침묵 6)를 받았다. 침묵 6 은 이 회차 서버가 지은 예열 · 해제 무음이다 — 지금은 걷어냈다.
 - 시각은 봇 덤프 경과다. 에이전트의 걸음은 서버 로그로 같은 축에 놓았다 — 13:40:12.969 `FLR.S.P.NP_IDLE.rx_REQUEST` · 12.972 `SV-STATE-PUBLISH-STATE … to=Active cause=first_rtp` · 15.310 `FLR.S.P.PERMITTED.rx_RELEASE`. 맞춘 기준은 botA 의 BIND(덤프 0.093 = 서버 13:40:08.620)다.
 - ★**송신 시계** — 앱이 프레임을 실시간보다 빨리 넣어도 SDK 가 프레임 길이대로 고르게 낸다. 통(`FRAME_QUEUE` 25)이 차면 `write` 가 기다린다. 몰아 보내면 서버는 그대로 넘기고 받는 쪽 지터 버퍼가 커지기 때문이다(— 「송신 시계」). 놓기 전에 `drain()` 으로 통을 비운다.
 - 무전 트랙은 floor control 효과 `mic.open` · `mic.close` 사이에만 나간다. 생성 floor control 상태기를 웹과 같은 계약으로 쓴다(Floor Request 절차는 [07](07_FLOOR.md)).
+- 이 되울림 에이전트 대신 실제 AI 를 잇는 것이 AI 에이전트 브리지(`oxbridge-ai`)다. 같은 저장소의 워크스페이스 멤버이고, oxpeer 공개 표면만 쓴다. 턴 · 이음매 · 무음 상한 · 선점은 [19](19_AGENT_BRIDGE.md)가 집이다.
 
 ### 3-5. 상태 전이를 앱이 받는다 — `Client::transitions()`(20261109)
 
@@ -151,7 +150,7 @@ sequenceDiagram
 
 에이전트가 전이 통을 열어 세었다. 생성 상태기의 걸음이 45 번 있었다. 서로 다른 규격 라벨이 37 가지였다. 규격이 받지 않는 사건(`impossible`)은 0 번이었다.
 
-예제 에이전트(`examples/agent/main.rs`)가 통을 여는 꼴이다.
+예제 에이전트(`crates/oxpeer/examples/agent_echo/main.rs`)가 통을 여는 꼴이다.
 
 ```rust
 let mut tr = client.transitions();
@@ -287,6 +286,16 @@ sequenceDiagram
 - 2층 등식 `peer_record_coverage` — ①`coverage` 가 있다 ②`loaded_ms` 없는 트랙 = `not_recorded` ③`expect_late_track` 을 선언한 판이면 늦게(목록 뒤 2초 넘어) 실렸거나 안 실린 트랙이 하나 이상. 녹화 판 일곱 모두 초록이었다.
 - 어느 트랙이 상한 밖이 되나는 발행이 서버에 닿은 차례가 정한다. 시나리오 머리 주석은 「b24 · b25 · b26 중 하나」라 적었는데 이 회차는 b19 였다.
 
+### 4-4. 대기열 승계 허가 뒤 마이크 게이트가 닫힌 채 — 서버사이드 누름은 늘 hold(`bridge_queued` · 20261112 고침)
+
+이 절은 이 장 회차가 아니라 브리지 2층 회차다(고치기 전 `e2e-20261112-082957` · 고친 뒤 `e2e-20261112-083513` · oxpeer `59d3720`).
+
+- **무엇이 깨졌나** — 사람이 말하는 동안 에이전트가 눌러 대기열에 섰다. 사람이 놓자 대기열 승계로 Floor Granted 가 왔다. 그런데 청취자가 에이전트 차례에 받은 슬롯 패킷이 0 이었다. 브리지는 50 프레임을 냈다고 셌다.
+- **왜** — 대기열에서 받은 Floor Granted 는 `queued` 에 머물며 사용자 의지를 기다린다([07 §3-4](07_FLOOR.md)). 누르고 말하기(hold)면 「버튼이 눌린 채」가 곧 의지다([연:RULE-FLR-PROC-QUEUED-ACCEPT](../protocol/10-flr.md#RULE-FLR-PROC-QUEUED-ACCEPT)). 웹 SDK 는 그 의지 표시를 넣는다. oxpeer 는 넣지 않았다. 그래서 `mic.open` 이 나지 않았고, 음성은 모두 게이트에서 버려졌다.
+- **고친 것** — 서버사이드에는 toggle 표면이 없다. 누름은 늘 hold 다. 그래서 승계 허가가 온 순간 앱이 누른 채면 곧 의지 표시를 넣는다(`src/core/room.rs` `floor_enter` → `hold_intent_due`). 고친 뒤 판에서 50 = 50 이 됐다.
+- **누가 먼저 알았나** — 2층 등식 `bridge_reply_reaches_room` 이다. 청취 봇이 에이전트 창에 받은 슬롯 패킷 수를 브리지 송출 프레임 수와 견준다. 그전 oxpeer 판(`peer_agent_*` 열하나)에는 대기열에 서는 판이 없었다.
+- **사용자는** — 에이전트는 말한다고 믿고, 아무도 못 듣는다. 회수 · 거절 통지는 없다. 앱은 허가를 받았다고 믿는다. 단서는 `PttInfo.state` 가 `QUEUED` 에 머문 것과 `stats().frames_gated` 가 오른 것뿐이다. 판 전체는 [19 §4-4](19_AGENT_BRIDGE.md).
+
 ## 5. 왜 이 모양인가
 
 - **뒷문을 두지 않았다** — 서버 쪽 tap(출구만 바꾼 가상 구독자)은 hook 규격서에 적혀 있지만 구현하지 않았다. 요구가 올 때로 미뤘다. 녹음기 · 에이전트는 「코어 입장에서 앱 백엔드와 같은 자격의 사용자」다. 그래서 같은 2층 · 3층 시험이 그대로 이들을 잰다.
@@ -316,7 +325,7 @@ sequenceDiagram
 LiveKit 의 Egress(녹화)는 대장이 API 표면(`EgressService` 7 · 사건 `egress_started` 등)만 읽었다(`livekit §13` · `§14-1`). 미디어 경로 칸은 비운다.
 
 
-## 7. 운영에서 보는 법
+## 7. 관측하는 법
 
 | 무엇 | 줄(이 회차 실측) |
 |---|---|
@@ -331,9 +340,11 @@ LiveKit 의 Egress(녹화)는 대장이 API 표면(`EgressService` 7 · 사건 `
 | 방을 잃음 | 게이트웨이 `CP-CODE-PEER-NOT-FOUND op=ICE_RESTART` → `CP-CODE-ROOM-NOT-FOUND op=ROOM_JOIN` |
 
 - oxpeer 쪽 표면은 셋이다.
-  - 사건 통 — `Session` · `Link` · `JoinFailed` · `TargetBitrate` · `KeyframeRequested` …
+  - 사건 통 — `Session` · `Link` · `JoinFailed` · `TargetBitrate` · `KeyframeRequested` · `Ptt` …
+    - `Ptt`(20261112) — 허가 · 거절 · 대기 · 회수 · 상태를 `PttInfo` 와 함께 낸다. `PttInfo` 에는 허가 시간(`remaining_sec`) · 우선순위 · 대기열 순번 · 마지막 거절 · 회수 사유(`FloorCause`)가 있다. 사유 번호는 `oxpeer::floor::{deny, revoke}`, 서버 T1 값은 `oxpeer::floor::T1_MS` 다. 회수 사유 2(상한 초과)와 4(선점)는 처방이 반대라 앱이 가른다([07 §4-1](07_FLOOR.md)).
   - 전이 통 — `Client::transitions()`(§3-5). 환경 변수 `OXPEER_TRACE` 를 켜면 같은 걸음이 표준 오류에도 나온다.
   - 계수 — `client.stats()`(`nack_sent` · `rtx_recovered` · `lost` · `pli_sent` · `rr_sent` · `target_bps` · `send_loss_permille` …).
+- 앱 운영 로그(20261112) — 앱이 `Client::log(AppLine)` 으로 넘긴 줄도 SDK 로거가 같은 꼴(`proc=peer`)로 낸다. 브리지의 진단 줄(`spec=SD-RULE-PLAT-AGENT-*`)이 이 길로 나간다([19 §7](19_AGENT_BRIDGE.md)).
 - 사용자 하나의 줄을 게이트웨이 · SFU 에 걸쳐 모아 보는 법(`/admin/history` · `oxadmin history` · 세션 지문)은 [17](17_OPERATIONS.md)이 집이다.
 
 
@@ -341,15 +352,15 @@ LiveKit 의 Egress(녹화)는 대장이 API 표면(`EgressService` 7 · 사건 `
 
 | 무엇 | 좌표 |
 |---|---|
-| 표면 | `oxlens-sdk-peer/src/api.rs` — `Client::create` · `connect` · `open` · `join` · `join_speaking` · `set_speaking_room` · `publish` · `LocalTrack::write` · `write_layer` · `drain` · `set_duplex` · `ptt_press` · `ptt_release` · `set_unit` · `set_layer` · `transitions` · `stats` |
+| 표면 | `oxlens-sdk-peer/crates/oxpeer/src/api.rs` — `Client::create` · `connect` · `open` · `join` · `join_speaking` · `set_speaking_room` · `publish` · `LocalTrack::write` · `write_layer` · `drain` · `set_duplex` · `ptt_press` · `ptt_release` · `set_unit` · `set_layer` · `transitions` · `stats` · `log` · `PttInfo` · `FloorCause` · `floor::{T1_MS, deny, revoke}` · `Event::Ptt` · `src/log.rs` `AppLine` |
 | 전이 통 | `src/api.rs` `Transition` · `Transitions` · `Client::transitions` · `src/core/mod.rs` `record` · `impossible` · `diag_send` |
-| 루프 · 집행 | `src/core/mod.rs` `run` · `src/core/room.rs` `room_step` · `sub_enter` · `floor_enter` · `set_layer` · `src/core/pubs.rs` `publish` · `pub_enter` · `floor_to_pub` · `pub_rebind` · `pub_room_joined` · `src/core/ses.rs`(BIND `source_tag`) |
+| 루프 · 집행 | `src/core/mod.rs` `run` · `src/core/room.rs` `room_step` · `sub_enter` · `floor_enter`(`hold_intent_due` · `ptt_settle`) · `floor_receive`(`ptt_rx`) · `set_layer` · `src/core/pubs.rs` `publish` · `pub_enter` · `floor_to_pub` · `pub_rebind` · `pub_room_joined` · `src/core/ses.rs`(BIND `source_tag`) |
 | 수신 정리층 · 조립 | `src/link/recv.rs` `on_rtp` · `on_sr` · `tick`(상수 `NACK_INTERVAL` · `NACK_TRIES` · `HOLD_NO_NACK` · `MAX_GAP` · `PLI_INTERVAL` · `RR_INTERVAL`) · `src/link/depack.rs` `unpack` |
 | 보내는 쪽 | `src/link/send.rs` `packetize` · `frame` · `retransmit` · `sender_report` · `src/link/bwe.rs` `on_feedback` · `on_remb` · `target` |
 | 생성본 | `src/generated/`(Rust 판 상태기 · 결합 · wire) · `tests/vectors/` · `src/vectors_test.rs` |
-| 예제 | `examples/recorder/main.rs`(출처로 파일 경계) · `video.rs`(요약 `coverage` · `not_recorded`) · `mkv.rs` · `ogg.rs` · `examples/agent/main.rs`(요약 `transitions`) |
+| 실행 파일 · 예제 | `crates/oxrec/src/main.rs`(녹음 갈래 — 레코드 흐름 + 파이프라인) · `video.rs`(녹화 갈래 · 요약 `coverage` · `not_recorded`) · `crates/oxpeer/examples/agent_echo/main.rs`(요약 `transitions`) · 결과물 `src/record/{ogg,mkv,hls}.rs` 는 [18](18_RECORDING.md) |
 | 서버(소비자가 아니라 계약 상대) | `oxlens-sfu/crates/oxhubd/src/ses/token.rs`(클레임) · `oxhubd/src/ses/mod.rs`(`source_tag`) · `oxsfud/src/fwd/mod.rs` `send_down`(CSRC) · `oxsfud/src/pub/mod.rs` `next_csrc` · `oxsfud/src/ops/floor.rs` `slot_sources` |
-| 2층 | `oxlens-labs/oxe2epy/scenarios/peer_*.yaml` · 등식 `oxe2epy/oxe2epy/verifier/equations.py` `peer_agent_transitions` · `peer_record_coverage` |
+| 2층 | `oxlens-labs/oxe2epy/scenarios/peer_*.yaml` · 등식 `oxe2epy/oxe2epy/verifier/equations.py` `peer_agent_transitions` · `peer_record_coverage` · 브리지 판(`bridge_queued` · `bridge_reply_reaches_room` 등)은 [19 §8](19_AGENT_BRIDGE.md) |
 | 3층 | `oxlens-sdk-web/qa/live/tests/peer_mixed.spec.ts` |
 | 규격 | [연:RULE-SES-TOKEN-CLAIMS](../protocol/03-ses.md#RULE-SES-TOKEN-CLAIMS) · [연:RULE-SES-TOKEN-AXES-SEPARATE](../protocol/03-ses.md#RULE-SES-TOKEN-AXES-SEPARATE) · [연:RULE-SES-TOKEN-BY-BACKEND](../protocol/03-ses.md#RULE-SES-TOKEN-BY-BACKEND) · [연:RULE-SES-SOURCE-TAG-SESSION](../protocol/03-ses.md#RULE-SES-SOURCE-TAG-SESSION) · [연:RULE-TRK-CSRC](../protocol/06-trk.md#RULE-TRK-CSRC) · [연:RULE-FLR-SLOT-SOURCES](../protocol/10-flr.md#RULE-FLR-SLOT-SOURCES) · [연:RULE-LINK-EGRESS-REWRITE](../protocol/09-link.md#RULE-LINK-EGRESS-REWRITE) · [연:RULE-SUB-FILL](../protocol/08-sub.md#RULE-SUB-FILL) · [연:RULE-ROOM-HIDDEN-ONLY-FOUR](../protocol/04-room.md#RULE-ROOM-HIDDEN-ONLY-FOUR) |
 
@@ -357,7 +368,7 @@ LiveKit 의 Egress(녹화)는 대장이 API 표면(`EgressService` 7 · 사건 `
 
 <details><summary>1. 녹음기의 파일 경계를 화자 사건(Floor Taken · Floor Idle)으로 자르면 무엇이 틀리나?</summary>
 
-화자 사건은 DC 로, 미디어는 RTP 로 따로 와서 차례 약속이 없다. Floor Granted 뒤 서버가 내는 예열 침묵이 Floor Taken 보다 먼저 닿기도 한다. 승계에서는 새 화자의 첫 RTP 와 Floor Taken 의 차례가 정해져 있지 않다. 그래서 경계 패킷 몇 개가 앞뒤 화자로 갈릴 수 있다. 지금은 패킷마다 실린 CSRC 가 바뀌는 곳에서 자른다. 출처 없는 침묵(이 회차 8)은 어느 파일에도 넣지 않는다.
+화자 사건은 DC 로, 미디어는 RTP 로 따로 와서 차례 약속이 없다. 승계에서는 새 화자의 첫 RTP 와 Floor Taken 의 차례가 정해져 있지 않다. 그래서 경계 패킷 몇 개가 앞뒤 화자로 갈릴 수 있다. 지금은 패킷마다 실린 CSRC 가 바뀌는 곳에서 자른다. 출처 없는 패킷은 어느 파일에도 넣지 않는다. 이 회차의 8 은 그때 서버가 지은 예열 · 해제 침묵이었다(20261111 에 걷어냈다).
 </details>
 
 <details><summary>2. 투명 녹음기도 CSRC 를 받는다. 서버는 녹음기라서 CSRC 를 붙이나?</summary>

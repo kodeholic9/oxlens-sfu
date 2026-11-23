@@ -243,7 +243,7 @@ sequenceDiagram
 - 정리하지 않는 방은 하나뿐이다 — 그사이 다시 선언된 방이다. 다시 선언되면 그 방은 이미 보류에서 빠진다(`RoomPut` 이 `held` 에서 지운다).
 - 고치기 전 회차(같은 날 07:05)는 달랐다. 그때는 방 주인 node 가 살아 있는지로 놓을지 정했다. node-c 가 새 `inst` 로 살아 돌아오자 「살아 있다」로 보고 놓지 않았다. 그런데 그 방을 든 것은 이미 죽은 옛 sfud 였다. 그 방 셋이 40분 뒤에도 node-a 표에 남았다.
 - 그 판정은 규격과 어긋났다 — 「아니면 사라진 방의 로컬 라우팅을 거둔다(그 방의 node 토큰이 남았든 사라졌든 같다)」 · 「살아 있고 고립되지 않은 hub 는 언젠가 그 방의 로컬 라우팅을 거둔다」. 서버 단위 시험은 A/B 로 확인했다(옛 판 빨강).
-- 남은 관찰 하나 — 줄 글이 아직 옛 기준의 이름(「owner node not live」)을 단다. 지금 기준은 「다시 선언되지 않았다」다. 줄 글을 바꿀지는 판단 거리다.
+- 위 발췌의 줄 글(「owner node not live」)은 옛 기준의 이름이었다. 20261112 에 지금 기준대로 「not redeclared after isolation」으로 바꿨다(D3 — 위 발췌는 바꾸기 전 회차 그대로).
 
 ### 4-3. 멈췄다 깨어남 · 부분 단절 · lease 만료 — 이 형상에서는 한 번도 안 났다
 
@@ -298,7 +298,7 @@ run-all 회차 창(13:23:15 ~ 13:53:37)의 `mesh session down` 까닭을 세면(
 | atm0s | 중앙 DB 없이 DHT 키값(Kademlia 꼴 XOR). 트랙마다 채널 id 해시. 직접 길이 나쁘면 게이트웨이가 중계 | 풀 메시 · 중계 없음 | 홉이 늘 하나 · 표가 제 것만 본다 | 규모 상한(100대 미만) · 부분 단절에 약하다 |
 | zenoh 1.10.1(직접 실측) | linkstate 트리 · 여러 홉 중계 · 같은 ID 세션에 합류 · Delete 차례 · 끝 표시 없음 · 혼잡 정책 `Block`/`Drop` | 코드로 가져온 것은 키 문법 둘(`*` · `**`)뿐. 선언 재전송 · 우선순위 큐 · 조각은 꼴만 참고해 새로 지음 | 멈춤 12초 × 20 실패 0 대 17/20 | 와이어 호환 · 생태계 |
 
-## 7. 운영에서 보는 법
+## 7. 관측하는 법
 
 | 줄(대상 · 칸) | 언제 | 이 회차 창(node-a · b · c) |
 |---|---|---|
@@ -310,7 +310,7 @@ run-all 회차 창(13:23:15 ~ 13:53:37)의 `mesh session down` 까닭을 세면(
 | `SV-STATE-UNIT-STATE unit=…` | 유닛 · 버스 · 로그 유닛 전이(`Starting` · `Running` · `Stopping` · `Down` · `Blocked`) | |
 | `bus isolated — other node tokens all gone (live view …)` · `bus isolation over — …` | 고립 판정 · 끝 | node-a 1 · 1 |
 | `drop candidate: room token delete settled …` → `room token gone — local routing dropped` | 디바운스한 뒤 방 라우팅을 정리했다 | 360 · 357 · 360 |
-| `drop candidate: held room released — owner node not live …` | 고립 중 보류한 방을 정리했다 | 5 · 0 · 0(§4-2 ②) |
+| `drop candidate: held room released — not redeclared after isolation …` | 고립 중 보류한 방을 정리했다 | 5 · 0 · 0(§4-2 ②) |
 | `home {node}/{inst} lost — reaping peer`(sfud · `SV-IMPL-BUS-HOME-LOST`) | 홈을 잃은 Peer 를 grace 뒤 축출한다 | node-a 1(§4-2 ①) |
 | `local hub token back — room tokens redeclared (n)`(sfud) | 제 hub 의 `node` 토큰이 다시 보여 방 토큰을 다시 선언 | 0 |
 

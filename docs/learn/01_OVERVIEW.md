@@ -42,6 +42,8 @@ flowchart LR
 | 시그널링 게이트웨이 `oxhubd`(hub) | 클라가 붙는 관문. 세션 · 방 위치 표 · oxmesh router 를 든다 | node-a `127.0.0.1:1974` · 하트비트 `10000`ms · 재개 창 `60000`ms | [02](02_CONNECT_JOIN.md) · [10](10_RECOVERY.md) · [13](13_MULTI_NODE.md) |
 | SFU `oxsfud` | 방 · 발행 · `mline_table` · 전달 · floor control · RTCP 종단 | node-a `sfu_id` `d6c9ad052c4a12ae` · UDP `20000` · `media-workers=2` | [02](02_CONNECT_JOIN.md) · [04](04_PACKET_PATH.md) |
 | oxmesh | node 사이 버스 — router 풀 메시 · liveliness token 선언 · 우선순위 큐 | router listen `7447` · `7448` · `7449` · lease `10000`ms | [14](14_OXMESH.md) |
+| 채팅 모듈(hub 안) | 공간 · 멤버 · 메시지 저장 · 실시간 통지 · 따라잡기. SFU 를 지나지 않고, `[chat]` 설정이 없으면 꺼진다 | 저장소 `sqlite:/tmp/oxlens/chat.db`(세 node 가 함께 씀 · 꼴은 `memory:` · `sqlite:` · `postgres://` 셋) · 실시간 도달은 보낸 쪽 응답 뒤 0 ~ 1ms(`TOUR-20` · 다른 node 도 같은 ms) | [20](20_CHAT.md) |
+| 녹음 유닛 `oxtapd` | node 마다 하나 · SFU 와 다른 프로세스(hub 가 띄움). `record:true` 방에 녹화 참가자로 들어 발언마다 녹취 파일을 남기고 발언 기록에 잇는다. 준비 상태(ready)에 세지 않는다 | 방이 생기고 1.2ms 에 듦 · 녹취 링크는 끝 갱신 0.57 ~ 0.60초 뒤(20261119 손 측정) | [21](21_TALK_RECORD.md) |
 | node | hub + SFU 한 벌. 개발 형상은 한 기계 위 셋(node-a · b · c) | 방 `qa_tournode_p1` 은 HRW 로 node-b · UDP `20001` | [13](13_MULTI_NODE.md) |
 | 접속의 일생(§3-2)의 사람 | A `tour_A` 받기만 · B `tour_B` 마이크 · 카메라. 둘 다 1pc | 방 `qa_tour_p4` · node-a · A 의 세션 지문 `6a851f47` | [02](02_CONNECT_JOIN.md) · [03](03_PUBLISH_SUBSCRIBE.md) |
 
@@ -167,6 +169,8 @@ sequenceDiagram
 | [09](09_MIC_COST.md) | cold 에서 누르면 첫 음절이 잘린다 · 마이크를 꺼도 망 비용은 안 준다 |
 | [15](15_SDK_INSIDE.md) | 받지 않는 사건 · 생성본 어긋남 · 손 결합이 규격을 비껴갈 때 |
 | [16](16_OXPEER.md) | 유닛 죽음에 녹음기가 방을 잃는다 · 손실 · m-line 상한을 넘는 녹화 |
+| [20](20_CHAT.md) | 받는 hub 가 멈춤(실시간이 안 오고 `CATCHUP` 이 메움) · 통지에 실패로 답함(ACK 가 아니라 기록이 남음) · 통지 밀림(창이 차면 `MESSAGES{live:true}` 로 묶음 · 그래도 줄 1,000 개 · 4 MiB 를 넘으면 `4007` — 세션째 끊겨 무전 · 통화도 같이) · 큰 공간의 저장 천장(저장소 꼴마다 다름) |
+| [21](21_TALK_RECORD.md) | 녹음 유닛 죽음(무전 · 기록은 그대로 · ready 200) · SFU 가 끝을 못 알림(`deadline` 뒤 `lost`) · 시작 거절(기록 없는 방) · 원본 없는 갱신(`5003` 뒤 다시) · 다시 보내기 상한(`talk_drop`) · 내려받기 거절(`3013` · `3019`) |
 
 ## 5. 왜 이 모양인가 — 우리만의 것
 
@@ -196,6 +200,8 @@ sequenceDiagram
 | 서버사이드 SDK | 녹음 · 녹화 · 에이전트를 SFU 코어에 넣으면 기능마다 특례가 생긴다 | 서버 특례 0(차이는 토큰의 `hidden` 한 칸). 발언 한 건 = 파일 하나를 패킷의 CSRC 가 정한다. 2층 24 판 빨강 0 | 디코딩 · 인코딩 · 송신 조절은 앱 몫이다. m-line 상한에 묶인다. CSRC 4바이트가 붙는다 | [16 §5](16_OXPEER.md) |
 | 로그가 규격 라벨을 들고 다닌다 | 「규격에 이름이 있으면 `ev`」. 운영성 조사(열린 소스 여섯 · 호스팅 다섯)에서 우리뿐이었다 | 이력 판정기가 줄만으로 결함을 잡는다. 20261109 에 Peer 정리(reclaim) 줄 두 번 · 구독 끝 줄 없음을 잡아 고쳤고, 이제 run-all 끝마다 전량을 돌린다(어긋남 0) | 로그량 — 생중계 1,000명 44 kB/s · 1,500명 66 kB/s. 이름 없는 사건은 `diag` 로 남는다 | [17 §5](17_OPERATIONS.md) |
 | 세션 지문(session fingerprint) | 사용자가 문의할 때 불러 주는 번호를 로그 세션 키와 같게 했다. 원값은 인증 수단이라 지문 8자만 쓴다 | 와이어 변경 0. `83e581a6` 하나로 두 node 의 줄이 열린다(`TOUR-13` A) | 32비트라 겹칠 수 있다. 세션이 새로 서면 번호가 바뀐다 | [17 §5](17_OPERATIONS.md) |
+| 미디어 시그널링 관문 안의 채팅 | 무전 채널에는 문자도 같이 오간다. 무전 방은 `room_id` 가 곧 `space_id` 다. 채팅을 따로 둔 서비스 대신 hub 의 모듈로 넣고, 통지 · ACK · 흐름 조절을 방 통지와 같은 장치로 쓴다 | `BIND` 하나로 미디어 시그널링과 채팅이 함께 선다. 실시간은 보낸 쪽 응답 뒤 0 ~ 1ms 에 닿았고, 다른 node 의 사람도 같은 ms 였다(`TOUR-20`) | 격리가 없다. 통지 넘침의 문(줄 1,000 개 · 쥔 바이트 4 MiB)을 넘으면 세션째 끊겨 무전 · 통화도 같이 끊긴다(`4007` — 혼잡 묶기 전에는 RTT 200ms 단말이 초당 통지 40 을 넘으면 닿았고, 묶기 뒤로 채팅만으로 닿은 회차는 없다). 큰 공간의 저장 천장(`sqlite:` 꼴 맥 멤버 2,000 · Pi 1,000 에서 무너짐 · 맥 `postgres://` 꼴은 2,000 을 버팀)이 hub 안에 있다 | [20 §5](20_CHAT.md) |
+| 발언권 서버가 대화 기록의 권위 | 무전 기록은 「누가 언제 얼마나 말했나」다. 그 사실을 아는 것은 발언권을 중재하는 SFU 하나다. 발언권 허가 하나를 공간의 메시지 하나로 남긴다 | 짧은 · 끊긴 · 소리 없는 발언까지 상태와 함께 남는다. 녹음 유닛이 죽어도 기록은 남는다(2층 3/3). 화자 이름을 서버가 찍는다. 기록 통지는 허가 뒤 3 ~ 8ms | 녹취 링크는 끝 갱신보다 0.57 ~ 0.60초 늦다. 발언 하나에 메시지 셋(원본 · 끝 · 녹취). SFU 가 끝을 못 알리면 저장소에는 `talking` 이 남고 받는 쪽은 37초 뒤에야 `lost` 를 본다 | [21 §5](21_TALK_RECORD.md) |
 
 
 ## 6. 다른 SFU 는 — 축마다 한 표
@@ -210,7 +216,7 @@ sequenceDiagram
 | 구독 결정 | `desired` + 조정 루프(사건 + 3초 주기) | 영상 Consumer 는 `paused` 로 만들라고 권함 | — | 구독자마다 SSRC 상한 50 · 50 · 다시 씀 | — | `mline_table` · `arev` · `READY` · m-line 25 · 재배정 | [03](03_PUBLISH_SUBSCRIBE.md) |
 | RTP 헤더 재작성 | 전달 경로 단일 오프셋 · 범위 지도는 buffer 쪽 | 스칼라 base + 버린 번호 집합 | — | 계층을 버리면 서버가 seq 공간 관리 | — | m-line 마다 단일 오프셋 · 경계 앞 버림 | [04](04_PACKET_PATH.md) |
 | PLI 억제 | 레이어마다 low 500ms · high 1s | SSRC 마다 1,000ms | — | 수신자마다 + 출처 전체 2단 | — | 발행자 · 레이어마다 h 1,000 · l 500ms. 인프라 요청도 같은 스로틀 | [04](04_PACKET_PATH.md) |
-| 재전송 버퍼 | — | 2,500개 또는 2,000ms | 시간 + RTT 적응 | — | — | 1,024개 + 사람마다 200회/3초 | [04](04_PACKET_PATH.md) |
+| 재전송 버퍼 | — | 2,500개 또는 2,000ms(3.19.21) · 3,000개 또는 4,000ms(3.32.2) | 시간 + RTT 적응 | — | — | 1,024개 + 나이 2s · 10ms 마다 2개씩 흘림 | [04](04_PACKET_PATH.md) |
 | 실행 단위 | — | 코어마다 worker 프로세스 | 한 프로세스 · 루프 풀 | — | Mumble 스레드 둘 · 락 하나 | 수신 스레드 1 · 미디어 워커 N · 제어 C | [04](04_PACKET_PATH.md) |
 | 레이어 판단 | 구독자 연결마다 할당기 · 혼잡 3단 | 전원 한 계단씩 · BWE 강등 뒤 10초 고정 | 코어에 추정기 없음 | 안 보는 레이어를 발행자가 안 만들게 되먹임 | — | 구독 트랜스포트마다 · 기본 손 상한 · v2 GCC + 프로브 | [05](05_SIMULCAST_BWE.md) |
 | 음소거 | `MUTED` · `PUB_MUTED` 사유 · 공백 프레임 | 멈춘 Producer 는 통계만 쌓는다 | audiobridge `mute` · `suspend` | — | — | 서버는 RTP 를 안 거르고 통지만 | [06](06_TRACK_ATTRS.md) |
@@ -229,7 +235,7 @@ sequenceDiagram
 
 이 표 밖에서 장들이 견준 것도 있다 — str0m(1.5초 무패킷 사건 · 시간 입력 · [04](04_PACKET_PATH.md) · [11](11_STALL_RESYNC.md) · [15](15_SDK_INSIDE.md)) · webrtc-rs(시간 경계 CI · [15](15_SDK_INSIDE.md)) · Discord(SDP 를 wire 에서 뺌 · [02](02_CONNECT_JOIN.md)) · Google Meet 미디어 API(CSRC 가 참가자 신원 · [08](08_SLOT_SPEAKER.md)) · atm0s · Cloudflare · Millicast · MoQ(분산 · [13](13_MULTI_NODE.md)) · zenoh 1.10.1(우리가 직접 잰 유일한 상대 · [14](14_OXMESH.md)).
 
-## 7. 운영에서 보는 법
+## 7. 관측하는 법
 
 | 묻는 것 | 먼저 볼 곳 | 집 |
 |---|---|---|
@@ -252,7 +258,7 @@ sequenceDiagram
 | oxmesh | `oxlens-sfu/crates/oxmesh/src/` — `core.rs` · `session.rs` · `wire.rs` · `keyexpr.rs` | — |
 | 운영 도구 | `oxlens-sfu/crates/oxadmin/` | (운영 규격은 [17](17_OPERATIONS.md)) |
 | 웹 SDK | `oxlens-sdk-web/src/` — `domain/<영역>/core.ts`(손 집행) · `internal/link/sdp.ts`(서버 쪽 SDP) · `platform/capability.ts`(`pc_mode`) · `internal/wire/ws.ts`(op 표) | [연:RULE-LINK-SDP-FREE](../protocol/09-link.md#RULE-LINK-SDP-FREE) · [연:RULE-LINK-SDP-1PC](../protocol/09-link.md#RULE-LINK-SDP-1PC) · [연:RULE-LINK-SDP-PC-COUNT](../protocol/09-link.md#RULE-LINK-SDP-PC-COUNT) · [연:R-LINK-SDP-WE-1PC](../protocol/09-link.md#R-LINK-SDP-WE-1PC) · [연:RULE-LINK-SDP-DC-OPENER](../protocol/09-link.md#RULE-LINK-SDP-DC-OPENER) |
-| oxpeer | `oxlens-sdk-peer/src/` · 예제 `examples/` | [연:RULE-TRK-CSRC](../protocol/06-trk.md#RULE-TRK-CSRC) |
+| oxpeer | `oxlens-sdk-peer/crates/oxpeer/src/` · 녹음기 `crates/oxrec` · AI 브리지 `crates/oxbridge-ai` · 예제 `crates/oxpeer/examples/` | [연:RULE-TRK-CSRC](../protocol/06-trk.md#RULE-TRK-CSRC) |
 | 복구 · 오류 | (각 장) | [연:RULE-LINK-RECOVERY-TIERS](../protocol/09-link.md#RULE-LINK-RECOVERY-TIERS) · [연:RULE-LINK-RECOVERY-UNIT](../protocol/09-link.md#RULE-LINK-RECOVERY-UNIT) · [연:RULE-LINK-RECOVERY-WS-FIRST](../protocol/09-link.md#RULE-LINK-RECOVERY-WS-FIRST) · [연:RULE-ERR-ONE-NUMBER-ONE-MEANING](../protocol/11-err.md#RULE-ERR-ONE-NUMBER-ONE-MEANING) · [연:RULE-ERR-UNKNOWN-BY-LEAD](../protocol/11-err.md#RULE-ERR-UNKNOWN-BY-LEAD) · [연:R-ROOM-CLOSED-OPS-ONLY](../protocol/04-room.md#R-ROOM-CLOSED-OPS-ONLY) |
 
 ## 9. 스스로 확인하는 질문

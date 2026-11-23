@@ -19,7 +19,7 @@
 | 무전 발언권 — 요청 · 허가 · 대기 · 반환 · 회수 · 선점 · 타이머(MCPTT 꼴 바이너리 메시지 over DataChannel) | ✅ |
 | 여러 방 동시 청취 · 세션당 말하는 방 하나(전환 가능) | ✅ |
 | 전이중 음성 · 영상 회의 | ✅ |
-| 시뮬캐스트 — 공간 층 셋(l / m / h)과 층마다 시간 층(VP8 은 payload 에서 · H264 는 dependency descriptor 에서 읽음) · 수동 층 선택 · 자동 층 조절(v1 REMB + 손실 · v2 TWCC 위 송신측 추정 — 코드 기본은 꺼짐, 예시 `policy.toml` 은 켬) · 층 전략 셋(`media.layer_strategy`) | ✅ |
+| 시뮬캐스트 — 공간 층 셋(l / m / h)과 층마다 시간 층(VP8 은 payload 에서 · H264 는 dependency descriptor 에서 읽음) · 수동 층 선택 · 자동 층 조절(v1 RR 손실 · 반복 NACK · 버림 · v2 TWCC 위 송신측 추정 — 코드 기본은 꺼짐, 예시 `policy.toml` 은 켬) · 층 전략 셋(`media.layer_strategy`) | ✅ |
 | 세션당 PeerConnection 하나 또는 둘(`1pc` / `2pc`) | ✅ |
 | ICE-lite · UDP 와 TCP 위 ICE · DTLS-SRTP · SCTP DataChannel | ✅ |
 | 서버가 끝내는 RTCP — RR · TWCC 피드백 · REMB · NACK / RTX(하향 재전송은 한꺼번에 쏟지 않고 간격을 두어 나눠 보냄) · PLI 스로틀(정책 손잡이) | ✅ |
@@ -182,7 +182,7 @@ cargo build --manifest-path crates/oxtapd/Cargo.toml --target-dir target
 |---|---|---|
 | [연동규격서](docs/protocol/README.md) | 클라 ↔ 서버 계약 — wire 메시지 · 상태기 · 타이머 · 흐름 · 오류 코드 · 발언권 | 규격 원천에서 생성 |
 | [서버 형상](docs/architecture.md) | 정적 구조 — 프로세스 · 스레드 · 공유 지점 · 패킷 하나의 길 | 소스를 읽어 쓴 해설(기준 커밋을 머리에 적음) |
-| [학습 문서](docs/learn/00_INDEX.md) | 실측 흐름 — 서버와 웹 SDK 가 실제로 주고받는 것(WS 프레임 · SDP · 로그)을 시각순으로 | 브라우저 탐침을 돌려 거둔 회차로 쓰고, 탐침을 다시 돌려 모양이 같은지 견준다 |
+| [학습 문서](docs/learn/00_INDEX.md) | 실측 흐름 21장(색인 따로) — 서버와 SDK 가 실제로 주고받는 것(WS 프레임 · SDP · 패킷 · 로그)을 시각순으로 · 녹음 · AI 에이전트 브리지 · 채팅 · 무전 발언 기록 포함 | 브라우저 탐침 · 2층 하네스 회차로 쓰고, 탐침을 다시 돌려 모양이 같은지 견준다 |
 
 문서는 한국어입니다. 공개 문서는 버전 태그마다 그 판에 맞춰 다시 짓습니다.
 

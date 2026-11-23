@@ -150,7 +150,6 @@ sequenceDiagram
   Note over U: 32.7초 무발화 — cold · 장치 반납
   U->>S: 누름 · Floor Request
   S->>U: 22:57:06.603 Floor Granted
-  S->>L: 예열 무음 20ms 마다 24 프레임
   U->>S: 06.603 STUN 3통 — 망은 살아 있다
   Note over U: 06.607 ~ 07.067 아무 패킷도 없음 460ms<br/>getUserMedia 재호출 · 인코더 재생성
   U->>S: 07.067 첫 음성
@@ -158,8 +157,8 @@ sequenceDiagram
 ```
 
 - **무엇이 깨졌나** — Floor Granted 는 즉시 났는데 단말이 보낼 소리가 없다. 장치 재획득 + 인코더 재생성 + 첫 프레임이 460ms 걸렸다.
-- **누가 먼저 아나** — SFU 가 예열 프레임 수로 안다. Floor Granted 에서 첫 실제 음성 사이를 20ms 마다 메운 수다. 24 프레임 ≈ 480ms, 18 ≈ 360ms, 23 ≈ 460ms 였다. 같은 날 hot_standby 에서 누른 Floor Granted 는 1~3 프레임(20~60ms)이었다.
-- **사용자는 무엇을 겪나** — 듣는 사람은 예열 무음으로 공백 없이 이어 듣는다. 그러나 화자의 첫 음절이 잘린다. 예열로는 못 살린다 — 잘리는 것은 단말 안에서다.
+- **누가 먼저 아나** — SFU 가 Floor Granted 에서 그 화자의 첫 RTP 까지의 간격으로 안다. 20260624 에는 그 간격을 예열 프레임 수로 셌다. 그때 서버는 이 간격을 20ms 마다 무음으로 메웠다(예열 — 20261111 에 걷어냈다 · [08 §3-1](08_SLOT_SPEAKER.md)). 24 프레임 ≈ 480ms, 18 ≈ 360ms, 23 ≈ 460ms 였다. 같은 날 hot_standby 에서 누른 Floor Granted 는 1~3 프레임(20~60ms)이었다.
+- **사용자는 무엇을 겪나** — 그 간격 동안 듣는 쪽 슬롯에는 아무것도 오지 않는다. 슬롯 줄로 나가는 것은 화자 RTP 뿐이다. 첫 소리가 와도 화자의 첫 음절은 잘려 있다. 서버가 메워서 살릴 수 없다 — 잘리는 것은 단말 안에서다.
 - **처방** — 자주 말하는 곳은 `keepWarm(ms)` 으로 `cold` 를 미룬다(전력과 맞바꾼다).
 - `ptt.enable()` 은 다른 일이다. 입장 뒤 **처음** 누를 때의 마이크 잡기 · half-duplex 발행을 미리 해 둔다.
 
@@ -212,7 +211,7 @@ sequenceDiagram
 | Mumble | 클라가 발화를 판정한다(VAD · PTT 키 · 짧게 두 번 누르면 떼도 유지) — 마이크 전원 축은 대장에 없다(`Mumble §9-1`) | SFU 권위 floor control + SDK 마이크 전원 셋 | 전원이 floor 상태를 보고 내려간다(대기열에 선 동안 안 내려감) | — |
 
 
-## 7. 운영에서 보는 법
+## 7. 관측하는 법
 
 | 보고 싶은 것 | 어디서 | 실제 모양(이 회차) |
 |---|---|---|
@@ -222,7 +221,7 @@ sequenceDiagram
 | 트랜스포트 생존(keepalive 가 끊겼을 때) | 서버 로그 `SV-STATE-PEER-STATE … from=Alive to=Suspect cause=pair_expired` · 진단 `SV-IMPL-LINK-PEER-STATE … in.dwell_ms` | 4-2 의 줄 · 진단 `in.dwell_ms=32644`(Alive 로 지낸 시간) |
 | keepalive 계수 | 브라우저 `getStats()` 의 candidate-pair(`consentRequestsSent` · `bytesSent` · `bytesReceived`) | 위 2 절 표 |
 
-- 「첫 음절이 잘린다」는 서버 로그만으로는 못 본다. 단서는 Floor Granted 줄과 그 사람의 `first_rtp` 줄 사이 간격이다. 예열이 그만큼 돌았다.
+- 「첫 음절이 잘린다」는 서버 로그만으로는 못 본다. 단서는 Floor Granted 줄과 그 사람의 `first_rtp` 줄 사이 간격이다. 단말이 첫 소리를 내기까지 그만큼 걸렸다(허가 전달 · 업링크 망 지연 포함).
 - 로그 줄 꼴 · 사람 하나의 사슬은 [17](17_OPERATIONS.md).
 
 ## 8. 소스 · 규격 좌표
@@ -251,7 +250,7 @@ STUN 동의 검사 횟수는 반이 된다(60초 22번 대 45번). 그러나 STU
 
 <details><summary>3. cold 에서 누른 사람의 첫 음절이 잘렸다. 서버 쪽 무엇으로 짐작하나?</summary>
 
-Floor Granted 에서 그 화자의 첫 RTP 까지의 간격이다. 예열 무음이 그동안 20ms 마다 돌았다. 20260624 에 cold 재획득은 18~24 프레임 — 실측 360~480ms 였다(입장 직후 첫 획득 640ms 는 따로 센다). hot_standby 는 1~3 프레임(20~60ms)이었다. SFU 는 전원 상태를 모르니 이 간격이 유일한 단서다.
+Floor Granted 에서 그 화자의 첫 RTP 까지의 간격이다(서버 로그 Floor Granted 줄 → `first_rtp` 줄). 20260624 에는 그 간격을 그때 서버가 20ms 마다 낸 예열 무음 수로 셌다(예열은 20261111 에 걷어냈다). cold 재획득은 18~24 프레임 — 실측 360~480ms 였다(입장 직후 첫 획득 640ms 는 따로 센다). hot_standby 는 1~3 프레임(20~60ms)이었다. SFU 는 전원 상태를 모르니 이 간격이 유일한 단서다.
 </details>
 
 <details><summary>4. 데이터를 아끼려고 STUN 동의 검사를 멈추면 무엇이 깨지나?</summary>

@@ -120,6 +120,7 @@ L 이 받은 Floor Taken 한 통이다.
 - `ROOM`(29)은 SFU 가 보내는 floor 메시지 전부에 실린다. DC 는 방마다가 아니라 SFU 마다 하나다. 그래서 여러 방의 통지가 한 통로로 섞여 오고, `ROOM` 으로 가른다(다방은 [08](08_SLOT_SPEAKER.md)).
 - `SEQ` 는 Floor Idle · Floor Taken 에만 있다. 방마다 1 씩 오른다. 재전송(T7 · T21)도 새로 보내는 것이라 올린다. **클라는 이 번호를 견주지 않는다**([연:RULE-FLR-SEQ](../protocol/10-flr.md#RULE-FLR-SEQ)).
 - `SOURCES`(31)는 원문 밖 자체 확장이다. 화자의 half-duplex 발행 트랙에 SFU 가 매긴 CSRC 다. 쓰임은 [08 §3-3](08_SLOT_SPEAKER.md).
+- `TALK`(0x20 = 32)도 표준(TS 24.380) 밖 필드다. SFU 가 허가할 때 지은 발언 id 를 Floor Granted · Taken 에 싣는다. 재허가는 같은 값이다. 위 프레임은 이 필드가 생기기 전(20261109) 회차라 없다. 그 발언이 공간의 메시지(발언 기록)로 남는 길은 [21](21_TALK_RECORD.md) 이 집이다.
 
 ### 3-3. Floor Request — 마이크는 누를 때 잡는다
 
@@ -139,7 +140,7 @@ L 이 받은 Floor Taken 한 통이다.
 - half-duplex 트랙은 **Floor Granted 가 나야 RTP 를 보낸다.** 등록(`REGISTERED`)과 송출(`SENDING`)이 나뉘어 있다.
 - SFU 에도 같은 게이트가 있다. 화자가 아닌 사람의 half-duplex RTP 는 버린다(`prefan_gate`, [08](08_SLOT_SPEAKER.md)). 강제하는 것은 통지가 아니라 이 게이트다([연:RULE-FLR-TRANSPORT-DC](../protocol/10-flr.md#RULE-FLR-TRANSPORT-DC)).
 - Floor Granted(04.292) 뒤 A 의 첫 RTP 가 SFU 에 닿기까지 102ms 걸렸다(04.394). 브라우저가 인코더를 띄우는 시간이다.
-- 그 사이 듣는 쪽 슬롯에는 SFU 가 지은 예열 무음이 흐른다. B 의 첫 슬롯 패킷 `FLR.C.NOPERM.rtp_rx` 가 04.293 이다. 예열은 [08](08_SLOT_SPEAKER.md) 몫이다.
+- 그 사이 듣는 쪽 슬롯에는 아무것도 흐르지 않는다. 슬롯 줄로 나가는 것은 화자 RTP 뿐이다. 이 회차 서버(`1ef7265`)는 그 사이를 예열 무음으로 메워 B 의 첫 슬롯 패킷 `FLR.C.NOPERM.rtp_rx` 가 04.293 이었다. 예열은 20261111 에 걷어냈다 — 까닭은 [08 §3-1](08_SLOT_SPEAKER.md).
 - Floor Granted 의 Ack(`0100`)에는 SFU 가 답하지 않는다. 받았다는 사실만 본다. 로그 줄이 `FLR.S.gate.ack_drop` 이다([연:DEV-FLR-ACK-DROP](../protocol/10-flr.md#DEV-FLR-ACK-DROP)).
 - 반면 Floor Taken 의 Ack(`0200`)은 `FLR.S.P.NP_TAKEN.rx_ACK_taken` 줄을 남긴다. 그 사람의 T21 재전송을 멈춘다.
 
@@ -160,7 +161,7 @@ L 이 받은 Floor Taken 한 통이다.
 
 - 누가 말하는 중에 온 Floor Request 는 거절하지 않는다. 대기열(queue)에 넣는다. 큐는 늘 켠다([연:R-FLR-QUEUE-ALWAYS](../protocol/10-flr.md#R-FLR-QUEUE-ALWAYS)). 대기열이 차면 그때 Floor Deny 사유 7 이다.
 - Floor Release 가 오면 Floor Idle 을 거치지 않고 대기열 맨 앞에게 넘긴다. 이것이 대기열 승계다([연:FLR.S.G.IDLE.enter_succession](../protocol/10-flr.md#FLR.S.G.IDLE.enter_succession)). 듣는 L 은 Floor Idle 없이 Floor Taken(화자 B)만 받는다.
-- 대기열에서 받은 Floor Granted 는 `queued` 에 머물며 사용자 의지를 기다린다(T132 2초). 누르고 말하기(hold)는 버튼이 눌린 것이 곧 의지다. 그래서 같은 ms 에 수락했다([연:RULE-FLR-PROC-QUEUED-ACCEPT](../protocol/10-flr.md#RULE-FLR-PROC-QUEUED-ACCEPT)).
+- 대기열에서 받은 Floor Granted 는 `queued` 에 머물며 사용자 의지를 기다린다(T132 2초). 누르고 말하기(hold)는 버튼이 눌린 것이 곧 의지다. 그래서 같은 ms 에 수락했다([연:RULE-FLR-PROC-QUEUED-ACCEPT](../protocol/10-flr.md#RULE-FLR-PROC-QUEUED-ACCEPT)). 서버사이드 SDK(oxpeer)가 이 의지 표시를 빠뜨려 승계 뒤 음성이 모두 버려진 결함이 있었다([16 §4-4](16_OXPEER.md)).
 - 승계로 준 Floor Granted 는 T20 으로 재전송된다.
 
 ### 3-5. Floor Release — 해제한 사람에게는 Floor Idle 대신 Floor Ack
@@ -219,6 +220,7 @@ sequenceDiagram
 - **사용자는 무엇을 겪나** — A 는 회수 사유 4 를 본다(다시 눌러도 또 뺏긴다). 사유 2(상한 초과 — T9 3초 뒤 다시 누르면 된다)와 처방이 반대라 사유를 가른다.
 - 선점자 B 는 Floor Queue Position Info 를 거절로 읽으면 안 된다. 누르고 말하기면 버튼이 눌린 채라, Floor Granted 가 오는 순간 열린다.
 - 기본 배치에서는 선점이 일어나지 않는다. 모두 우선순위 0 이면 `>` 가 성립하지 않아 전원 같은 대기열이다([연:DEV-FLR-PREEMPT-RELATIVE](../protocol/10-flr.md#DEV-FLR-PREEMPT-RELATIVE)).
+- AI 에이전트 브리지는 이 성질을 쓴다. 에이전트는 늘 우선순위 0 으로 누른다. 사람 앱이 1 이상으로 누르면 에이전트가 선점된다([19 §4-2](19_AGENT_BRIDGE.md)).
 
 ### 4-2. 화자가 해제 없이 사라진다 — T1 만료 · 죽은 사람에게 가는 Floor Taken
 
@@ -253,7 +255,10 @@ sequenceDiagram
 - **무엇이 오가나** — T1 만료 뒤 B 가 Floor Granted 를 받자 SFU 는 죽은 A 에게도 Floor Taken(+A)을 보낸다. Ack 이 안 오니 T21 로 1초마다 두 번 더 보낸다. 세 번째 만료에서 그만둔다(`T21_exhaust`). Ack 유실 재전송이 실측으로 보인 것이다([연:DEV-FLR-TAKEN-ACK](../protocol/10-flr.md#DEV-FLR-TAKEN-ACK)).
 - 그 재전송도 `SEQ` 를 올린다. 그래서 C 가 받은 다음 Floor Idle 은 seq 11 · 12 를 건너뛴 13 이다(16.729).
 - **사용자는 무엇을 겪나** — 듣는 사람은 3.7초부터 4초 동안 **화자 표시는 A 인데 소리가 없다.** 그 4초 동안 다른 사람이 누르면 대기열에 선다.
-- T1 만료 뒤에는 SFU 가 지은 해제 무음 3 프레임이 온다(7.720 · 7.743 · 7.766 · seq 92 · 93 · 94). ts 는 87360 → 279504 로 4.0초만큼 건너뛴다. Floor Idle(7.721)도 그 사이에 온다.
+- **화자 쪽에서 보면** — T1 회수는 화자에게 알리지 않는다([연:RULE-FLR-PROC-TAKEN-IDLE](../protocol/10-flr.md#RULE-FLR-PROC-TAKEN-IDLE) 5 — 원문 성질). 회수 통지(Floor Revoke)는 T2 만료 · 선점 · 권한 비트 회수 셋뿐이다. 이 판의 A 는 이미 사라져서 상관없다.
+  - 살아 있는 화자가 누른 채 4초 넘게 RTP 를 안 보내면 다르다. 화자는 아직 floor 를 쥐었다고 믿는다. 아무도 누르지 않아 floor 가 빈 채 남으면, 그 뒤 보내는 RTP 는 통지 없이 버려진다([연:FLR.S.P.NP_IDLE.rx_RTP_drop](../protocol/10-flr.md#FLR.S.P.NP_IDLE.rx_RTP_drop)). 그사이 다른 사람이 floor 를 잡았으면 송신 위반으로 Floor Revoke 가 온다.
+  - TTS 가 늦는 AI 에이전트가 이 틈에 빠지기 쉽다. 그래서 브리지는 T1 보다 1초 짧은 무음 상한(3초)으로 먼저 Floor Release 한다([19 §4-1](19_AGENT_BRIDGE.md)).
+- T1 만료 뒤 슬롯에는 다음 화자 RTP 까지 아무것도 오지 않는다. 듣는 쪽에 오는 것은 Floor Idle(7.721)뿐이다. 이 회차 서버(`1ef7265`)는 그때 해제 무음 3 프레임을 냈다(7.720 · 7.743 · 7.766 · seq 92 · 93 · 94 · ts 87360 → 279504 로 4.0초만큼 건너뜀). 해제 무음은 20261111 에 걷어냈다 — [08 §3-1](08_SLOT_SPEAKER.md).
 
 
 ### 4-3. 남의 방을 지목하거나 방을 안 적은 요청
@@ -310,13 +315,14 @@ sequenceDiagram
 | Zello Work | 비상 호출 — 5초 카운트다운 뒤 10초 무중단 오디오를 지정 비상 채널로 · 기본은 발신자만 해제(조사 기록 §4-4) | 우선순위 선점(Floor Revoke 사유 4) | 방 안의 누구든 값으로 뺏을 수 있다 | 「무중단 10초」 같은 보장 시간은 계약에 없다 |
 
 
-## 7. 운영에서 보는 법
+## 7. 관측하는 법
 
 | 보고 싶은 것 | 어디서 | 실제 모양(이 회차) |
 |---|---|---|
 | 중재 전이 | 서버 로그 `kind=ev spec=FLR.S.…` — 중재마다 한 줄. `from` · `to` 는 방 전체 상태(IDLE · TAKEN · PREVOKE) | `spec=FLR.S.P.NP_IDLE.rx_REQUEST … room=qa_tourptt_p2 user=tourptt_A floor_sequence=9 mbcp_seq=0 area=FLR … from=IDLE to=TAKEN cause=server_rx`(이 탐침 서버에선 `mbcp_seq` 가 0 — 아래 · 지금은 와이어 `SEQ` 값) |
 | 타이머 만료 | 같은 줄 · `cause=t1` · `t7` · `t8` · `t21` | `spec=FLR.S.G.TAKEN.T1 room=… floor_sequence=18 … from=TAKEN to=IDLE cause=t1` |
 | 지금 화자 · 대기열 · 걸린 타이머 | `GET /admin/rooms/{id}/snapshot` 의 `floor` | `{"state":"IDLE","speaker":null,"queue":[],"timers":[{"name":"T7","at":…}],"first_rtp_at":…,"last_rtp_at":…}` |
+| 발언 기록 보고 | 서버 로그 `kind=diag spec=SV-IMPL-FLR-TALK-REPORT` — 허가마다 그 발언의 `talk` id 로 `report=start` 를 낸다. 그 방의 채팅 공간이 없으면 기록하지 않고 `code=3012` 를 남긴다(발언 기록은 [21](21_TALK_RECORD.md)) | `spec=SV-IMPL-FLR-TALK-REPORT room=qa_tourptt_p2 talk=81330e4c… report=start code=3012 msg="talk not recorded — no space or chat off for this room"`(v1.13 탐침 회차 `tour-v113`) |
 | 버려진 floor 프레임 | `GET /admin/drops` 의 `dc_bad_frame` · `dc_unknown_svc` · `dc_no_room` | 4-3 의 방 없는 요청은 `dc_no_room` 으로 센다(소스 `ops/floor.rs` `dc_in` — 이 회차는 계수를 읽지 않았다) |
 | 클라 쪽 | SDK 전이 라벨 `FLR.C.…` · `ptt.state`(`phase` · `lastEnd` · `lastDeny` · `lastRevoke` · `trusted`) | `FLR.C.PREL.rx_ACK_release` · `FLR.C.QUEUED.intent` |
 

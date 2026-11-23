@@ -2,7 +2,7 @@
 
 ## 13. AUX — 부가 통신
 
-문자(MESSAGE) · 진단(TASK) — 방 상태를 나르지 않는다
+진단(TASK) — 방 상태를 나르지 않는다(문자 MESSAGE 는 CHAT 으로 옮겼다)
 
 ### 13-1. 구조
 
@@ -40,52 +40,9 @@
   버리면 시킨 쪽이 타임아웃까지 기다린다.
 - 기다리는 시간은 **서버 정책**이다. 클라가 정하지 않는다.
 
-<a id="AUX.op.MESSAGE"></a>
-#### 13-1-2. `0x0501 MESSAGE` — 문자   **양방향** · 응답 있음
-단 2 · 출처 §13-1-2
-
-**요청**
-
-| 칸 | 형 | 필수 | 뜻 |
-|---|---|---|---|
-| `room_id` | str | ✔ |  |
-| `content` | str | ✔ |  |
-
-**응답**
-
-| 칸 | 형 | 필수 | 뜻 |
-|---|---|---|---|
-| `msg_id` | str | ✔ | uuid |
-
-**통지 · 받는 꼴**
-
-| 칸 | 형 | 필수 | 뜻 |
-|---|---|---|---|
-| `room_id` | str | ✔ |  |
-| `user_id` | str | ✔ | `user_id` = 보낸 사람 |
-| `content` | str | ✔ |  |
-
-**실패** — `3002` 방에 없음 · `1002` · `1003` `room_id`·`content` 없음
-
-<a id="RULE-AUX-MESSAGE-FORM"></a>**RULE-AUX-MESSAGE-FORM** · 규칙
-
-**형식**
-- 보낼 때 `{ room_id, content }` → 응답 `{ msg_id }` (uuid)
-- 받을 때 `{ room_id, user_id, content }` — `user_id` = 보낸 사람. ★**보낸 사람에게는 에코하지 않는다** — 자기 것은 응답으로 안다(아래)
-
-→ 구조 — [`AUX.op.MESSAGE`](#AUX.op.MESSAGE)
-
-<a id="RULE-AUX-MESSAGE-PROC"></a>**RULE-AUX-MESSAGE-PROC** · 규칙
-
-**절차** — 같은 번호가 양방향이다. **보낸 사람이 자기 것을 알아보는 것은 `pid`** 다.
-
-<a id="RULE-AUX-MESSAGE-FAIL"></a>**RULE-AUX-MESSAGE-FAIL** · 규칙
-
-→ 구조 — [`AUX.op.MESSAGE`](#AUX.op.MESSAGE)
-
 <a id="AUX.op.TASK"></a>
-#### 13-1-3. `0x0601 TASK` — 시켜서 하고 보고한다   **양방향** · 응답 있음
-단 3 · 출처 §13-1-3
+#### 13-1-2. `0x0601 TASK` — 시켜서 하고 보고한다   **양방향** · 응답 있음
+단 3 · 출처 §13-1-2
 
 **요청**
 
@@ -165,9 +122,4 @@
 
 ★**증상** — ACK 을 미루면 **다음 프레임이 못 나간다**(윈도우가 좁다).
 
-#### 13-3-2. §13-1-2 `0x0501 MESSAGE` — 문자   **양방향** · 응답 있음
-
-<a id="R-AUX-MESSAGE-SYMPTOM"></a>**R-AUX-MESSAGE-SYMPTOM** · 근거
-
-★**증상** — `room_id` 를 빼면 `1003`(필수 칸 — 방을 따지기 전에 형을 본다) · 들어가지 않은 방이면 `3002`.
-
+<a id="CHAT"></a>

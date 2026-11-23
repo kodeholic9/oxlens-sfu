@@ -259,14 +259,14 @@ sequenceDiagram
 | 발행자 음소거 | LiveKit — 전달기가 멈춤 사유를 `MUTED`(구독자) · `PUB_MUTED`(발행자)로 가른다(`livekit §9-3`) · 음소거 중 패딩 · 공백 프레임(`livekit §9-4`) / mediasoup — 멈춘 Producer 도 통계는 쌓고 전달만 안 한다(`mediasoup §4-4`) | 서버는 RTP 를 거르지 않고 통지만 · 브라우저가 무음 프레임 | 서버 상태가 하나 적다 | 음소거 중에도 대역을 쓴다 · 공백 프레임으로 디코더를 정리하지 않는다 |
 | 회의 ↔ PTT | LiveKit · mediasoup 에는 floor control 개념이 없다(대장 G4 — 누구나 발행) / Janus audiobridge 는 `mute` 와 `suspend` 를 따로 둔다(`Janus §7-5` — 믹서) | 같은 트랙의 `duplex` 속성 · `TRACK_EVENT{add}` 하나 | 한 방에서 회의와 PTT 를 트랙마다 섞는다 · 재협상 없음 | 시뮬캐스트와 함께 못 쓴다 · 다시 싣기 비용 |
 
-## 7. 운영에서 보는 법
+## 7. 관측하는 법
 
 | 사건 | 서버 로그 줄(이 회차) |
 |---|---|
 | 음소거 · 해제 | `proc=sfu kind=ev spec=CP-OP-TRACK-STATE room=qa_tourattr_p1 seq=5` · hub `spec=CP-OP-TRACK-SET … msg=ok` |
 | 영상 멈춤 · 해제 | `spec=SV-STATE-SUBSCRIBE-STATE user=tourattr_B key=t505c4172c6565045 from=Active to=- cause=unload` · `… from=- to=Created cause=load` · `spec=CP-OP-MLINE-EVENT session=1607a1aa user=tourattr_B arev=4` · hub `spec=CP-OP-SUBSCRIBE-LAYER … msg=ok` — 멈춤에는 방 줄(`TRACK-STATE` · `TRACK-EVENT`)이 없다 |
 | 회의 ↔ PTT | `spec=CP-OP-TRACK-EVENT room=qa_tourattr_p1 seq=7` · 구독자마다 `cause=unload` / `cause=load` · `spec=CP-OP-MLINE-EVENT … arev=6` · hub `spec=CP-OP-TRACK-SET … msg=ok` |
-| m-line 이 다시 열림 | `spec=SV-STATE-SUBSCRIBE-STATE user=tourattr_B key=t505c4172c6565045 from=Created to=Active cause=ready` |
+| m-line 이 다시 열림 | `spec=SV-STATE-SUBSCRIBE-STATE user=tourattr_B key=t505c4172c6565045 from=Created to=Active cause=ready` · 그 `READY` 로 발행자에게 키프레임을 청한 판단 `spec=SV-IMPL-RTCP-TERMINATE user=tourattr_A … in.go=send in.why=ready in.key_age_ms=3651 msg="pli decided"`(v1.13 탐침 회차 `tour-v113` — `in.key_age_ms` 는 그 층 마지막 키프레임이 온 뒤 지난 시간) |
 | 거절 | `spec=CP-CODE-FIELD-CONFLICT … op=TRACK_SET msg="muted xor duplex"` 꼴 |
 | m-line 의 재작성 상태 | `GET /admin/users/{user}/media` 의 `rewrite`(`switches` · `seq_off`) — 다시 싣기마다 `switches` 가 하나씩 오른다(이 회차 2) |
 

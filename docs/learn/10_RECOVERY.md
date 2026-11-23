@@ -1,8 +1,8 @@
 # 10. 끊김과 복구 — 끊긴 층만 고친다
 
 > author: kodeholic (powered by Claude) · created: 2026-11-09.
-> ★**대조한 커밋** — 서버 `oxlens-sfu` `1ef7265` · SDK `oxlens-sdk-web` `de8c4a9`(+탐침) · 2층 `oxlens-labs` `a68d2de` · oxpeer `740f172`
-> ★**실측 회차** — 3층 탐침 `TOUR-10` 한 회차 · 2층 시나리오 `peer_recorder_*` · `peer_agent_*` · `adv_idle_survives` 한 회차씩. 값은 돌릴 때마다 바뀌고 차례 · 모양은 같다.
+> ★**대조한 커밋** — 서버 `oxlens-sfu` `1ef7265` · SDK `oxlens-sdk-web` `de8c4a9`(+탐침) · 2층 `oxlens-labs` `a68d2de` · oxpeer `740f172` · §4-5 는 서버 `82d1bd5`(고치기 전) · `6dffb4d`(고친 뒤)
+> ★**실측 회차** — 3층 탐침 `TOUR-10` 한 회차 · 2층 시나리오 `peer_recorder_*` · `peer_agent_*` · `adv_idle_survives` 한 회차씩 · §4-5 는 미디어 경로 5초 끊김 시험(판 셋씩). 값은 돌릴 때마다 바뀌고 차례 · 모양은 같다.
 
 ## 1. 30초 요약
 
@@ -22,6 +22,7 @@ flowchart TD
 - **복구 단계는 셋이다.** 세션 재개(`RESUME`) · ICE restart · 재연결(rebuild — 새 PeerConnection)이다.
 - **실측 값** — WS 만 끊기면 왕복 한 번이다(끊김 → 재개 완료 9~10ms). 35초 얼었다 깨면 250ms 다. 재개 창 밖이면 새 세션과 재연결이다(0.1~0.9초, 대부분 일부러 흩어 늦춘 시간). 유닛이 죽으면 그 서버의 방을 잃는다(`3001`).
 - **무발화는 끊김이 아니다.** 35초 동안 한 패킷도 안 보낸 구독자가 정리(reclaim)되지 않았다(⑦). 생존은 미디어가 아니라 STUN · 하트비트가 붙든다.
+- **망이 돌아오는 순간도 고장 날 수 있다**(§4-5). 서버 → 구독자 방향이 5초 끊겼다 돌아오면 구독자는 빈 seq 약 1,000 개를 NACK(잃은 패킷 알림)한다. 옛 서버는 그중 나이 2초 안의 것 수백 개를 받은 즉시 한꺼번에 RTX(재전송)로 쏘았다. 약 0.3초에 31.5 Mbps 였다. 5 Mbps 병목이 84% 를 버렸고, 손실 기반 대역 추정이 무너져 720p 가 360p · 180p 로 내려갔다. 20261123 부터 mediasoup 처럼 흘려 보낸다(10ms 마다 2개). 끊김 뒤 재전송이 1,006 개에서 6 ~ 10 개로, 끊김 뒤 정지가 6.3초에서 5.1초로 줄었다. 5.1초는 끊김 자체이고 LiveKit · mediasoup 과 같다. 끊김 관측 자체 때문에 한 단계(720p → 360p) 내려가는 것은 아직 남았다.
 
 ## 2. 등장인물 · 값
 
@@ -272,6 +273,11 @@ sequenceDiagram
 - **고친 내용(20261109 · SDK `de8c4a9`)** — 규격 산문은 `online` 을 방아쇠로 들었다. 그런데 생성 상태기 원천에 그 입구가 없었고 SDK 리스너도 0 이었다. 원천에 입구 `LINK.C.OK.online` · `LINK.C.any.online_absorbed` 를 더했다. SDK 는 `connect()` 때 `online` 리스너를 달고 `close()` 때 뗀다. oxpeer 에도 같은 입구가 생성됐다. 다만 부르는 곳이 없다(브라우저 사건이라서).
 - **확인한 것** — 둘뿐이다. SDK 1층 시험 `SD-ENTRY-LINK-ONLINE` 이 두 갈래를 본다. ①쉬던 연결 → WS 점검 → 재시작. ②복구 중 → 흡수. 리스너를 빼면 빨강이다. 규격 모형 검증 판도 이 입구(`LINK.C.OK.online` · `LINK.C.any.online_absorbed`)를 지난다. 3층 탐침은 이 입구를 밟지 않는다.
 
+### 4-5. 망이 돌아오는 순간 — 재전송이 한꺼번에 몰려 화질이 내려간다(20261123 고침 · 지금 실측)
+
+
+앞 절들은 신호 · 세션이 끊긴 이야기였다. 이 절은 미디어 경로만 끊겼다 돌아오는 경우다. 서버에서 구독자로 가는 방향을 5초 끊었다 돌려도, 끊긴 동안 구독자가 보낸 NACK 은 서버에 닿는다. 옛 서버는 NACK 을 받은 즉시 그 목록을 다 재전송해, 망이 돌아오는 순간 1,000 개 남짓이 한꺼번에 몰렸다. 그 손실이 손실 기반 대역 추정을 무너뜨려 레이어가 l 까지 내려갔다. 지금 서버는 NACK 의 seq 를 m-line 마다 대기줄에 넣고(이미 대기 중인 seq 는 다시 안 넣는다) RTCP 차례(10ms)마다 m-line 마다 2개까지 흘려 보낸다. RTX 게이트 · 캐시 · 키프레임 기다림 · 나이 상한은 꺼낼 때 본다. 고친 뒤 끊김 직후 재전송은 판마다 6 ~ 10 개로 줄었고, 덧붙던 정지가 사라졌다(6.3 → 5.1초). 끊김 직후 h → m 한 단계 내림은 남아 있다.
+
 ## 5. 왜 이 모양인가
 
 - **복구는 세 단계다**([연:RULE-SES-RESUME-SIGNAL-ONLY](../protocol/03-ses.md#RULE-SES-RESUME-SIGNAL-ONLY)) — 세션 재개(`RESUME`) · ICE restart · 재연결(rebuild).
@@ -304,8 +310,12 @@ sequenceDiagram
 | str0m(`str0m §8-1`) | ICE 에 `Failed` 가 일부러 없다 — 포기 판단은 상위 몫 | 클라는 사다리로 · 서버는 재개 창(세션) · 쌍 만료(트랜스포트)로 판단 | 포기 시각이 계약 값으로 정해진다 | 그 값이 틀리면 둘 다 고쳐야 한다([연:COND-SES-WINDOW-OVER-BACKOFF](../protocol/03-ses.md#COND-SES-WINDOW-OVER-BACKOFF)) |
 | Jitsi JVB(`JVB §9`) | make-before-break — ICE agent 둘을 나란히 · 전환 뒤 3초 옛 agent 유지 · 새 agent 대기 20초 | 트랜스포트 객체 하나가 옛 · 새 ufrag 를 함께 받다 새 것으로 검사가 오면 옛 것을 내린다 | 소켓 · 객체 하나로 겹친다 · ②에서 234ms | ICE 자격 벌마다 최대 둘 — 그 사이 또 오면 대기분을 바꾼다 |
 | Mumble(`Mumble §1-3`) | 서버 인증서 지문마다 UDP/TCP 판정을 기억해 다음 접속에 복원 | 기억하지 않는다 — 매 접속 백지 | 상태가 없다 | 첫 미디어까지 시간을 아끼지 못한다 |
+| mediasoup 3.32.2(`worker/src/RTC/RTP/RtpStreamSend.cpp:21-23` · `:160-200` · `:545-640`) | NACK 의 seq 를 스트림마다 대기줄에 넣는다(중복 안 넣음). 타이머가 안 돌면 곧바로 꺼내고, 그 뒤 10ms 마다 2개씩. 꺼낼 때 버퍼 나이 · RTT 안 재전송을 보고 거른 것은 셈 밖 | 같은 꼴(20261123 · §4-5) — m-line 마다 대기줄 · 워커 RTCP 차례 10ms · 나이는 RTP ts 차 2초 · RTT 대신 같은 seq 100ms 간격 | 끊겼다 돌아온 구독자의 몰린 재전송이 병목을 넘치지 않는다 | 몰린 재전송은 초당 200 개로만 나간다(평소 손실 한두 개는 그대로 곧바로) |
+| LiveKit 1.13.11(`pkg/config/config.go:378` `UseSendSideBWE: false`) | 기본이 REMB — 구독자 브라우저가 받는 쪽에서 추정해 알린다. 끊긴 구간의 손실이 서버 추정의 입력이 아니다 | 서버가 구독 트랜스포트마다 TWCC 로 추정(지연 기울기 + 손실 기반) | 탐색 · 패딩 · 레이어를 서버가 직접 쥔다 | 끊김 관측이 손실 기반 추정에 들어가 끊김 직후 한 레이어 내려간다(§4-5 ⑧ · 선례 없음) |
 
-## 7. 운영에서 보는 법
+마지막 두 행은 선행 사례 대장이 아니라 20261123 원인 규명 때 저쪽 소스를 읽은 것이다.
+
+## 7. 관측하는 법
 
 | 사건 | 줄(실측) | 어디 |
 |---|---|---|
@@ -317,6 +327,13 @@ sequenceDiagram
 | ICE restart | `SV-IMPL-LINK-ICE-RESTART msg="ice restart issued …"` → `"ufrag promoted …"` · `cause=ice_restart_checked` | SFU |
 | 유닛 죽음 뒤 | `SV.rooms … cause=room_dropped` · `CP-CODE-PEER-NOT-FOUND op=ICE_RESTART` · `CP-CODE-ROOM-NOT-FOUND op=ROOM_JOIN` | hub |
 | 재연결 | 같은 사용자의 `SES.S.bind_new`(새 세션 지문) → `CP-OP-ROOM-JOIN` | hub |
+| 끊김 뒤 재전송 몰림 | `kind=stat … user=<구독자> … retransmitted_packets_sent=<누계> nack_count=… bwe_estimate_bps=…`(5초마다) — 끊김 직후 한 칸에 고치기 전 386 ~ 1,115 · 고친 뒤 6 ~ 10 올랐다 | SFU |
+| 재전송을 거른 사유 | 계수 `rtx_old`(나이 2초 넘음) · `rtx_wait_key`(구독자 PLI 뒤 키프레임 기다림) · `rtx_gate`(레이어 · 화자 전환 앞 seq) · `rtx_repeat`(seq 마다 상한 · 100ms 안 다시 청함) · `rtx_cache_miss` | hub `/admin/drops` |
+| 손실로 레이어가 내려감 | `SV-RULE-SIM-TICK … in.to=m … in.target=<그때 추정> … in.reason=no_room in.by=loss … msg="auto layer → m"` · 오를 때 `msg="padding to the target on"` | SFU |
+| 구독자가 본 것 | getStats 영상 `inbound-rtp` 의 `totalFreezesDuration`(리그 칸 `freezeDur`) · `framesDecoded` 가 멈춘 구간 · `frameHeight` · `retransmittedPacketsReceived`(리그 칸 `rtxRecv`) | 브라우저 |
+
+- **끊김 뒤 재전송은 서버 stat 으로 센다.** 브라우저의 `retransmittedPacketsReceived` 에는 RTX 로 실어 보내는 패딩 · 탐색 패킷도 섞이는 것으로 보인다. 고친 뒤 판 1 은 서버 재전송이 6 개인데, 브라우저 칸은 서버가 패딩을 켠 40.18 ~ 43.94초 무렵 184(40초)에서 1,476(44초)으로 약 1,300 개 늘었다(추론 — 패킷 단위로 가르지 않았다).
+- **판단기 안을 볼 때** — 손실 기반 추정의 관측마다 값(`avg_loss` · 상한 · acked)은 지금 로그에 없다. §4-5 의 `XDBG-LOSS` 는 원인을 찾느라 잠시 넣은 줄이다.
 
 - SDK 쪽은 전이 라벨로 보인다 — `SES.C.any.drop_carry` · `SES.C.any.Backoff` · `SES.C.RESUMING.bind_same` · `SES.C.RESUMING.resume_ok` · `ROOM.C.JOINED.resume_snapshot` · `LINK.C.any.table_carried_old` · `LINK.C.OK.online` · `LINK.C.any.online_absorbed`. 앱 이벤트는 `session { state: 'resuming', recovering: true }` → `active` 다.
 - 한 사용자의 끊김 · 복구를 시간 차례로 모아 보는 것(`/admin/history` · `oxadmin history <user>`)과 세션 지문은 [17 장](17_OPERATIONS.md)에 있다.
@@ -332,6 +349,8 @@ sequenceDiagram
 | 브라우저 `online` 입구 | — | `src/domain/ses/core.ts` `onOnline`(`connect` 에 달고 `close` 에 뗀다) → `src/domain/link/core.ts` `online` · oxpeer `src/generated/link_client.rs` `online`(부르는 곳 없음) | [연:RULE-LINK-RECOVERY-WS-FIRST](../protocol/09-link.md#RULE-LINK-RECOVERY-WS-FIRST) |
 | 재연결 · 분산 | `oxhubd/src/ses/mod.rs` `cut` · `dispose` · `room_dropped` | `src/domain/gen/sdk_defaults.ts`(`massJitterMs` 등) · oxpeer `src/core/ses.rs` | [연:RULE-SES-REBUILD](../protocol/03-ses.md#RULE-SES-REBUILD) · [연:RULE-LINK-RECOVERY-REBUILD](../protocol/09-link.md#RULE-LINK-RECOVERY-REBUILD) · [연:RULE-SES-REBUILD-JITTER](../protocol/03-ses.md#RULE-SES-REBUILD-JITTER) |
 | 운영 표면 | `oxhubd/src/ops/http.rs`(`/admin/users/:user/cut` · `/admin/drops`) · `ops/admin.rs` `drops` | — | — |
+| 하향 재전송 흘림 | `oxsfud/src/rtcp/nack.rs` `Ledger::enqueue` · `drain` · `step`(수치 `PER_TURN` 2 · `TURN_MS` 10 · `MAX_AGE_MS` 2,000 · `MAX_PER_SEQ` 3 · `REPEAT_GAP_MS` 100) · `rtcp/mod.rs` `on_nack` · `rtx_turn`(`tick` 에서) · `rtx_source`(RTX 게이트 · 캐시 · 나이) · `drain_rtx` · 계수 이름 `ops/mod.rs` · stat `ops/timers.rs` `retransmitted_packets_sent` · 1층 `tests/vectors.rs` `rtcp_nack_drain_vectors` | — | — 「RTX 는 흘려 보낸다」 · 증상 「대기줄 없이 …」 · 원천 `spec/server/areas/rtcp/behavior/nack.ts`(`NACK_LEDGER` · `NackLedger.enqueue` · `drain`) · 벡터 `rtcp.json` `nack_drain` · 시험 단위 `S-sym-RULE-RTCP-NACK-DOWN-4` |
+| 손실 기반 추정 | `oxsfud/src/sim/bwe.rs` `LossController` — `observe`(관측 · 상한) · `average_loss`(깎은 평균 · 중앙값 두 배 갈래) · `median_rate` · `candidates` · `objective` · `calc_lower`(acked 바닥) · 수치 `LOSS_*` | — | — 손실 기반 추정 · 원천 `spec/server/areas/sim/behavior/lossbased.ts`(SIM.model.LossController · SIM.model.LOSS) |
 
 ## 9. 스스로 확인하는 질문
 
@@ -358,4 +377,24 @@ sequenceDiagram
 <details><summary>5. (깨지는 길) ①에서 망이 돌아온 뒤 SDK 가 1.47초를 기다렸다. 브라우저 `online` 입구가 이 기다림을 줄이나?</summary>
 
 줄이지 않는다. 그 기다림은 세션 층 재접속 사다리의 다음 칸이다. 이 탐침은 중계에서 TCP 를 닫았을 뿐이라 브라우저에 `online` 사건이 나지 않는다. `online` 입구는 PeerConnection 층의 것이다. 망이 바뀌어 옛 TCP 가 반쯤 열린 채 남는 고장을 막는다 — ICE 흔들림 기다림 없이 바로 WS 를 점검한다(§4-4). 사다리를 당기는 방아쇠는 규격에 없다.
+</details>
+
+<details><summary>6. (깨지는 길) 5초 끊김 뒤 구독자가 NACK 한 약 1,000 개 seq 가운데 재전송할 값어치가 있는 것은? 서버는 왜 그것이 이미 갔다고 여겼나?</summary>
+
+거의 없다. 나이 2초가 넘은 것(순서 진단 판에서 985 개 중 599 개)은 화면이 이미 지나갔다. 2초 안 386 개 가운데 끊긴 동안의 PLI 에 답한 키프레임이 섞여 있다(13번째 · 그 앞에 델타 12 개). 나머지는 2초 가까이 묵은 델타 프레임이다. 서버의 키프레임 기다림은 그 키프레임을 「보낼 때」 풀린다. 33.10 에 보냈지만 망이 끊겨 있었다. 보냄은 도착이 아닌데 서버는 그것을 모른다. 그래서 돌아온 순간의 NACK 이 기다림에 걸리지 않았다(§4-5 ②).
+</details>
+
+<details><summary>7. (깨지는 길) 끊김 관측(손실 94%)은 평균 손실에서 빠졌는데 몰림 관측(84%)은 왜 남았나? 남으면 추정은 어디에 묶이고 왜 레이어가 계속 내려가나?</summary>
+
+깎은 평균은 손실 비율이 가장 큰 관측 하나와 가장 작은 관측 하나만 뺀다(가장 큰 것이 중앙값 두 배 넘게 빨리 보낸 관측이면 둘 다 안 뺀다). 가장 큰 것은 끊김 관측이었고, 평소 송신 속도(1.82M)라 빠졌다. 몰림 관측은 둘째라 남았다. 가장 컸더라도 송신 속도 35.9M 가 중앙값 두 배를 넘어 빼지 않는다. 평균 손실 0.675 면 상한이 160k 로 하한(acked)보다 낮아져 추정 = acked 가 된다. acked 는 지금 흐르는 양이라 지금 레이어 값보다 조금 낮다. 그래서 한 단계 내리고, 내리면 흐르는 양이 줄어 acked 가 또 내려간다. 몰림 관측이 15칸 창을 나갈 때까지 이어진다(§4-5 ④).
+</details>
+
+<details><summary>8. 흘림(10ms 마다 2개)은 옛 「구독자당 3초에 200회」 예산과 무엇이 다른가? 평소 손실에는 무엇이 달라지나?</summary>
+
+예산은 개수로 자른다. 몰린 NACK 의 앞쪽(오래된) seq 가 예산을 먹어 끊김 직전 키프레임이 못 나갔다(다시 움직이기까지 약 4초). 흘림은 버리지 않고 늦춘다. 묵은 것은 꺼낼 때 나이로 거르고, 거른 것은 2개 셈에 넣지 않는다. 그래서 묵은 seq 가 뒤의 쓸모 있는 패킷 몫을 먹지 않는다. 이 회차에서 흘림이 준 것은 「몰림이 없으니 몰림 버림도 없다」였다(키프레임은 레이어 전환 뒤 게이트에 걸려 재전송되지 않은 것으로 본다). 평소 NACK(seq 한두 개)은 대기줄이 비어 있어 받은 즉시 다 나가니 달라지는 것이 없다(§4-5 ⑥).
+</details>
+
+<details><summary>9. (관측) 20261121 의 큐 50 → 100 A/B 는 왜 「몰린 재전송 버림」 가설을 가르지 못했나?</summary>
+
+몰림이 약 1,000 패킷이었다. 큐 100 으로도 못 받는다. 두 조건 모두 몰림 대부분이 버려졌으니 결과가 갈릴 수 없었다. 가설을 가르려면 손잡이가 그 결과를 바꿀 만큼 움직이는지 먼저 산수로 본다. 원인은 판단 입력을 찍는 진단 줄과 그 기능만 끄는 A/B(재전송 끔)로 확정했다(§4-5 ⑤).
 </details>

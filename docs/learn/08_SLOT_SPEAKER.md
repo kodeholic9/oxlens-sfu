@@ -11,7 +11,6 @@ flowchart LR
   A["A 업링크<br/>SSRC 2684354561"] --> G{"전달 게이트 prefan_gate<br/>지금 화자인가"}
   B["B 업링크<br/>SSRC 2684354562"] --> G
   G -- "화자만 통과" --> SLOT["PTT 슬롯 audio · video<br/>speaker = 지금 화자"]
-  SRV["SFU 가 짓는 무음<br/>예열 · 해제 3 프레임"] --> SLOT
   SLOT --> RW["듣는 사람마다 RTP 헤더 재작성<br/>seq · ts 를 이어 붙임"]
   RW --> L["듣는 쪽 m-line 하나<br/>SSRC 4028492266 그대로"]
 ```
@@ -33,7 +32,7 @@ flowchart LR
 | 잰 것 | 값 |
 |---|---|
 | 화자 전환 동안 듣는 쪽 오디오 SSRC(`ptt_voice_seam` botC) | `4028492266` 하나 · seq 0 → 187 구멍 없음 |
-| 앞 화자 마지막 패킷 → 해제 무음 3 → 예열 1 → 새 화자 첫 패킷 | 3.725 → 3.738 · 3.760 · 3.782 → 3.838 → 3.855 |
+| 앞 화자 마지막 패킷 → 새 화자 첫 패킷 | 3.725 → 3.855(이 회차는 사이에 서버 무음 4 프레임 — §3-1) |
 | CSRC — `csrc_ptt_av` | A 오디오 180 · 비디오 181 · B 오디오 182 · 비디오 183 |
 | 말할 방 바꾸기(같은 SFU) `AFFILIATION` 왕복 | 12.245 → 12.251 = **6ms** |
 | 새 화자 첫 키프레임까지 듣는 쪽 영상 공백(`ptt_stale_nack` · 앞 화자 마지막 영상부터) | 3.962 → 6.496 = **2.53초** |
@@ -47,9 +46,9 @@ flowchart LR
 | 경과 | 보낸 쪽 | 듣는 쪽 seq | ts | 크기 | 무엇 |
 |---|---|---|---|---|---|
 | 3.725 | A seq 91 | 92 | 88320 | 51 | A 의 마지막 소리 |
-| 3.738 · 3.760 · 3.782 | SFU | 93 · 94 · 95 | 89280 · 90240 · 91200 | 31 | 해제 무음 3 프레임(opus 무음 `f8 ff fe`) |
-| 3.838 | SFU | 96 | 93792 | 31 | 예열 — Floor Idle 에서 Floor Granted 로 갈 때 |
 | 3.855 | B seq 0 | 97 | 94752 | 51 | B 의 첫 소리 |
+
+듣는 쪽 seq 93 ~ 96 은 이 회차 서버가 지은 무음이다(아래 「걷어낸 것」).
 
 ```mermaid
 sequenceDiagram
@@ -60,20 +59,23 @@ sequenceDiagram
   A->>S: 3.724 RTP seq 91 마지막
   S->>C: 3.725 seq 92 · SSRC 4028492266
   A->>S: 3.735 DC Floor Release
-  S->>C: 3.738 Floor Idle · 해제 무음 seq 93 · 94 · 95
+  S->>C: 3.738 Floor Idle
   B->>S: 3.834 DC Floor Request
-  S->>C: 3.838 Floor Taken 화자 B · 예열 seq 96
+  S->>C: 3.838 Floor Taken 화자 B
   B->>S: 3.854 RTP seq 0
-  S->>C: 3.855 seq 97 — 예열은 여기서 멈춘다
+  S->>C: 3.855 seq 97 · SSRC 4028492266
 ```
 
-- seq 는 「마지막」 바로 뒤로 구멍 없이 잇는다. ts 는 지난 시간만큼 건너뛴다.
-- 받은 시각으로 3.782 → 3.838 은 56ms 다. ts 는 91200 → 93792 = 2592 틱(54ms × 48)만큼 건너뛰었다. 두 값이 거의 같다.
+- seq 는 앞 패킷 바로 뒤로 구멍 없이 잇는다. 이 회차의 92 → 97 사이 넷은 아래의 걷어낸 서버 무음이다. ts 는 지난 시간만큼 건너뛴다.
+- 받은 시각으로 3.725 → 3.855 는 130ms 다. ts 는 88320 → 94752 = 6432 틱(134ms × 48)만큼 건너뛰었다. 두 값이 거의 같다.
 - 듣는 브라우저 입장에서는 한 사람이 잠깐 쉬었다 다시 말한 것과 같다. 오프셋 하나로 잇는 RTP 헤더 재작성은 [04](04_PACKET_PATH.md) 몫이다([연:RULE-LINK-SOURCE-SWITCH](../protocol/09-link.md#RULE-LINK-SOURCE-SWITCH)).
-- **해제 무음 3 프레임**은 해제한 순간 지터 버퍼를 조용히 닫는다.
-- **예열**은 Floor Granted 순간부터 화자의 첫 RTP 가 게이트를 지날 때까지 20ms 마다 무음을 넣어 버퍼를 데운다(최대 250 프레임). 여기서는 B 의 첫 RTP 가 Floor Granted 18ms 뒤에 와서(3.836 → 3.854) 한 프레임으로 끝났다.
-- 둘 다 **화자 본인에게는 안 보낸다.** 자기 소리가 되돌아오지 않게 한다.
-- 예열은 **Floor Idle 에서 Floor Granted 로 갈 때만**이다. 대기열 승계([07 §3-4](07_FLOOR.md))는 슬롯이 이미 흐르고 있다. 그래서 예열 없이 새 화자 RTP 로 잇는다.
+- ★**슬롯 줄로 나가는 것은 화자 RTP 뿐이다.** SFU 는 슬롯에 자기가 지은 프레임을 내지 않는다. Floor Idle 에서 Floor Granted 로 가든, 대기열 승계([07 §3-4](07_FLOOR.md))든 같다.
+- **걷어낸 것 — 예열 · 해제 무음(20261111).** 이 회차 서버(`1ef7265`)는 위 두 줄 사이 seq 93 ~ 96 에 31바이트 opus 무음(`f8 ff fe`) 넷을 냈다.
+  - 해제 무음 — 반환(Floor Idle 진입) 때 3 프레임(3.738 · 3.760 · 3.782 · seq 93 · 94 · 95).
+  - 예열 — Floor Idle 에서 Floor Granted 로 갈 때, 화자의 첫 RTP 전까지 20ms 마다 무음(최대 250 프레임). 여기서는 B 의 첫 RTP 가 Floor Granted 18ms 뒤(3.836 → 3.854)에 와서 한 프레임(3.838 · seq 96)으로 끝났다.
+  - 왜 걷어냈나 — 서버 프레임은 화자 RTP 와 같은 다운링크 SSRC · seq 공간을 나눠 쓴다. 그리고 제어 링으로 들어가 워커의 링 차례에 따라 화자 패킷 사이에 끼었다. 승계 이음매에 서버 무음이 끼었다 빠졌다 했다(20261022). 예열 첫 프레임이 화자 첫 RTP 뒤로 밀렸다. 결합 저장 차례 때문에 예열 한 프레임이 화자 뒤에 나갈 수 있었다. 끝난 예열 태스크가 새 결합의 예열을 지웠다. 막으려고 쌓은 장치(적용 차례 판단 · 화자 빼기 · 승계 예외 · 예열 표지)가 다시 결함을 낳았다.
+  - 효과는 잰 적이 없다. 첫 음절 지연을 40 ~ 150ms 줄인다는 것은 추정(20260623)뿐이었다. 한 번에 다섯 장 보내기는 지터 버퍼를 420ms 로 부풀렸다(20260624).
+  - 다시 넣는 조건 — 진짜 NetEQ 하네스(neteq_rtpplay)로 Idle 뒤 첫 발화의 첫 음절 재생 시각을 예열 있음 · 없음으로 잰 수치가 먼저다.
 - 슬롯 트랙 둘은 방이 생길 때 생기고 방이 없어질 때까지 남는다. 입장 응답부터 목록에 있다. half-duplex 발행이나 화자가 슬롯을 만들거나 지우지 않는다([연:RULE-TRK-SLOT-LIFE](../protocol/06-trk.md#RULE-TRK-SLOT-LIFE)). half-duplex 발행 트랙은 트랙 목록에 안 오른다.
 
 ### 3-2. 화자 아닌 사람의 소리는 전달 게이트에서 버린다
@@ -90,21 +92,19 @@ CSRC(contributing source)는 RFC 3550 §5.1 의 칸이다. 「이 패킷의 내�
 2층 `csrc_ptt_av` — botC 만 `BIND` 에 `"source_tag": true` 를 실었다. botC 의 오디오 슬롯 m-line(SSRC `4112507195` 하나)은 이렇다.
 
 ```
- 1.725 seq 0    csrc []     len 31   ← 예열(SFU 가 지음)
  1.745 seq 1    csrc [180]  len 55   ← A 오디오
  5.716 seq 186  csrc [180]  len 55   ← A 마지막
- 5.724 seq 187  csrc []     len 31   ← 해제 무음 ×3(187 · 188 · 189)
- 6.228 seq 190  csrc []     len 31   ← 예열
  6.228 seq 191  csrc [182]  len 55   ← B 오디오
-10.226 seq 378  csrc []     len 31   ← 해제 무음 ×3(378 · 379 · 380)
 ```
+
+이 회차 서버(`1ef7265`)는 seq 0 · 187 ~ 190 · 378 ~ 380 에 CSRC 없는 31바이트 무음(예열 · 해제 무음)을 더 냈다. 지금은 걷어냈다(§3-1).
 
 비디오 슬롯 m-line(SSRC `2464669017`)도 같다. A 구간 CSRC 181 · B 구간 183 이고, seq 0 → 695 에 구멍이 없다.
 
 - 번호와 사람의 대응은 Floor Taken 의 `SOURCES` 가 준다. 화자 A 의 Floor Taken 이 `[181, 180]`, B 의 것이 `[183, 182]` 를 실었다([연:RULE-FLR-SLOT-SOURCES](../protocol/10-flr.md#RULE-FLR-SLOT-SOURCES)). half-duplex 발행은 트랙 목록에 없어 거기서 찾을 수 없기 때문이다.
 - full-duplex 트랙은 트랙 목록 항목의 `csrc` 가 같은 값이다. `csrc_conf_av` 에서 `TRACK_EVENT` 의 `csrc` 20 · 21 · 22 · 23 이 패킷 CSRC 와 같았다([연:RULE-TRK-CSRC](../protocol/06-trk.md#RULE-TRK-CSRC)).
 - ★**패킷 경계는 통지가 아니라 CSRC 가 정한다.** 통지와 미디어는 순서 약속이 없다. 받는 쪽은 통지로 「번호 → 사람」만 배운다. 어느 패킷이 누구 것인지는 패킷의 CSRC 로 가른다.
-- **CSRC 가 없는 패킷은 SFU 가 지은 것이다**(예열 · 해제 무음).
+- **CSRC 가 없는 패킷은 SFU 가 지은 것이다.** 지금은 대역 probe 패딩(RTX · 페이로드 없음)뿐이다. 어느 발행 트랙에도 넣지 않는다. SFU 는 미디어 프레임을 짓지 않는다([연:RULE-TRK-CSRC](../protocol/06-trk.md#RULE-TRK-CSRC)).
 - 켜지 않은 PeerConnection 은 늘 CC = 0 이다. 같은 회차의 botA · botB 는 CSRC 를 한 번도 받지 않았다.
 - 지금 브라우저 SDK 는 켜지 않는다(3층 `BIND` 응답 `"source_tag":false`). 켜는 쪽은 녹음 · 녹화 · 에이전트(서버사이드 SDK — [16](16_OXPEER.md))다([연:RULE-SES-SOURCE-TAG-SESSION](../protocol/03-ses.md#RULE-SES-SOURCE-TAG-SESSION)).
 - CSRC 값은 **그 SFU 안에서** 트랙마다 다르고, 트랙이 사는 동안 같다. 같은 3층 회차에서 B · C · A 의 half-duplex 트랙이 23 · 24 · 25 를 받았다. 방이 달라도 SFU 가 하나라 겹치지 않는다.
@@ -189,7 +189,7 @@ sequenceDiagram
 - **무엇이 깨졌나** — 영상은 새 출처의 키프레임부터 싣는다. 델타 프레임은 앞 화자 그림 위에 그려져 깨지기 때문이다. 새 화자가 키프레임을 늦게 내면 그동안 듣는 쪽 영상 m-line 은 비어 있다.
 - **누가 먼저 아나** — SFU 다. Floor Granted 순간 화자 영상에 PLI 묶음(0 · 500 · 1,500ms)을 건다. 키프레임이 아닌 패킷은 `await_keyframe` 로 세며 버리고, 버릴 때마다 PLI 를 다시 요청한다.
 - 봇에 닿은 PLI 는 4.473 · 5.480 · 6.481 로 1초 간격이었다. 묶음과 재요청이 PLI 스로틀(이 회차 설정 `pli_throttle_high_ms=1000`)에 걸려 1초에 하나씩 나갔다. 스로틀은 [04](04_PACKET_PATH.md).
-- **무엇이 오가나** — 오디오 m-line 은 4.474 예열 한 프레임 뒤 4.479 부터 B 의 소리를 그대로 받는다. 영상 m-line 은 3.962 → 6.496 동안 패킷이 없다.
+- **무엇이 오가나** — 오디오 m-line 은 4.479 부터 B 의 소리를 그대로 받는다(이 회차는 그 앞 4.474 에 지금은 걷어낸 예열 한 프레임이 있었다). 영상 m-line 은 3.962 → 6.496 동안 패킷이 없다.
 - 다시 올 때 seq 는 57 → 58 로 구멍이 없다. ts 는 지난 시간(2.53초 = 227970 틱)만큼 건너뛴다.
 - **2.53초의 기준점** — 듣는 사람이 겪는 공백이라 앞 화자의 마지막 영상(3.962)부터 잰다. RTP 헤더 재작성 쪽에서 새 화자의 첫 영상 패킷(4.477)부터 재면 2.02초다. [04 §4-3](04_PACKET_PATH.md) 은 이쪽으로 잰다. 같은 창이다.
 - **사용자는 무엇을 겪나** — 새 화자의 목소리는 바로 들리는데 그림은 2.5초 늦게 나온다. 정상 브라우저는 PLI 에 바로 키프레임을 낸다. 그러면 이 창은 왕복 하나 수준이다. 이 시나리오는 그 창을 일부러 넓혀 다음 깨짐을 겨눈다.
@@ -240,7 +240,7 @@ Y SFU(node-a) 로그에 botZ 의 발행 트랜스포트가 서고, Floor Ack 이
 
 > ★**우리만의 것 — PTT 슬롯(화자가 바뀌어도 m-line 하나)**
 > - **선택 배경** — 무전 방은 화자가 바뀌는 것이 본업이다. 화자마다 m-line 을 열면 전환마다 m-line 이 생기고 SDP 재협상이 돈다. 그래서 방에 오디오 · 비디오 슬롯 하나씩을 두고 SFU 가 출처를 바꿔 끼운다. m-line 돌려쓰기의 선례는 Jitsi 의 SSRC 다시 쓰기다([연:R-SUB-FILL-WHY](../protocol/08-sub.md#R-SUB-FILL-WHY)).
-> - **얻은 것** — 화자 전환에 시그널링 0 · 재협상 0. `ptt_voice_seam` 에서 앞 화자 마지막 → 새 화자 첫 패킷이 SSRC 하나 · seq 92 → 97 로 구멍 없이 이어졌다. 3층 TOUR-07 에서 L 은 두 화자를 mid 32 하나로 214 패킷 받았다([07](07_FLOOR.md)). 듣는 쪽 지터 버퍼도 하나라 화자마다 새로 데우지 않는다.
+> - **얻은 것** — 화자 전환에 시그널링 0 · 재협상 0. `ptt_voice_seam` 에서 앞 화자 마지막 → 새 화자 첫 패킷이 SSRC 하나 · 구멍 없는 seq 로 이어졌다(92 → 97 — 사이 넷은 그때 서버가 지은 무음). 3층 TOUR-07 에서 L 은 두 화자를 mid 32 하나로 214 패킷 받았다([07](07_FLOOR.md)). 듣는 쪽 지터 버퍼도 하나라 화자마다 새로 데우지 않는다.
 > - **잃은 것** — ①패킷만으로는 누가 말하는지 모른다. Floor Taken 을 따로 받아야 한다. 녹음처럼 패킷마다 신원이 필요한 곳을 위해 CSRC 를 나중에 더했다(4바이트 · 켠 연결만). ②영상은 새 화자 키프레임까지 빈다 — 실측 2.53초(일부러 늦춘 판). ③두 사람이 동시에 말할 수 없다([연:REJ-FLR-MULTI-TALKER](../protocol/10-flr.md#REJ-FLR-MULTI-TALKER)). ④경계 근처에서 늦게 온 패킷은 버린다(`prefan_gate` · `pre_boundary`).
 
 | 다른 길 | 버린 이유 |
@@ -261,17 +261,18 @@ Y SFU(node-a) 로그에 botZ 의 발행 트랜스포트가 서고, Floor Ack 이
 |---|---|---|---|---|
 | Jitsi(JVB) | 받는 m-line 의 SSRC 를 다시 써 돌려쓴다 · 경주는 m-line 을 여유 있게 둬서 확률로 줄인다 · 음성은 「어차피 섞어 튼다」로 신원을 안 따진다(조사 기록) | PTT 슬롯 + `READY{arev}` 로 확인된 차례 · 신원은 CSRC | 녹음처럼 섞지 않는 소비처도 패킷마다 신원을 안다 | CSRC 표를 우리가 낸다 |
 | LiveKit · mediasoup | 녹화는 트랙 하나 = 구독 하나로 결합을 고정한다(패킷 안 신원 — in-band 신원 — 없음) · mediasoup Consumer 는 Producer 하나에 평생 묶인다(조사 기록) | 결합이 바뀌는 것이 뼈대(슬롯 · 재배정)라 패킷 안 신원(CSRC) | m-line 수가 화자 수와 무관 | 결합 고정의 단순함은 없다 |
-| Google Meet 미디어 API | 프레임의 CSRC 가 참가자 신원 · SSRC 는 디버그용 · 실제 음성 전의 무음 프레임에는 CSRC 가 없다(조사 기록) | 같다 — SFU 가 지은 무음은 CC = 0 | 표준 장치 그대로 | — |
+| Google Meet 미디어 API | 프레임의 CSRC 가 참가자 신원 · SSRC 는 디버그용 · 실제 음성 전의 무음 프레임에는 CSRC 가 없다(조사 기록) | CSRC 가 신원인 것은 같다 · SFU 는 무음 프레임을 짓지 않는다(CC = 0 은 대역 probe 패딩뿐) | 표준 장치 그대로 | — |
 | Mumble | 듣기 전용 채널 청취(`ChannelListener`)가 멤버십과 다른 축 · 권한(`Listen`)도 따로 · 방마다 음량(`Mumble §5`) · 같은 사람이 여러 경로로 오면 서버가 합친다(`§6-3`) | `sub_rooms` 로 N 방 청취 · 권한은 입장과 같다 · 합치지 않는다 | SFU 가 단순 | 방마다 음량 · 청취 전용 권한이 계약에 없다 |
 | SvxLink | 말할 곳 `SelectTG`(하나)와 들을 곳 `TgMonitor`(집합)를 가른다 · 선택은 30초 무활동이면 기본으로 돌아간다(`SvxLink §3`) | `pub_room` 하나 + `sub_rooms` 집합 — 같은 축 | 업계 정본과 같은 모양 | 임시 선택 · 자동 복귀가 없다 |
 | JVB | 수신자가 이름으로 `include` · `exclude` 를 고른다(`JVB §5`) | 청취 단위가 방 | 단순 | 「이 방에서 이 사람만」은 못 한다 |
 | Zello Work | 채널 4종 — Team · Dynamic · Hidden · Dispatch(작업 큐 → 1:1 전환) · 역할에 `listen_only` · `to`(말할 대상 제한)(조사 기록 §4-1 · §4-3) | 방 하나 종류 | 단순 | Dispatch 같은 큐형 채널 · 말할 대상 제한이 없다 |
 
 
-## 7. 운영에서 보는 법
+## 7. 관측하는 법
 
 | 보고 싶은 것 | 어디서 | 실제 모양(이 회차) |
 |---|---|---|
+| 발언 기록 보고 | `kind=diag spec=SV-IMPL-FLR-TALK-REPORT` — 허가받은 방마다 한 줄([07 §7](07_FLOOR.md)) | `room=qa_tourmulti_p5 … report=start code=3012` · `room=qa_tourmulti_p6 … report=start code=3012`(v1.13 탐침 회차 `tour-v113` — 두 방 모두 채팅 공간이 없다) |
 | 말할 방 · 들을 방 | 서버 로그 `spec=AFF.S.…` | `spec=AFF.S.select … from=qa_tourmulti_p5 to=qa_tourmulti_p6 cause=AFFILIATION` · 듣기 입장 `AFF.S.join_listen` |
 | 옛 방 · 새 방의 floor 입구 | `spec=FLR.S.ws.pub_away` · `FLR.S.ws.pub_select` | 위 3-5 |
 | 둘째 입장의 PT 매핑을 버림 | `kind=diag spec=SV-IMPL-SUB-SUBSCRIBER-TABLE` | `in.differs=vp9/90000:98>100 msg="1pc join number tags differ from the table, ignored"` |
@@ -289,7 +290,7 @@ Y SFU(node-a) 로그에 botZ 의 발행 트랜스포트가 서고, Floor Ack 이
 |---|---|---|---|
 | 슬롯 · 전달 게이트 · 출처 바꿈 | `oxsfud/src/fwd/mod.rs`(`SlotFan` · `forward` half-duplex 갈래 · `send_down` 의 `await_keyframe` · `pre_boundary` · CSRC) | — | [연:RULE-LINK-SOURCE-SWITCH](../protocol/09-link.md#RULE-LINK-SOURCE-SWITCH) · [연:RULE-LINK-DOWNLINK-SSRC](../protocol/09-link.md#RULE-LINK-DOWNLINK-SSRC) |
 | 재작성 경계 · 창 | [04 §8](04_PACKET_PATH.md) | — | [연:RULE-LINK-EGRESS-REWRITE](../protocol/09-link.md#RULE-LINK-EGRESS-REWRITE) ⑤ |
-| 화자 결합 · 예열 · 해제 무음 · PLI 묶음 | `oxsfud/src/ops/floor.rs`(`bind_media` · `release_media` · `push_frames` · `slot_sources` · `pli_while_bound`) · `flr/bind.rs`(`Slot::apply`) · `fwd/mod.rs`(`PRIME_FRAMES` · `SILENCE_FRAMES` · `OPUS_SILENCE`) | — | — |
+| 화자 결합 · 해제 · PLI 묶음 | `oxsfud/src/ops/floor.rs`(`bind_media` · `release_media` · `slot_sources` · `pli_while_bound`) · `flr/bind.rs`(`Slot::apply`) | — | — |
 | Floor Taken 의 `SOURCES` | `oxsig/src/floor.rs`(`tlv::SOURCES` · `taken`) | `internal/wire/floor_consts.ts`(`Tlv.SOURCES`) | [연:RULE-FLR-SLOT-SOURCES](../protocol/10-flr.md#RULE-FLR-SLOT-SOURCES) |
 | DC 통지 쌓기 | `oxsfud/src/aux/mod.rs`(`dc_send` · `dc_backlog_full`) | — | [연:RULE-LINK-SDP-DC-OPENER](../protocol/09-link.md#RULE-LINK-SDP-DC-OPENER) |
 | 소속 · 말할 방 | `oxsfud/src/ops/media.rs`(`affiliation` · `move_pub`) | `domain/aff/core.ts` | [연:AFF.op.AFFILIATION](../protocol/05-aff.md#AFF.op.AFFILIATION) |
@@ -299,12 +300,12 @@ Y SFU(node-a) 로그에 botZ 의 발행 트랜스포트가 서고, Floor Ack 이
 
 <details><summary>1. A 에서 B 로 화자가 바뀔 때 듣는 브라우저는 재협상을 하나? 무엇이 바뀌고 무엇이 그대로인가?</summary>
 
-안 한다. SSRC · mid · PT 가 그대로다. 바뀌는 것은 패킷의 내용(출처)뿐이다. seq 는 앞 패킷 바로 뒤로 잇고, ts 는 지난 시간만큼 건너뛴다(`ptt_voice_seam` seq 92 → 97 · ts 88320 → 94752). 사이에 SFU 가 지은 해제 무음 3 프레임과 예열 1 프레임이 끼었다.
+안 한다. SSRC · mid · PT 가 그대로다. 바뀌는 것은 패킷의 내용(출처)뿐이다. seq 는 앞 패킷 바로 뒤로 잇고, ts 는 지난 시간만큼 건너뛴다(`ptt_voice_seam` ts 88320 → 94752). 슬롯 줄에는 화자 RTP 만 흐른다. 이 회차의 seq 92 → 97 사이 넷은 그때 SFU 가 지은 해제 무음 3 · 예열 1 프레임이다 — 지금은 걷어냈다.
 </details>
 
 <details><summary>2. `source_tag` 를 켠 녹음기가 CSRC 가 없는 패킷을 받았다. 무엇인가? 어느 발행 파일에 넣나?</summary>
 
-SFU 가 지은 패킷이다 — 예열이나 해제 무음. 어느 발행 트랙에도 넣지 않는다([연:RULE-TRK-CSRC](../protocol/06-trk.md#RULE-TRK-CSRC)). `csrc_ptt_av` 에서 seq 0 · 187~190 · 378~380 이 그랬다. 길이도 31바이트로 화자 패킷(55)과 달랐다.
+SFU 가 지은 패킷이다 — 지금은 대역 probe 패딩(RTX · 페이로드 없음)뿐이다. 어느 발행 트랙에도 넣지 않는다([연:RULE-TRK-CSRC](../protocol/06-trk.md#RULE-TRK-CSRC)). 걷어내기 전에는 예열 · 해제 무음도 그랬다. `csrc_ptt_av` 의 seq 0 · 187~190 · 378~380 이 그것이었고, 길이도 31바이트로 화자 패킷(55)과 달랐다.
 </details>
 
 <details><summary>3. 새 화자의 목소리는 바로 들리는데 영상은 2.5초 늦었다. SFU 는 그 사이 무엇을 했나?</summary>

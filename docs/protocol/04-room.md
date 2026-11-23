@@ -51,7 +51,8 @@
 | `capacity` | u32 | ✔ | 정원. 기본·최대 **1000** |
 | `user_count` | u32 | ✔ | 현재 인원 (★`hidden` 제외) |
 | `created_at` | u64 | ✔ | epoch ms |
-| `rec` | bool | ✔ | 녹화 참가자(`participant_type:1`) 존재 여부 — ★`hidden` 이어도 참이다(녹화 사실은 감추지 않는다) |
+| `rec` | bool | ✔ | 녹화 참가자(`participant_type:1`) 존재 여부 — ★`hidden` 이어도 참이다(녹화 사실은 감추지 않는다 · 녹음 유닛도 녹화 참가자다 — §4-1-13 `record`) |
+| `record` | bool | ✔ | 녹음하는 방인가(§4-1-13 `record`) |
 
 <a id="ROOM.type.MemberInfo"></a>
 #### 4-1-3. 형 `MemberInfo` — `MemberInfo`
@@ -689,6 +690,7 @@ answer 조립뿐이다. 첫 협상 확정본(answer)의 번호는 그 offer 의 
 | `unused_ttl_secs` | int? | — | 아무도 안 들어온 채로 유지할 초. 없으면 ★서버 설정을 따른다(상용 기본 = 영구 · 시험 형상은 짧게) |
 | `departure_ttl_secs` | int? | — | 마지막 참가자가 나간 뒤 유지할 초. 없으면 ★서버 설정의 기본값(위와 같다). `0` = 즉시 |
 | ★`media_codecs` | MediaCodecs? | — | ★**그 방의 미디어 코덱**(§4-1-1 — 그 방의 발행 전부) — 없거나 빈 값인 칸은 기본값(audio `opus` · video `H264`). ★**방이 사는 동안 바뀌지 않는다**(바꾸는 기능이 없다) |
+| ★`record` | bool? | — (기본 false) | ★**켜면 그 방의 발언을 녹음한다**(녹음 유닛이 녹화 참가자로 들어간다 — 연:RULE-CHAT-TALK-UPDATE 녹취). 발언 기록은 켜고 끄기와 상관없이 남는다(§14-1-5) |
 
 **응답**
 
@@ -698,6 +700,7 @@ answer 조립뿐이다. 첫 협상 확정본(answer)의 번호는 그 offer 의 
 | `name` | str | ✔ |  |
 | `capacity` | u32 | ✔ |  |
 | `created_at` | u64 | ✔ |  |
+| ★`record` | bool | ✔ | 녹음하는 방인가(§4-1-13) |
 | ★`media_codecs` | MediaCodecs | ✔ | ★정해진 값(기본값을 채운 뒤) |
 
 **실패** — `1003` `1003 MISSING_FIELD` 이름 필요 · `1002`(400) `capacity` 초과·`room_id` 255바이트 초과·★`room_id` 금지 문자(`/` `*` `$` `?` `#`) · `4003` `QUOTA_EXCEEDED` ★**이 배포**의 방 생성 수 상한 · `1005` ★`media_codecs` 가 지원 밖 · 모르는 이름 — 발행의 코덱 검사와 같은 지원 코덱 표 · `details.supported` 로 알린다(말없이 기본값으로 바꾸지 않는다). HTTP 실패 body 는 전부 §11-1-1 `Failure` 형이다
@@ -742,6 +745,7 @@ answer 조립뿐이다. 첫 협상 확정본(answer)의 번호는 그 offer 의 
 | `participants` | MemberInfo[] | ✔ | MemberInfo[] §4-1-3 |
 | ★`me` | MemberInfo | ★내가 그 방에 입장 중일 때만 | ★**나** — 명단과 따로 싣는다(투명이든 아니든 늘 · 권한 포함 — ★내 권한의 출처는 이것이다 · DEV-ROOM-ME-APART) |
 | `created_at` | u64 | ✔ |  |
+| ★`record` | bool | ✔ | 녹음하는 방인가(§4-1-13) |
 | ★`media_codecs` | MediaCodecs | ✔ | §4-1-1 |
 | ★`version` | Version | ✔ | ★**항상 온다.** ★**스냅샷이라 갭으로 보지 않고 보관값을 재설정한다**(§4-2-3 규칙 2) — ★단 같은 `epoch` 에서 보관값보다 낮으면 버린다(DEV-ROOM-SNAPSHOT-BEHIND) |
 | `tracks` | TrackEntry[] | ★tracks=1 일 때만 |  |
@@ -765,6 +769,7 @@ answer 조립뿐이다. 첫 협상 확정본(answer)의 번호는 그 offer 의 
   "user_count": 12,
   "participants": [ {"user_id":"u1","role":255,"select":false,"participant_type":0,"metadata":{"name":"…"}} ],   // MemberInfo[] §4-1-3
   "created_at": 1756000000000,
+  "record": false,                                      // 녹음하는 방인가(§4-1-13)
   "media_codecs": {"audio":"opus","video":"H264"},      // §4-1-1
   "version": {"epoch":"sfu-7f3a…","seq":10245},         // ★**항상 온다.** ★**스냅샷이라 갭으로 보지 않고 보관값을 재설정한다**(§4-2-3 규칙 2) — ★단 같은 `epoch` 에서 보관값보다 낮으면 버린다(DEV-ROOM-SNAPSHOT-BEHIND)
   "tracks": [ {"room_id":"r1","user_id":"u2","kind":"audio","track_id":"t-u2-mic","type":"individual"} ] }   // ★tracks=1 일 때만
@@ -998,7 +1003,7 @@ T-stall — 같은 방에 sync_required 를 보낸 뒤 다시 알릴 수 있을 
 | <a id="ROOM.C.JOINING.join_ok_quit"></a>`ROOM.C.JOINING.join_ok_quit` | 받는 상태 rs == 'JOINING' · m.part == 'res' && quit | rs ← 'LEAVING'; quit ← false; sfu ← m.server_config.sfu_id; jid ← m.join_id; jsure ← true · 보낸다 ROOM_LEAVE.req {join_id: m.join_id} · 효과 aff.leave → AFF.C.any.left · AFF.C.any.left_back · AFF.C.any.left_from · AFF.C.any.left_join · AFF.C.any.left_want · AFF.C.any.left_other · 효과 room.sub_rooms | §4-2-3 1 DEV-ROOM-LEAVE-WHILE-JOINING — 기다리는 동안 앱이 나가려 했다 — 서버는 받아들였으니 연결을 세우지 않고 ROOM_LEAVE 로 나간다(응답 뒤 처리는 퇴장과 같다) · ★그 방이 어느 서버인지는 응답이 알려 준다(sfu) — 없으면 퇴장 응답의 link.room_left · 재구축 효과가 그 서버 연결에 닿지 않는다(검증 판 MS6 반례) · ★응답의 sub_rooms 는 그 서버의 진실이다 — 나가려던 입장이어도 같은 서버 방들에 알린다(이 입장이 옛 Peer 를 축출했으면 다른 방이 그것을 여기서만 안다 · 없으면 그 방이 서버 명단 밖에서 JOINED 로 남는다 — 검증 판 MS4 반례) |
 | <a id="ROOM.C.JOINING.join_fail_quit"></a>`ROOM.C.JOINING.join_fail_quit` | 받는 상태 rs == 'JOINING' · m.part != 'res' && quit && m.code >= 2000 | rs ← 'NONE'; quit ← false; retry ← false; jid ← 0 · 효과 aff.join_failed → AFF.C.any.join_failed_back · AFF.C.any.join_failed · AFF.C.any.join_failed_other · 효과 app.left · 효과 link.room_left → LINK.C.any.last_room_left · LINK.C.any.room_left | §4-2-2 1 DEV-ROOM-LEAVE-WHILE-JOINING — 기다리는 동안 앱이 나가려 했다 — 실패면 들어간 적이 없으니 보낼 것 없이 끝낸다(4009 도 되풀이하지 않는다) |
 | <a id="ROOM.C.JOINING.join_pc_mismatch"></a>`ROOM.C.JOINING.join_pc_mismatch` | 받는 상태 rs == 'JOINING' · m.part == 'res' && m.server_config.pc_mode != pcm | rs ← 'LEAVING'; sfu ← m.server_config.sfu_id; jid ← m.join_id; jsure ← true · 보낸다 ROOM_LEAVE.req {join_id: m.join_id} · 효과 aff.leave → AFF.C.any.left · AFF.C.any.left_back · AFF.C.any.left_from · AFF.C.any.left_join · AFF.C.any.left_want · AFF.C.any.left_other · 효과 app.join_failed · 효과 room.sub_rooms | §4-1 DEV-ROOM-PC-MISMATCH-UNDO — 응답의 server_config.pc_mode 가 세션 확정값과 다르다 — 규격 위반 · 연결을 세우지 않고 실패로 다룬다(RULE-ROOM-JOIN-PC-MODE-CHECK · 서버가 조용히 다른 모드로 돌리는 경로는 없다). ★서버는 이미 받아들였다 — ROOM_LEAVE 로 되돌린다(응답 뒤 처리는 퇴장과 같다 — 세우던 연결은 link.room_left 로 버린다) |
-| <a id="ROOM.C.JOINING.join_ok"></a>`ROOM.C.JOINING.join_ok` | 받는 상태 rs == 'JOINING' · m.part == 'res' | rs ← 'JOINED'; cseq ← m.version.seq; cepoch ← m.version.epoch; sfu ← m.server_config.sfu_id; jid ← m.join_id; jsure ← true · 효과 trk.snapshot → TRK.C.any.snapshot · TRK.C.any.snapshot_same · 효과 link.server_ice → LINK.C.any.server_ice_same · LINK.C.REBUILD.server_ice_rebuild · LINK.C.NONE.server_ice_closed · LINK.C.any.peer_replaced · 효과 link.table → LINK.C.any.table_carried_same · LINK.C.any.table_carried · LINK.C.any.table_carried_rebound · LINK.C.any.table_carried_old · 효과 sdp.rebuild → LINK.C.NONE.renego_closed · LINK.C.any.renego_queued · LINK.C.any.renego · 효과 ready.tracks → SUB.C.any.ready_want · 효과 app.joined · 효과 room.sub_rooms · 효과 aff.implicit → AFF.C.any.implicit_back_held · AFF.C.any.implicit_back · AFF.C.any.implicit_back_busy · AFF.C.any.implicit_joined · AFF.C.any.implicit_join_unselected · AFF.C.any.implicit_busy · AFF.C.any.implicit_gone · AFF.C.any.implicit_pub · AFF.C.any.implicit_away · AFF.C.any.implicit_same · 효과 floor.join → FLR.C.any.join | §4-2-3 2 §4-2-2 1 §4-2-2 2 §4-2-2 3 §4-2-2 4 §4-2-2 5 §4-2-2 6 §8-1-2 5 — ★스냅샷이다 — version 은 견주지 않고 재설정 · sdp.rebuild 는 그 방 첫 READY 를 실을 협상(RULE-SUB-TABLE-PROC 5) |
+| <a id="ROOM.C.JOINING.join_ok"></a>`ROOM.C.JOINING.join_ok` | 받는 상태 rs == 'JOINING' · m.part == 'res' | rs ← 'JOINED'; cseq ← m.version.seq; cepoch ← m.version.epoch; sfu ← m.server_config.sfu_id; jid ← m.join_id; jsure ← true · 효과 trk.snapshot → TRK.C.any.snapshot · TRK.C.any.snapshot_same · 효과 link.server_ice → LINK.C.any.server_ice_same · LINK.C.REBUILD.server_ice_rebuild · LINK.C.NONE.server_ice_closed · LINK.C.any.peer_replaced · 효과 link.table → LINK.C.any.table_carried_same · LINK.C.any.table_carried · LINK.C.any.table_carried_rebound · LINK.C.any.table_carried_old · 효과 sdp.rebuild → LINK.C.NONE.renego_closed · LINK.C.any.renego_queued · LINK.C.any.renego · 효과 ready.tracks → SUB.C.any.ready_want · 효과 app.joined · 효과 room.sub_rooms · 효과 floor.join → FLR.C.any.join · 효과 aff.implicit → AFF.C.any.implicit_back_held · AFF.C.any.implicit_back · AFF.C.any.implicit_back_busy · AFF.C.any.implicit_joined · AFF.C.any.implicit_join_unselected · AFF.C.any.implicit_busy · AFF.C.any.implicit_gone · AFF.C.any.implicit_pub · AFF.C.any.implicit_away · AFF.C.any.implicit_same | §4-2-3 2 §4-2-2 1 §4-2-2 2 §4-2-2 3 §4-2-2 4 §4-2-2 5 §4-2-2 6 §8-1-2 5 — ★스냅샷이다 — version 은 견주지 않고 재설정 · sdp.rebuild 는 그 방 첫 READY 를 실을 협상(RULE-SUB-TABLE-PROC 5) · ★floor.join 이 aff.implicit 앞이다 — 방에 든 뒤 같은 응답의 발행 방을 연다(서버도 입장 → 발행 방 차례 · 거꾸로면 select:true 입장의 발행 방 사본을 입장이 덮는다 — ③-6 발언권 판 f_rebuild HP 반례) |
 | <a id="ROOM.C.JOINING.join_4009"></a>`ROOM.C.JOINING.join_4009` | 받는 상태 rs == 'JOINING' · m.code == 4009 | retry ← true | §4-2-2 6 R-ROOM-ON-JOIN-FAIL-WHY |
 | <a id="ROOM.C.JOINING.join_1xxx"></a>`ROOM.C.JOINING.join_1xxx` | 받는 상태 rs == 'JOINING' · m.code < 2000 | rs ← 'NONE'; jid ← 0 · 효과 aff.join_failed → AFF.C.any.join_failed_back · AFF.C.any.join_failed · AFF.C.any.join_failed_other · 효과 app.bug · 효과 link.room_left → LINK.C.any.last_room_left · LINK.C.any.room_left | §4-2-2 3 |
 | <a id="ROOM.C.JOINING.join_fail"></a>`ROOM.C.JOINING.join_fail` | 받는 상태 rs == 'JOINING' · 나머지 | rs ← 'NONE'; jid ← 0 · 효과 aff.join_failed → AFF.C.any.join_failed_back · AFF.C.any.join_failed · AFF.C.any.join_failed_other · 효과 app.join_failed · 효과 link.room_left → LINK.C.any.last_room_left · LINK.C.any.room_left | §4-2-2 1 §4-2-2 2 §4-2-2 4 §4-2-2 5 §9-2-1 R-ROOM-ON-JOIN-FAIL-WHY — ★그 서버 방 하나가 빠진 것으로 LINK 에 알린다 — 재구축의 다시 입장이 실패해 그 서버에 남은 방이 없으면 재구축을 멈추고 연결을 닫는다(RULE-LINK-RECOVERY-REBUILD · 없으면 LINK 가 REBUILD 에 남는다) |

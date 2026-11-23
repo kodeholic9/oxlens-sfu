@@ -315,14 +315,14 @@ sequenceDiagram
 | ICE · TCP | LiveKit 폴백 사다리 UDP → ICE/TCP → TURN/TLS(`livekit §7-3`) / Janus 는 ICE 표면이 넓다(`Janus §1-3`) | ICE-lite · host 후보 하나 · TCP passive 는 안드로이드 폴백 · TURN 없음 | 서버 ICE 가 응답만 한다 | 런타임 폴백 사다리가 없다 · UDP 가 막힌 웹은 못 붙는다 |
 | 시그널링에서 SDP 를 뺐나 | Discord — SDP 협상을 자체 JSON opcode 로 바꿨다. 입장 교환 약 1000바이트(공식 블로그 인용 · 2차) | 같은 결론(SDP 를 wire 에서 뺐다) — 단 ICE · DTLS 는 남겼다 | 브라우저를 그대로 쓴다 | keepalive 를 못 줄인다([09](09_MIC_COST.md)) |
 
-## 7. 운영에서 보는 법
+## 7. 관측하는 법
 
 | 사건 | 서버 로그 줄(이 회차) | 운영 표면 · SDK 전이 |
 |---|---|---|
 | 붙었다 | `SES.S.bind_new` · `CP-OP-BIND msg=bound` | `SES.C.CONNECTING.bind_ok` |
 | 방에 들어갔다 | `SV-STATE-PEER-STATE … cause=peer_created` · `SV-STATE-SUBSCRIBE-STATE … cause=load` · `AFF.S.join_select` · `CP-OP-ROOM-JOIN msg=ok` | `ROOM.C.JOINING.join_ok` · `/admin/rooms/<room>/snapshot` |
 | 트랜스포트가 섰다 | `SV-RULE-LINK-TRANSPORT "transport ready (dtls+srtp) publish"` · `SV-STATE-PEER-STATE … cause=nominated_new_pair` · `SV-IMPL-LINK-PEER-STATE in.dwell_ms=66` | `SDK.first_up` · `/admin/users/<user>/media`(`ufrag` · `arev` · `acked`) |
-| 받기를 확인했다 | `SV-STATE-SUBSCRIBE-STATE … cause=ready` · `CP-OP-READY arev=1` | `SUB.C.SENT.ready_ok` |
+| 받기를 확인했다 | `SV-STATE-SUBSCRIBE-STATE … cause=ready` · `CP-OP-READY arev=1` · 발행자에게 키프레임을 청한 판단 `SV-IMPL-RTCP-TERMINATE … in.go=send in.why=ready msg="pli decided"`(v1.13 탐침 회차 `tour-v113` — PLI 를 넘길지 · 미룰지 · 거둘지를 발행 워커가 정할 때 남는 줄 · [04](04_PACKET_PATH.md)) | `SUB.C.SENT.ready_ok` |
 | 거절 · 끊김 | `CP-CODE-<이름> op=<op>` 한 줄(모든 실패 응답 · `LEAVE` 사유) · `SES.S.bind_2002` · `SES.S.drop_reclaim cause=cut` · 쫓겨난 옛 세션 `… cause=evict` | 응답 코드 · `LEAVE` 사유 |
 | 떠났다 | `SES.S.leave` · `AFF.S.left` · `SV-STATE-SUBSCRIBE-STATE … cause=unload` · `SV-STATE-PEER-STATE … to=- cause=session_gone`(트랜스포트마다 한 줄) | `/admin/history` |
 

@@ -78,6 +78,7 @@
 
 **서버가 지킬 것**
 - ★**표가 바뀔 때마다 `arev` 를 하나 올리고 표 전체를 `MLINE_EVENT` 로 그 사람에게 보낸다.** 바뀐 줄만 보내지 않는다.
+  ★**단 `ROOM_JOIN` 이 바꾼 표는 `MLINE_EVENT` 로 따로 보내지 않는다 — 그 성공 응답의 `mline_table` 이 싣는다**(`arev` 는 오른다). 그 서버에 처음 드는 입장이면 응답 전에는 클라에 그 연결이 없어 먼저 온 통지는 받을 곳이 없고, 이미 든 연결이면 같은 표를 두 번 보내는 것일 뿐이다 — 받는 쪽은 어느 길로 와도 같다(§8-1-2 1 · ③-3).
 - ★**줄은 지우지 않는다.** 트랙이 빠지면 그 줄은 빈 줄(`track_id` 없음)이 된다. 빈 줄은 같은 `kind` 의 다음 트랙이 먼저 쓴다(§8-1-1 `mid` 발급 규칙).
 - ★**줄의 튜플(`pt`·`codec`·`fmtp`) · 다운링크 SSRC · `stream_id` 는 줄이 생길 때 정해진다** — 빈 줄도 그대로 갖는다(§8-3-1). 튜플은 다른 튜플의 트랙을 실을 때만 바뀐다(§8-1-2).
 - ★`arev` 는 그 서버 프로세스가 사는 동안 세션마다 이어진다 — 연결을 재구축해도 되돌리지 않는다.
@@ -144,7 +145,7 @@
 - ★★**`READY` 는 그 서버에서 내가 들어가 있는 방마다 하나씩 보낸다.** 협상은 서버 단위로
   한 번이지만, 이 신호는 **방 단위**다.
 - ★★**`arev` 는 그 협상에 쓴 배정표의 차례 번호다**(§8-1-2) — 한 협상의 `READY` 들은 같은 `arev` 를 싣는다.
-- ★**협상이 실패했으면 보내지 않는다.**
+- ★**협상이 실패했으면 보내지 않는다.** ★그 방이 보낼 `READY` 는 남는다 — 다음에 성공한 협상의 끝에 보낸다. 그 협상을 누가 열었든 같다(발행 · 같은 서버의 다른 방 · 연결 복구 — 협상은 서버 단위라 구독 줄까지 지금 표로 다시 짓는다).
 
 <a id="RULE-SUB-EGRESS-ACKED"></a>**RULE-SUB-EGRESS-ACKED** · 규칙
 
@@ -274,7 +275,7 @@
 | 어느 상태 | 그 방에 READY 를 보낼 때가 됐다 — 입장 · 스냅샷 반영 뒤(RULE-SUB-READY-PROC) | `WANT` | `SUB.C.any.ready_want` |
 | `WANT` | 그 서버 재협상이 끝났다 — 이번에 바뀐 방마다 READY(RULE-TRK-TRACK-EVENT-PROC) | `SENT` | `SUB.C.WANT.nego_ok` |
 | 어느 상태 | 그 서버 재협상이 끝났다 — 이번에 바뀐 방마다 READY(RULE-TRK-TRACK-EVENT-PROC) | — | `SUB.C.any.nego_ok_other` |
-| `WANT` | 협상이 실패했다 — READY 를 보내지 않는다(RULE-SUB-READY-PROC) | `NONE` | `SUB.C.WANT.nego_fail` |
+| `WANT` | 협상이 실패했다 — READY 를 보내지 않는다(RULE-SUB-READY-PROC) | 그대로 | `SUB.C.WANT.nego_fail` |
 | 어느 상태 | 협상이 실패했다 — READY 를 보내지 않는다(RULE-SUB-READY-PROC) | — | `SUB.C.any.nego_fail_other` |
 | 어느 상태 | READY 응답을 받았다(RULE-SUB-READY-FAIL) | — | `SUB.C.any.ready_res_old` |
 | `SENT` | READY 응답을 받았다(RULE-SUB-READY-FAIL) | `OK` | `SUB.C.SENT.ready_ok` |
@@ -317,7 +318,7 @@
 | 라벨 | 언제 | 하는 일 | 원문 · 근거 |
 |---|---|---|---|
 | <a id="SUB.C.WANT.nego_ok"></a>`SUB.C.WANT.nego_ok` | 받는 효과 LINK sub.nego_ok · ready == 'WANT' | ready ← 'SENT' · 보낸다 READY.req | §7-1-2 §4-2-6 — 여러 번 보내도 안전하다(RULE-SUB-READY-IDEMPOTENT) |
-| <a id="SUB.C.WANT.nego_fail"></a>`SUB.C.WANT.nego_fail` | 받는 효과 LINK sub.nego_fail · ready == 'WANT' | ready ← 'NONE' | §7-1-2 |
+| <a id="SUB.C.WANT.nego_fail"></a>`SUB.C.WANT.nego_fail` | 받는 효과 LINK sub.nego_fail · ready == 'WANT' | — | §7-1-2 §8-1-3 — ★WANT 를 지우지 않는다 — 그 방의 표는 아직 확인받지 못했다. 다음에 성공한 협상의 끝(누가 열었든 — 발행 · 같은 서버의 다른 방 · 복구 · 협상은 서버 단위)에 READY 를 보낸다. 지우면 남이 연 협상이 구독 줄까지 적용해도 nego_ok_other 라 READY 가 없어 게이트가 닫힌 채 검다(③-1 — SG1 반례) |
 | <a id="SUB.C.WANT.table_rebound"></a>`SUB.C.WANT.table_rebound` | 받는 효과 LINK sub.table_rebound · ready == 'WANT' | — | §8-1-2 — 협상 중이다 — 지금 READY 를 보내면 아직 SDP 에 없는 줄까지 확인하게 된다 · 협상이 끝나면 보내는 READY 가 그때의 가장 새 차례를 싣는다 |
 
 <a id="SUB.C.SENT"></a>
@@ -333,7 +334,7 @@
 
 | 라벨 | 언제 | 하는 일 | 원문 · 근거 |
 |---|---|---|---|
-| <a id="SUB.C.NONE.table_rebound"></a>`SUB.C.NONE.table_rebound` | 받는 효과 LINK sub.table_rebound · ready == 'NONE' | — | §8-1-2 — 적용된 구독 SDP 가 없다(입장 전 · 협상 실패) — 확인할 것이 없다 |
+| <a id="SUB.C.NONE.table_rebound"></a>`SUB.C.NONE.table_rebound` | 받는 효과 LINK sub.table_rebound · ready == 'NONE' | — | §8-1-2 — 적용된 구독 SDP 가 없다(입장 응답 전) — 확인할 것이 없다 · 협상 실패는 WANT 를 남긴다(③-1) |
 
 <a id="SUB.S"></a>
 #### 8-2-5. 서버

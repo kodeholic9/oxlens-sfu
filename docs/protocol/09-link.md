@@ -311,6 +311,7 @@
 | 6 | `http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01` | 양쪽 | transport-cc |
 | 10 | `urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id` | 시뮬캐스트 | rid (시뮬캐스트) |
 | 11 | `urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id` | 시뮬캐스트 | 복구용 rid |
+| 12 | `https://aomediacodec.github.io/av1-rtp-spec/#dependency-descriptor-rtp-header-extension` | 발행 영상 | 시간 층 표지(dependency-descriptor — H264 시간 층) |
 
 <a id="RULE-LINK-SDES-MID-BOTH"></a>**RULE-LINK-SDES-MID-BOTH** · 규칙
 
@@ -537,7 +538,7 @@ WS 는 살아 있다는 전제다 — WS 가 죽었으면 세션 층(§3-2-4 · 
    ★**재구축 순서** — 그 서버 방들의 발언권을 `has no permission` 으로 내리고 앱에 알린다(DC 가 없으니 통지가 오지 않는다 —
    §3-2-3 1-1 과 같은 이유) → 그 서버 방 보관본을 버린다 → 그 서버 연결을 닫는다 → 그 서버 방을 ★**입장 순서대로**
    `ROOM_JOIN`(§4-2-1 — 새 연결 · ★그 방 마지막으로 안 입장의 `join_id` 를 싣는다 — 갈아 끼우기 §4-1-7: 첫 입장이 옛 Peer 를 축출하면 나머지 방은 새 Peer 에 없어 보통 입장이 된다) → 그 서버 다시 발행(§7-2-3). 발행 방(`pub_room`)이 그 서버였으면 다시 들어간 뒤
-   `pub_select`(§5-1-2). ★**발언권 내림·보관본 버림은 들어갈 때 한 번이다** — 재시도는 입장·발행만 다시 한다.
+   `pub_select`(§5-1-2). ★**다시 들어가는 `ROOM_JOIN` 은 늘 `select:false` 다 — 처음 입장의 `select` 를 되싣지 않는다.** 그 사이 앱이 다른 서버 방으로 발언 방을 옮겼거나 옮기는 중일 수 있는데 서버는 자기 것만 알아, 되실으면 두 서버가 저마다 발행 방을 갖는다(§4-2-1 2 — 소속 판 `rebuild_sel` 반례 · ③-4). ★**발언권 내림·보관본 버림은 들어갈 때 한 번이다** — 재시도는 입장·발행만 다시 한다.
    ★**첫 `ROOM_JOIN` 은 분산해 늦춘다**(§3-2-3) — 재구축은 서버가 상태를 잃은 사건이라 단말 전부에 한꺼번에 온다.
    `4009` 를 받으면 `retry_after_ms` 를 ★**하한**으로 기다린 뒤 다시 보낸다(§11-2-3). ★재구축 중 앱이 그 서버의 마지막 방을
    나가면 멈추고 연결을 닫는다(§4-2-5).
@@ -1010,7 +1011,7 @@ egress 에서 PT 를 그 표로 배정하고 헤더 확장을 ★**다시 짓는
 | ② | ★**발행 패킷의 확장 ID 는 브라우저 번호로 나간다** — 클라는 그 번호를 `PUBLISH_TRACKS` 의 `*_extmap_id` 로 신고한다. ★**구독자에게는 그 구독자와 협상한 확장만 그 구독자의 확장 ID 로 간다** — 발행자의 확장 영역이 그대로 흘러오지 않는다(transport-cc 일련번호는 구독자 전송로 기준 · 음량 등 값은 발행자 것 · 확장 ID 는 구독자 것). 서버가 ingress 에서 무엇을 읽고 egress 에서 어떻게 다시 짓는가는 서버 정의서의 것이다. ★**근거는 RFC 8843 §12** — *"the identifier used for a given extension MUST identify the same extension across all the bundled media descriptions"*. 두 브라우저가 이것을 집행한다(한 BUNDLE 안에서 확장 ID 하나를 다른 URI 로 바꾼 offer 를 Chromium 149·Firefox 155 가 거부 — 실측 20260912) | §9-4-10 `a=extmap` · §9-4-11 `a=extmap` |
 | ③ | ★**구독 m-line 에도 mid 확장을 선언한다**(RFC 8843 §9.1 — *"The RTP MID header extension MUST be enabled, by including an SDP 'extmap' attribute … in each bundled RTP-based m= section in every offer and answer"*). ★**확장 값은 서버가 그 m-line 의 배정표 줄 `mid`(§8-1-1) 로 새로 쓴다** — 발행자의 mid 값(발행자 m-line 번호)은 ②에서 버려져 새지 않는다. 그래서 브라우저는 SSRC 로도 mid 확장으로도 같은 m-line 을 고른다 | §9-4-11 `sdes:mid` · §9-4-16 |
 | ④ | ★`1pc` 는 ★**내 번호표를 먼저 신고한다** — 새로 만든 연결의 브라우저 offer 가 정한 PT 표·확장 ID 표를 `ROOM_JOIN` 요청의 `extmap`·`codecs`(§4-1)로 싣고, 서버는 그 표를 피해 구독 PT 를 배정하고 그 표의 번호로 확장을 새로 쓴다. ★**그 서버에 이 세션의 연결이 이미 있으면 요청의 표는 버린다** — 기존 연결의 표를 피해 배정하고 기존 연결의 번호로 확장을 쓴다(클라는 새 연결을 버리고 기존 연결을 쓴다 — 브라우저가 연결마다 같은 번호를 붙인다는 보장이 없다). 첫 협상 확정본은 그 offer 의 부분집합이라 offer 표를 신고하면 충분하다 | §9-4-19 · §9-2-1 |
-| ⑤ | ★**CSRC 는 `source_tag` 를 켠 세션(§3-1-1)의 연결에만 싣는다.** 켠 연결에서 ★**발행 트랙에서 온 패킷**은 CC = 1 · CSRC = 그 트랙의 출처 번호(§6-1-1 `csrc`)다 — 레이어 · 화자 · 재배정으로 출처가 바뀌어도 패킷마다 그 순간의 발행 트랙을 든다(SSRC 는 줄 것이라 못 한다 — §9-4-2). ★**서버가 지은 패킷**(무전 예열 · 해제 침묵)은 발행 트랙이 아니라 ★CSRC 가 없다(CC = 0). ★**재전송(RTX)은 원 패킷과 같은 CC · CSRC 다**(RFC 4588 §4 — *"the CSRC count (CC), and the CSRC list of the original RTP header MUST be copied \"as is\""*). ★켜지 않은 연결은 늘 CC = 0 이다 — 발행자가 실은 CSRC 도 버린다. 근거 — RFC 3550 §3 CSRC 는 *"the receiver to indicate the current talker, even though all the audio packets contain the same SSRC identifier"* 를 위한 것이고, 출처 번호의 값 공간은 다운링크 SSRC 와 가른다(§9-1-1 아래 SSRC 공간 — RFC 8843 §9.2 는 받은 CSRC 를 들어오는 SSRC 표에서 찾는다). 길이는 4바이트 는다 — 따로 다루지 않는다(선례 넷 모두 egress 길이를 경로 MTU 로 판정하지 않는다) | §6-1-1 `csrc` · §3-1 `source_tag` |
+| ⑤ | ★**CSRC 는 `source_tag` 를 켠 세션(§3-1-1)의 연결에만 싣는다.** 켠 연결에서 ★**발행 트랙에서 온 패킷**은 CC = 1 · CSRC = 그 트랙의 출처 번호(§6-1-1 `csrc`)다 — 레이어 · 화자 · 재배정으로 출처가 바뀌어도 패킷마다 그 순간의 발행 트랙을 든다(SSRC 는 줄 것이라 못 한다 — §9-4-2). ★**서버가 지은 패킷**(대역 probe 패딩 — 미디어 프레임은 짓지 않는다)은 발행 트랙이 아니라 ★CSRC 가 없다(CC = 0). ★**재전송(RTX)은 원 패킷과 같은 CC · CSRC 다**(RFC 4588 §4 — *"the CSRC count (CC), and the CSRC list of the original RTP header MUST be copied \"as is\""*). ★켜지 않은 연결은 늘 CC = 0 이다 — 발행자가 실은 CSRC 도 버린다. 근거 — RFC 3550 §3 CSRC 는 *"the receiver to indicate the current talker, even though all the audio packets contain the same SSRC identifier"* 를 위한 것이고, 출처 번호의 값 공간은 다운링크 SSRC 와 가른다(§9-1-1 아래 SSRC 공간 — RFC 8843 §9.2 는 받은 CSRC 를 들어오는 SSRC 표에서 찾는다). 길이는 4바이트 는다 — 따로 다루지 않는다(선례 넷 모두 egress 길이를 경로 MTU 로 판정하지 않는다) | §6-1-1 `csrc` · §3-1 `source_tag` |
 
 <a id="RULE-LINK-DOWNLINK-SSRC"></a>**RULE-LINK-DOWNLINK-SSRC** · 규칙
 
@@ -1020,7 +1021,7 @@ egress 에서 PT 를 그 표로 배정하고 헤더 확장을 ★**다시 짓는
 
 <a id="RULE-LINK-SOURCE-SWITCH"></a>**RULE-LINK-SOURCE-SWITCH** · 규칙
 
-★★**출처 전환 — 다운링크 스트림 밑의 업링크 스트림이 바뀌는 일은 셋이고, 서버가 똑같이 다룬다**: 레이어 전환(시뮬캐스트 — 같은 트랙의 다른 업링크 스트림) · 화자 전환(무전 슬롯 — 발언권) · 재배정(전이중 줄 — §8-1-2). 클라에게는 SSRC 도 SDP 도 그대로다(§9-4-2).
+★★**출처 전환 — 다운링크 스트림 밑의 업링크 스트림이 바뀌는 일은 셋이고, 서버가 똑같이 다룬다**: 레이어 전환(시뮬캐스트 — 같은 트랙의 다른 업링크 스트림) · 화자 전환(무전 슬롯 — ★발언권 허가마다 · 같은 사람이 다시 허가를 받아도 새 출처다) · 재배정(전이중 줄 — §8-1-2). 클라에게는 SSRC 도 SDP 도 그대로다(§9-4-2).
 
 ★**클라가 볼 것 — 이것이 계약의 전부다.** 다운링크 스트림의 seq 는 전환을 건너 하나씩 오르고 timestamp 는 흐른 시간만큼 오른다(한 다운링크 스트림으로 이어진다 — 한 방의 발행이 같은 코덱이라 클럭 · PT 가 같다, §4-1-1). 영상은 전환 순간의 짧은 손실 뒤 ★**새 출처의 키프레임부터** 온다. ★**새 출처의 패킷 중 전환 경계(새 출처 첫 패킷)보다 앞선 번호는 오지 않는다** — 늦게 도착한 그 패킷을 이어 쓰면 앞 출처가 이미 쓴 seq 와 겹친다. 전환 경계 앞 seq 의 NACK 에는 재전송이 오지 않는다(audio 는 NACK 을 협상하지 않는다 — §9-4-11 `a=rtcp-fb`). 받는 SR 의 SSRC 는 다운링크 SSRC 이고 NTP ↔ RTP 대응은 발행자의 것 그대로다. 재배정이면 표(`MLINE_EVENT`)가 먼저 오고, 확인(`READY{arev}`) 뒤에 새 출처가 온다(§8-1-3).
 ★서버가 그것을 어떻게 잇는가(오프셋 · 키프레임 요청 · NACK · PLI · SR 번역)는 서버 정의서의 것이다 — 상대편 구현이 몰라도 붙는다.
@@ -1242,7 +1243,7 @@ a=end-of-candidates
 | `a=rtcp-fb` | ★**여기만 서버가 정한다.** `server_config.codecs[].rtcp_fb` 를 쓴다 — *"나한테 이 피드백을 보내라"* 는 서버의 요구다 |
 | `a=extmap` | ★**offer 와 서버 선언(`server_config.extmap`)의 교집합**만. ★★**번호는 offer 것**을 쓴다. 새 번호를 제안하면 상대가 그것을 따라가 **와이어 확장 번호가 조용히 바뀐다**(rid/mid/twcc 파싱이 죽는다). ★그래서 발행 패킷은 브라우저 번호로 나가고 구독자 쪽 번호와 다르다 — ★**서버가 egress 에서 헤더 확장을 구독자 확장 ID 로 다시 짓는다**(§9-4-2 ②). 클라는 그 번호를 `PUBLISH_TRACKS` 의 `*_extmap_id` 로 신고한다. ★`sdes:mid` 도 포함한다 — 서버가 ingress 에서 SSRC 학습 재료로 읽는다(시뮬캐스트는 층별 SSRC 가 SDP 에 없어 mid·rid 확장으로 배운다) |
 | RTX | offer 에 rtx PT 가 있으면 ★`a=rtpmap:{rtx_pt} rtx/{clockrate}` + ★`a=fmtp:{rtx_pt} apt={pt}` 를 **짝으로** 넣는다 |
-| ★**시뮬캐스트** | offer 그 m-line 에 `a=simulcast:send` 가 있을 때만 ★`a=rid:l recv` · `a=rid:h recv` · `a=simulcast:recv l;h` 을 넣는다. ★**방향을 `recv` 로 뒤집는다**(서버가 받는 쪽이다). ★★**rid 목록의 순서가 품질을 말하고 이름은 말하지 않는다** — 브라우저는 목록 **앞쪽**을 축소(1/2), **마지막**을 원본 해상도로 잡는다(Chromium 149·Firefox 155 실측 — RFC 8853 은 rid 를 불투명 식별자로 둔다). 그래서 ★**낮은 품질부터** `l;h` 로 적고, 브라우저 offer 경로에서는 클라가 `sendEncodings` 를 같은 순서로 만든다 |
+| ★**시뮬캐스트** | offer 그 m-line 에 `a=simulcast:send` 가 있을 때만 ★offer 의 rid 마다 `a=rid:<rid> recv` 와 `a=simulcast:recv <rid 목록>`(offer 순서 그대로 — 카메라 기본은 `l;m;h` · 두 층 발행자는 `l;h`)을 넣는다. rid 는 표(§7-1-2 `l` · `m` · `h`) 안의 것이어야 한다 — 표 밖 rid 의 업링크는 서버가 받지 않는다. ★**방향을 `recv` 로 뒤집는다**(서버가 받는 쪽이다). ★★**rid 목록의 순서가 품질을 말하고 이름은 말하지 않는다** — 브라우저는 목록 **앞쪽**을 축소(둘이면 1/2 · 셋이면 1/4 · 1/2), **마지막**을 원본 해상도로 잡는다(Chromium 149·Firefox 155 실측 — RFC 8853 은 rid 를 불투명 식별자로 둔다). 그래서 ★**낮은 품질부터** `l;m;h`(두 층이면 `l;h`)로 적고, 브라우저 offer 경로에서는 클라가 `sendEncodings` 를 같은 순서로 만든다 |
 | ★**시뮬캐스트 video 의 `fmtp`** | ★**예외 둘** — `a=simulcast:send` 가 있는 video m-line 이면 answer 의 그 코덱 `fmtp` 에 ★`x-google-per-layer-pli=1` 을 더한다(`fmtp` 줄이 없으면 `a=fmtp:{pt} x-google-per-layer-pli=1` 을 만든다). ★발행자 엔진이 층마다 키프레임 요청 타이머를 두고 ★**청한 층만** 키프레임을 낸다 — 없으면 타이머가 인코더 하나에 하나라 한 층에 청해도 ★모든 층이 키프레임을 내고 300ms 안의 다른 층 요청은 버려진다(libwebrtc `video/encoder_rtcp_feedback.cc` · `media/base/sdp_video_format_utils.cc` · 3층 실측 20261028 — 없음: l 요청마다 h 키프레임 Δ1 · 있음: h Δ0). 비표준 `x-` 파라미터다 — 다른 엔진의 수용은 재지 않았다(크로뮴만 실측) |
 | 방향 | ★**`recvonly`**(서버 입장에서 받는다). offer 가 `inactive` 면 `a=inactive` |
 
@@ -1267,9 +1268,8 @@ a=rtcp-fb:{pt} {server_config 의 rtcp_fb}                ← 되풀이 codec.se
 a=rtpmap:{rtx_pt} rtx/{clockrate}                       ← offer 에 rtx 가 있을 때만 · 되풀이 codec
 a=fmtp:{rtx_pt} apt={pt}                                ← 되풀이 codec · rtx 일 때
 a=extmap:{extmap.id} {extmap.uri}                       ← ★offer 와 server_config.extmap 의 교집합 · 번호는 offer 것 · 되풀이 extmap
-a=rid:l recv                                            ← ★시뮬캐스트일 때만 — 낮은 품질부터
-a=rid:h recv                                            ← simulcast 일 때
-a=simulcast:recv l;h                                    ← simulcast 일 때
+a=rid:{rid} recv                                        ← ★시뮬캐스트일 때만 — offer 순서(낮은 품질부터 · 카메라 기본 l · m · h) · 되풀이 offer 의 rid
+a=simulcast:recv {rid 목록 ;}                             ← 카메라 기본 `l;m;h` · 두 층 발행자 `l;h`
 … m-line 공통 — 꼬리 …
 ```
 
@@ -1618,7 +1618,7 @@ a=end-of-candidates
 
 ★★**자리 확보 트랜시버는 두지 않는다.** ★**새 발행 m-line 은 클라가 합성 offer 에 새 절로
 붙인다**(§9-4-19) — 브라우저는 그 절에 트랜시버를 새로 만들고(RFC 8829 §5.10 — `addTrack` 으로 만든 것만 기존 절에 잇고, 없으면 새로 만든다),
-클라가 `direction` 을 보내기로 돌려 `replaceTrack` 한다. ★**시뮬캐스트도 이 길로 열린다** — 합성 offer 가 `a=simulcast:recv l;h` 와
+클라가 `direction` 을 보내기로 돌려 `replaceTrack` 한다. ★**시뮬캐스트도 이 길로 열린다** — 합성 offer 가 `a=simulcast:recv l;m;h`(낮은 품질부터) 와
 `a=rid:<id> recv` 를 선언하면 answer 가 `a=simulcast:send` 로 답하고 인코딩이 rid 마다 선다(실측 Chromium 149 · Firefox 155,
 Chromium 은 두 층이 실제로 흘렀다, Firefox 의 RTP 단계는 미측정). ★**`a=rid` 의 방향은 `recv`** 다 — `send` 로 적으면
 Chromium 은 조용히 단일로 떨어지고 Firefox 는 SDP 를 거부한다. ★**그래서 클라 축 mid 규칙이 필요하다** — 새 발행 m-line 의 `mid` 는

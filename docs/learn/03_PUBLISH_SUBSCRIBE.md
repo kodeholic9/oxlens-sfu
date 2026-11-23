@@ -314,7 +314,7 @@ botC recv fail {"code":3008,"name":"SSRC_COLLISION","permanent":true}
 | 구독 m-line 이 모자랄 때 | Jitsi Videobridge — 구독자마다 SSRC 상한(audio 50 · video 50). 오래 안 쓴 것부터 다시 쓰고 맵 통지만 보낸다. 경주는 여유분으로 줄인다(규격 [연:R-SUB-FILL-WHY](../protocol/08-sub.md#R-SUB-FILL-WHY) 가 든 선례 · 2차) | 상한 25 · 재배정 · 확인된 차례로 경주를 막는다 | 다른 사람이 그 칸에 비치는 창이 없다 | 재배정마다 한 왕복 |
 | 음성을 몇 개 보내나 | JVB — 에너지 순위 상위 N(`num-loudest 3` · 기본 꺼짐)을 입구에서 자른다(`JVB §4-2`) | 음성 m-line 25 · 서버가 음량으로 고른다 | 동시에 25 m-line 까지 받는다 | 25 를 넘는 동시 발화는 서버 고르기에 맡긴다 |
 
-## 7. 운영에서 보는 법
+## 7. 관측하는 법
 
 | 사건 | 서버 로그 줄(이 회차) | 운영 표면 · SDK 전이 |
 |---|---|---|
