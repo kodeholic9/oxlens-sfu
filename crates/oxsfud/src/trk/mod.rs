@@ -22,6 +22,10 @@ pub fn item_misfit(t: &PublishTrack) -> Option<&'static str> {
     }
 }
 
+pub fn ssrc_collision(tracks: &[PublishTrack], down: &std::collections::BTreeSet<u32>) -> Option<u32> {
+    tracks.iter().flat_map(|t| std::iter::once(t.ssrc).chain(t.rtx_ssrc)).find(|x| down.contains(x))
+}
+
 pub fn canonical_video(name: &str) -> Option<&'static str> {
     SUPPORTED_VIDEO.iter().find(|c| c.eq_ignore_ascii_case(name)).copied()
 }

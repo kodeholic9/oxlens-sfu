@@ -333,9 +333,8 @@ pub fn publish(c: &Ctx, body: &Value) -> Result<Value, Failure> {
             if peer.pc_mode == PcMode::One
                 && let Some(t) = s.table(&peer)
             {
-                let down = t.down_ssrcs();
-                if tracks.iter().any(|x| down.contains(&x.ssrc) || x.rtx_ssrc.map(|r| down.contains(&r)).unwrap_or(false)) {
-                    return Err(Code::SsrcCollision.failure());
+                if let Some(ssrc) = crate::trk::ssrc_collision(&tracks, &t.down_ssrcs()) {
+                    return Err(Code::SsrcCollision.failure().with_details(json!({ "ssrc": ssrc })));
                 }
             }
             for t in &tracks {
