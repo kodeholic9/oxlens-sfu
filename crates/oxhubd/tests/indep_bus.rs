@@ -171,7 +171,7 @@ fn vanished_node_stays_a_candidate_during_grace() {
         let c: BTreeSet<String> = v.candidates(now).into_iter().collect();
         assert_eq!(c, before, "S-sym-RULE-BUS-PLACEMENT-3③ vanished node kept in candidates during grace · now {now}");
         let again: Vec<Option<String>> = rooms(300).iter().map(|r| pick(c.iter().map(|s| s.as_str()), r)).collect();
-        assert_eq!(again, placed, "S-sym-RULE-BUS-PLACEMENT-1① placement does not move while a node is merely not live · now {now}");
+        assert_eq!(again, placed, "S-sym-RULE-BUS-PLACEMENT-1① S-sym-RULE-BUS-PLACEMENT-2② placement does not move while a node is merely not live · now {now}");
     }
     let late = del_at + grace + SETTLE_MS + 1;
     if v.settle_due(late) {
@@ -199,6 +199,19 @@ fn blip_and_restart_do_not_move_rooms() {
     let again: Vec<Option<String>> = rooms(300).iter().map(|r| pick(after.iter().map(|s| s.as_str()), r)).collect();
     assert_eq!(again, placed, "S-sym-RULE-BUS-PLACEMENT-2 Delete blips and restarts do not re-place rooms");
     assert!(v.node_live("node-b"), "S-sym-RULE-BUS-PLACEMENT-4 node-b live again under its new inst");
+}
+
+#[test]
+fn late_delete_of_the_old_inst_keeps_the_restarted_room() {
+    let mut v = View::new("node-a", "hub-a-1", 10_000);
+    let mut t = feed(&mut v, TokenEv::NodePut { node: "node-b".into(), inst: "hub-b-1".into() }, 0);
+    t = feed(&mut v, TokenEv::RoomPut { room: "R".into(), node: "node-b".into(), inst: "sfu-b-1".into() }, t);
+    t = feed(&mut v, TokenEv::RoomPut { room: "R".into(), node: "node-b".into(), inst: "sfu-b-2".into() }, t);
+    t = feed(&mut v, TokenEv::RoomDel { room: "R".into(), node: "node-b".into(), inst: "sfu-b-1".into() }, t);
+    let loc = v.room_node("R").map(|l| (l.node.clone(), l.inst.clone()));
+    assert_eq!(loc, Some(("node-b".to_string(), "sfu-b-2".to_string())), "S-sym-RULE-BUS-KEYSPACE-1①② the old inst's late Delete does not remove the room the restarted sfud declared");
+    feed(&mut v, TokenEv::RoomDel { room: "R".into(), node: "node-b".into(), inst: "sfu-b-2".into() }, t);
+    assert!(v.room_node("R").is_none(), "정:RULE-BUS-KEYSPACE the current inst's Delete removes the room");
 }
 
 #[test]

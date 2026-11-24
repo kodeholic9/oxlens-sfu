@@ -85,8 +85,21 @@ fn override_outlives_membership() {
     r.remove("a");
     assert!(!r.has("a"), "S-sym-IMPL-ROOM-PERMISSION-3 left the room");
     r.join(member("a", false), Some(Permission::ALL)).expect("registered");
-    assert_eq!(r.member("a").map(|m| m.permission), Some(DOWN), "S-sym-IMPL-ROOM-PERMISSION-3 leaving and re-joining does not lift the lowered bits");
-    assert_eq!(r.permission_for("a", Some(Permission::ALL)), DOWN, "S-sym-IMPL-ROOM-PERMISSION-3 the room's override wins over the token value");
+    assert_eq!(r.member("a").map(|m| m.permission), Some(DOWN), "S-sym-IMPL-ROOM-PERMISSION-3① leaving and re-joining does not lift the lowered bits");
+    assert_eq!(r.permission_for("a", Some(Permission::ALL)), DOWN, "S-sym-IMPL-ROOM-PERMISSION-3① the room's override wins over the token value");
     assert!(r.set_permission("a", Permission::ALL).is_some(), "S-sym-IMPL-ROOM-PERMISSION-3 bits raised back to default");
-    assert!(!r.st.lock().map(|s| s.overrides.contains_key("a")).unwrap_or(true), "S-sym-IMPL-ROOM-PERMISSION-3 default bits are not stored as an override");
+    assert!(!r.st.lock().map(|s| s.overrides.contains_key("a")).unwrap_or(true), "S-sym-IMPL-ROOM-PERMISSION-3② default bits are not stored as an override");
+    r.remove("a");
+    r.join(member("a", false), Some(DOWN)).expect("registered");
+    assert_eq!(r.member("a").map(|m| m.permission), Some(DOWN), "S-sym-IMPL-ROOM-PERMISSION-3② after the override is gone a re-join takes the token value");
+}
+
+#[test]
+fn a_room_of_only_a_hidden_recorder_is_rec_with_no_users() {
+    let r = room(PERMANENT, PERMANENT);
+    let bot = Member { user: "rec-1".into(), role: None, select: false, participant_type: 1, hidden: true, metadata: None, permission: Permission::ALL };
+    r.join(bot, None).expect("registered");
+    let s = r.summary();
+    assert!(s.rec, "S-sym-IMPL-ROOM-DERIVED-2 a hidden recorder makes the room rec");
+    assert_eq!(s.user_count, 0, "S-sym-IMPL-ROOM-DERIVED-2 the same hidden recorder is not counted as a user");
 }

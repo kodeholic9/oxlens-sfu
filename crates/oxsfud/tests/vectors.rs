@@ -45,7 +45,7 @@ fn fwd_rewrite_vectors() {
             let payload = hex(s["payload"].as_str().unwrap_or(""));
             let cov = covers(clock == 48000, &payload);
             if let Some(want) = s["covers"].as_u64() {
-                assert_eq!(cov as u64, want, "S-sym-IMPL-FWD-SOURCE-SWITCH-3 — 덮는 길이 {name} #{i}");
+                assert_eq!(cov as u64, want, "S-sym-IMPL-FWD-SOURCE-SWITCH-3① — 덮는 길이 {name} #{i}");
             }
             let m = rw.map(
                 s["src"].as_u64().unwrap_or(0),
@@ -55,7 +55,7 @@ fn fwd_rewrite_vectors() {
                 cov,
             );
             assert_eq!(m.map(|x| x.seq as u64), s["out_seq"].as_u64(), "S-sym-IMPL-FWD-SOURCE-SWITCH-1 · S-sym-IMPL-FWD-SOURCE-SWITCH-4①② — out_seq {name} #{i}");
-            assert_eq!(m.map(|x| x.ts as u64), s["out_ts"].as_u64(), "S-sym-IMPL-FWD-SOURCE-SWITCH-3 — out_ts {name} #{i}");
+            assert_eq!(m.map(|x| x.ts as u64), s["out_ts"].as_u64(), "S-sym-IMPL-FWD-SOURCE-SWITCH-3① — out_ts {name} #{i}");
         }
         if let Some(n) = c.get("early_nack") {
             let got = rw.unmap_nack(n["out_seq"].as_u64().unwrap_or(0) as u16).map(|x| x as u64);
@@ -391,6 +391,27 @@ fn sim_congestion_vectors() {
 }
 
 #[test]
+fn arrival_deltas_ignore_the_subscriber_clock_offset() {
+    use oxsfud::sim::core::*;
+    let v = load("sim.json");
+    let mut seen = 0;
+    for c in cases(&v, "arrival") {
+        let name = c["name"].as_str().unwrap_or("");
+        for shift in [7_200_000_000i64, -3_600_000_000, 123_456_789] {
+            let (mut a, mut b) = (InterArrival::default(), InterArrival::default());
+            for (i, s) in c["steps"].as_array().unwrap_or(&vec![]).iter().enumerate() {
+                let (send, arr, sys) = (s["send_us"].as_i64().unwrap_or(0), s["arrival_us"].as_i64().unwrap_or(0), s["system_us"].as_i64().unwrap_or(0));
+                let x = a.push(send, arr, sys);
+                let y = b.push(send, arr + shift, sys);
+                assert_eq!(x, y, "S-sym-IMPL-RTCP-TERMINATE-5① subscriber clock offset {shift} does not change the delay deltas · {name} step {i}");
+                seen += x.is_some() as usize;
+            }
+        }
+    }
+    assert!(seen > 0, "S-sym-IMPL-RTCP-TERMINATE-5① some group deltas were produced");
+}
+
+#[test]
 fn sim_arrival_vectors() {
     use oxsfud::sim::core::*;
     let v = load("sim.json");
@@ -552,18 +573,18 @@ fn rtcp_nack_drain_vectors() {
                 Some("nack") => {
                     let seqs: Vec<u16> = s["seqs"].as_array().unwrap_or(&vec![]).iter().map(|x| x.as_u64().unwrap_or(0) as u16).collect();
                     let idle = l.enqueue(&seqs);
-                    assert_eq!(idle, s["idle"].as_bool().unwrap_or(false), "S-sym-RULE-RTCP-NACK-DOWN-4 대기줄이 비어 있었나 {name} 걸음 {i}");
+                    assert_eq!(idle, s["idle"].as_bool().unwrap_or(false), "S-sym-RULE-RTCP-NACK-DOWN-4① 대기줄이 비어 있었나 {name} 걸음 {i}");
                     if idle { l.drain(at, |q| ages.get(&q).map(|a| (*a, ()))) } else { Drained { sent: Vec::new(), refused: Vec::new() } }
                 }
                 _ => l.drain(at, |q| ages.get(&q).map(|a| (*a, ()))),
             };
             let sent: Vec<u64> = d.sent.iter().map(|(q, _)| *q as u64).collect();
             let want: Vec<u64> = s["sent"].as_array().unwrap_or(&vec![]).iter().map(|x| x.as_u64().unwrap_or(0)).collect();
-            assert_eq!(sent, want, "S-sym-RULE-RTCP-NACK-DOWN-4 보낸 seq {name} 걸음 {i}");
+            assert_eq!(sent, want, "S-sym-RULE-RTCP-NACK-DOWN-4①③ 보낸 seq {name} 걸음 {i}");
             let refused: Vec<&str> = d.refused.iter().map(|w| w.name()).collect();
             let want_r: Vec<String> = s["refused"].as_array().unwrap_or(&vec![]).iter().map(|x| x.as_str().unwrap_or("").to_string()).collect();
-            assert_eq!(refused, want_r, "S-sym-RULE-RTCP-NACK-DOWN-4 거른 까닭 {name} 걸음 {i}");
-            assert_eq!(l.queued() as u64, s["queued"].as_u64().unwrap_or(0), "S-sym-RULE-RTCP-NACK-DOWN-4 남은 대기 {name} 걸음 {i}");
+            assert_eq!(refused, want_r, "S-sym-RULE-RTCP-NACK-DOWN-4③ 거른 까닭 {name} 걸음 {i}");
+            assert_eq!(l.queued() as u64, s["queued"].as_u64().unwrap_or(0), "S-sym-RULE-RTCP-NACK-DOWN-4③ 남은 대기 {name} 걸음 {i}");
         }
     }
 }

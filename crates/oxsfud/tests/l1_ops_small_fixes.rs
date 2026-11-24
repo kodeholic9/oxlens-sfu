@@ -712,6 +712,8 @@ fn t66_2_join_recounts_voice_order_after_registration() {
         holds(&u.t, &z.track_id, &r.id),
         "정:IMPL-ROOM-JOIN 정:IMPL-SUB-PIPELINE S-sym-IMPL-ROOM-JOIN-5 a voice-order change between the joiner's own count and its registration is taken in by one more count after registration"
     );
+    let in_res = res.as_ref().ok().map(|v| v["mline_table"].to_string().contains(&z.track_id)).unwrap_or(false);
+    assert!(in_res, "S-sym-IMPL-ROOM-JOIN-5 the voice-order change also reaches the join response mline_table");
 }
 
 #[test]

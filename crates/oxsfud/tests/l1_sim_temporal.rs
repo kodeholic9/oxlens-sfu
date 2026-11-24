@@ -37,7 +37,7 @@ fn temporal_vectors_match_product() {
     for r in v["tl_read"].as_array().expect("tl_read") {
         let got = vp8_tl(&hex(r["payload"].as_str().expect("payload")));
         let want = r["tl"].as_object().map(|o| Tl { tid: o["tid"].as_u64().expect("tid") as u8, sync: o["sync"].as_u64().expect("sync") as u8, pid: o["pid"].as_u64().expect("pid") as u16 });
-        assert_eq!(got, want, "S-sym-IMPL-SIM-SWITCH-5 vp8_tl · {}", r["name"]);
+        assert_eq!(got, want, "S-sym-IMPL-SIM-SWITCH-5⑤ vp8_tl · {}", r["name"]);
     }
     let cases = v["temporal"].as_array().expect("temporal");
     assert!(!cases.is_empty(), "판 묶음 temporal 비었다");
@@ -47,9 +47,9 @@ fn temporal_vectors_match_product() {
         for (i, st) in c["steps"].as_array().expect("steps").iter().enumerate() {
             let tl = vp8_tl(&hex(st["payload"].as_str().expect("payload"))).expect("tl");
             let (send, why) = sel.step(tl, st["key"].as_bool().expect("key"), st["target"].as_u64().expect("target") as u8);
-            assert_eq!(send, st["send"].as_bool().expect("send"), "S-sym-IMPL-SIM-SWITCH-5 send · {name} · step {i}");
-            assert_eq!(why.map(|w| w.name()), st["why"].as_str(), "S-sym-IMPL-SIM-SWITCH-5 why · {name} · step {i}");
-            assert_eq!(sel.current as u64, st["current"].as_u64().expect("current"), "S-sym-IMPL-SIM-SWITCH-5 current · {name} · step {i}");
+            assert_eq!(send, st["send"].as_bool().expect("send"), "S-sym-IMPL-SIM-SWITCH-5①②③ send · {name} · step {i}");
+            assert_eq!(why.map(|w| w.name()), st["why"].as_str(), "S-sym-IMPL-SIM-SWITCH-5①②③ why · {name} · step {i}");
+            assert_eq!(sel.current as u64, st["current"].as_u64().expect("current"), "S-sym-IMPL-SIM-SWITCH-5①②③ current · {name} · step {i}");
         }
     }
 }
@@ -65,9 +65,9 @@ fn state_packs_and_goal_clips() {
         }
     }
     assert_eq!(goal(TL_NONE, TL_TOP), TL_TOP, "S-sym-IMPL-SIM-SWITCH-5 no manual cap = top");
-    assert_eq!(goal(1, TL_TOP), 1, "S-sym-IMPL-SIM-SWITCH-5 manual cap");
-    assert_eq!(goal(TL_NONE, 0), 0, "S-sym-IMPL-SIM-SWITCH-5 auto cap");
-    assert_eq!(goal(2, 1), 1, "S-sym-IMPL-SIM-SWITCH-5 min of the two");
+    assert_eq!(goal(1, TL_TOP), 1, "S-sym-IMPL-SIM-SWITCH-5 S-sym-IMPL-SIM-SWITCH-10⑤ manual cap");
+    assert_eq!(goal(TL_NONE, 0), 0, "S-sym-IMPL-SIM-SWITCH-5 S-sym-IMPL-SIM-SWITCH-10⑤ auto cap");
+    assert_eq!(goal(2, 1), 1, "S-sym-IMPL-SIM-SWITCH-5 S-sym-IMPL-SIM-SWITCH-10⑤ min of the two");
     assert_eq!(goal(9, 9), TL_TOP, "S-sym-IMPL-SIM-SWITCH-5 clipped to TL_TOP");
 }
 
@@ -119,7 +119,7 @@ fn selection_with_rewriter_keeps_numbers_contiguous() {
                 let pic = vp8_pic(&pay);
                 let (send, _) = sel.step(tl, key, target);
                 if tid == 0 {
-                    assert!(send, "S-sym-IMPL-SIM-SWITCH-5 TID0 is always sent · seed {seed} · frame {f}");
+                    assert!(send, "S-sym-IMPL-SIM-SWITCH-5④ TID0 is always sent · seed {seed} · frame {f}");
                 }
                 assert!(sel.current <= target, "S-sym-IMPL-SIM-SWITCH-5 current never above target after the frame head · seed {seed} · frame {f}");
                 if !send {
@@ -127,9 +127,9 @@ fn selection_with_rewriter_keeps_numbers_contiguous() {
                 } else {
                     let m = rw.map_pic(1, seq, f.wrapping_mul(3000), f as u64, 1, pic.as_ref()).expect("forwarded");
                     if let (Some((ls, lp)), Some(p)) = (last, m.pid) {
-                        assert_eq!(m.seq, ls.wrapping_add(1), "S-sym-IMPL-FWD-SOURCE-SWITCH-9① out seq +1 · seed {seed} · frame {f}");
+                        assert_eq!(m.seq, ls.wrapping_add(1), "S-sym-IMPL-FWD-SOURCE-SWITCH-9① S-sym-IMPL-SIM-SWITCH-5⑥ out seq +1 · seed {seed} · frame {f}");
                         let d = p.wrapping_sub(lp) % M15;
-                        assert!(d == 0 || d == 1, "S-sym-IMPL-FWD-SOURCE-SWITCH-10① out pid same or +1 · seed {seed} · frame {f} · {lp} → {p}");
+                        assert!(d == 0 || d == 1, "S-sym-IMPL-FWD-SOURCE-SWITCH-10① S-sym-IMPL-SIM-SWITCH-5⑥ out pid same or +1 · seed {seed} · frame {f} · {lp} → {p}");
                     }
                     last = Some((m.seq, m.pid.unwrap_or(0)));
                     sent_by_tid[tid as usize] += 1;
@@ -154,6 +154,20 @@ fn never_rises_without_layer_sync() {
     }
     let (send, _) = sel.step(Tl { tid: 1, sync: 1 << 1, pid: 400 }, false, TL_TOP);
     assert!(send && sel.current == 1, "S-sym-IMPL-SIM-SWITCH-6② Y frame lifts one step");
+}
+
+#[test]
+fn late_packet_of_an_earlier_frame_leaves_the_state() {
+    let mut sel = TemporalSel::default();
+    let _ = sel.step(Tl { tid: 0, sync: 0, pid: 600 }, true, 1);
+    let (send, _) = sel.step(Tl { tid: 1, sync: 0, pid: 602 }, false, 2);
+    assert!(send && sel.current == 1, "S-sym-IMPL-SIM-SWITCH-5③ no Y yet · stays at 1");
+    let (send, why) = sel.step(Tl { tid: 2, sync: 1 << 2, pid: 601 }, false, 2);
+    assert!(!send && why.is_none(), "S-sym-IMPL-SIM-SWITCH-5③ late frame with Y is judged by the current layer only");
+    assert_eq!(sel.current, 1, "S-sym-IMPL-SIM-SWITCH-5③ late frame with Y does not lift the layer");
+    assert_eq!(sel.pid, Some(602), "S-sym-IMPL-SIM-SWITCH-5③ late frame does not move the frame head");
+    let (send, why) = sel.step(Tl { tid: 2, sync: 0, pid: 603 }, false, 2);
+    assert!(!send && why.is_none() && sel.current == 1, "S-sym-IMPL-SIM-SWITCH-5③ next frame without Y stays at 1");
 }
 
 fn frame_json(f: &oxsfud::sim::dd::DdFrame) -> Value {
@@ -181,14 +195,14 @@ fn dd_vectors_match_product() {
                 held = attached;
             }
             let got = frame.as_ref().map(frame_json).unwrap_or(Value::Null);
-            assert_eq!(got, st["frame"], "S-sym-IMPL-SIM-SWITCH-7 dd_read · {name} · step {i}");
+            assert_eq!(got, st["frame"], "S-sym-IMPL-SIM-SWITCH-7①③ dd_read · {name} · step {i}");
             let (Some(f), Some(s)) = (frame, held.as_ref()) else { continue };
             let tl = dd_tl(&f, s);
-            assert_eq!(serde_json::json!({ "tid": tl.tid, "sync": tl.sync, "pid": tl.pid }), st["tl"], "S-sym-IMPL-SIM-SWITCH-7 dd_tl · {name} · step {i}");
+            assert_eq!(serde_json::json!({ "tid": tl.tid, "sync": tl.sync, "pid": tl.pid }), st["tl"], "S-sym-IMPL-SIM-SWITCH-7①② dd_tl · {name} · step {i}");
             let (send, why) = sel.step(tl, st["key"].as_bool().expect("key"), st["target"].as_u64().expect("target") as u8);
-            assert_eq!(send, st["send"].as_bool().expect("send"), "S-sym-IMPL-SIM-SWITCH-7 send · {name} · step {i}");
-            assert_eq!(why.map(|w| w.name()), st["why"].as_str(), "S-sym-IMPL-SIM-SWITCH-7 why · {name} · step {i}");
-            assert_eq!(sel.current as u64, st["current"].as_u64().expect("current"), "S-sym-IMPL-SIM-SWITCH-7 current · {name} · step {i}");
+            assert_eq!(send, st["send"].as_bool().expect("send"), "S-sym-IMPL-SIM-SWITCH-7② send · {name} · step {i}");
+            assert_eq!(why.map(|w| w.name()), st["why"].as_str(), "S-sym-IMPL-SIM-SWITCH-7② why · {name} · step {i}");
+            assert_eq!(sel.current as u64, st["current"].as_u64().expect("current"), "S-sym-IMPL-SIM-SWITCH-7② current · {name} · step {i}");
         }
     }
     let base = dd_read(&hex(v["dd"][0]["steps"][0]["raw"].as_str().expect("raw")), None).1;
@@ -196,8 +210,8 @@ fn dd_vectors_match_product() {
         let name = r["name"].as_str().unwrap_or("");
         let given = if r["with_structure"].as_bool().expect("with_structure") { base.as_ref() } else { None };
         let (frame, attached) = dd_read(&hex(r["raw"].as_str().expect("raw")), given);
-        assert_eq!(frame.as_ref().map(frame_json).unwrap_or(Value::Null), r["frame"], "S-sym-IMPL-SIM-SWITCH-7 dd_read frame · {name}");
+        assert_eq!(frame.as_ref().map(frame_json).unwrap_or(Value::Null), r["frame"], "S-sym-IMPL-SIM-SWITCH-7① dd_read frame · {name}");
         let now = attached.as_ref().or(given);
-        assert_eq!(now.map(structure_json).unwrap_or(Value::Null), r["structure"], "S-sym-IMPL-SIM-SWITCH-7 dd_read structure · {name}");
+        assert_eq!(now.map(structure_json).unwrap_or(Value::Null), r["structure"], "S-sym-IMPL-SIM-SWITCH-7① dd_read structure · {name}");
     }
 }

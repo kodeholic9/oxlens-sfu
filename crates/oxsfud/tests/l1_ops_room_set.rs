@@ -11,7 +11,7 @@ use oxsfud::flr::core::{Floor, Msg, Mt};
 use oxsfud::ops;
 use oxsfud::ops::floor::{self, Entry};
 use oxsfud::room::{PERMANENT, Room, RoomInit};
-use oxsig::msg::{Kind, MediaCodecs};
+use oxsig::msg::{Kind, MediaCodecs, Permission};
 use serde_json::json;
 
 use support::*;
@@ -507,4 +507,19 @@ fn t_src_room_things_have_one_owner() {
         "정:IMPL-ROOM-LIFE 정:RULE-CONC-HOT-PATH room things have one owner (the room, or the room set's own index) and the packet path reads the slot index with one RCU read:\n{}",
         bad.join("\n")
     );
+}
+
+#[test]
+fn a_recreated_room_takes_the_token_permission_again() {
+    let _g = serial();
+    let id = tag("perm3");
+    let r = room(&id);
+    let down = Permission { publish_audio: false, publish_video: true, publish_screen: true, floor_request: false };
+    r.join(member("a"), Some(Permission::ALL)).expect("registered");
+    assert!(r.set_permission("a", down).is_some(), "stand check — bits lowered in the old room");
+    drive(async { ops::rooms::destroy_room(&r, "SV-IMPL-ROOM-LIFE", "l1").await });
+    let again = room(&id);
+    again.join(member("a"), Some(Permission::ALL)).expect("registered");
+    assert_eq!(again.member("a").map(|m| m.permission), Some(Permission::ALL), "S-sym-IMPL-ROOM-PERMISSION-3③ the recreated room does not carry the destroyed room's override — re-join takes the token value");
+    assert!(!Arc::ptr_eq(&r, &again), "stand check — a new room under the same id");
 }

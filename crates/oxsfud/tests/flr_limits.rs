@@ -216,3 +216,49 @@ fn revoke_during_t132_or_after_lost_granted_is_retried_then_t3_moves_on() {
     assert_eq!(f.holder().as_deref(), Some("c"), "T3 moves the floor on");
     assert_eq!(sent(&r, "b", Mt::Taken), 1, "b learns the new speaker");
 }
+
+fn denies(s: &Step, to: &str) -> Vec<u32> {
+    s.out.iter().filter(|o| o.to == to && o.m.t == Mt::Deny).map(|o| o.m.n).collect()
+}
+
+#[test]
+fn a_queued_member_whose_floor_bit_goes_down_leaves_the_queue_with_deny_102() {
+    let mut f = room(&["a", "b", "c", "d"]);
+    request(&mut f, "a");
+    request(&mut f, "b");
+    request(&mut f, "c");
+    request(&mut f, "d");
+    let ask = |f: &mut Floor, u: &str| -> Option<u32> {
+        let s = f.server_rx(u, &Msg::new(Mt::QposReq, None, 0, 0), true, 0);
+        s.out.iter().find(|o| o.to == u && o.m.t == Mt::Qinfo).map(|o| o.m.n)
+    };
+    assert_eq!((ask(&mut f, "c"), ask(&mut f, "d")), (Some(2), Some(3)), "stand check — c and d wait behind b");
+    let s = f.perm_down("b");
+    assert_eq!(denies(&s, "b"), vec![oxsig::floor::deny::NO_PERMISSION as u32], "S-sym-IMPL-ROOM-PERMISSION-4① the queued member gets DENY(102) once");
+    assert!(!s.out.iter().any(|o| o.to != "b"), "S-sym-IMPL-ROOM-PERMISSION-4② nothing is sent to the remaining waiters");
+    assert_eq!((ask(&mut f, "c"), ask(&mut f, "d")), (Some(1), Some(2)), "S-sym-IMPL-ROOM-PERMISSION-4② asking afterwards returns the moved-up positions");
+    let s = release(&mut f, "a");
+    assert!(!s.out.iter().any(|o| o.to == "b" && o.m.t == Mt::Granted), "S-sym-IMPL-ROOM-PERMISSION-4①③ no succession GRANTED to the member taken out of the queue");
+    assert!(s.out.iter().any(|o| o.to == "c" && o.m.t == Mt::Granted), "S-sym-IMPL-ROOM-PERMISSION-4 stand check — the next waiter is granted");
+    assert_eq!(f.holder().as_deref(), Some("c"), "S-sym-IMPL-ROOM-PERMISSION-4①③ the floor passes over the removed waiter");
+}
+
+#[test]
+fn a_member_without_the_floor_bit_is_denied_102_even_at_top_priority() {
+    let mut f = room(&["a"]);
+    f.ws_join("b", false);
+    f.ws_pub_select("b");
+    request_p(&mut f, "a", 5);
+    for p in [5u32, 7, 255] {
+        let s = request_p(&mut f, "b", p);
+        assert_eq!(denies(&s, "b"), vec![oxsig::floor::deny::NO_PERMISSION as u32], "S-sym-IMPL-ROOM-PERMISSION-5①② priority {p} is denied 102 before the priority is read");
+        assert!(!s.out.iter().any(|o| o.to == "a" && o.m.t == Mt::Revoke), "S-sym-IMPL-ROOM-PERMISSION-5① priority {p} does not preempt the speaker");
+        assert_eq!(f.holder().as_deref(), Some("a"), "S-sym-IMPL-ROOM-PERMISSION-5① the speaker keeps the floor · priority {p}");
+    }
+    let mut g = Floor::new(10, 30);
+    g.ws_join("b", false);
+    g.ws_pub_select("b");
+    let s = request_p(&mut g, "b", 255);
+    assert_eq!(denies(&s, "b"), vec![oxsig::floor::deny::NO_PERMISSION as u32], "S-sym-IMPL-ROOM-PERMISSION-5①② an idle floor is not granted either");
+    assert_eq!(g.holder(), None, "S-sym-IMPL-ROOM-PERMISSION-5① no holder");
+}

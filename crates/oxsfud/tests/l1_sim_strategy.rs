@@ -66,7 +66,7 @@ fn wait_temporal_vectors_match_product() {
         for (name, want) in c["out"].as_object().unwrap() {
             let got = wait_temporal(strat(name), g("layer") as u8, g("target") as u8, g("pause") as u8, g("elapsed_ms"), g("window_ms"), g("current") as u8, g("auto") as u8);
             let w = (want[0].as_u64().unwrap() as u8, why(want[1].as_str().unwrap()));
-            assert_eq!(got, w, "S-sym-IMPL-SIM-SWITCH-10①②③④ wait_temporal · {} · {name}", c["name"]);
+            assert_eq!(got, w, "S-sym-IMPL-SIM-SWITCH-10①②③④⑥ wait_temporal · {} · {name}", c["name"]);
         }
     }
     for p in v["point_decode"].as_array().unwrap() {

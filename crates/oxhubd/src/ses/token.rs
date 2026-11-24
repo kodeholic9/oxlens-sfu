@@ -234,4 +234,25 @@ mod tests {
         let user = a.issue(&req(None, None), 60, 2048).unwrap().token;
         assert!(a.verify_ops(&user).is_err());
     }
+
+    #[derive(Serialize)]
+    struct HookClaims {
+        iss: String,
+        hook: bool,
+        iat: u64,
+        exp: u64,
+    }
+
+    #[test]
+    fn a_hook_token_is_not_an_ops_credential() {
+        let mut a = accounts();
+        a.keys[0].hook_allowed = true;
+        let now = secs_now();
+        let hook = encode(&Header::new(Algorithm::HS256), &HookClaims { iss: "k".into(), hook: true, iat: now, exp: now + 60 }, &EncodingKey::from_secret(b"s")).expect("signed");
+        assert_eq!(a.verify_ops(&a.sign_ops("k", 60).unwrap()), Ok("k".to_string()), "positive control — the ops token of the same account passes");
+        assert_eq!(a.verify_ops(&hook), Err(Code::NotAuthorized), "H-sym-3-1-1① — a correctly signed hook token of a hook-allowed account is refused 2006 on the ops path");
+        assert_eq!(Code::NotAuthorized.failure().code, 2006, "H-sym-3-1-1① — the refusal code is 2006");
+        a.keys[0].ops_allowed = false;
+        assert_eq!(a.verify_ops(&hook), Err(Code::NotAuthorized), "H-sym-3-1-1① — still 2006 when the account has no ops allowance");
+    }
 }

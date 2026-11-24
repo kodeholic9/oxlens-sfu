@@ -265,7 +265,7 @@ all_forms!(t_is_the_store_time_as_is |db| {
     join(&s, "S", "a", 1000);
     let t1 = fresh_t(s.send("a", "S", ID_A, "x", Some(5000)));
     let t2 = fresh_t(s.send("a", "S", ID_B, "y", Some(5000)));
-    assert_eq!((t1, t2), (5000, 5000), "S-sym-IMPL-CHAT-STORE-1 — two stored in the same ms both keep that t");
+    assert_eq!((t1, t2), (5000, 5000), "S-sym-IMPL-CHAT-STORE-1 · CP-OP-MESSAGE⑦ — two stored in the same ms both keep that t");
     let t3 = fresh_t(s.send("a", "S", ID_C, "z", Some(10)));
     assert_eq!(t3, 10, "S-sym-IMPL-CHAT-STORE-1 — an earlier store time is not pushed up");
     let e = s.list("a").expect("list").remove(0);
@@ -310,10 +310,10 @@ async_forms!(message_op_refuses_only_that_request_on_bounds [memory = Memory, sq
     let chat = Chat::new(s, Limits::default());
     let ask = |msg_id: String, content: String| serde_json::json!({ "space_id": "S", "msg_id": msg_id, "content": content });
     let f = chat.handle("a", "s1", Op::Message, ask("a".repeat(65), "x".into()), 100).await.err().expect("refused");
-    assert_eq!(f.code, Code::InvalidPayload.num(), "CP-OP-MESSAGE ④ — msg_id over 64 bytes is 1002");
+    assert_eq!(f.code, Code::InvalidPayload.num(), "CP-OP-MESSAGE④ — msg_id over 64 bytes is 1002");
     let f = chat.handle("a", "s1", Op::Message, ask(ID_A.into(), "가".repeat(21_846)), 70_000).await.err().expect("refused");
     assert_eq!(f.code, Code::InvalidPayload.num(), "CP-OP-MESSAGE ⑧ — content over 65535 bytes is 1002");
-    assert!(chat.handle("a", "s1", Op::Message, ask("not-hex-at-all".into(), "가".repeat(21_845)), 70_000).await.is_ok(), "CP-OP-MESSAGE ④ — the shape is not checked · 65535 bytes is taken");
+    assert!(chat.handle("a", "s1", Op::Message, ask("not-hex-at-all".into(), "가".repeat(21_845)), 70_000).await.is_ok(), "CP-OP-MESSAGE④ — the shape is not checked · 65535 bytes is taken");
     let f = chat.handle("a", "s1", Op::Message, ask(ID_B.into(), "x".into()), BODY_MAX + 1).await.err().expect("refused");
     assert_eq!(f.code, Code::InvalidPayload.num(), "연:RULE-CHAT-CONTENT — a body over 131072 received bytes is 1002");
 });
@@ -387,7 +387,7 @@ async_forms!(refused_messages_store_nothing_and_notify_no_one [memory = Memory, 
         let mid = body["msg_id"].as_str().unwrap_or_default().to_string();
         let before = seen_by(&chat, "a", "b").await;
         assert_eq!(call(&chat, user, Op::Message, body).await.err(), Some(code), "{what} — the code");
-        assert_eq!(seen_by(&chat, "a", "b").await, before, "{what} — nothing stored · no undelivered record · no fan-out (the refusal carries no delivery)");
+        assert_eq!(seen_by(&chat, "a", "b").await, before, "{what} — nothing stored · no undelivered record · no fan-out (the refusal carries no delivery) · CP-CODE-REF-NOT-FOUND② · CP-CODE-REF-DELETED② · CP-CODE-NOT-REF-SENDER② · CP-CODE-MSG-ID-CONFLICT②");
         if code != Code::MsgIdConflict.num() {
             let probe = call(&chat, user, Op::Message, say("S", &mid, serde_json::json!({ "content": "probe" }))).await;
             assert!(matches!(probe, Ok((_, true))), "{what} — nothing was stored under its msg_id (a post with the same msg_id is stored fresh) {probe:?}");
@@ -401,7 +401,7 @@ async_forms!(refused_messages_store_nothing_and_notify_no_one [memory = Memory, 
 all_forms!(space_and_membership_checks |db| {
     let s = store(db, Visibility::Shared);
     assert_eq!(s.send("a", "nope", ID_A, "x", Some(1)), Err(Code::SpaceNotFound));
-    assert_eq!(s.send("a", "S", ID_A, "x", Some(1)), Err(Code::NotSpaceMember));
+    assert_eq!(s.send("a", "S", ID_A, "x", Some(1)), Err(Code::NotSpaceMember), "CP-OP-MESSAGE⑤ — a non-member is 3013");
     join(&s, "S", "a", 1);
     s.leave("S", "a", None, Some(2)).expect("leave");
     assert_eq!(s.send("a", "S", ID_A, "x", Some(3)), Err(Code::NotSpaceMember), "a member who left is not a member");
@@ -460,16 +460,16 @@ all_forms!(a_page_never_splits_one_t |db| {
     }
     let ts = |p: &Page| p.messages.iter().map(|m| m.t).collect::<Vec<_>>();
     let p = s.history("a", "S", Dir::Latest, 2).expect("latest");
-    assert_eq!(ts(&p), vec![200, 200, 200, 300], "CP-OP-SPACE-HISTORY ⑤ — the page takes every message of its edge t");
+    assert_eq!(ts(&p), vec![200, 200, 200, 300], "CP-OP-SPACE-HISTORY⑤ — the page takes every message of its edge t");
     assert!(p.more);
     let same: Vec<&str> = p.messages[..3].iter().map(|m| m.msg_id.as_str()).collect();
     let mut sorted = same.clone();
     sorted.sort();
-    assert_eq!(same, sorted, "CP-OP-SPACE-HISTORY ① — same t is in msg_id order");
+    assert_eq!(same, sorted, "CP-OP-SPACE-HISTORY① — same t is in msg_id order");
     let p = s.history("a", "S", Dir::Before(200), 2).expect("before");
     assert_eq!((ts(&p), p.more), (vec![1, 100], false), "the join message at t 1 and the post at 100");
     let p = s.history("a", "S", Dir::After(100), 1).expect("after");
-    assert_eq!((ts(&p), p.more), (vec![200, 200, 200], true), "CP-OP-SPACE-HISTORY ⑤ — after keeps one t whole too");
+    assert_eq!((ts(&p), p.more), (vec![200, 200, 200], true), "CP-OP-SPACE-HISTORY⑤ — after keeps one t whole too");
     let p = s.history("a", "S", Dir::After(200), 1).expect("after");
     assert_eq!((ts(&p), p.more), (vec![300], false), "continuing from the edge t loses nothing and repeats nothing");
 });
@@ -520,7 +520,7 @@ all_forms!(undelivered_is_written_with_the_message_and_cleared_by_ack |db| {
     assert_eq!(s.pending("b").expect("b"), vec![ID_A.to_string()], "S-sym-IMPL-CHAT-STORE-2 — every other member has a record");
     assert_eq!(s.pending("c").expect("c"), vec![ID_A.to_string()]);
     s.ack("b", &[ID_A.to_string()]).expect("ack");
-    assert!(s.pending("b").expect("b").is_empty(), "CP-OP-MESSAGE ⑨ — an ACK clears that member's record");
+    assert!(s.pending("b").expect("b").is_empty(), "CP-OP-MESSAGE⑨ — an ACK clears that member's record");
     assert_eq!(s.pending("c").expect("c"), vec![ID_A.to_string()], "another member's record stays");
     s.purge(11).expect("purge");
     assert!(s.pending("c").expect("c").is_empty(), "records older than the keep window are removed");
@@ -1658,6 +1658,26 @@ all_forms!(ext_pending_is_written_in_the_store_transaction_per_matching_account 
     assert!(!ext_ids(&s, "texts").contains(&upd.msg_id), "S-sym-RULE-CHAT-EXT-SUB-9② — 글 구독에 발언 기록 갱신은 안 걸림");
     assert_eq!(ext_ids(&s, "all").len(), 2 + 4 + 2, "정:RULE-CHAT-EXT-SUB 1 — \"*\" 는 모든 종류");
     assert!(s.ext_rows("texts").expect("rows").iter().all(|r| r.tries == 0), "형상 — 새 행의 시도 수 0");
+});
+
+all_forms!(a_star_account_gets_every_space_outside_membership_and_the_visible_start |db| {
+    let s = db.open(Visibility::Joined).subscribed(subs(&[("all", &["*"]), ("texts", &[""])]));
+    s.create_space("S", None).expect("space");
+    s.create_space("S2", None).expect("space two");
+    join(&s, "S", "a", 1);
+    join(&s, "S2", "c", 1);
+    let early = id(1);
+    fresh_t(s.send("a", "S", &early, "before b joined", Some(10)));
+    join(&s, "S", "b", 20);
+    let other = id(2);
+    fresh_t(s.send("c", "S2", &other, "another space", Some(30)));
+    let seen_by_b: Vec<String> = s.history("b", "S", Dir::Latest, 60).expect("history").messages.into_iter().map(|m| m.msg_id).collect();
+    assert!(!seen_by_b.contains(&early), "positive control — in the joined form the member b does not see what came before b joined {seen_by_b:?}");
+    assert_eq!(s.history("b", "S2", Dir::Latest, 60), Err(Code::NotSpaceMember), "positive control — b is no member of the other space");
+    let all = ext_ids(&s, "all");
+    assert!(all.contains(&early), "H-rule-7-3-13 — the \"*\" account gets the message from before the visible start of a member {all:?}");
+    assert!(all.contains(&other), "H-rule-7-3-13 — the \"*\" account gets the message of a space it has no membership in either {all:?}");
+    assert_eq!(all.iter().filter(|i| **i == early || **i == other).count(), 2, "H-rule-7-3-13 — one row each");
 });
 
 all_forms!(a_resent_msg_id_writes_no_second_ext_row |db| {

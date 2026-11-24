@@ -225,3 +225,11 @@ fn rtp_observation_is_recorded_only_under_the_grant_that_admitted_it() {
     fan.release();
     assert_eq!(fan.ep.load().grant, 0, "정:IMPL-FLR-RTP-OBSERVE release episode has no grant");
 }
+
+#[test]
+fn gate_dropped_rtp_never_feeds_the_talk_clock() {
+    use oxsfud::ops::floor::obs_recorded;
+    for clock in [1u64, 7, u64::MAX] {
+        assert!(!obs_recorded(0, clock), "S-sym-IMPL-FLR-RTP-OBSERVE-2 RTP dropped at the prefan gate is reported without a grant and records no first_rtp_at · last_rtp_at · clock grant {clock}");
+    }
+}

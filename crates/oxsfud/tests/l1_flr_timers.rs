@@ -111,7 +111,7 @@ fn t7_repeats_idle_ten_times_with_a_new_number_each() {
         assert!(n <= 20, "T7 never stopped");
     }
     assert_eq!(seqs.len(), timers::C7 as usize, "CP-TIMER-T7① IDLE ten times in all (the first and nine repeats) then it stops");
-    assert!(seqs.windows(2).all(|w| w[1] == w[0] + 1), "CP-TIMER-T7① each repeat carries seq + 1 {seqs:?}");
+    assert!(seqs.windows(2).all(|w| w[1] == w[0] + 1), "CP-TIMER-T7① · CP-MSG-FLOOR-IDLE② each repeat carries seq + 1 {seqs:?}");
     let mut f = room(&["a", "b"]);
     request(&mut f, "a", 5);
     release(&mut f, "a");

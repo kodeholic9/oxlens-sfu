@@ -743,6 +743,81 @@ async fn one_given_up_message_does_not_hold_back_the_others() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_resent_older_message_arrives_after_a_newer_live_one() {
+    let mut k = knobs();
+    k.sweep = Duration::from_millis(1_000);
+    let r = rig_with(k).await;
+    let older = post(&r, 0);
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let s = open(&r, "acme").await;
+    let q = s.declare_queryable(sub_key("acme")).await.expect("queryable");
+    let (tx, mut got) = tokio::sync::mpsc::unbounded_channel();
+    let first_refused = older.clone();
+    let _h = tokio::spawn(async move {
+        let mut refused_once = false;
+        while let Ok(query) = q.recv_async().await {
+            let b = body_of(&query);
+            let refuse = !refused_once && ids_of(&b).contains(&first_refused);
+            let _ = tx.send(b);
+            if refuse {
+                refused_once = true;
+                let _ = query.reply_err(b"no".to_vec()).await;
+            } else {
+                let _ = query.reply(query.key_expr().clone(), b"ok".to_vec()).await;
+            }
+        }
+    });
+    let cid = open_cid(&r).await;
+    let one = tokio::time::timeout(Duration::from_secs(5), got.recv()).await.expect("drain in time").expect("body");
+    assert_eq!(ids_of(&one), vec![older.clone()], "positive control — the waiting message is carried first and refused once");
+    let newer = post(&r, 1);
+    let msg = r.chat.store.history("u1", "S", oxhubd::chat::store::Dir::Latest, 1).expect("history").messages.remove(0);
+    assert_eq!(msg.msg_id, newer);
+    assert!(r.gate.deliver(&cid, true, vec![msg], None).expect("deliver").accepted(), "positive control — the live one is taken");
+    let mut bodies = vec![one];
+    let end = Instant::now() + Duration::from_secs(10);
+    while bodies.iter().flat_map(|b| ids_of(b)).filter(|i| *i == older).count() < 2 && Instant::now() < end {
+        if let Ok(Some(b)) = tokio::time::timeout(Duration::from_secs(1), got.recv()).await {
+            bodies.push(b);
+        }
+    }
+    let arrivals: Vec<String> = bodies.iter().flat_map(|b| ids_of(b)).collect();
+    let count = |id: &str| arrivals.iter().filter(|i| *i == id).count();
+    assert_eq!(count(&older), 2, "H-rule-7-3-9① H-sym-7-3-1① — the refused message is carried again: the same msg_id arrives twice, so a 3rd that does not filter by msg_id handles it twice {arrivals:?}");
+    assert!(count(&newer) >= 1, "형상 — the live one arrived {arrivals:?}");
+    let first_newer = arrivals.iter().position(|i| *i == newer).expect("newer arrived");
+    let last_older = arrivals.iter().rposition(|i| *i == older).expect("older arrived");
+    let t_older = bodies.iter().map(|b| b["messages"].as_array().cloned().unwrap_or_default()).flatten().find(|m| m["msg_id"] == older).and_then(|m| m["t"].as_u64()).expect("t older");
+    let t_newer = bodies.iter().map(|b| b["messages"].as_array().cloned().unwrap_or_default()).flatten().find(|m| m["msg_id"] == newer).and_then(|m| m["t"].as_u64()).expect("t newer");
+    assert!(t_older < t_newer, "형상 — the older message has the earlier t");
+    assert!(last_older > first_newer, "H-rule-7-3-10③ — the arrival order differs from the t order: the older message arrives again after the newer one {arrivals:?}");
+    drop(s);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn what_waited_past_the_retention_is_gone_when_the_client_comes() {
+    let r = rig().await;
+    let old = "mold0".to_string();
+    match r.chat.store.send("u1", "S", &old, "waited too long", Some(1_000)).expect("send") {
+        oxhubd::chat::store::Sent::Fresh { ext, .. } => assert_eq!(ext, vec!["acme".to_string()], "형상 — the old message waits for acme"),
+        _ => panic!("fresh"),
+    }
+    let fresh = post(&r, 7);
+    assert_eq!(r.chat.store.ext_rows("acme").expect("rows").len(), 2, "형상 — an old row and a new row wait");
+    r.chat.purge_once(common::now_ms()).expect("purge");
+    let left: Vec<String> = r.chat.store.ext_rows("acme").expect("rows").into_iter().map(|x| x.msg_id).collect();
+    assert_eq!(left, vec![fresh.clone()], "H-rule-7-3-11 — the retention purge removes the old waiting row and keeps the new one");
+    let s = open(&r, "acme").await;
+    let (mut got, _h) = answering(s.declare_queryable(sub_key("acme")).await.expect("queryable"), Mode::Ack);
+    let b = tokio::time::timeout(Duration::from_secs(5), got.recv()).await.expect("drain in time").expect("body");
+    assert_eq!(ids_of(&b), vec![fresh], "H-rule-7-3-11 — a client that comes after the retention gets the new share only · the purged one never comes (positive control — the drain itself works)");
+    assert!(!ids_of(&b).contains(&old), "H-rule-7-3-11 — the purged message is not carried");
+    let more = tokio::time::timeout(Duration::from_millis(1_500), got.recv()).await;
+    assert!(more.is_err(), "H-rule-7-3-11 — nothing else follows {more:?}");
+    drop(s);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn one_zid_with_two_connections_holds_two_rows() {
     let r = rig().await;
     let mut a = Raw::connect(&r, "acme").await;
@@ -764,6 +839,26 @@ fn spec_dir() -> PathBuf {
         return PathBuf::from(p);
     }
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/spec")
+}
+
+#[test]
+fn one_ack_clears_the_streak_of_reply_timeouts() {
+    use oxhubd::chat::zgate::plan::{After, Item, Knobs, Outbox, Outcome};
+    let mut o: Outbox<(), ()> = Outbox::new(Knobs { window: 1, cap: 1_000, live_max: 100, close_at: 3 });
+    let mut step = |o: &mut Outbox<(), ()>, oc: Outcome| {
+        let n = o.queued() as u64 + 1;
+        o.offer(Item { live: false, ids: vec![format!("m{n}")], bytes: 1, msgs: vec![()], waiter: None });
+        assert!(o.take().is_some(), "형상 — 창 하나에 하나를 꺼낸다");
+        o.done(oc)
+    };
+    assert_ne!(step(&mut o, Outcome::Timeout), After::Close);
+    assert_ne!(step(&mut o, Outcome::Timeout), After::Close);
+    assert_eq!(o.streak, 2, "형상 — 잇단 시간 넘김 둘");
+    assert_ne!(step(&mut o, Outcome::Ack), After::Close);
+    assert_eq!(o.streak, 0, "PL-KEY-HOOK-EXT-REPLY-TIMEOUT-MS③ PL-KEY-HOOK-EXT-TIMEOUT-CLOSE③ — ACK 하나가 잇단 수를 0 으로 되돌린다");
+    assert_ne!(step(&mut o, Outcome::Timeout), After::Close);
+    assert_ne!(step(&mut o, Outcome::Timeout), After::Close, "PL-KEY-HOOK-EXT-TIMEOUT-CLOSE③ — ACK 뒤 둘이 더 와도 닫지 않는다(이으면 셋)");
+    assert_eq!(step(&mut o, Outcome::Timeout), After::Close, "PL-KEY-HOOK-EXT-TIMEOUT-CLOSE② — 잇단 수가 3 에 닿으면 닫는다");
 }
 
 #[test]
