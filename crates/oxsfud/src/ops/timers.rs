@@ -334,3 +334,42 @@ fn max_rss_bytes() -> u64 {
 fn open_fds() -> usize {
     std::fs::read_dir("/dev/fd").map(|d| d.count()).unwrap_or(0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::room::RoomInit;
+
+    fn room() -> Arc<Room> {
+        Room::new(RoomInit {
+            id: "tstall".into(),
+            name: "tstall".into(),
+            capacity: 10,
+            unused_ttl: 0,
+            departure_ttl: 0,
+            media_codecs: MediaCodecs::default(),
+            epoch: "e".into(),
+            floor: crate::flr::core::Floor::new(10, 30),
+            record: false,
+        })
+    }
+
+    fn told(r: &Room, user: &str) -> Option<u64> {
+        r.stall_cool.lock().ok().and_then(|g| g.get(user).copied())
+    }
+
+    #[test]
+    fn sync_required_stays_quiet_inside_the_cooldown_and_tells_again_after() {
+        assert_eq!(STALL_COOL_MS, 30_000, "CP-TIMER-T-STALL 30 seconds per (room, person)");
+        let r = room();
+        let t0 = 1_000_000;
+        sync_required(&r, "a", t0, "t1", t0 - 5_000, t0 - 5_000);
+        assert_eq!(told(&r, "a"), Some(t0), "positive control — the first stall tells");
+        sync_required(&r, "a", t0 + STALL_COOL_MS - 1, "t1", t0, t0);
+        assert_eq!(told(&r, "a"), Some(t0), "CP-TIMER-T-STALL inside the cooldown the same (room, person) is not told again");
+        sync_required(&r, "b", t0 + 1, "t1", t0, t0);
+        assert_eq!(told(&r, "b"), Some(t0 + 1), "CP-TIMER-T-STALL the cooldown is per person — another person in the room is told");
+        sync_required(&r, "a", t0 + STALL_COOL_MS, "t1", t0, t0);
+        assert_eq!(told(&r, "a"), Some(t0 + STALL_COOL_MS), "CP-TIMER-T-STALL once the cooldown has passed it can tell again");
+    }
+}

@@ -318,6 +318,86 @@ async_forms!(message_op_refuses_only_that_request_on_bounds [memory = Memory, sq
     assert_eq!(f.code, Code::InvalidPayload.num(), "연:RULE-CHAT-CONTENT — a body over 131072 received bytes is 1002");
 });
 
+async fn call(chat: &Chat, user: &str, op: Op, body: serde_json::Value) -> Result<(serde_json::Value, bool), u16> {
+    chat.handle(user, "s1", op, body, 100).await.map(|a| (a.body, a.deliver.is_some())).map_err(|f| f.code)
+}
+
+fn say(space: &str, msg_id: &str, extra: serde_json::Value) -> serde_json::Value {
+    let mut b = serde_json::json!({ "space_id": space, "msg_id": msg_id });
+    if let (Some(o), Some(e)) = (b.as_object_mut(), extra.as_object()) {
+        o.extend(e.clone());
+    }
+    b
+}
+
+async fn seen_by(chat: &Chat, user: &str, other: &str) -> (serde_json::Value, Vec<String>) {
+    let (page, _) = call(chat, user, Op::SpaceHistory, serde_json::json!({ "space_id": "S", "limit": 100 })).await.expect("history");
+    (page, chat.store.pending(other).expect("pending"))
+}
+
+async_forms!(space_list_and_view_answer_as_the_store_stands [memory = Memory, sqlite = Sqlite, postgres = Postgres] |db| {
+    let s = store(db, Visibility::Shared);
+    s.create_space("E", None).expect("empty space");
+    for sp in ["S", "E"] {
+        join(&s, sp, "a", 1);
+        join(&s, sp, "b", 1);
+    }
+    let chat = Chat::new(s, Limits::default());
+    call(&chat, "a", Op::Message, say("S", ID_A, serde_json::json!({ "content": "hi" }))).await.expect("post");
+    let (list, _) = call(&chat, "b", Op::SpaceList, serde_json::json!({})).await.expect("list");
+    let entry = |sp: &str| list["spaces"].as_array().and_then(|v| v.iter().find(|e| e["space_id"] == sp).cloned()).expect("entry");
+    assert!(entry("S").get("last_t").is_some_and(|t| t.is_u64()), "positive control — a space with a post carries last_t");
+    assert!(entry("E").get("last_t").is_none(), "CP-OP-SPACE-LIST③ a space without messages has no last_t {}", entry("E"));
+    let (v1, _) = call(&chat, "b", Op::SpaceView, serde_json::json!({ "space_id": "S" })).await.expect("view");
+    let (v2, _) = call(&chat, "b", Op::SpaceView, serde_json::json!({ "space_id": "S" })).await.expect("view again");
+    assert_eq!((v1["read"].as_u64(), v2["read"].as_u64()), (Some(1), Some(1)), "CP-OP-SPACE-VIEW③ sending it again gives the same read");
+    let (after, _) = call(&chat, "b", Op::SpaceList, serde_json::json!({})).await.expect("list");
+    let s_after = after["spaces"].as_array().and_then(|v| v.iter().find(|e| e["space_id"] == "S").cloned()).expect("S");
+    assert_eq!((s_after["total"].as_u64(), s_after["read"].as_u64()), (Some(1), Some(1)), "CP-OP-SPACE-VIEW③ the second view leaves the read where the first put it");
+});
+
+async_forms!(refused_messages_store_nothing_and_notify_no_one [memory = Memory, sqlite = Sqlite, postgres = Postgres] |db| {
+    let s = store(db, Visibility::Shared);
+    s.create_space("T", None).expect("space T");
+    for u in ["a", "b"] {
+        join(&s, "S", u, 1);
+    }
+    join(&s, "T", "a", 1);
+    let chat = Chat::new(s, Limits::default());
+    let (_, fanned) = call(&chat, "a", Op::Message, say("S", &id(1), serde_json::json!({ "content": "hello" }))).await.expect("post");
+    assert!(fanned, "positive control — a stored message is handed to the fan-out");
+    call(&chat, "a", Op::Message, say("T", &id(2), serde_json::json!({ "content": "there" }))).await.expect("post in T");
+    call(&chat, "b", Op::Message, say("S", &id(3), serde_json::json!({ "kind": "react", "ref": id(1), "keys": ["+1"] }))).await.expect("react");
+    call(&chat, "a", Op::Message, say("S", &id(4), serde_json::json!({ "content": "gone" }))).await.expect("post");
+    call(&chat, "a", Op::Message, say("S", &id(5), serde_json::json!({ "kind": "delete", "ref": id(4) }))).await.expect("delete");
+    let before = seen_by(&chat, "a", "b").await;
+    let first_t = before.0["messages"].as_array().and_then(|v| v.iter().find(|m| m["msg_id"] == id(1).as_str()).and_then(|m| m["t"].as_u64())).expect("first t");
+    let cases: Vec<(&str, u16, serde_json::Value, &str)> = vec![
+        ("a", Code::MsgIdConflict.num(), say("S", &id(1), serde_json::json!({ "content": "other" })), "CP-CODE-MSG-ID-CONFLICT②"),
+        ("a", Code::RefNotFound.num(), say("S", &id(10), serde_json::json!({ "kind": "edit", "ref": "missing", "content": "x" })), "CP-CODE-REF-NOT-FOUND② unknown msg_id"),
+        ("a", Code::RefNotFound.num(), say("S", &id(11), serde_json::json!({ "kind": "edit", "ref": id(2), "content": "x" })), "CP-CODE-REF-NOT-FOUND② a post of another space"),
+        ("a", Code::RefNotFound.num(), say("S", &id(12), serde_json::json!({ "kind": "react", "ref": id(3), "keys": ["x"] })), "CP-CODE-REF-NOT-FOUND② a relation"),
+        ("a", Code::RefDeleted.num(), say("S", &id(13), serde_json::json!({ "kind": "edit", "ref": id(4), "content": "back" })), "CP-CODE-REF-DELETED② edit"),
+        ("b", Code::RefDeleted.num(), say("S", &id(14), serde_json::json!({ "kind": "react", "ref": id(4), "keys": ["x"] })), "CP-CODE-REF-DELETED② react"),
+        ("a", Code::RefDeleted.num(), say("S", &id(15), serde_json::json!({ "kind": "delete", "ref": id(4) })), "CP-CODE-REF-DELETED② delete"),
+        ("b", Code::NotRefSender.num(), say("S", &id(16), serde_json::json!({ "kind": "edit", "ref": id(1), "content": "mine" })), "CP-CODE-NOT-REF-SENDER② edit"),
+        ("b", Code::NotRefSender.num(), say("S", &id(17), serde_json::json!({ "kind": "delete", "ref": id(1) })), "CP-CODE-NOT-REF-SENDER② delete"),
+    ];
+    for (user, code, body, what) in cases {
+        let mid = body["msg_id"].as_str().unwrap_or_default().to_string();
+        let before = seen_by(&chat, "a", "b").await;
+        assert_eq!(call(&chat, user, Op::Message, body).await.err(), Some(code), "{what} — the code");
+        assert_eq!(seen_by(&chat, "a", "b").await, before, "{what} — nothing stored · no undelivered record · no fan-out (the refusal carries no delivery)");
+        if code != Code::MsgIdConflict.num() {
+            let probe = call(&chat, user, Op::Message, say("S", &mid, serde_json::json!({ "content": "probe" }))).await;
+            assert!(matches!(probe, Ok((_, true))), "{what} — nothing was stored under its msg_id (a post with the same msg_id is stored fresh) {probe:?}");
+        }
+    }
+    let after = seen_by(&chat, "a", "b").await;
+    let orig = after.0["messages"].as_array().and_then(|v| v.iter().find(|m| m["msg_id"] == id(1).as_str()).cloned()).expect("first");
+    assert_eq!((orig["content"].as_str(), orig["t"].as_u64()), (Some("hello"), Some(first_t)), "CP-CODE-MSG-ID-CONFLICT② the message stored first stays as it was");
+});
+
 all_forms!(space_and_membership_checks |db| {
     let s = store(db, Visibility::Shared);
     assert_eq!(s.send("a", "nope", ID_A, "x", Some(1)), Err(Code::SpaceNotFound));
@@ -570,7 +650,7 @@ all_forms!(relations_are_checked_on_the_pointer_only |db| {
     fresh_t(s.send("a", "T", &id(2), "there", Some(10)));
     assert_eq!(s.post("b", "S", &id(3), &edit(&id(1), "x"), Some(11)), Err(Code::NotRefSender), "연:RULE-CHAT-REF-CHECK — someone else's post cannot be edited");
     assert_eq!(s.post("b", "S", &id(3), &rel(ChatKind::Delete, &id(1)), Some(11)), Err(Code::NotRefSender), "nor deleted");
-    fresh_t(s.post("b", "S", &id(4), &react(&id(1), &["+1"]), Some(12)));
+    assert!(matches!(s.post("b", "S", &id(4), &react(&id(1), &["+1"]), Some(12)), Ok(Sent::Fresh { .. })), "CP-CODE-NOT-REF-SENDER③ a react on someone else's post is taken");
     assert_eq!(s.post("a", "S", &id(5), &edit("missing", "x"), Some(13)), Err(Code::RefNotFound), "an unknown msg_id");
     assert_eq!(s.post("a", "S", &id(5), &edit(&id(2), "x"), Some(13)), Err(Code::RefNotFound), "a post of another space");
     assert_eq!(s.post("a", "S", &id(5), &react(&id(4), &["x"]), Some(13)), Err(Code::RefNotFound), "a relation is not a post");
@@ -591,7 +671,7 @@ all_forms!(delete_clears_the_post_and_what_points_at_it |db| {
     assert_eq!(s.post("a", "S", &id(5), &edit(&id(1), "again"), Some(14)), Err(Code::RefDeleted), "연:RULE-CHAT-DELETE — no edit after delete");
     assert_eq!(s.post("b", "S", &id(5), &react(&id(1), &["x"]), Some(14)), Err(Code::RefDeleted), "no reaction after delete");
     assert_eq!(s.post("a", "S", &id(5), &rel(ChatKind::Delete, &id(1)), Some(14)), Err(Code::RefDeleted), "no second delete");
-    fresh_t(s.post("b", "S", &id(6), &Outgoing { r#ref: Some(id(1)), ..Outgoing::text("why?") }, Some(15)));
+    assert!(matches!(s.post("b", "S", &id(6), &Outgoing { r#ref: Some(id(1)), ..Outgoing::text("why?") }, Some(15)), Ok(Sent::Fresh { .. })), "CP-CODE-REF-DELETED③ a reply (a post's ref) to the deleted post is taken");
     let page = s.history("b", "S", Dir::Latest, 50).expect("history");
     let orig = page.messages.iter().find(|m| m.msg_id == id(1)).expect("the envelope stays");
     assert_eq!((orig.content.as_str(), orig.ext.is_none()), ("", true), "S-sym-IMPL-CHAT-STORE-5① — the post is emptied");
@@ -1458,8 +1538,8 @@ all_forms!(a_talk_is_an_origin_only_for_reply_and_react |db| {
     let tid = talk_id(20);
     sent_msg(s.talk(&talk_start(&tid, "S", "a"), Some(2_000)));
     let reply = Outgoing { content: "copy".into(), r#ref: Some(tid.clone()), ..Outgoing::default() };
-    assert!(s.post("a", "S", ID_A, &reply, Some(2_100)).is_ok(), "연:RULE-CHAT-REF-CHECK — a reply may point at a talk");
-    assert!(s.post("a", "S", ID_B, &react(&tid, &["👍"]), Some(2_200)).is_ok(), "a react may point at a talk");
+    assert!(s.post("a", "S", ID_A, &reply, Some(2_100)).is_ok(), "연:RULE-CHAT-REF-CHECK CP-CODE-REF-NOT-FOUND③ — a reply may point at a talk");
+    assert!(s.post("a", "S", ID_B, &react(&tid, &["👍"]), Some(2_200)).is_ok(), "CP-CODE-REF-NOT-FOUND③ a react may point at a talk");
     assert_eq!(s.post("a", "S", ID_C, &edit(&tid, "x"), Some(2_300)), Err(Code::RefNotFound), "연:RULE-CHAT-REF-CHECK — a talk is not edited");
     assert_eq!(s.post("a", "S", &id(30), &rel(ChatKind::Delete, &tid), Some(2_400)), Err(Code::RefNotFound), "a talk is not deleted");
     let up = common::talk::update_msg_id(&tid, ":end");
