@@ -625,7 +625,7 @@ async fn reply_timeouts_in_a_row_close_the_session_and_count_tries() {
     let cid = open_cid(&r).await;
     let msg = r.chat.store.history("u1", "S", oxhubd::chat::store::Dir::Latest, 1).expect("history").messages.remove(0);
     let _ = r.gate.deliver(&cid, true, vec![msg], None);
-    assert!(wait(8_000, || !r.gate.conns().iter().any(|c| c.cid == cid)).await, "S-sym-RULE-CHAT-EXT-SUB-6① · PL-KEY-HOOK-EXT-REPLY-TIMEOUT-MS② — 잇단 시간 넘김 close_at 번에 그 세션을 닫는다(클라이언트는 새 연결로 다시 붙는다)");
+    assert!(wait(8_000, || !r.gate.conns().iter().any(|c| c.cid == cid)).await, "S-sym-RULE-CHAT-EXT-SUB-6① · PL-KEY-HOOK-EXT-REPLY-TIMEOUT-MS② · H-sym-7-3-3 — 잇단 시간 넘김 close_at 번에 그 세션을 닫는다(클라이언트는 새 연결로 다시 붙는다)");
     assert!(r.gate.drops.reply_timeout.load(Ordering::Relaxed) >= 2, "PL-KEY-HOOK-EXT-REPLY-TIMEOUT-MS① — 시간 넘김마다 ext_reply_timeout +1");
     let end = Instant::now() + Duration::from_secs(3);
     while Instant::now() < end && r.chat.store.ext_rows("acme").expect("rows").first().is_none_or(|x| x.tries == 0) {
@@ -714,7 +714,7 @@ fn send_plan_vectors() {
                     serde_json::json!(a.as_str())
                 }
             };
-            assert_eq!(got, s["got"], "정:RULE-CHAT-EXT-SUB 5 — {} · {s}", c["name"]);
+            assert_eq!(got, s["got"], "정:RULE-CHAT-EXT-SUB 5 H-rule-7-3-8 — {} · {s}", c["name"]);
             assert_eq!((o.inflight as u64, o.queued() as u64, o.backlog, o.streak as u64), (s["inflight"].as_u64().expect("i"), s["queued"].as_u64().expect("q"), s["backlog"].as_bool().expect("b"), s["streak"].as_u64().expect("s")), "{} · {s}", c["name"]);
         }
     }

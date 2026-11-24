@@ -299,7 +299,7 @@ mod tests {
     fn rejects_version_and_retired() {
         assert!(decode(&[0x40, 0]).is_none());
         assert!(decode(&[7, 0]).is_none());
-        assert!(encode(&Msg::new(REVOKE, true)).is_none());
+        assert!(encode(&Msg::new(REVOKE, true)).is_none(), "C-sym-RULE-FLR-MSG-REVOKE-3 a REVOKE with the A bit set is never built");
     }
 
     #[test]

@@ -53,7 +53,7 @@ fn points_vectors_match_product() {
         for (name, want) in c["out"].as_object().unwrap() {
             let got: Vec<(i64, i64)> = layer_points(strat(name), &raw, cs, ct).iter().map(|p| (p.bitrate, p.layer as i64)).collect();
             let want: Vec<(i64, i64)> = want.as_array().unwrap().iter().map(|p| (p[0].as_f64().unwrap() as i64, p[1].as_i64().unwrap())).collect();
-            assert_eq!(got, want, "S-sym-RULE-SIM-TICK-24① ② ③ ④ ⑤ layer_points · {} · {name}", c["name"]);
+            assert_eq!(got, want, "S-sym-RULE-SIM-TICK-24①②③④⑤ layer_points · {} · {name}", c["name"]);
         }
     }
 }

@@ -128,9 +128,9 @@ fn pick_is_hrw_with_lexicographic_tie() {
 fn own_node_is_a_candidate_before_its_echo() {
     let v = View::new("node-a", "hub-a-1", 10_000);
     let c = v.candidates(0);
-    assert!(c.contains(&"node-a".to_string()), "S-sym-RULE-BUS-PLACEMENT-6 own node is a candidate from the start: {c:?}");
+    assert!(c.contains(&"node-a".to_string()), "S-sym-RULE-BUS-PLACEMENT-6① own node is a candidate from the start: {c:?}");
     for r in rooms(50) {
-        assert_eq!(pick(c.iter().map(|s| s.as_str()), &r), Some("node-a".to_string()), "S-sym-RULE-BUS-PLACEMENT-6 single node places every room on itself before its echo");
+        assert_eq!(pick(c.iter().map(|s| s.as_str()), &r), Some("node-a".to_string()), "S-sym-RULE-BUS-PLACEMENT-6② single node places every room on itself before its echo");
     }
 
     let mut va = View::new("node-a", "hub-a-1", 10_000);
@@ -169,9 +169,9 @@ fn vanished_node_stays_a_candidate_during_grace() {
     assert!(!v.node_live("node-c"), "S-sym-RULE-BUS-PLACEMENT-1 node-c is not live after its Delete");
     for now in [t2, del_at + grace / 2, del_at + grace - 1] {
         let c: BTreeSet<String> = v.candidates(now).into_iter().collect();
-        assert_eq!(c, before, "S-sym-RULE-BUS-PLACEMENT-3 vanished node kept in candidates during grace · now {now}");
+        assert_eq!(c, before, "S-sym-RULE-BUS-PLACEMENT-3③ vanished node kept in candidates during grace · now {now}");
         let again: Vec<Option<String>> = rooms(300).iter().map(|r| pick(c.iter().map(|s| s.as_str()), r)).collect();
-        assert_eq!(again, placed, "S-sym-RULE-BUS-PLACEMENT-1 placement does not move while a node is merely not live · now {now}");
+        assert_eq!(again, placed, "S-sym-RULE-BUS-PLACEMENT-1① placement does not move while a node is merely not live · now {now}");
     }
     let late = del_at + grace + SETTLE_MS + 1;
     if v.settle_due(late) {

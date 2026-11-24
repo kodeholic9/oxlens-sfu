@@ -158,7 +158,7 @@ fn release_does_not_clear_newer_bind() {
     assert!(s.apply(&Effect::Bind { user: "A".into(), g: 0 }), "S-sym-IMPL-FLR-MEDIA-BIND-3 first bind applies");
     assert!(s.apply(&Effect::Bind { user: "B".into(), g: 1 }), "S-sym-IMPL-FLR-MEDIA-BIND-3 new speaker bind applies");
     let cleared = s.apply(&Effect::Release { g: 0 });
-    assert!(!cleared, "S-sym-IMPL-FLR-MEDIA-BIND-3 late release of g=0 must not clear bind g=1");
+    assert!(!cleared, "S-sym-IMPL-FLR-MEDIA-BIND-3 S-sym-IMPL-FLR-MEDIA-BIND-5② late release of g=0 must not clear bind g=1");
     assert_eq!(s.bound, Some(("B".to_string(), 1)), "S-sym-IMPL-FLR-MEDIA-BIND-3 slot keeps the new speaker after old release lands late");
     assert_eq!(s.speaker(), Some("B"), "S-sym-IMPL-FLR-MEDIA-BIND-3 speaker stays B");
 }
@@ -187,11 +187,11 @@ fn release_clears_older_after_succession() {
     for i in [0usize, 2, 1] {
         s.apply(&decided[i]);
     }
-    assert_eq!(s.bound, None, "S-sym-IMPL-FLR-MEDIA-BIND-5 release g=1 landing before bind g=1 clears the returned bind g=0 · order [0,2,1]");
+    assert_eq!(s.bound, None, "S-sym-IMPL-FLR-MEDIA-BIND-5① release g=1 landing before bind g=1 clears the returned bind g=0 · order [0,2,1]");
 
     let mut s = Slot::default();
     s.apply(&Effect::Bind { user: "A".into(), g: 4 });
-    assert!(s.apply(&Effect::Release { g: 9 }), "S-sym-IMPL-FLR-MEDIA-BIND-5 release with larger number clears an older bind");
+    assert!(s.apply(&Effect::Release { g: 9 }), "S-sym-IMPL-FLR-MEDIA-BIND-5② release with larger number clears an older bind");
     assert_eq!(s.bound, None, "S-sym-IMPL-FLR-MEDIA-BIND-5 nothing left after release g=9");
     assert!(!s.apply(&Effect::Bind { user: "C".into(), g: 7 }), "S-sym-IMPL-FLR-MEDIA-BIND-5 bind numbered below the seen max stays dropped");
 }

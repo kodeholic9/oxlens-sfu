@@ -149,11 +149,11 @@ fn never_rises_without_layer_sync() {
     for p in 11..400u16 {
         let tid = [2u8, 1, 2, 0][(p % 4) as usize];
         let (send, _) = sel.step(Tl { tid, sync: 0, pid: p }, false, TL_TOP);
-        assert_eq!(sel.current, 0, "S-sym-IMPL-SIM-SWITCH-6 no rise without Y · pid {p}");
-        assert_eq!(send, tid == 0, "S-sym-IMPL-SIM-SWITCH-6 only TID0 while waiting for Y · pid {p}");
+        assert_eq!(sel.current, 0, "S-sym-IMPL-SIM-SWITCH-6① no rise without Y · pid {p}");
+        assert_eq!(send, tid == 0, "S-sym-IMPL-SIM-SWITCH-6① only TID0 while waiting for Y · pid {p}");
     }
     let (send, _) = sel.step(Tl { tid: 1, sync: 1 << 1, pid: 400 }, false, TL_TOP);
-    assert!(send && sel.current == 1, "S-sym-IMPL-SIM-SWITCH-6 Y frame lifts one step");
+    assert!(send && sel.current == 1, "S-sym-IMPL-SIM-SWITCH-6② Y frame lifts one step");
 }
 
 fn frame_json(f: &oxsfud::sim::dd::DdFrame) -> Value {

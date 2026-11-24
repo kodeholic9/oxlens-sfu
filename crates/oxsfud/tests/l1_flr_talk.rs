@@ -85,7 +85,7 @@ fn a_grant_starts_one_talk_and_the_release_ends_it() {
     assert_eq!(got.len(), 1, "{got:?}");
     assert_eq!(got[0].talk_id(), talk_id, "the end names the same talk");
     let (state, reason, dur) = end_of(&got[0]);
-    assert_eq!((state, reason), (TalkState::Ok, None), "연:RULE-CHAT-TALK-STATE a release past the minimum is ok");
+    assert_eq!((state, reason), (TalkState::Ok, None), "연:RULE-CHAT-TALK-STATE PL-KEY-FLOOR-TALK-MIN-MS a release past the minimum is ok");
     assert!((900..2_000).contains(&dur), "duration counts from the first RTP {dur}");
     assert!(r.exec.clock.lock().map(|c| c.talk.is_none()).unwrap_or(false), "no open talk after idle");
 }
@@ -107,7 +107,7 @@ fn a_short_or_silent_talk_still_ends_with_its_state() {
     heard_for(&r, 100);
     release(&r, &a);
     let got = drain(&mut rx);
-    assert_eq!(end_of(&got[1]).0, TalkState::Short, "under floor.talk_min_ms(500) is short");
+    assert_eq!(end_of(&got[1]).0, TalkState::Short, "PL-KEY-FLOOR-TALK-MIN-MS under floor.talk_min_ms(500) is short");
     request(&r, &a, 5);
     floor::run(&r, Entry::of("t1", ""), |f, _| Some(f.t1()));
     let got = drain(&mut rx);

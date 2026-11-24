@@ -326,8 +326,8 @@ all_forms!(space_and_membership_checks |db| {
     s.leave("S", "a", None, Some(2)).expect("leave");
     assert_eq!(s.send("a", "S", ID_A, "x", Some(3)), Err(Code::NotSpaceMember), "a member who left is not a member");
     assert_eq!(s.history("a", "S", Dir::Latest, 60), Err(Code::NotSpaceMember));
-    assert_eq!(s.catchup_check("a", "S"), Err(Code::NotSpaceMember), "CP-OP-CATCHUP ④ — not a member is 3013");
-    assert_eq!(s.catchup_check("a", "nope"), Err(Code::SpaceNotFound), "CP-OP-CATCHUP ④ — no such space is 3012");
+    assert_eq!(s.catchup_check("a", "S"), Err(Code::NotSpaceMember), "CP-OP-CATCHUP④ — not a member is 3013");
+    assert_eq!(s.catchup_check("a", "nope"), Err(Code::SpaceNotFound), "CP-OP-CATCHUP④ — no such space is 3012");
 });
 
 all_forms!(roster_at_message_time |db| {
@@ -474,11 +474,11 @@ all_forms!(catchup_merges_records_and_since_in_t_order |db| {
     }
     s.ack("b", &[id(2)]).expect("b got the S post at 200 live");
     let page = s.catchup("b", None, None, &Cursor::default(), 100, 1 << 20).expect("records only");
-    assert_eq!(page.iter().map(|m| (m.t, m.msg_id.clone())).collect::<Vec<_>>(), vec![(100, id(0)), (100, id(1)), (300, id(3))], "CP-OP-CATCHUP ② — records in (t, msg_id) order");
+    assert_eq!(page.iter().map(|m| (m.t, m.msg_id.clone())).collect::<Vec<_>>(), vec![(100, id(0)), (100, id(1)), (300, id(3))], "CP-OP-CATCHUP② — records in (t, msg_id) order");
     let page = s.catchup("b", None, Some(200), &Cursor::default(), 100, 1 << 20).expect("since");
-    assert_eq!(page.iter().map(|m| m.msg_id.clone()).collect::<Vec<_>>(), vec![id(0), id(1), id(2), id(3)], "CP-OP-CATCHUP ② — t ≥ 200 joins the records once each");
+    assert_eq!(page.iter().map(|m| m.msg_id.clone()).collect::<Vec<_>>(), vec![id(0), id(1), id(2), id(3)], "CP-OP-CATCHUP② — t ≥ 200 joins the records once each");
     let page = s.catchup("b", Some("S"), None, &Cursor::default(), 100, 1 << 20).expect("one space");
-    assert_eq!(page.iter().map(|m| m.msg_id.clone()).collect::<Vec<_>>(), vec![id(0)], "CP-OP-CATCHUP ③ — one space only");
+    assert_eq!(page.iter().map(|m| m.msg_id.clone()).collect::<Vec<_>>(), vec![id(0)], "CP-OP-CATCHUP③ — one space only");
     let first = s.catchup("b", None, None, &Cursor::default(), 2, 1 << 20).expect("bundle");
     assert_eq!(first.len(), 2, "CP-OP-MESSAGES ① — at most the bundle count");
     let last = first.last().expect("last");

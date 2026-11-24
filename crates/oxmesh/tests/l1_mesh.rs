@@ -113,7 +113,7 @@ async fn client_sees_deletes_and_batch_end_when_its_router_is_lost() {
             break;
         }
     }
-    assert_eq!(after, vec![TokenEvent::Delete("ox/t/int/node/a/h1".into()), TokenEvent::BatchEnd]);
+    assert_eq!(after, vec![TokenEvent::Delete("ox/t/int/node/a/h1".into()), TokenEvent::BatchEnd], "S-sym-RULE-MESH-DECL-3 every token the client saw gets its Delete then one batch end");
 }
 
 #[tokio::test]
@@ -174,8 +174,8 @@ async fn pending_query_ends_at_once_when_the_target_session_closes() {
     let held = timeout(LEASE, q.recv()).await.ok().flatten().expect("query arrived");
     let t0 = Instant::now();
     b.close().await;
-    assert_eq!(timeout(Duration::from_secs(3), r.recv()).await.ok().flatten(), None);
-    assert!(t0.elapsed() < Duration::from_secs(2), "not the 10 s timeout");
+    assert_eq!(timeout(Duration::from_secs(3), r.recv()).await.ok().flatten(), None, "S-sym-RULE-MESH-REQUEST-2 the pending query ends with the target session");
+    assert!(t0.elapsed() < Duration::from_secs(2), "S-sym-RULE-MESH-REQUEST-2 not the 10 s timeout");
     drop(held);
 }
 

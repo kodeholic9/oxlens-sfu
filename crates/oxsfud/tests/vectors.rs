@@ -268,13 +268,13 @@ fn sim_allocator_vectors() {
             assert_eq!(grants.len(), want.len(), "S-sym-RULE-SIM-TICK-11 — 배분받은 줄 수 {name} 걸음 {i}");
             for (g, w) in grants.iter().zip(want.iter()) {
                 assert_eq!(g.id, w["id"].as_u64().unwrap_or(u64::MAX), "S-sym-RULE-SIM-TICK-11 — 줄 차례 {name} 걸음 {i}");
-                assert_eq!(g.layer as i64, w["layer"].as_i64().unwrap_or(9), "S-sym-RULE-SIM-TICK-11 · S-sym-RULE-SIM-TICK-12 — 층 {name} 걸음 {i} 줄 {}", g.id);
+                assert_eq!(g.layer as i64, w["layer"].as_i64().unwrap_or(9), "S-sym-RULE-SIM-TICK-11 · S-sym-RULE-SIM-TICK-12 · S-sym-RULE-SIM-TICK-15 — 층 {name} 걸음 {i} 줄 {}", g.id);
                 assert_eq!(g.point as u64, w["point"].as_u64().unwrap_or(99), "S-sym-RULE-SIM-TICK-11 — 점 {name} 걸음 {i}");
                 assert_eq!(g.changed, w["changed"].as_bool().unwrap_or(false), "정:RULE-SIM-TICK — 바뀌었나 {name} 걸음 {i}");
                 assert_eq!(g.reason.name(), w["reason"].as_str().unwrap_or(""), "S-sym-RULE-SIM-TICK-12 — 못 오른 까닭 {name} 걸음 {i}");
                 assert_eq!(g.need, w["need"].as_i64().unwrap_or(-1), "S-sym-RULE-SIM-TICK-12 — 위 점에 더 드는 양 {name} 걸음 {i}");
             }
-            assert_eq!(left, st["out"]["left"].as_i64().unwrap_or(-1), "S-sym-RULE-SIM-TICK-11 — 남은 양 {name} 걸음 {i}");
+            assert_eq!(left, st["out"]["left"].as_i64().unwrap_or(-1), "S-sym-RULE-SIM-TICK-11 · S-sym-RULE-SIM-TICK-15 — 남은 양 {name} 걸음 {i}");
         }
     }
 }
@@ -652,7 +652,7 @@ fn flr_media_bind_vectors() {
             let want: Vec<bool> = o["applied"].as_array().map(|a| a.iter().filter_map(|x| x.as_bool()).collect()).unwrap_or_default();
             let got: Vec<bool> = idx.iter().map(|i| applied[*i]).collect();
             assert_eq!(got, want, "S-sym-IMPL-FLR-MEDIA-BIND-4 — 적용 여부 {name} {idx:?}");
-            assert_eq!(s.bound, bound(&o["bound"]), "S-sym-IMPL-FLR-MEDIA-BIND-5 — 끝 슬롯 {name} {idx:?}");
+            assert_eq!(s.bound, bound(&o["bound"]), "S-sym-IMPL-FLR-MEDIA-BIND-5① — 끝 슬롯 {name} {idx:?}");
         }
         let want = c["targetless_differs"].as_u64().unwrap_or_else(|| panic!("targetless_differs 없음 {name}"));
         assert_eq!(differs, want, "S-sym-IMPL-FLR-MEDIA-BIND-4 — 번호를 안 보는 집행이 판정 차례와 갈리는 차례 수 {name}");

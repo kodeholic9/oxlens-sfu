@@ -209,8 +209,8 @@ mod tests {
         let id = a.verify_user(&t.token).unwrap();
         assert_eq!(id.user_id, "u1");
         assert_eq!(id.claims.participant_type, 1);
-        assert_eq!(a.issue(&req(Some(2), None), 60, 2048).unwrap_err().code, 2005);
-        assert_eq!(a.issue(&req(None, Some(true)), 60, 2048).unwrap_err().code, 2005);
+        assert_eq!(a.issue(&req(Some(2), None), 60, 2048).unwrap_err().code, 2005, "CP-CODE-CLAIM-NOT-ALLOWED② participant_type not allowed for the account");
+        assert_eq!(a.issue(&req(None, Some(true)), 60, 2048).unwrap_err().code, 2005, "CP-CODE-CLAIM-NOT-ALLOWED② hidden:true on an account without hidden_allowed");
         assert_eq!(a.verify_user("garbage"), Err(Code::TokenInvalid));
     }
 

@@ -23,7 +23,7 @@ fn slot_packet_admitted_before_release_is_dropped_when_applied_after_it() {
     assert!(fan.live(ep), "정:RULE-FWD-MEDIA-WORKERS packet of the current episode is sent");
     fan.release();
     assert!(fan.admit("a").is_none(), "정:IMPL-FLR-MEDIA-BIND released speaker does not pass the gate");
-    assert!(!fan.live(ep), "정:RULE-FWD-MEDIA-WORKERS S-sym-IMPL-FLR-MEDIA-BIND-7 packet admitted before release is not sent when applied after it");
+    assert!(!fan.live(ep), "정:RULE-FWD-MEDIA-WORKERS packet admitted before release is not sent when applied after it");
 }
 
 #[test]
@@ -34,7 +34,7 @@ fn old_speaker_packet_is_dropped_after_succession_and_new_speaker_packet_is_kept
     fan.bind(who("b"), 3);
     let new = fan.admit("b").expect("b passes").id;
     assert!(fan.admit("a").is_none(), "정:IMPL-FLR-MEDIA-BIND only the new speaker passes after succession");
-    assert!(!fan.live(old), "정:RULE-FWD-MEDIA-WORKERS S-sym-IMPL-FLR-MEDIA-BIND-7 old speaker packet applied after succession is not sent");
+    assert!(!fan.live(old), "정:RULE-FWD-MEDIA-WORKERS old speaker packet applied after succession is not sent");
     assert!(fan.live(new), "정:RULE-FWD-MEDIA-WORKERS new speaker packet is sent");
 }
 
@@ -51,8 +51,8 @@ fn rewriter_goes_back_to_the_old_source_when_its_late_packet_is_applied() {
     assert!(late.switched, "정:IMPL-FWD-SOURCE-SWITCH a late old-source packet switches back — the slot carries the old speaker again");
     let b2 = rw.map(b, 7_001, 500_960, 1_220, 960).unwrap();
     assert!(b2.switched, "정:IMPL-FWD-SOURCE-SWITCH and the new speaker switches once more");
-    assert_eq!(rw.switches, 3, "정:IMPL-FWD-SOURCE-SWITCH S-sym-IMPL-FLR-MEDIA-BIND-7 one floor change became three source switches");
-    assert_eq!(b2.ts.wrapping_sub(b1.ts), 1_920, "정:IMPL-FWD-SOURCE-SWITCH the new speaker's audio is pushed 20ms later than it was sent");
+    assert_eq!(rw.switches, 3, "정:IMPL-FWD-SOURCE-SWITCH S-sym-IMPL-FLR-MEDIA-BIND-7② one floor change became three source switches");
+    assert_eq!(b2.ts.wrapping_sub(b1.ts), 1_920, "정:IMPL-FWD-SOURCE-SWITCH S-sym-IMPL-FLR-MEDIA-BIND-7② the new speaker's audio is pushed 20ms later than it was sent");
 }
 
 #[test]
@@ -196,7 +196,7 @@ fn regrant_of_the_same_speaker_opens_the_rtx_gate_with_its_first_packet() {
     let _ = first;
     assert!(!again.switched, "정:IMPL-FWD-SOURCE-SWITCH S-sym-IMPL-FLR-MEDIA-BIND-8 the same speaker is not a source switch — the old gate (opened only on a switch) stayed closed for the whole talk");
     last = e3;
-    assert!(!rtx_closed(last, fan.episode()), "정:RULE-RTCP-NACK-DOWN S-sym-IMPL-FLR-MEDIA-BIND-8 S-sym-RULE-RTCP-NACK-DOWN-1 the regranted speaker's first packet opens the gate — it is a new episode");
+    assert!(!rtx_closed(last, fan.episode()), "정:RULE-RTCP-NACK-DOWN S-sym-IMPL-FLR-MEDIA-BIND-8① S-sym-RULE-RTCP-NACK-DOWN-1 the regranted speaker's first packet opens the gate — it is a new episode");
 }
 
 #[test]

@@ -469,7 +469,7 @@ mod tests {
         v.on_token(rp("ra", "a"), 0);
         v.on_token(rd("ra", "a"), 10);
         let s = v.settle(2_000);
-        assert!(!s.isolated_now);
+        assert!(!s.isolated_now, "S-sym-RULE-BUS-PRESENCE-5③ a node that never saw another is not isolated");
         assert_eq!(s.dropped_rooms, vec!["ra".to_string()]);
     }
 }
