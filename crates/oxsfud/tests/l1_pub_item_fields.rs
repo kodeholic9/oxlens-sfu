@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.12 · 연:PUB.op.PUBLISH_TRACKS · 연:RULE-TRK-FIELDS-BY-TYPE · model: claude-opus-5-5
-//! 1층 — 발행 항목의 칸은 종류(kind)에 맞아야 한다 · audio 항목의 `source` 는 body 오류(1002)다. 판정은 `trk::item_misfit` 한 곳(발행 길목이 부른다 · context 202611/20261124b 발견 2).
+//! 1층 — 발행 항목의 칸은 종류(kind)에 맞아야 한다 · audio 항목의 `source` · `simulcast: true` 는 body 오류(1002)다. 판정은 `trk::item_misfit` 한 곳(발행 길목이 부른다 · context 202611/20261124b 발견 2).
 
 use oxsfud::trk::item_misfit;
 use oxsig::msg::PublishTrack;
@@ -30,4 +30,16 @@ fn video_source_fits() {
         }
         assert_eq!(item_misfit(&item(v)), None, "video with source {src:?} fits");
     }
+}
+
+#[test]
+fn audio_simulcast_true_is_a_misfit() {
+    let mut v = json!({"kind": "audio", "ssrc": 3, "mid": "0", "pt": 111});
+    v["simulcast"] = json!(false);
+    assert_eq!(item_misfit(&item(v.clone())), None, "audio simulcast:false fits");
+    v["simulcast"] = json!(true);
+    assert_eq!(item_misfit(&item(v)), Some("simulcast"), "audio carrying simulcast:true is a body error");
+    let mut vid = json!({"kind": "video", "ssrc": 0, "mid": "1", "pt": 96, "codec": "VP8"});
+    vid["simulcast"] = json!(true);
+    assert_eq!(item_misfit(&item(vid)), None, "video simulcast fits");
 }

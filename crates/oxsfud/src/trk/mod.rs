@@ -15,8 +15,9 @@ pub const FMTP_H264: &str = "level-asymmetry-allowed=1;packetization-mode=1;prof
 pub const FMTP_OPUS: &str = "minptime=10;useinbandfec=1";
 
 pub fn item_misfit(t: &PublishTrack) -> Option<&'static str> {
-    match (t.kind, &t.source) {
-        (Kind::Audio, Some(_)) => Some("source"),
+    match (t.kind, &t.source, t.simulcast) {
+        (Kind::Audio, Some(_), _) => Some("source"),
+        (Kind::Audio, _, Some(true)) => Some("simulcast"),
         _ => None,
     }
 }
