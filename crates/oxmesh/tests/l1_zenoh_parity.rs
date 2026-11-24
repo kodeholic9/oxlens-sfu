@@ -276,13 +276,13 @@ async fn test_liveliness_regression_2() {
     let t2 = router("tok2", &[&r]).await;
     let token2 = t2.declare_token(KEY).await.expect("token");
     sleep(SLEEP).await;
-    assert_eq!(drain(&mut sub).await, vec![], "second declaration of the same key is not a new Put");
+    assert_eq!(drain(&mut sub).await, vec![], "S-sym-RULE-MESH-DECL-2 second declaration of the same key is not a new Put");
     drop(token1);
     sleep(SLEEP).await;
-    assert_eq!(drain(&mut sub).await, vec![], "still held by tok2");
+    assert_eq!(drain(&mut sub).await, vec![], "S-sym-RULE-MESH-DECL-2 still held by tok2 — no Delete");
     drop(token2);
     sleep(SLEEP).await;
-    assert_eq!(drain(&mut sub).await, del());
+    assert_eq!(drain(&mut sub).await, del(), "S-sym-RULE-MESH-DECL-2 the last one gone — one Delete");
 }
 
 #[tokio::test]

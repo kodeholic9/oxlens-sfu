@@ -23,7 +23,7 @@ fn slot_packet_admitted_before_release_is_dropped_when_applied_after_it() {
     assert!(fan.live(ep), "정:RULE-FWD-MEDIA-WORKERS packet of the current episode is sent");
     fan.release();
     assert!(fan.admit("a").is_none(), "정:IMPL-FLR-MEDIA-BIND released speaker does not pass the gate");
-    assert!(!fan.live(ep), "정:RULE-FWD-MEDIA-WORKERS packet admitted before release is not sent when applied after it");
+    assert!(!fan.live(ep), "정:RULE-FWD-MEDIA-WORKERS S-sym-IMPL-FLR-MEDIA-BIND-7① packet admitted before release is not sent when applied after it");
 }
 
 #[test]
@@ -34,8 +34,8 @@ fn old_speaker_packet_is_dropped_after_succession_and_new_speaker_packet_is_kept
     fan.bind(who("b"), 3);
     let new = fan.admit("b").expect("b passes").id;
     assert!(fan.admit("a").is_none(), "정:IMPL-FLR-MEDIA-BIND only the new speaker passes after succession");
-    assert!(!fan.live(old), "정:RULE-FWD-MEDIA-WORKERS old speaker packet applied after succession is not sent");
-    assert!(fan.live(new), "정:RULE-FWD-MEDIA-WORKERS new speaker packet is sent");
+    assert!(!fan.live(old), "정:RULE-FWD-MEDIA-WORKERS S-sym-IMPL-FLR-MEDIA-BIND-7① old speaker packet applied after succession is not sent");
+    assert!(fan.live(new), "정:RULE-FWD-MEDIA-WORKERS S-sym-IMPL-FLR-MEDIA-BIND-7① new speaker packet is sent");
 }
 
 #[test]

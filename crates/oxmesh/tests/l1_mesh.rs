@@ -196,6 +196,41 @@ async fn restart_with_same_node_id_resyncs_and_old_cleanup_keeps_new_tokens() {
     assert_eq!(a.tokens("ox/t/int/node/b/*", LEASE).await.unwrap_or_default(), vec!["ox/t/int/node/b/boot2".to_string()]);
 }
 
+async fn sorted(m: &Mesh, expr: &str) -> Vec<String> {
+    let mut v = m.tokens(expr, LEASE).await.unwrap_or_default();
+    v.sort();
+    v
+}
+
+#[tokio::test]
+async fn restarted_router_sees_tokens_changed_while_it_was_down_as_soon_as_its_session_stands() {
+    let a = router("a", &[]).await;
+    let sa = client("sfud-a", &a).await;
+    let port = free_port();
+    let seed = vec![a.bound()[0].to_string()];
+    let b1 = router_at("b", port, &seed).await;
+    eventually("b1 joined a", || async { router_peers(&a).await.len() == 1 }).await;
+    let old_local = a.declare_token("ox/t/int/node/a/old").await.expect("token");
+    let old_client = sa.declare_token("ox/t/int/room/r1/a/old").await.expect("token");
+    let old = vec!["ox/t/int/node/a/old".to_string(), "ox/t/int/room/r1/a/old".to_string()];
+    eventually("positive control — b1 sees a's local and client tokens", || async { sorted(&b1, "ox/t/int/**").await == old }).await;
+    b1.close().await;
+    eventually("b1 gone from a", || async { router_peers(&a).await.is_empty() }).await;
+    drop(old_local);
+    drop(old_client);
+    let _new_local = a.declare_token("ox/t/int/node/a/new").await.expect("token");
+    let _new_client = sa.declare_token("ox/t/int/room/r1/a/new").await.expect("token");
+    let new = vec!["ox/t/int/node/a/new".to_string(), "ox/t/int/room/r1/a/new".to_string()];
+    eventually("positive control — a holds the changed tokens before b restarts", || async { sorted(&a, "ox/t/int/**").await == new }).await;
+    let b2 = router_at("b", port, &seed).await;
+    eventually("S-sym-RULE-MESH-SESSION-3 the restarted router sees the tokens that changed while it was down as soon as its session stands — no later change needed", || async {
+        sorted(&b2, "ox/t/int/**").await == new
+    })
+    .await;
+    sleep(LEASE * 2).await;
+    assert_eq!(sorted(&b2, "ox/t/int/**").await, new, "S-sym-RULE-MESH-SESSION-3 none of the tokens dropped while it was down comes back");
+}
+
 #[tokio::test]
 async fn both_seeding_each_other_keeps_one_session_dialed_by_the_smaller() {
     let (px, py) = (free_port(), free_port());
@@ -205,13 +240,13 @@ async fn both_seeding_each_other_keeps_one_session_dialed_by_the_smaller() {
     sleep(LEASE).await;
     let sx = x.info().await.expect("info").sessions;
     let sy = y.info().await.expect("info").sessions;
-    assert_eq!(sx.len(), 1);
-    assert_eq!(sy.len(), 1);
-    assert_eq!(sx[0].dialer, "x");
-    assert_eq!(sy[0].dialer, "x");
+    assert_eq!(sx.len(), 1, "S-sym-RULE-MESH-SHAPE-2① one session on x");
+    assert_eq!(sy.len(), 1, "S-sym-RULE-MESH-SHAPE-2① one session on y");
+    assert_eq!(sx[0].dialer, "x", "S-sym-RULE-MESH-SHAPE-2① dialed by the smaller node_id");
+    assert_eq!(sy[0].dialer, "x", "S-sym-RULE-MESH-SHAPE-2① dialed by the smaller node_id");
     sleep(LEASE).await;
     let again = x.info().await.expect("info").sessions;
-    assert_eq!((again.len(), again[0].sno), (1, sx[0].sno), "stable — no churn");
+    assert_eq!((again.len(), again[0].sno), (1, sx[0].sno), "S-sym-RULE-MESH-SHAPE-2① stable — no churn");
 }
 
 #[tokio::test]
@@ -241,7 +276,7 @@ async fn advertised_address_is_the_one_others_dial() {
     let b = router("b", &[&a]).await;
     eventually("b links z", || async { router_peers(&b).await.iter().any(|(p, _)| p == "z") }).await;
     let bz = b.info().await.expect("info").sessions.into_iter().find(|s| s.peer == "z").map(|s| (s.dialer, s.addr));
-    assert_eq!(bz, Some(("b".to_string(), front_addr.to_string())), "b dials z at the advertised address");
-    assert!(hits.load(std::sync::atomic::Ordering::Relaxed) >= 1);
+    assert_eq!(bz, Some(("b".to_string(), front_addr.to_string())), "S-sym-RULE-MESH-SHAPE-4① b dials z at the advertised address");
+    assert!(hits.load(std::sync::atomic::Ordering::Relaxed) >= 1, "S-sym-RULE-MESH-SHAPE-4① the dial went through the advertised front");
     drop(z);
 }
