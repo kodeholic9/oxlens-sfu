@@ -7,7 +7,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use oxsfud::fwd::{DownRow, LAYER_PAUSE, apply_row_cmd, row_same};
 use oxsfud::link::{Role, Transport};
-use oxsfud::sim::{LayerState, PENDING_MS, Pli, adopt_asks, judge, layer_state, step, want};
+use oxsfud::r#pub::PliState;
+use oxsfud::rtcp::{PLI_ADOPT, PLI_LAYER, PLI_RETRY, PliGo, pli_decide};
+use oxsfud::sim::{LayerState, PENDING_MS, PENDING_PLI_RETRY_MS, Pli, adopt_asks, judge, layer_state, step, want};
 use oxsig::msg::Kind;
 
 fn row() -> DownRow {
@@ -73,6 +75,49 @@ fn adopting_asks_once_and_the_same_step_does_not_retry() {
     let (st, adopted) = judge(&r, 1, false, 50_300, true, 0, |_| false);
     assert!(adopted.is_none(), "정:IMPL-SIM-SWITCH nothing new to adopt");
     assert_eq!(st.pli, Pli::Retry(0), "정:IMPL-SIM-SWITCH ④ the retry comes on a later packet when the wait is due");
+}
+
+#[test]
+fn one_switch_reaches_the_publisher_as_one_pli_of_that_layer() {
+    let r = row();
+    on(&r, LayerState { layer: 1, target: 1, since: 0 });
+    let mut p = PliState::default();
+    let gap = oxsfud::ops::policy().media.pli_throttle_low_ms as u64;
+    let margin = oxsfud::ops::policy().media.pli_reopen_margin_ms as u64;
+    let t0 = 50_000u64;
+    let mut want = PLI_LAYER;
+    r.cap.store(0, Ordering::Release);
+    let mut asked_at = 0u64;
+    let mut last_key = 0u64;
+    let mut sent = 0;
+    let mut asks = 0;
+    for i in 0..40u64 {
+        let now = t0 + i * 20;
+        let key = now == t0 + 400;
+        let l = if key { 0 } else { 1 };
+        if key {
+            last_key = now;
+        }
+        let retry_due = now.saturating_sub(asked_at) >= PENDING_PLI_RETRY_MS;
+        let (st, adopted) = judge(&r, l, key, now, retry_due, 0, |_| false);
+        if adopt_asks(adopted, layer_state(&r)).is_some() {
+            asked_at = now;
+            want |= PLI_ADOPT;
+        }
+        if let Pli::Retry(_) = st.pli {
+            asked_at = now;
+            want |= PLI_RETRY;
+        }
+        if want != 0 {
+            asks += 1;
+        }
+        if pli_decide(&mut p, std::mem::take(&mut want), true, now, gap, last_key, margin) == PliGo::Send {
+            sent += 1;
+        }
+    }
+    assert_eq!(layer_state(&r).layer, 0, "정:IMPL-SIM-SWITCH the switch is confirmed by the target keyframe");
+    assert!(asks >= 2, "정:IMPL-SIM-SWITCH positive control — the request, the adopt and the retry all ask ({asks})");
+    assert_eq!(sent, 1, "정:IMPL-SIM-SWITCH S-sym-IMPL-SIM-SWITCH-4 one switch reaches the publisher as one PLI of that layer — the retry inside the throttle is held and the keyframe withdraws it");
 }
 
 #[test]

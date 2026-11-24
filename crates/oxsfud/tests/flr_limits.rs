@@ -137,7 +137,7 @@ fn retransmitted_request_and_release_are_idempotent() {
     assert_eq!(f.holder().as_deref(), Some("a"));
     release(&mut f, "a");
     let again = release(&mut f, "a");
-    assert_eq!(sent(&again, "a", Mt::Idle), 1, "a T100 copy of RELEASE is confirmed by IDLE again");
+    assert_eq!(sent(&again, "a", Mt::Idle), 1, "C-proc-RULE-FLR-PROC-PERM-RELEASE③ a T100 copy of RELEASE is confirmed by a unicast IDLE again");
     assert_eq!(f.g, G::Idle);
 }
 
