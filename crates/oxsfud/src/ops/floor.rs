@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.7 · 정:IMPL-FLR-LOCK · 정:IMPL-FLR-RTP-OBSERVE · 정:IMPL-FLR-MEDIA-BIND · 정:IMPL-FLR-FIRST-NOTICE · 정:IMPL-FLR-MEMBER-JOIN · 정:RULE-FLR-SNAPSHOT · 연:RULE-FLR-TIMERS · 연:TRN.frame.DC · 정:IMPL-FLR-POLICY · 정:CAND-FLR-RELEASE-SILENCE-SPEAKER · 정:CAND-FWD-PRIME-SOURCE · 정:CAND-FWD-PRIME-EPISODE · 운영:RULE-LOG-TRANSITION · 정:IMPL-FWD-ROOM · 정:IMPL-ROOM-LIFE · 정:RULE-CONC-SIX · 정:IMPL-FLR-TALK-REPORT · 연:RULE-FLR-TLV · model: claude-opus-5-5
-//! 발언권 집행 — 판정은 방 락 안(보낼 것 · 걸 타이머 · 효과에 `grant_no`) · 집행은 락 밖(MBCP 를 DC 로 · 타이머는 가장 이른 만료 시각에 깨어난다 · 슬롯 결합 · 예열 CN · 해제 무음 · PLI burst) · 발언 알림(허가에 발언 id · 끝에 상태 — 방마다 한 줄). 시계 · 집행 큐 · 집행자는 그 방의 것(`Room.exec`) — 지음 → 돎 을 이긴 쪽만 집행자를 띄우고, 돎일 때만 판정한다.
+// spec: v1.7 · 정:IMPL-FLR-LOCK · 정:IMPL-FLR-RTP-OBSERVE · 정:IMPL-FLR-MEDIA-BIND · 정:IMPL-FLR-FIRST-NOTICE · 정:IMPL-FLR-MEMBER-JOIN · 정:RULE-FLR-SNAPSHOT · 연:RULE-FLR-TIMERS · 연:TRN.frame.DC · 정:IMPL-FLR-POLICY · 운영:RULE-LOG-TRANSITION · 정:IMPL-FWD-ROOM · 정:IMPL-ROOM-LIFE · 정:RULE-CONC-SIX · 정:IMPL-FLR-TALK-REPORT · 연:RULE-FLR-TLV · model: claude-opus-5-5
+//! 발언권 집행 — 판정은 방 락 안(보낼 것 · 걸 타이머 · 효과에 `grant_no`) · 집행은 락 밖(MBCP 를 DC 로 · 타이머는 가장 이른 만료 시각에 깨어난다 · 슬롯 결합 · PLI burst — 서버가 지은 프레임은 슬롯에 내지 않는다) · 발언 알림(허가에 발언 id · 끝에 상태 — 방마다 한 줄). 시계 · 집행 큐 · 집행자는 그 방의 것(`Room.exec`) — 지음 → 돎 을 이긴 쪽만 집행자를 띄우고, 돎일 때만 판정한다.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
