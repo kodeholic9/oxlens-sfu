@@ -155,6 +155,20 @@ fn rtp_after_release_draws_revoke_then_release_settles() {
 }
 
 #[test]
+fn idle_rtp_of_a_non_holder_is_dropped_but_rtp_after_ones_own_release_draws_revoke_three() {
+    let mut f = room(&["a", "b"]);
+    let r = f.rtp("b");
+    assert_eq!(sent(&r, "b", Mt::Revoke), 0, "C-sym-RULE-FLR-MSG-REVOKE-1② idle RTP of someone who never released is only dropped — no REVOKE");
+    assert!(r.labels.contains(&"FLR.S.P.NP_IDLE.rx_RTP_drop"), "C-sym-RULE-FLR-MSG-REVOKE-1② the drop is the idle RTP rule");
+    request(&mut f, "a");
+    release(&mut f, "a");
+    let r = f.rtp("a");
+    let causes: Vec<u32> = r.out.iter().filter(|o| o.to == "a" && o.m.t == Mt::Revoke).map(|o| o.m.n).collect();
+    assert_eq!(causes, vec![oxsig::floor::revoke::NO_PERMISSION as u32], "C-sym-RULE-FLR-MSG-REVOKE-1③ RTP after one's own release draws REVOKE(3)");
+    assert!(r.labels.contains(&"FLR.S.P.NP_IDLE.rx_RTP_after_release"), "C-sym-RULE-FLR-MSG-REVOKE-1③ the after-release rule");
+}
+
+#[test]
 fn request_overtaken_by_release_is_granted_and_freed_by_t1() {
     let mut f = room(&["a", "b"]);
     let r = release(&mut f, "a");

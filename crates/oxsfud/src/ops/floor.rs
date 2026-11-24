@@ -319,9 +319,14 @@ fn rearm(fl: &Floor, ck: &mut Clock, now: u64) {
     }
 }
 
-fn execute(room: &Arc<Room>, job: Job) {
+pub struct ExecPlan {
+    pub applied: Vec<Exec>,
+    pub burst: Vec<Arc<crate::r#pub::PubTrack>>,
+}
+
+pub fn plan_exec(room: &Room, effects: Vec<Exec>) -> ExecPlan {
     let mut applied = Vec::new();
-    for e in job.effects {
+    for e in effects {
         let effect = match &e {
             Exec::Bind { effect, .. } | Exec::Release { effect, .. } => effect.clone(),
         };
@@ -349,21 +354,28 @@ fn execute(room: &Arc<Room>, job: Job) {
         }
         applied.push(e);
     }
+    let burst = applied
+        .iter()
+        .filter_map(|e| match e {
+            Exec::Bind { videos, video_ok: true, .. } => Some(videos),
+            _ => None,
+        })
+        .flat_map(|vs| vs.iter().flat_map(|st| st.physical()))
+        .collect();
+    ExecPlan { applied, burst }
+}
+
+fn execute(room: &Arc<Room>, job: Job) {
+    let plan = plan_exec(room, job.effects);
     let reason = if job.step.labels.contains(&"FLR.S.gate.not_in_room") { Some("not_in_room") } else { None };
     for (o, sources) in job.step.out.iter().zip(job.sources.iter()) {
         if let Some(m) = to_mbcp(&o.m, &room.id, reason, sources, job.talk.as_deref()) {
             send(&o.to, &m);
         }
     }
-    for e in &applied {
-        if let Exec::Bind { videos, video_ok: true, .. } = e {
-            let fan = room.slot(Kind::Video);
-            for st in videos {
-                for t in st.physical() {
-                    pli_while_bound(fan, &t);
-                }
-            }
-        }
+    let fan = room.slot(Kind::Video);
+    for t in &plan.burst {
+        pli_while_bound(fan, t);
     }
 }
 

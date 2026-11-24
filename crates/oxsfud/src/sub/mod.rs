@@ -914,9 +914,9 @@ mod tests {
         let o = t.sync(&[cand("a", "r2", Kind::Audio, Class::Full, 0)], 3);
         assert!(o.changed);
         assert_eq!(t.rows()[0].mid, row.mid, "정:IMPL-AFF-PUB-MOVE same row after the move");
-        assert!(!row.open(), "정:IMPL-SUB-TABLE since = the arev that moved the row · not sent before ack");
+        assert!(!row.open(), "정:IMPL-SUB-TABLE S-sym-IMPL-SUB-TABLE-3 since = the arev that moved the row · the send path drops a closed row · not sent before ack");
         t.ready("r2", t.snapshot("e").arev, 4);
-        assert!(row.open(), "정:IMPL-SUB-TABLE sends again once the new arev is acked");
+        assert!(row.open(), "정:IMPL-SUB-TABLE S-sym-IMPL-SUB-TABLE-3 sends again once the new arev is acked");
     }
 
     #[test]
