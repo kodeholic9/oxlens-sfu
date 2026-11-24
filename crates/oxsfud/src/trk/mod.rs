@@ -1,8 +1,8 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-TRK-FROM-PUB · 정:IMPL-TRK-CODEC-REGISTRY · 연:RULE-TRK-PUB-TO-TRACK · 연:RULE-TRK-SLOT-LIFE · 연:RULE-ROOM-MEDIA-CODECS · 연:TRK.type.TrackEntry · 정:CAND-PUB-H264-PROFILE · 정:CAND-PUB-CODEC-REGISTRY-PLACE · 연:RULE-TRK-FIELDS-BY-TYPE · 연:RULE-TRK-FOUR-PATHS · model: claude-opus-5-5
+// spec: v1.6 · 정:IMPL-TRK-FROM-PUB · 정:IMPL-TRK-CODEC-REGISTRY · 연:RULE-TRK-PUB-TO-TRACK · 연:RULE-TRK-SLOT-LIFE · 연:RULE-ROOM-MEDIA-CODECS · 연:TRK.type.TrackEntry · 정:CAND-PUB-H264-PROFILE · 정:CAND-PUB-CODEC-REGISTRY-PLACE · 연:RULE-TRK-FIELDS-BY-TYPE · 연:RULE-TRK-FOUR-PATHS · 연:PUB.op.PUBLISH_TRACKS · model: claude-opus-5-5
 //! 트랙 — 코덱 등록부(VP8 · H264 · 키프레임 판정기가 있는 것만) · 슬롯 트랙 둘(방과 수명) · 발행에서 파생하는 개인 트랙 목록(`muted` 포함).
 
-use oxsig::msg::{Kind, MediaCodecs, TrackEntry, TrackEntryType};
+use oxsig::msg::{Kind, MediaCodecs, PublishTrack, TrackEntry, TrackEntryType};
 
 use crate::r#pub::PubStream;
 
@@ -13,6 +13,13 @@ pub const ROOM_H264_PROFILE: &str = "42e0";
 pub const SCALABILITY: &str = "L3T3";
 pub const FMTP_H264: &str = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f";
 pub const FMTP_OPUS: &str = "minptime=10;useinbandfec=1";
+
+pub fn item_misfit(t: &PublishTrack) -> Option<&'static str> {
+    match (t.kind, &t.source) {
+        (Kind::Audio, Some(_)) => Some("source"),
+        _ => None,
+    }
+}
 
 pub fn canonical_video(name: &str) -> Option<&'static str> {
     SUPPORTED_VIDEO.iter().find(|c| c.eq_ignore_ascii_case(name)).copied()

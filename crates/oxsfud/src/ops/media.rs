@@ -322,6 +322,9 @@ pub fn publish(c: &Ctx, body: &Value) -> Result<Value, Failure> {
                 if t.mid.is_empty() {
                     return Err(Code::MissingField.failure().with_message("mid"));
                 }
+                if let Some(field) = crate::trk::item_misfit(&t) {
+                    return Err(Code::InvalidPayload.failure().with_message(field));
+                }
                 if t.simulcast.unwrap_or(false) && rid_extmap_id.is_none() {
                     return Err(Code::MissingField.failure().with_message("rid_extmap_id"));
                 }
