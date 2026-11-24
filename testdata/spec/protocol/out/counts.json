@@ -1,0 +1,19 @@
+{
+ "FLR.C100": "3",
+ "FLR.C101": "3",
+ "FLR.C104": "3",
+ "FLR.C20": "3",
+ "FLR.C21": "3",
+ "FLR.C7": "10",
+ "FLR.C8": "3",
+ "ROOM.BundleCap": "128",
+ "ROOM.ClientMlines": "32",
+ "ROOM.DispatchCh": "20",
+ "ROOM.FullAudio": "25",
+ "ROOM.FullVideo": "25",
+ "ROOM.MaxRooms": "20",
+ "ROOM.SlotBudget": "40",
+ "ROOM.Sub1pc": "96",
+ "ROOM.Sub2pc": "128",
+ "SES.CBackoff": "10"
+}

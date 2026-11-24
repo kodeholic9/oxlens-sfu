@@ -100,11 +100,15 @@ pub fn subscriber(user: &str) -> Sub {
 }
 
 pub fn subscriber_as(user: &str, sid: &str) -> Sub {
+    subscriber_slots(user, sid, sfu().policy.media.slot_mid_reserve as usize)
+}
+
+pub fn subscriber_slots(user: &str, sid: &str, slot_budget: usize) -> Sub {
     let s = sfu();
     let session = format!("ses-{user}");
     let publish = Transport::new(s.next_id(), user, &session, Role::Publish, 0, false);
     let subscribe = Transport::new(s.next_id(), user, &session, Role::Subscribe, 0, false);
-    let t = Table::new(subscribe.clone(), PcMode::Two, s.policy.media.slot_mid_reserve as usize);
+    let t = Table::new(subscribe.clone(), PcMode::Two, slot_budget);
     t.mark_seeded();
     s.tables.insert(t.clone());
     let p = Arc::new(Peer {

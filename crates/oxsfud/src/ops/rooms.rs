@@ -18,7 +18,7 @@ use crate::link::{Peer, Role, Transport};
 use crate::room::{Member, PERMANENT, Room, RoomInit};
 use crate::sub::Table;
 
-pub const MAX_ROOMS: usize = 100;
+pub const MAX_ROOMS: usize = 20;
 
 fn sfu() -> Result<&'static Arc<super::Sfu>, Failure> {
     super::sfu().ok_or_else(|| Code::InternalError.failure())

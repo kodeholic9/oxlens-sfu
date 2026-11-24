@@ -786,24 +786,48 @@ fn t56_2_old_session_gone_after_takeover_forgets_only_the_old_sid() {
 #[test]
 fn the_join_past_the_listen_limit_fails_once_with_the_limit_and_count() {
     let _g = serial();
-    assert_eq!(ops::rooms::MAX_ROOMS, 100, "CP-CODE-LISTEN-LIMIT① limit 100");
+    let max = ops::rooms::MAX_ROOMS;
+    let fit = sfu().policy.media.slot_mid_reserve as usize / 2;
     let u = subscriber(&tag("listen-u"));
-    for i in 0..ops::rooms::MAX_ROOMS - 1 {
-        enter(&u.p, &room(&tag(&format!("listen-{i}"))));
+    for i in 0..fit {
+        let r = ops::rooms::join(&ctx_of(&u.p), &json!({ "room_id": room(&tag(&format!("listen-{i}"))).id }));
+        assert!(r.is_ok(), "positive control — room {} of {fit} (the default slot budget, two slot lines a room) is taken on the real ROOM_JOIN path: {}", i + 1, brief(&r));
     }
-    let hundredth = room(&tag("listen-99"));
-    let r = ops::rooms::join(&ctx_of(&u.p), &json!({ "room_id": hundredth.id }));
-    assert_ne!(code(&r), Some(Code::ListenLimit.num()), "positive control — at 99 rooms the listen limit does not refuse: {}", brief(&r));
-    if r.is_err() {
-        enter(&u.p, &hundredth);
-    }
-    assert_eq!(u.p.rooms().len(), ops::rooms::MAX_ROOMS, "stand check — 100 rooms held");
-    let over = room(&tag("listen-100"));
+    assert_eq!(u.p.rooms().len(), fit, "stand check — the slot budget's worth of rooms is held");
+    let over = room(&tag("listen-over"));
     let r = ops::rooms::join(&ctx_of(&u.p), &json!({ "room_id": over.id }));
     let f = r.as_ref().err().cloned();
-    assert_eq!(f.as_ref().map(|f| f.code), Some(Code::ListenLimit.num()), "CP-CODE-LISTEN-LIMIT① the 101st ROOM_JOIN fails with 4004: {}", brief(&r));
-    assert_eq!(f.and_then(|f| f.details), Some(json!({ "limit": 100, "current": 100 })), "CP-CODE-LISTEN-LIMIT① details.limit = 100 · current");
-    assert!(u.p.rooms().len() == ops::rooms::MAX_ROOMS && !over.has(&u.p.user) && !u.p.in_room(&over.id), "CP-CODE-LISTEN-LIMIT① the refused join leaves nothing behind");
+    assert_ne!(f.as_ref().map(|f| f.code), Some(Code::MidLimit.num()), "CP-CODE-LISTEN-LIMIT① the next ROOM_JOIN is not refused by the m-line budget first: {}", brief(&r));
+    assert_eq!(f.as_ref().map(|f| f.code), Some(Code::ListenLimit.num()), "CP-CODE-LISTEN-LIMIT① the next ROOM_JOIN fails with 4004: {}", brief(&r));
+    assert_eq!(f.and_then(|f| f.details), Some(json!({ "limit": max, "current": max })), "CP-CODE-LISTEN-LIMIT① details.limit = MaxRooms · current");
+    assert!(u.p.rooms().len() == max && !over.has(&u.p.user) && !u.p.in_room(&over.id), "CP-CODE-LISTEN-LIMIT① the refused join leaves nothing behind");
+}
+
+#[test]
+fn the_join_past_a_cut_slot_budget_fails_with_the_mline_count() {
+    let _g = serial();
+    let slots = 6;
+    let fit = slots / 2;
+    let user = tag("midlim-u");
+    let u = subscriber_slots(&user, &format!("sid-{user}"), slots);
+    let held: Vec<Arc<Room>> = (0..fit).map(|i| room(&tag(&format!("midlim-{i}")))).collect();
+    for (i, r) in held.iter().enumerate() {
+        let got = ops::rooms::join(&ctx_of(&u.p), &json!({ "room_id": r.id }));
+        assert!(got.is_ok(), "positive control — room {} of {fit} fits a slot budget of {slots}: {}", i + 1, brief(&got));
+    }
+    assert!(fit < ops::rooms::MAX_ROOMS, "stand check — the listen limit is not the one in reach");
+    let over = room(&tag("midlim-over"));
+    let r = ops::rooms::join(&ctx_of(&u.p), &json!({ "room_id": over.id }));
+    let f = r.as_ref().err().cloned();
+    assert_eq!(f.as_ref().map(|f| f.code), Some(Code::MidLimit.num()), "CP-CODE-MID-LIMIT① a ROOM_JOIN past the slot budget fails with 4005: {}", brief(&r));
+    assert_eq!(f.and_then(|f| f.details), Some(json!({ "limit": slots, "current": slots })), "CP-CODE-MID-LIMIT① details.limit · current are line counts (the slot budget)");
+    assert!(slots < u.t.limit(), "CP-CODE-MID-LIMIT③ fixed split — the subscribe budget {} still has room while the slot budget refuses", u.t.limit());
+    assert!(u.p.rooms().len() == fit && !over.has(&u.p.user) && !u.p.in_room(&over.id), "CP-CODE-MID-LIMIT① the refused join leaves nothing behind");
+    let again = ops::rooms::join(&ctx_of(&u.p), &json!({ "room_id": over.id }));
+    assert_eq!(again.as_ref().err().map(|f| f.code), Some(Code::MidLimit.num()), "CP-CODE-MID-LIMIT② before another room is left the same join fails the same: {}", brief(&again));
+    assert!(ops::rooms::leave(&ctx_of(&u.p), &json!({ "room_id": held[0].id })).is_ok(), "stand check — one held room is left");
+    let after = ops::rooms::join(&ctx_of(&u.p), &json!({ "room_id": over.id }));
+    assert!(after.is_ok() && u.p.in_room(&over.id), "CP-CODE-MID-LIMIT② after another room is left the join gets in: {}", brief(&after));
 }
 
 #[test]

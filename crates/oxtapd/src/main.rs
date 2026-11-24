@@ -88,7 +88,7 @@ async fn run(a: Args) -> i32 {
     };
     let epoch = common::ident::new_epoch();
     let _sender = common::log::init(Setup { node: a.node.clone(), proc_name: "peer", epoch: Some(epoch.clone()), sink, log_dir: a.log_dir.clone() }, &policy);
-    tracing::info!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", node = %a.node, build = %a.build, root = %a.root.display(), keep_days = a.keep_days, "rec unit boot");
+    tracing::info!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", build = %a.build, root = %a.root.display(), keep_days = a.keep_days, "rec unit boot");
     let ca = match &a.hub_ca {
         Some(p) => match std::fs::read(p) {
             Ok(b) => Some(b),

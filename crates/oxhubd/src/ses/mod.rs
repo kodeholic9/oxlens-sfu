@@ -185,7 +185,7 @@ impl Ctx {
 
 fn end_fail(ctx: &Ctx, req: &str, node: &str, why: &str) {
     ctx.counters.session_end_fail.fetch_add(1, Ordering::Relaxed);
-    tracing::warn!(kind = "diag", spec = "SV-IMPL-SES-DATA", node = %node, req = %req, "session end request failed: {why}");
+    tracing::warn!(kind = "diag", spec = "SV-IMPL-SES-DATA", target_node = %node, req = %req, "session end request failed: {why}");
 }
 
 fn transition(s: &Session, spec: Option<&str>, from: &str, to: Option<&str>, cause: &str, inputs: &[(&str, String)]) {
