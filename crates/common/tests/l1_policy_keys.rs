@@ -54,6 +54,12 @@ fn ws_flow_window_outside_one_to_ten_fails_the_boot() {
 }
 
 #[test]
+fn hook_ext_window_zero_fails_the_boot() {
+    assert!(boots("[hook]\next_window = 1\n"), "positive control — 1 boots");
+    assert!(!boots("[hook]\next_window = 0\n"), "PL-KEY-HOOK-EXT-WINDOW② 0 is out of range — the boot fails");
+}
+
+#[test]
 fn logging_ranges_fail_the_boot_outside() {
     assert!(boots("[logging]\nline_max_bytes = 2047\n"), "positive control — 2047 boots");
     assert!(!boots("[logging]\nline_max_bytes = 2048\n"), "PL-KEY-LOGGING-LINE-MAX-BYTES① 2048 is out of range — the boot fails");

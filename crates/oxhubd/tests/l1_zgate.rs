@@ -669,6 +669,96 @@ async fn a_full_queue_refuses_and_counts() {
     drop(s);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn what_overflows_the_window_merges_into_the_bundle_at_the_line_end() {
+    let mut k = knobs();
+    k.window = 1;
+    k.reply_timeout = Duration::from_secs(30);
+    let r = rig_with(k).await;
+    let s = open(&r, "acme").await;
+    let q = s.declare_queryable(sub_key("acme")).await.expect("queryable");
+    let cid = open_cid(&r).await;
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (tx, mut got) = tokio::sync::mpsc::unbounded_channel();
+    let rel = release.clone();
+    let _h = tokio::spawn(async move {
+        let mut first = true;
+        while let Ok(query) = q.recv_async().await {
+            let _ = tx.send(body_of(&query));
+            if first {
+                first = false;
+                rel.notified().await;
+            }
+            let _ = query.reply(query.key_expr().clone(), b"ok".to_vec()).await;
+        }
+    });
+    let ids: Vec<String> = (0..4).map(|i| post(&r, i)).collect();
+    let page = r.chat.store.history("u1", "S", oxhubd::chat::store::Dir::Latest, 10).expect("history").messages;
+    let msg = |id: &str| page.iter().find(|m| m.msg_id == id).cloned().expect("msg");
+    let o0 = r.gate.deliver(&cid, true, vec![msg(&ids[0])], None).expect("deliver").as_str();
+    let held = tokio::time::timeout(Duration::from_secs(5), got.recv()).await.expect("first in time").expect("body");
+    assert_eq!((o0, ids_of(&held)), ("queued", vec![ids[0].clone()]), "positive control — the first one goes alone and fills the window of one");
+    let offers: Vec<&str> = ids[1..].iter().map(|id| r.gate.deliver(&cid, true, vec![msg(id)], None).expect("deliver").as_str()).collect();
+    assert_eq!(offers, vec!["queued", "merged", "merged"], "PL-KEY-HOOK-EXT-WINDOW② over the window the first waits at the line end and the rest merge into that bundle");
+    release.notify_one();
+    let next = tokio::time::timeout(Duration::from_secs(5), got.recv()).await.expect("bundle in time").expect("body");
+    assert_eq!((next["live"].clone(), ids_of(&next)), (serde_json::json!(true), ids[1..].to_vec()), "PL-KEY-HOOK-EXT-WINDOW② the overflow goes as one merged bundle once the window opens");
+    drop(s);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_given_up_message_does_not_hold_back_the_others() {
+    let mut k = knobs();
+    k.sweep = Duration::from_millis(1_000);
+    let r = rig_with(k).await;
+    let bad = post(&r, 0);
+    let s = open(&r, "acme").await;
+    let q = s.declare_queryable(sub_key("acme")).await.expect("queryable");
+    let (tx, mut got) = tokio::sync::mpsc::unbounded_channel();
+    let poison = bad.clone();
+    let _h = tokio::spawn(async move {
+        while let Ok(query) = q.recv_async().await {
+            let b = body_of(&query);
+            let refuse = ids_of(&b).contains(&poison);
+            let _ = tx.send(b);
+            if refuse {
+                let _ = query.reply_err(b"no".to_vec()).await;
+            } else {
+                let _ = query.reply(query.key_expr().clone(), b"ok".to_vec()).await;
+            }
+        }
+    });
+    assert!(wait(12_000, || r.gate.drops.given_up.load(Ordering::Relaxed) >= 1).await, "positive control — the one always refused is given up (ext_given_up)");
+    while got.try_recv().is_ok() {}
+    let later: Vec<String> = (1..4).map(|i| post(&r, i)).collect();
+    assert_eq!(rows_left(&r, 0, 5_000).await, 0, "S-sym-RULE-CHAT-EXT-SUB-7② after the give-up the other messages go and are cleared");
+    let mut seen = Vec::new();
+    while let Ok(b) = got.try_recv() {
+        seen.extend(ids_of(&b));
+    }
+    assert!(!seen.contains(&bad), "S-sym-RULE-CHAT-EXT-SUB-7② the given-up one is not carried again {seen:?}");
+    assert!(later.iter().all(|id| seen.contains(id)), "S-sym-RULE-CHAT-EXT-SUB-7② every other message went {seen:?}");
+    assert_eq!(r.gate.drops.given_up.load(Ordering::Relaxed), 1, "S-sym-RULE-CHAT-EXT-SUB-7② the give-up dragged nothing else along");
+    drop(s);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_zid_with_two_connections_holds_two_rows() {
+    let r = rig().await;
+    let mut a = Raw::connect(&r, "acme").await;
+    a.open(Duration::from_secs(30)).await;
+    a.declare(&sub_key("acme")).await;
+    let mut b = Raw::connect(&r, "acme").await;
+    b.open(Duration::from_secs(30)).await;
+    b.declare(&sub_key("acme")).await;
+    let t = wait_tokens(&r, 2, 3_000).await;
+    let mut cids: Vec<String> = t.iter().map(|(_, _, c)| c.clone()).collect();
+    cids.sort();
+    cids.dedup();
+    assert_eq!((t.len(), cids.len()), (2, 2), "S-sym-RULE-CHAT-EXT-SUB-4① one zid on two connections — two rows in the ext table with different cids {t:?}");
+    assert!(wait(3_000, || r.gate.conns().iter().filter(|c| c.open).count() == 2).await, "S-sym-RULE-CHAT-EXT-SUB-4① both connections stay open {:?}", r.gate.conns().len());
+}
+
 fn spec_dir() -> PathBuf {
     if let Ok(p) = std::env::var("OXLENS_SPEC") {
         return PathBuf::from(p);

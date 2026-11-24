@@ -770,14 +770,40 @@ fn t56_2_old_session_gone_after_takeover_forgets_only_the_old_sid() {
     let new = subscriber_as(&user, "t562-y");
     enter(&new.p, &r);
     assert!(kept("t562-x") && sfu().peer(&user).is_some_and(|p| Arc::ptr_eq(&p, &new.p)), "stand check — the old sid is kept and the new Peer is named");
+    sfu().tables.keep("t562-y", 7);
+    assert_eq!(sfu().tables.floor("t562-y"), 7, "stand check — the new sid holds a kept arev of its own (an earlier table of that session was retired)");
     let res = ops::rooms::session_gone(&envelope(CallKind::SessionGone, Some(&user), Some("t562-x")));
     assert!(res.is_ok());
     assert!(
         !kept("t562-x"),
         "정:IMPL-GC-PEER-REAP S-sym-IMPL-GC-PEER-REAP-3 the old session's kept arev is forgotten even when the user's Peer is another session's"
     );
-    assert!(sfu().peer(&user).is_some_and(|p| Arc::ptr_eq(&p, &new.p)), "the new Peer is not touched");
-    assert!(sfu().table(&new.p).is_some_and(|t| Arc::ptr_eq(&t, &new.t)) && r.has(&user) && new.p.in_room(&r.id), "the new session stays in the room");
+    assert!(sfu().peer(&user).is_some_and(|p| Arc::ptr_eq(&p, &new.p)), "S-sym-IMPL-GC-PEER-REAP-3 the new Peer is not touched");
+    assert!(sfu().table(&new.p).is_some_and(|t| Arc::ptr_eq(&t, &new.t)) && r.has(&user) && new.p.in_room(&r.id), "S-sym-IMPL-GC-PEER-REAP-3 the new session's table stays and it stays in the room");
+    assert_eq!(sfu().tables.floor("t562-y"), 7, "S-sym-IMPL-GC-PEER-REAP-3 the new session's kept arev stays");
+}
+
+#[test]
+fn the_join_past_the_listen_limit_fails_once_with_the_limit_and_count() {
+    let _g = serial();
+    assert_eq!(ops::rooms::MAX_ROOMS, 100, "CP-CODE-LISTEN-LIMIT① limit 100");
+    let u = subscriber(&tag("listen-u"));
+    for i in 0..ops::rooms::MAX_ROOMS - 1 {
+        enter(&u.p, &room(&tag(&format!("listen-{i}"))));
+    }
+    let hundredth = room(&tag("listen-99"));
+    let r = ops::rooms::join(&ctx_of(&u.p), &json!({ "room_id": hundredth.id }));
+    assert_ne!(code(&r), Some(Code::ListenLimit.num()), "positive control — at 99 rooms the listen limit does not refuse: {}", brief(&r));
+    if r.is_err() {
+        enter(&u.p, &hundredth);
+    }
+    assert_eq!(u.p.rooms().len(), ops::rooms::MAX_ROOMS, "stand check — 100 rooms held");
+    let over = room(&tag("listen-100"));
+    let r = ops::rooms::join(&ctx_of(&u.p), &json!({ "room_id": over.id }));
+    let f = r.as_ref().err().cloned();
+    assert_eq!(f.as_ref().map(|f| f.code), Some(Code::ListenLimit.num()), "CP-CODE-LISTEN-LIMIT① the 101st ROOM_JOIN fails with 4004: {}", brief(&r));
+    assert_eq!(f.and_then(|f| f.details), Some(json!({ "limit": 100, "current": 100 })), "CP-CODE-LISTEN-LIMIT① details.limit = 100 · current");
+    assert!(u.p.rooms().len() == ops::rooms::MAX_ROOMS && !over.has(&u.p.user) && !u.p.in_room(&over.id), "CP-CODE-LISTEN-LIMIT① the refused join leaves nothing behind");
 }
 
 #[test]
