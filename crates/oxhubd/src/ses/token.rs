@@ -215,6 +215,18 @@ mod tests {
     }
 
     #[test]
+    fn bind_path_never_answers_claim_not_allowed() {
+        let a = accounts();
+        let now = secs_now();
+        let c = UserClaims { sub: Some("u1".into()), user_id: None, participant_type: 2, hidden: true, metadata: None, permission: None, iat: now, exp: now + 60 };
+        let t = encode(&Header::new(Algorithm::HS256), &c, &EncodingKey::from_secret(b"s")).expect("signed");
+        assert_eq!(a.issue(&req(Some(2), Some(true)), 60, 2048).unwrap_err().code, 2005, "positive control — the same claims are refused at issuance");
+        let got = a.verify_user(&t);
+        assert!(got.is_ok(), "C-proc-RULE-SES-CONN-BIND-FAIL③ the BIND path checks the signature only — claims the account would not issue are not 2005 there: {got:?}");
+        assert_eq!(a.verify_user("garbage"), Err(Code::TokenInvalid), "C-proc-RULE-SES-CONN-BIND-FAIL③ a bad token on the BIND path is 2002, never 2005");
+    }
+
+    #[test]
     fn ops_token() {
         let a = accounts();
         let t = a.sign_ops("k", 60).unwrap();
