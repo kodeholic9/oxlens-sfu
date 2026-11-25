@@ -108,7 +108,7 @@ fn t610_4_redeclare_declares_every_room_in_the_room_set() {
     let got_missed = drive(seen(&mut sub, &km, true));
     assert!(
         got_missed && holds_token(&missed),
-        "정:RULE-BUS-PRESENCE 정:IMPL-ROOM-LIFE redeclaring takes the rooms from the room set — a room whose declare had failed is declared too"
+        "정:RULE-BUS-PRESENCE 정:IMPL-ROOM-LIFE S-sym-IMPL-ROOM-LIFE-5 redeclaring takes the rooms from the room set — a room whose declare had failed is declared too"
     );
     assert!(holds_token(&held), "정:RULE-BUS-PRESENCE a room that held its token holds the redeclared one");
     destroy(&missed);

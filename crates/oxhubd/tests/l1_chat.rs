@@ -560,12 +560,12 @@ all_forms!(catchup_merges_records_and_since_in_t_order |db| {
     let page = s.catchup("b", Some("S"), None, &Cursor::default(), 100, 1 << 20).expect("one space");
     assert_eq!(page.iter().map(|m| m.msg_id.clone()).collect::<Vec<_>>(), vec![id(0)], "CP-OP-CATCHUP③ — one space only");
     let first = s.catchup("b", None, None, &Cursor::default(), 2, 1 << 20).expect("bundle");
-    assert_eq!(first.len(), 2, "CP-OP-MESSAGES ① — at most the bundle count");
+    assert_eq!(first.len(), 2, "CP-OP-MESSAGES① — at most the bundle count");
     let last = first.last().expect("last");
     let next = s.catchup("b", None, None, &Cursor { t: last.t, msg_id: last.msg_id.clone() }, 2, 1 << 20).expect("next");
     assert_eq!(next.iter().map(|m| m.msg_id.clone()).collect::<Vec<_>>(), vec![id(3)], "the cursor continues without a gap or a repeat");
     let one = s.catchup("b", None, None, &Cursor::default(), 100, 1).expect("bytes");
-    assert_eq!(one.len(), 1, "CP-OP-MESSAGES ① — a message over the byte cap goes alone");
+    assert_eq!(one.len(), 1, "CP-OP-MESSAGES① — a message over the byte cap goes alone");
     s.leave("S", "b", None, Some(400)).expect("leave S");
     let page = s.catchup("b", None, Some(0), &Cursor::default(), 100, 1 << 20).expect("since after leaving");
     assert!(page.iter().filter(|m| m.space_id == "S").all(|m| m.msg_id == id(0)), "a space left is not read by t — only its records come");
