@@ -96,13 +96,13 @@ fn a_position_query_is_answered_while_taken_or_revoking_whatever_the_queue_and_n
     assert_eq!(to(&ask(&mut f, "b"), "b", Mt::Qinfo)[0].n, 1, "stand check — a queued member gets its position");
     let outside = ask(&mut f, "c");
     let q = to(&outside, "c", Mt::Qinfo);
-    assert_eq!((q.len(), q[0].n), (1, NOT_IN_QUEUE), "CP-MSG-FLOOR-QUEUE-POS-REQUEST② taken: a member outside the queue is answered with 254");
+    assert_eq!((q.len(), q[0].n), (1, NOT_IN_QUEUE), "CP-MSG-FLOOR-QUEUE-POS-REQUEST② C-proc-RULE-FLR-PROC-QUEUED-T104④ taken: a member outside the queue is answered with 254");
 
     let s = request_p(&mut f, "e", 200);
     assert_eq!(to(&s, "a", Mt::Revoke).len(), 1, "stand check — a higher priority pushed the speaker into the revoke grace");
     let during = ask(&mut f, "c");
     let q = to(&during, "c", Mt::Qinfo);
-    assert_eq!((q.len(), q[0].n), (1, NOT_IN_QUEUE), "CP-MSG-FLOOR-QUEUE-POS-REQUEST② during the revoke grace the query is still answered");
+    assert_eq!((q.len(), q[0].n), (1, NOT_IN_QUEUE), "CP-MSG-FLOOR-QUEUE-POS-REQUEST② C-proc-RULE-FLR-PROC-QUEUED-T104④ during the revoke grace the query is still answered — a waiter whose T104 ran out can always ask");
 }
 
 #[test]
@@ -174,4 +174,38 @@ fn the_server_never_answers_an_ack_in_any_participant_state() {
     }
     let probe = release(&mut f, "d");
     assert!(!probe.out.is_empty(), "stand check — the same member is answered when it sends something that needs an answer");
+}
+
+#[test]
+fn a_floor_refusal_for_a_missing_bit_is_a_dc_deny_102_and_no_floor_code_path_builds_2006() {
+    let mut f = Floor::new(10, 30);
+    f.ws_join("b", false);
+    f.ws_pub_select("b");
+    let s = request_p(&mut f, "b", 255);
+    let deny: Vec<u32> = to(&s, "b", Mt::Deny).iter().map(|m| m.n).collect();
+    assert_eq!(deny, vec![floor::deny::NO_PERMISSION as u32], "CP-CODE-NOT-AUTHORIZED③ a member without the floor bit is refused with DENY 102 on the floor path");
+    let floor_srcs = [include_str!("../src/flr/core.rs"), include_str!("../src/flr/talk.rs"), include_str!("../src/ops/floor.rs")];
+    for (i, src) in floor_srcs.iter().enumerate() {
+        assert!(!src.contains("NotAuthorized"), "CP-CODE-NOT-AUTHORIZED③ floor source {i} never builds code 2006 (NotAuthorized)");
+    }
+    assert!(include_str!("../src/ops/media.rs").contains("Code::NotAuthorized"), "stand check — the scan sees the real producer: PUBLISH_TRACKS builds 2006");
+    assert!(include_str!("../src/flr/core.rs").contains("deny::NO_PERMISSION"), "stand check — the floor source carries the 102 path");
+}
+
+#[test]
+fn a_member_without_the_floor_bit_is_denied_102_every_time_it_presses() {
+    let mut f = Floor::new(10, 30);
+    f.ws_join("a", true);
+    f.ws_pub_select("a");
+    f.ws_join("b", false);
+    f.ws_pub_select("b");
+    request_p(&mut f, "a", 5);
+    let mut causes = Vec::new();
+    for p in [5u32, 7, 255, 5, 255] {
+        let s = request_p(&mut f, "b", p);
+        causes.extend(to(&s, "b", Mt::Deny).iter().map(|m| m.n));
+        assert_eq!(s.out.len(), 1, "C-proc-RULE-FLR-PROC-DENY② pressing again at priority {p} sends exactly one thing — the DENY");
+    }
+    assert_eq!(causes, vec![floor::deny::NO_PERMISSION as u32; 5], "C-proc-RULE-FLR-PROC-DENY② the 102 refusal is the same every time it is pressed again");
+    assert_eq!(f.holder().as_deref(), Some("a"), "stand check — the speaker was never disturbed");
 }

@@ -51,9 +51,9 @@ fn a_pub_select_into_a_room_of_another_codec_is_refused_1006_and_moves_nothing()
     list(&v, true);
     oxsfud::ops::media::move_pub(&u.p, Some(&home), None).expect("stand check — the home room is the speaking room");
     assert_eq!(mine(&home, &u.p.user), 1, "stand check — the H264 video is listed in the home room");
-    let f = oxsfud::ops::media::move_pub(&u.p, Some(&vp8), None).expect_err("S-sym-IMPL-AFF-PUB-ROOM-1 an H264 track cannot speak into a VP8 room");
-    assert_eq!(f.code, 1006, "S-sym-IMPL-AFF-PUB-ROOM-1 the codec recheck refuses with CODEC_MISMATCH: {f:?}");
-    assert_eq!(oxsfud::aff::pub_room(&u.p).as_deref(), Some(home.id.as_str()), "S-sym-IMPL-AFF-PUB-ROOM-1 the refusal moves nothing — the speaking room stays");
+    let f = oxsfud::ops::media::move_pub(&u.p, Some(&vp8), None).expect_err("S-sym-IMPL-AFF-PUB-ROOM-1 CP-OP-AFFILIATION⑦ an H264 track cannot speak into a VP8 room — the whole move fails");
+    assert_eq!(f.code, 1006, "S-sym-IMPL-AFF-PUB-ROOM-1 CP-OP-AFFILIATION⑦ the codec recheck refuses with CODEC_MISMATCH: {f:?}");
+    assert_eq!(oxsfud::aff::pub_room(&u.p).as_deref(), Some(home.id.as_str()), "S-sym-IMPL-AFF-PUB-ROOM-1 CP-OP-AFFILIATION⑦ the refusal moves nothing — the speaking room stays");
     assert_eq!(mine(&vp8, &u.p.user), 0, "S-sym-IMPL-AFF-PUB-ROOM-1 the H264 track never lands in the VP8 room (no packets of another codec flow there)");
     assert_eq!(mine(&home, &u.p.user), 1, "S-sym-IMPL-AFF-PUB-ROOM-1 the track stays listed in the home room");
 }

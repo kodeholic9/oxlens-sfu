@@ -268,15 +268,36 @@ mod tests {
         for _ in 0..DATA_CAP {
             assert_eq!(a.push(&put), Push::Queued);
         }
-        assert_eq!(a.push(&put), Push::Dropped);
+        assert_eq!(a.push(&put), Push::Dropped, "S-sym-RULE-BUS-EVENTS-5③ the put over the data lane limit is dropped");
         assert_eq!(b.push(&put), Push::Queued);
         let req = Msg::Request { qid: 1, expr: "ox/t/int/q/node/n1/call".into(), payload: Vec::new(), timeout_ms: 10 };
         for _ in 0..REQ_CAP {
             assert_eq!(a.push(&req), Push::Queued);
         }
         assert_eq!(a.push(&req), Push::Full);
-        assert_eq!(a.dropped.load(Ordering::Relaxed), 1);
+        assert_eq!(a.dropped.load(Ordering::Relaxed), 1, "S-sym-RULE-BUS-EVENTS-5③ the session counts each dropped put");
         assert_eq!(a.full.load(Ordering::Relaxed), 1);
-        assert_eq!(total.load(Ordering::Relaxed), 1);
+        assert_eq!(total.load(Ordering::Relaxed), 1, "S-sym-RULE-BUS-EVENTS-5③ the process total (bus_ev_drop) rises by the dropped puts");
+    }
+
+    #[test]
+    fn a_full_data_lane_neither_closes_the_session_nor_holds_back_tokens() {
+        let ob = Outbox::new(Arc::new(AtomicU64::new(0)));
+        let put = Msg::Put { key: "ox/t/int/ev/room/r1".into(), payload: vec![0; 8] };
+        for _ in 0..DATA_CAP {
+            assert_eq!(ob.push(&put), Push::Queued);
+        }
+        for _ in 0..1_000 {
+            assert_eq!(ob.push(&put), Push::Dropped, "S-sym-RULE-BUS-EVENTS-5① a flooded data lane keeps dropping — the session is not closed (a closed outbox answers Closed)");
+            assert!(ob.lanes.lock().map(|g| g.closing.is_none()).unwrap_or(false), "S-sym-RULE-BUS-EVENTS-5① a flooded data lane does not close the session");
+        }
+        let tok = Msg::Declare { kind: crate::wire::DeclKind::Token, id: 7, expr: "ox/t/int/room/r1/n1/i1".into() };
+        assert_eq!(ob.push(&tok), Push::Queued, "S-sym-RULE-BUS-EVENTS-5② a token declare is still taken while the data lane is full");
+        match ob.pop() {
+            Pop::Frames(f) => assert_eq!(f[4], Lane::Declare as u8, "S-sym-RULE-BUS-EVENTS-5② the writer sends the token declare ahead of the queued puts"),
+            _ => panic!("stand check — the outbox has frames"),
+        }
+        let core = include_str!("core.rs");
+        assert!(!core.contains("Push::Dropped") && !core.contains("Push::Full =>"), "S-sym-RULE-BUS-EVENTS-5① no caller turns a dropped put into closing the session");
     }
 }
