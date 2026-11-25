@@ -34,3 +34,30 @@ fn track_event_body_cannot_exist_without_version() {
     let with_version = json!({"action": "add", "room_id": "r1", "tracks": [], "version": {"epoch": "e", "seq": 1}});
     assert!(serde_json::from_value::<TrackEventBody>(with_version).is_ok(), "stand check — the same body with version parses");
 }
+
+fn struct_fields(name: &str) -> Vec<String> {
+    let src = include_str!("../src/msg.rs");
+    let head = format!("pub struct {name} {{");
+    let start = src.find(&head).unwrap_or_else(|| panic!("struct {name} not found")) + head.len();
+    let body = &src[start..src[start..].find("\n}").map(|i| start + i).expect("struct end")];
+    body.lines().filter_map(|l| l.trim().strip_prefix("pub ").and_then(|r| r.split(':').next()).map(|s| s.trim().to_string())).collect()
+}
+
+#[test]
+fn leave_body_carries_only_code_name_message_details() {
+    let wire = json!({"code": 2010, "name": "SESSION_REPLACED", "message": "m", "details": {"k": 1}, "permanent": true, "reason": "x"});
+    let body: oxsig::msg::LeaveBody = serde_json::from_value(wire).expect("leave body parses");
+    let back = serde_json::to_value(&body).expect("leave body serializes");
+    assert_eq!(keys(&back), ["code", "details", "message", "name"], "CP-OP-LEAVE③ the server's LEAVE body has code · name · message · details and no permanent — the unknown fields are not representable");
+}
+
+#[test]
+fn room_join_res_has_no_floor_field_and_a_track_event_names_one_room() {
+    let fields = struct_fields("RoomJoinRes");
+    assert!(fields.len() >= 8 && fields.contains(&"mline_table".to_string()), "stand check — the scan read the real RoomJoinRes fields: {fields:?}");
+    let floorish: Vec<&String> = fields.iter().filter(|f| ["floor", "speaker", "talk", "queue"].iter().any(|w| f.to_lowercase().contains(w))).collect();
+    assert!(floorish.is_empty(), "C-sym-RULE-FLR-JOIN-NOTIFY-3 the join response has no field whose name carries floor · speaker · talk · queue: {floorish:?}");
+    let ev = struct_fields("TrackEventBody");
+    assert_eq!(ev.iter().filter(|f| f.as_str() == "room_id").count(), 1, "C-sym-R-TRK-TRACK-EVENT-SYMPTOMS-2 a TRACK_EVENT body names exactly one room — a mixed-room message cannot be built");
+    assert!(ev.contains(&"tracks".to_string()), "stand check — the scan read the real TrackEventBody fields: {ev:?}");
+}
