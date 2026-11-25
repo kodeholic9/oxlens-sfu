@@ -233,13 +233,13 @@ async fn a_zenoh_client_receives_queries_and_its_answers_come_back() {
         answers.push(tokio::time::timeout(Duration::from_secs(10), p.answer()).await.expect("answer in time"));
     }
     let (_q, seen) = tokio::time::timeout(Duration::from_secs(10), replier).await.expect("replier in time").expect("replier");
-    assert_eq!(answers[0], Answer::Ack, "H-rule-7-3-7③ — query 키로 reply = ACK");
-    assert_eq!(answers[1], Answer::Refused(b"no".to_vec()), "H-rule-7-3-7④ — reply_err = 거절(ACK 아님)");
+    assert_eq!(answers[0], Answer::Ack, "S-rule-RULE-HOOK-CHAT-SUB-7③ — query 키로 reply = ACK");
+    assert_eq!(answers[1], Answer::Refused(b"no".to_vec()), "S-rule-RULE-HOOK-CHAT-SUB-7④ — reply_err = 거절(ACK 아님)");
     assert_eq!(answers[2], Answer::NoReply, "정:RULE-CHAT-EXT-SUB 4 — 답 없이 놓으면 답 없음(ACK 아님)");
     assert_eq!(answers[3], Answer::Ack, "형상 — 큰 질의도 ACK");
     assert_eq!(seen[0], b"one".to_vec(), "형상 — 묶음 몸이 그대로 간다");
-    assert_eq!(seen[3].len(), big.len(), "H-rule-7-3-7② — 512 KiB 질의 한 건이 조각으로 나뉘어 한 건으로 온다");
-    assert!(seen[3] == big, "H-rule-7-3-7② — 이은 몸이 같다");
+    assert_eq!(seen[3].len(), big.len(), "S-rule-RULE-HOOK-CHAT-SUB-7② — 512 KiB 질의 한 건이 조각으로 나뉘어 한 건으로 온다");
+    assert!(seen[3] == big, "S-rule-RULE-HOOK-CHAT-SUB-7② — 이은 몸이 같다");
     s.close().await.expect("close");
     let t = wait_tokens(&r, 0, 3_000).await;
     assert!(t.is_empty(), "정:RULE-CHAT-EXT-SUB 3 — Close 에 토큰이 걷힌다 {t:?}");
@@ -260,8 +260,8 @@ async fn a_reply_on_another_key_is_no_ack() {
     });
     let a = tokio::time::timeout(Duration::from_secs(10), r.gate.query(&cid, b"x".to_vec()).expect("query").answer()).await.expect("answer");
     let (_q, blocked) = tokio::time::timeout(Duration::from_secs(10), replier).await.expect("replier in time").expect("replier");
-    assert!(blocked, "H-sym-7-3-2 — 클라이언트가 다른 키의 답을 막는다");
-    assert_eq!(a, Answer::NoReply, "H-sym-7-3-2 — ACK 0 · 그 묶음은 다시 온다(답 없음)");
+    assert!(blocked, "S-sym-RULE-HOOK-CHAT-SUB-2 — 클라이언트가 다른 키의 답을 막는다");
+    assert_eq!(a, Answer::NoReply, "S-sym-RULE-HOOK-CHAT-SUB-2 — ACK 0 · 그 묶음은 다시 온다(답 없음)");
     drop(s);
 }
 
@@ -273,17 +273,17 @@ async fn what_the_gate_does_not_take() {
     let _cid = open_cid(&r).await;
     let refused0 = r.gate.drops.refused.load(Ordering::Relaxed);
     let _outside = s.declare_queryable(format!("ox/{NS}/elsewhere/q")).await.expect("outside queryable");
-    assert!(wait(3_000, || r.gate.drops.refused.load(Ordering::Relaxed) > refused0).await, "H-rule-7-3-12② · S-sym-RULE-BUS-PUBLIC-4① — 허용 키 밖 선언은 무시하고 센다");
+    assert!(wait(3_000, || r.gate.drops.refused.load(Ordering::Relaxed) > refused0).await, "S-rule-RULE-HOOK-CHAT-SUB-12② · S-sym-RULE-BUS-PUBLIC-4① — 허용 키 밖 선언은 무시하고 센다");
     s.put(format!("ox/{NS}/pub/v1/x"), b"v".to_vec()).await.expect("put");
-    assert!(wait(3_000, || r.gate.drops.push_dropped.load(Ordering::Relaxed) >= 1).await, "H-rule-7-3-12① — 3rd 의 put 은 버리고 센다");
+    assert!(wait(3_000, || r.gate.drops.push_dropped.load(Ordering::Relaxed) >= 1).await, "S-rule-RULE-HOOK-CHAT-SUB-12① — 3rd 의 put 은 버리고 센다");
     let started = Instant::now();
     let replies = s.get(format!("ox/{NS}/pub/v1/q")).await.expect("get");
     let mut n = 0;
     while replies.recv_async().await.is_ok() {
         n += 1;
     }
-    assert_eq!(n, 0, "H-rule-7-3-12③ — 3rd 의 질의에는 결과가 없다");
-    assert!(started.elapsed() < Duration::from_secs(5), "H-rule-7-3-12③ — 결과 없이 바로 끝(시한을 기다리지 않는다) {:?}", started.elapsed());
+    assert_eq!(n, 0, "S-rule-RULE-HOOK-CHAT-SUB-12③ — 3rd 의 질의에는 결과가 없다");
+    assert!(started.elapsed() < Duration::from_secs(5), "S-rule-RULE-HOOK-CHAT-SUB-12③ — 결과 없이 바로 끝(시한을 기다리지 않는다) {:?}", started.elapsed());
     let started = Instant::now();
     let tokens_got = s.liveliness().get(format!("ox/{NS}/pub/v1/live/**")).await.expect("liveliness get");
     while tokens_got.recv_async().await.is_ok() {}
@@ -309,7 +309,7 @@ async fn what_the_gate_does_not_take() {
         seen_tokens += 1;
     }
     assert!(seen == 0 && seen_tokens == 0 && started.elapsed() < Duration::from_secs(5), "S-sym-RULE-BUS-PUBLIC-4① — 3rd 는 int/** 를 읽지 못한다(질의 {seen} · 토큰 {seen_tokens} · {:?})", started.elapsed());
-    assert_eq!(r.gate.conns().len(), 1, "H-rule-7-3-12④ — 그동안 세션은 산다");
+    assert_eq!(r.gate.conns().len(), 1, "S-rule-RULE-HOOK-CHAT-SUB-12④ — 그동안 세션은 산다");
     drop(q);
     drop(s);
 }
@@ -320,8 +320,8 @@ async fn declaring_another_accounts_key_closes_the_session() {
     let s = open(&r, "acme").await;
     let refused0 = r.gate.drops.refused.load(Ordering::Relaxed);
     let _q = s.declare_queryable(sub_key("other")).await;
-    assert!(wait(5_000, || r.gate.conns().is_empty()).await, "H-rule-7-3-4① — 인증서 계정과 다른 chat/sub 키를 선언하면 세션이 닫힌다");
-    assert!(r.gate.drops.refused.load(Ordering::Relaxed) > refused0, "H-rule-7-3-4① — ext_refused +1");
+    assert!(wait(5_000, || r.gate.conns().is_empty()).await, "S-rule-RULE-HOOK-CHAT-SUB-4① — 인증서 계정과 다른 chat/sub 키를 선언하면 세션이 닫힌다");
+    assert!(r.gate.drops.refused.load(Ordering::Relaxed) > refused0, "S-rule-RULE-HOOK-CHAT-SUB-4① — ext_refused +1");
     assert!(tokens(&r).await.is_empty(), "형상 — 토큰이 서지 않았다");
     drop(s);
 }
@@ -331,15 +331,15 @@ async fn refused_before_the_session() {
     let r = rig().await;
     let ep = tls_endpoint(&r);
     let tcp = format!("tcp/127.0.0.1:{}", r.gate.addr.port());
-    assert!(refused_open(client_cfg(&r, &ep, None)).await && counted(&r, 0).await, "H-rule-3-9① · S-sym-RULE-BUS-PUBLIC-4② — 인증서 없음은 붙지 못하고 ext_refused +1");
-    assert!(refused_open(client_cfg(&r, &ep, Some("rogue"))).await && counted(&r, 1).await, "H-rule-3-9② — 다른 CA 인증서는 붙지 못하고 ext_refused +1");
-    assert!(refused_open(client_cfg(&r, &ep, Some("nohook"))).await && counted(&r, 2).await, "H-rule-3-9③ — 연동 허용 없는 계정은 붙지 못하고 ext_refused +1");
-    assert!(refused_open(client_cfg(&r, &ep, Some("nosub"))).await && counted(&r, 3).await, "H-rule-3-9④ — 구독 빈 계정은 붙지 못하고 ext_refused +1");
+    assert!(refused_open(client_cfg(&r, &ep, None)).await && counted(&r, 0).await, "S-rule-RULE-HOOK-CREDENTIAL-9① · S-sym-RULE-BUS-PUBLIC-4② — 인증서 없음은 붙지 못하고 ext_refused +1");
+    assert!(refused_open(client_cfg(&r, &ep, Some("rogue"))).await && counted(&r, 1).await, "S-rule-RULE-HOOK-CREDENTIAL-9② — 다른 CA 인증서는 붙지 못하고 ext_refused +1");
+    assert!(refused_open(client_cfg(&r, &ep, Some("nohook"))).await && counted(&r, 2).await, "S-rule-RULE-HOOK-CREDENTIAL-9③ — 연동 허용 없는 계정은 붙지 못하고 ext_refused +1");
+    assert!(refused_open(client_cfg(&r, &ep, Some("nosub"))).await && counted(&r, 3).await, "S-rule-RULE-HOOK-CREDENTIAL-9④ — 구독 빈 계정은 붙지 못하고 ext_refused +1");
     assert!(refused_open(client_cfg(&r, &ep, Some("stranger"))).await && counted(&r, 4).await, "정:RULE-CHAT-EXT-SUB 7 — 모르는 계정은 붙지 못하고 ext_refused +1");
-    assert!(refused_open(client_cfg(&r, &tcp, None)).await && counted(&r, 5).await, "H-rule-7-3-1② · S-sym-RULE-BUS-PUBLIC-4② — 평문 TCP 는 닫히고 ext_refused +1");
+    assert!(refused_open(client_cfg(&r, &tcp, None)).await && counted(&r, 5).await, "S-rule-RULE-HOOK-CHAT-SUB-1② · S-sym-RULE-BUS-PUBLIC-4② — 평문 TCP 는 닫히고 ext_refused +1");
     assert!(r.gate.conns().is_empty(), "형상 — 거절된 것은 연결표에 들지 않는다");
     let s = open(&r, "acme").await;
-    assert!(wait(3_000, || r.gate.conns().len() == 1).await, "H-rule-7-3-1① · H-rule-3-9⑤ — tls 로 붙는다");
+    assert!(wait(3_000, || r.gate.conns().len() == 1).await, "S-rule-RULE-HOOK-CHAT-SUB-1① · S-rule-RULE-HOOK-CREDENTIAL-9⑤ — tls 로 붙는다");
     drop(s);
 }
 
@@ -452,12 +452,12 @@ async fn another_version_or_a_non_client_is_closed_in_the_handshake() {
     let mut raw = Raw::connect(&r, "acme").await;
     raw.send(Raw::init(0x08, WhatAmI::Client)).await;
     let got = raw.recv().await.map(|m| m.body);
-    assert!(matches!(got, Some(TransportBody::Close(_))) && counted(&r, before).await, "H-rule-7-3-2 — 판 0x09 가 아니면 InitAck 대신 Close · ext_refused +1 {got:?}");
+    assert!(matches!(got, Some(TransportBody::Close(_))) && counted(&r, before).await, "S-rule-RULE-HOOK-CHAT-SUB-2 — 판 0x09 가 아니면 InitAck 대신 Close · ext_refused +1 {got:?}");
     let before = r.gate.drops.refused.load(Ordering::Relaxed);
     let mut raw = Raw::connect(&r, "acme").await;
     raw.send(Raw::init(zenoh_protocol::VERSION, WhatAmI::Peer)).await;
     let got = raw.recv().await.map(|m| m.body);
-    assert!(matches!(got, Some(TransportBody::Close(_))) && counted(&r, before).await, "H-rule-7-3-1③ — client 가 아니면 InitAck 대신 Close · ext_refused +1 {got:?}");
+    assert!(matches!(got, Some(TransportBody::Close(_))) && counted(&r, before).await, "S-rule-RULE-HOOK-CHAT-SUB-1③ — client 가 아니면 InitAck 대신 Close · ext_refused +1 {got:?}");
     assert!(r.gate.conns().is_empty(), "형상 — 연결표에 들지 않는다");
 }
 
@@ -466,7 +466,7 @@ async fn a_client_with_usrpwd_on_fails_on_its_own_side() {
     let r = rig().await;
     let mut cfg = client_cfg(&r, &tls_endpoint(&r), Some("acme"));
     cfg.insert_json5("transport/auth/usrpwd", r#"{ user: "u", password: "p" }"#).expect("usrpwd");
-    assert!(refused_open(cfg).await, "H-rule-7-3-1④ · H-rule-7-3-3④ — usrpwd 를 켠 클라이언트는 붙지 못한다(입구가 auth 확장을 되돌리지 않는다)");
+    assert!(refused_open(cfg).await, "S-rule-RULE-HOOK-CHAT-SUB-1④ · S-rule-RULE-HOOK-CHAT-SUB-3④ — usrpwd 를 켠 클라이언트는 붙지 못한다(입구가 auth 확장을 되돌리지 않는다)");
     assert!(wait(3_000, || r.gate.conns().is_empty()).await, "형상 — 연결표에 남지 않는다");
 }
 
@@ -631,7 +631,7 @@ async fn what_waited_is_drained_when_the_client_comes_and_acks_clear_it() {
     let o = r.gate.deliver(&cid, true, vec![msg], None).expect("deliver");
     assert!(o.accepted(), "정:RULE-CHAT-EXT-SUB 4 — 연결이 있으면 넣고 성공");
     let b = tokio::time::timeout(Duration::from_secs(5), got.recv()).await.expect("live in time").expect("body");
-    assert_eq!((b["live"].clone(), ids_of(&b)), (serde_json::json!(true), vec![live]), "H-rule-7-3-6① — 실시간 몸 {{live:true, messages}} · 메시지 꼴 = MESSAGES 의 것");
+    assert_eq!((b["live"].clone(), ids_of(&b)), (serde_json::json!(true), vec![live]), "S-rule-RULE-HOOK-CHAT-SUB-6① — 실시간 몸 {{live:true, messages}} · 메시지 꼴 = MESSAGES 의 것");
     assert_eq!(rows_left(&r, 0, 3_000).await, 0, "형상 — 실시간 ACK 도 지운다");
     drop(s);
 }
@@ -646,7 +646,7 @@ async fn reply_timeouts_in_a_row_close_the_session_and_count_tries() {
     let cid = open_cid(&r).await;
     let msg = r.chat.store.history("u1", "S", oxhubd::chat::store::Dir::Latest, 1).expect("history").messages.remove(0);
     let _ = r.gate.deliver(&cid, true, vec![msg], None);
-    assert!(wait(8_000, || !r.gate.conns().iter().any(|c| c.cid == cid)).await, "S-sym-RULE-CHAT-EXT-SUB-6① · PL-KEY-HOOK-EXT-REPLY-TIMEOUT-MS② · H-sym-7-3-3 — 잇단 시간 넘김 close_at 번에 그 세션을 닫는다(클라이언트는 새 연결로 다시 붙는다)");
+    assert!(wait(8_000, || !r.gate.conns().iter().any(|c| c.cid == cid)).await, "S-sym-RULE-CHAT-EXT-SUB-6① · PL-KEY-HOOK-EXT-REPLY-TIMEOUT-MS② · S-sym-RULE-HOOK-CHAT-SUB-3 — 잇단 시간 넘김 close_at 번에 그 세션을 닫는다(클라이언트는 새 연결로 다시 붙는다)");
     assert!(r.gate.drops.reply_timeout.load(Ordering::Relaxed) >= 2, "PL-KEY-HOOK-EXT-REPLY-TIMEOUT-MS① — 시간 넘김마다 ext_reply_timeout +1");
     let end = Instant::now() + Duration::from_secs(3);
     while Instant::now() < end && r.chat.store.ext_rows("acme").expect("rows").first().is_none_or(|x| x.tries == 0) {
@@ -804,14 +804,14 @@ async fn a_resent_older_message_arrives_after_a_newer_live_one() {
     }
     let arrivals: Vec<String> = bodies.iter().flat_map(|b| ids_of(b)).collect();
     let count = |id: &str| arrivals.iter().filter(|i| *i == id).count();
-    assert_eq!(count(&older), 2, "H-rule-7-3-9① H-sym-7-3-1① — the refused message is carried again: the same msg_id arrives twice, so a 3rd that does not filter by msg_id handles it twice {arrivals:?}");
+    assert_eq!(count(&older), 2, "S-rule-RULE-HOOK-CHAT-SUB-9① S-sym-RULE-HOOK-CHAT-SUB-1① — the refused message is carried again: the same msg_id arrives twice, so a 3rd that does not filter by msg_id handles it twice {arrivals:?}");
     assert!(count(&newer) >= 1, "형상 — the live one arrived {arrivals:?}");
     let first_newer = arrivals.iter().position(|i| *i == newer).expect("newer arrived");
     let last_older = arrivals.iter().rposition(|i| *i == older).expect("older arrived");
     let t_older = bodies.iter().map(|b| b["messages"].as_array().cloned().unwrap_or_default()).flatten().find(|m| m["msg_id"] == older).and_then(|m| m["t"].as_u64()).expect("t older");
     let t_newer = bodies.iter().map(|b| b["messages"].as_array().cloned().unwrap_or_default()).flatten().find(|m| m["msg_id"] == newer).and_then(|m| m["t"].as_u64()).expect("t newer");
     assert!(t_older < t_newer, "형상 — the older message has the earlier t");
-    assert!(last_older > first_newer, "H-rule-7-3-10③ — the arrival order differs from the t order: the older message arrives again after the newer one {arrivals:?}");
+    assert!(last_older > first_newer, "S-rule-RULE-HOOK-CHAT-SUB-10③ — the arrival order differs from the t order: the older message arrives again after the newer one {arrivals:?}");
     drop(s);
 }
 
@@ -827,14 +827,14 @@ async fn what_waited_past_the_retention_is_gone_when_the_client_comes() {
     assert_eq!(r.chat.store.ext_rows("acme").expect("rows").len(), 2, "형상 — an old row and a new row wait");
     r.chat.purge_once(common::now_ms()).expect("purge");
     let left: Vec<String> = r.chat.store.ext_rows("acme").expect("rows").into_iter().map(|x| x.msg_id).collect();
-    assert_eq!(left, vec![fresh.clone()], "H-rule-7-3-11 — the retention purge removes the old waiting row and keeps the new one");
+    assert_eq!(left, vec![fresh.clone()], "S-rule-RULE-HOOK-CHAT-SUB-11 — the retention purge removes the old waiting row and keeps the new one");
     let s = open(&r, "acme").await;
     let (mut got, _h) = answering(s.declare_queryable(sub_key("acme")).await.expect("queryable"), Mode::Ack);
     let b = tokio::time::timeout(Duration::from_secs(5), got.recv()).await.expect("drain in time").expect("body");
-    assert_eq!(ids_of(&b), vec![fresh], "H-rule-7-3-11 — a client that comes after the retention gets the new share only · the purged one never comes (positive control — the drain itself works)");
-    assert!(!ids_of(&b).contains(&old), "H-rule-7-3-11 — the purged message is not carried");
+    assert_eq!(ids_of(&b), vec![fresh], "S-rule-RULE-HOOK-CHAT-SUB-11 — a client that comes after the retention gets the new share only · the purged one never comes (positive control — the drain itself works)");
+    assert!(!ids_of(&b).contains(&old), "S-rule-RULE-HOOK-CHAT-SUB-11 — the purged message is not carried");
     let more = tokio::time::timeout(Duration::from_millis(1_500), got.recv()).await;
-    assert!(more.is_err(), "H-rule-7-3-11 — nothing else follows {more:?}");
+    assert!(more.is_err(), "S-rule-RULE-HOOK-CHAT-SUB-11 — nothing else follows {more:?}");
     drop(s);
 }
 
@@ -920,7 +920,7 @@ fn send_plan_vectors() {
                     serde_json::json!(a.as_str())
                 }
             };
-            assert_eq!(got, s["got"], "정:RULE-CHAT-EXT-SUB 5 H-rule-7-3-8 — {} · {s}", c["name"]);
+            assert_eq!(got, s["got"], "정:RULE-CHAT-EXT-SUB 5 S-rule-RULE-HOOK-CHAT-SUB-8 — {} · {s}", c["name"]);
             assert_eq!((o.inflight as u64, o.queued() as u64, o.backlog, o.streak as u64), (s["inflight"].as_u64().expect("i"), s["queued"].as_u64().expect("q"), s["backlog"].as_bool().expect("b"), s["streak"].as_u64().expect("s")), "{} · {s}", c["name"]);
         }
     }

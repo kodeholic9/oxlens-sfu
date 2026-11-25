@@ -1675,9 +1675,9 @@ all_forms!(a_star_account_gets_every_space_outside_membership_and_the_visible_st
     assert!(!seen_by_b.contains(&early), "positive control — in the joined form the member b does not see what came before b joined {seen_by_b:?}");
     assert_eq!(s.history("b", "S2", Dir::Latest, 60), Err(Code::NotSpaceMember), "positive control — b is no member of the other space");
     let all = ext_ids(&s, "all");
-    assert!(all.contains(&early), "H-rule-7-3-13 — the \"*\" account gets the message from before the visible start of a member {all:?}");
-    assert!(all.contains(&other), "H-rule-7-3-13 — the \"*\" account gets the message of a space it has no membership in either {all:?}");
-    assert_eq!(all.iter().filter(|i| **i == early || **i == other).count(), 2, "H-rule-7-3-13 — one row each");
+    assert!(all.contains(&early), "S-rule-RULE-HOOK-CHAT-SUB-13 — the \"*\" account gets the message from before the visible start of a member {all:?}");
+    assert!(all.contains(&other), "S-rule-RULE-HOOK-CHAT-SUB-13 — the \"*\" account gets the message of a space it has no membership in either {all:?}");
+    assert_eq!(all.iter().filter(|i| **i == early || **i == other).count(), 2, "S-rule-RULE-HOOK-CHAT-SUB-13 — one row each");
 });
 
 all_forms!(a_resent_msg_id_writes_no_second_ext_row |db| {
