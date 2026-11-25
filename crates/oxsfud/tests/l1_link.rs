@@ -36,10 +36,10 @@ fn ice_restart_at_most_two_per_set() {
     let late = stun::request(&first.ufrag, "peer", &first.pwd, [1u8; 12], true);
     assert!(stun::check(&late, |u| c.pwd(u)).is_err(), "S-sym-IMPL-LINK-ICE-RESTART-2 늦게 적용된 옛 응답의 자격은 통과하지 못한다");
     let old = stun::request(&active.ufrag, "peer", &active.pwd, [2u8; 12], false);
-    assert!(stun::check(&old, |u| c.pwd(u)).is_ok(), "S-sym-IMPL-LINK-ICE-RESTART-2 새 것이 쓰이기 전에는 옛 것도 받는다");
+    assert!(stun::check(&old, |u| c.pwd(u)).is_ok(), "S-sym-IMPL-LINK-ICE-RESTART-2 C-sym-R-LINK-ICE-RESTART-SYMPTOMS-3①② 새 것이 쓰이기 전에는 옛 것도 받는다");
     let new = stun::request(&second.ufrag, "peer", &second.pwd, [3u8; 12], true);
     assert!(stun::check(&new, |u| c.pwd(u)).is_ok(), "S-sym-IMPL-LINK-ICE-RESTART-2 새 자격은 통과한다");
-    assert_eq!(c.checked(&second.ufrag), Checked::Promoted { retired: active.ufrag.clone() }, "S-sym-IMPL-LINK-ICE-RESTART-2 새 ufrag 첫 검사에 옛 것을 내린다");
+    assert_eq!(c.checked(&second.ufrag), Checked::Promoted { retired: active.ufrag.clone() }, "S-sym-IMPL-LINK-ICE-RESTART-2 C-sym-R-LINK-ICE-RESTART-SYMPTOMS-3② 새 ufrag 첫 검사에 옛 것을 내린다");
     assert_eq!(c.ufrags(), vec![second.ufrag.clone()], "S-sym-IMPL-LINK-ICE-RESTART-2 승격 뒤 하나만 남는다");
-    assert!(stun::check(&old, |u| c.pwd(u)).is_err(), "S-sym-IMPL-LINK-ICE-RESTART-2 내린 옛 자격은 더는 통과하지 못한다");
+    assert!(stun::check(&old, |u| c.pwd(u)).is_err(), "S-sym-IMPL-LINK-ICE-RESTART-2 C-sym-R-LINK-ICE-RESTART-SYMPTOMS-3② 내린 옛 자격은 더는 통과하지 못한다");
 }
