@@ -523,3 +523,43 @@ fn a_recreated_room_takes_the_token_permission_again() {
     assert_eq!(again.member("a").map(|m| m.permission), Some(Permission::ALL), "S-sym-IMPL-ROOM-PERMISSION-3③ the recreated room does not carry the destroyed room's override — re-join takes the token value");
     assert!(!Arc::ptr_eq(&r, &again), "stand check — a new room under the same id");
 }
+
+#[test]
+fn one_user_in_two_rooms_of_one_server_is_one_peer() {
+    let _g = serial();
+    let (x, y) = (room(&tag("c2-x")), room(&tag("c2-y")));
+    let u = subscriber(&tag("c2-u"));
+    let c = ctx_of(&u.p);
+    assert!(ops::rooms::join(&c, &json!({ "room_id": x.id })).is_ok(), "stand check — joins the first room");
+    let first = sfu().peer(&u.p.user).expect("peer after the first join");
+    assert!(ops::rooms::join(&c, &json!({ "room_id": y.id })).is_ok(), "stand check — joins the second room");
+    let second = sfu().peer(&u.p.user).expect("peer after the second join");
+    assert!(Arc::ptr_eq(&first, &second), "S-cond-RULE-DOC-COND-INDEX-SERVER-2 one user in two rooms of the same server keeps one Peer");
+    assert!(second.in_room(&x.id) && second.in_room(&y.id) && x.has(&u.p.user) && y.has(&u.p.user), "S-cond-RULE-DOC-COND-INDEX-SERVER-2 both rooms hang on that one Peer — joining the second does not move the user out of the first");
+}
+
+#[test]
+fn a_second_ready_notifies_the_floor_again_and_keeps_the_first_stall_origin() {
+    let _g = serial();
+    let mut f = Floor::new(10, 30);
+    for u in ["a", "b"] {
+        f.ws_join(u, true);
+        f.ws_pub_select(u);
+    }
+    for i in 0..2 {
+        let s = f.ready("b");
+        assert_eq!(s.out.iter().filter(|o| o.to == "b" && o.m.t == Mt::Idle).count(), 1, "S-sym-IMPL-SUB-READY-GATE-2 READY #{i} with no speaker gets IDLE once");
+    }
+    f.server_rx("a", &Msg::new(Mt::Request, None, 5, 0), true, 0);
+    for i in 0..2 {
+        let s = f.ready("b");
+        assert_eq!(s.out.iter().filter(|o| o.to == "b" && o.m.t == Mt::Taken).count(), 1, "S-sym-IMPL-SUB-READY-GATE-2 READY #{i} with a speaker gets TAKEN once");
+    }
+    let x = room(&tag("rg2-x"));
+    let sub = subscriber(&tag("rg2-s"));
+    enter(&sub.p, &x);
+    let (first, _) = sub.t.ready(&x.id, 0, 1_000);
+    let (second, _) = sub.t.ready(&x.id, 0, 5_000);
+    assert!(first && !second, "stand check — the first READY is the first");
+    assert_eq!(sub.t.ready_at(&x.id), Some(1_000), "S-sym-IMPL-SUB-READY-GATE-2 the stall origin stays at the first READY");
+}

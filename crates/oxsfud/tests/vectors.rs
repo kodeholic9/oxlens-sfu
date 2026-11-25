@@ -335,7 +335,7 @@ fn sim_congestion_vectors() {
                     continue;
                 }
                 "padding" => {
-                    assert_eq!(c.padding(us), st["out"].as_i64().unwrap_or(-1), "S-sym-RULE-SIM-TICK-17 — 패딩 예산 {name} 걸음 {i}");
+                    assert_eq!(c.padding(us), st["out"].as_i64().unwrap_or(-1), "S-sym-RULE-SIM-TICK-17① — 패딩으로 오르는 동안 패딩 예산 = 목표 속도 {name} 걸음 {i}");
                     continue;
                 }
                 "rtt" => {

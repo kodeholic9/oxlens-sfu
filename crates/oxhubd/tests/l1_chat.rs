@@ -1445,7 +1445,7 @@ fn the_send_lane_closes_on_bytes_before_the_frame_count() {
         n += 1;
         assert!(n <= QUEUE_MAX + lane::WINDOW + 1, "형상 — 건수 상한에서 끊겨야 한다");
     };
-    assert_eq!((cut, n), (Code::FlowOverflow, QUEUE_MAX), "S-sym-IMPL-SES-SOCKET-LIFE-1③ — 양성 대조: 건수 {QUEUE_MAX} 초과도 같은 사유");
+    assert_eq!((cut, n), (Code::FlowOverflow, QUEUE_MAX), "S-sym-IMPL-SES-SOCKET-LIFE-1③ SV-CODE-4006-4008 — 양성 대조: 건수 {QUEUE_MAX} 초과도 같은 사유");
 }
 
 fn talk_id(i: usize) -> String {

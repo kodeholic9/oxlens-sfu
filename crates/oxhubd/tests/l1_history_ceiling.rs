@@ -54,7 +54,11 @@ fn ask() -> Ask {
     Ask { room: Some("busy".into()), since: 0, until: u64::MAX, diag: true, stat: true, max: MAX_LINES, ..Ask::default() }
 }
 
-fn measure(name: &str, every: u64) -> (u128, usize, bool, usize) {
+fn mono_of(line: &str) -> u64 {
+    line.split(' ').find_map(|f| f.strip_prefix("mono=")).and_then(|v| v.parse().ok()).expect("mono")
+}
+
+fn measure(name: &str, every: u64) -> (u128, Vec<u64>, bool, usize, u64) {
     let d = dir(name);
     let n = fill(&d, every);
     let t = Instant::now();
@@ -62,19 +66,20 @@ fn measure(name: &str, every: u64) -> (u128, usize, bool, usize) {
     let ms = t.elapsed().as_millis();
     let _ = std::fs::remove_dir_all(&d);
     eprintln!("history ceiling {name}: lines {n} · read {ms} ms · kept {} · truncated {}", f.lines.len(), f.truncated);
-    (ms, f.lines.len(), f.truncated, f.boots.len())
+    (ms, f.lines.iter().map(|l| mono_of(l)).collect(), f.truncated, f.boots.len(), n)
 }
 
 #[test]
 fn a_full_log_file_is_read_within_budget_when_the_room_is_rare() {
-    let (ms, kept, truncated, boots) = measure("rare", 100_000);
-    assert!(kept > 0 && kept <= MAX_LINES && !truncated && boots == 1, "운영:RULE-READ-HISTORY the rare room's lines come back with their boot line");
+    let (ms, kept, truncated, boots, _) = measure("rare", 100_000);
+    assert!(!kept.is_empty() && kept.len() <= MAX_LINES && !truncated && boots == 1, "운영:RULE-READ-HISTORY O-sym-RULE-READ-HISTORY-5 the rare room's lines come back whole with their boot line");
     assert!(ms <= BUDGET_MS, "운영:RULE-READ-HISTORY O-sym-RULE-READ-HISTORY-5 a node whose log file is at the rotation ceiling answers within {BUDGET_MS} ms (took {ms} ms)");
 }
 
 #[test]
 fn a_full_log_file_is_read_within_budget_when_every_line_is_the_room() {
-    let (ms, kept, truncated, boots) = measure("busy", 1);
-    assert!(kept == MAX_LINES && truncated && boots == 1, "운영:RULE-READ-HISTORY the newest {MAX_LINES} lines come back cut at the front with truncated");
+    let (ms, kept, truncated, boots, n) = measure("busy", 1);
+    assert!(kept.len() == MAX_LINES && truncated && boots == 1, "운영:RULE-READ-HISTORY O-sym-RULE-READ-HISTORY-5 {MAX_LINES} lines come back with truncated and the boot line (got {} lines)", kept.len());
+    assert!(kept.last() == Some(&(n - 1)) && kept.first() == Some(&(n - MAX_LINES as u64)) && kept.windows(2).all(|w| w[1] == w[0] + 1), "운영:RULE-READ-HISTORY O-sym-RULE-READ-HISTORY-5 the cut is at the front — the newest {MAX_LINES} lines of the file stay (first {:?} last {:?} of {n})", kept.first(), kept.last());
     assert!(ms <= BUDGET_MS, "운영:RULE-READ-HISTORY O-sym-RULE-READ-HISTORY-5 a node whose log file is at the rotation ceiling answers within {BUDGET_MS} ms even when every line is picked (took {ms} ms)");
 }

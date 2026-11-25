@@ -251,7 +251,7 @@ fn a_member_without_the_floor_bit_is_denied_102_even_at_top_priority() {
     request_p(&mut f, "a", 5);
     for p in [5u32, 7, 255] {
         let s = request_p(&mut f, "b", p);
-        assert_eq!(denies(&s, "b"), vec![oxsig::floor::deny::NO_PERMISSION as u32], "S-sym-IMPL-ROOM-PERMISSION-5①② priority {p} is denied 102 before the priority is read");
+        assert_eq!(denies(&s, "b"), vec![oxsig::floor::deny::NO_PERMISSION as u32], "S-sym-IMPL-ROOM-PERMISSION-5①② SV-CODE-2006③ priority {p} is denied 102 before the priority is read — the floor refusal is the DC cause, not 2006");
         assert!(!s.out.iter().any(|o| o.to == "a" && o.m.t == Mt::Revoke), "S-sym-IMPL-ROOM-PERMISSION-5① priority {p} does not preempt the speaker");
         assert_eq!(f.holder().as_deref(), Some("a"), "S-sym-IMPL-ROOM-PERMISSION-5① the speaker keeps the floor · priority {p}");
     }

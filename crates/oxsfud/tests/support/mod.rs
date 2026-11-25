@@ -31,6 +31,10 @@ pub fn serial() -> MutexGuard<'static, ()> {
 }
 
 pub fn sfu() -> &'static Arc<Sfu> {
+    sfu_with(common::policy::Policy::default())
+}
+
+pub fn sfu_with(policy: common::policy::Policy) -> &'static Arc<Sfu> {
     if let Some(s) = ops::sfu() {
         return s;
     }
@@ -40,7 +44,7 @@ pub fn sfu() -> &'static Arc<Sfu> {
         node: "l1".into(),
         epoch: "l1-epoch".into(),
         build: "l1".into(),
-        policy: common::policy::Policy::default(),
+        policy,
         ip: "127.0.0.1".parse().expect("ip"),
         udp_port: 0,
         tcp_port: None,

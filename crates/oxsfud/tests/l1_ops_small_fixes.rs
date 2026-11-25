@@ -420,7 +420,7 @@ fn t61_2_refused_join_keeps_the_other_room() {
     drop(held);
     let res = t1.join().expect("t1");
     assert!(stood, "stand failed — the join never reached its own resync");
-    assert_eq!(code(&res), Some(Code::RoomNotFound.num()), "정:IMPL-ROOM-JOIN S-sym-IMPL-ROOM-JOIN-4 refused with ROOM_NOT_FOUND: {}", brief(&res));
+    assert_eq!(code(&res), Some(Code::RoomNotFound.num()), "정:IMPL-ROOM-JOIN S-sym-IMPL-ROOM-JOIN-4 SV-CODE-3001② the media server refuses a room it no longer has with ROOM_NOT_FOUND: {}", brief(&res));
     assert!(!r.has(&u.p.user) && !u.p.in_room(&r.id), "정:IMPL-ROOM-JOIN the refused join leaves neither the roster nor Peer.rooms holding R");
     assert!(u.p.in_room(&r0.id) && r0.has(&u.p.user), "정:IMPL-ROOM-JOIN the other room stays");
     assert!(sfu().peer(&u.p.user).is_some_and(|p| Arc::ptr_eq(&p, &u.p)), "정:IMPL-ROOM-JOIN the Peer that holds another room is not reaped");
@@ -800,7 +800,7 @@ fn the_join_past_the_listen_limit_fails_once_with_the_limit_and_count() {
     let r = ops::rooms::join(&ctx_of(&u.p), &json!({ "room_id": over.id }));
     let f = r.as_ref().err().cloned();
     assert_ne!(f.as_ref().map(|f| f.code), Some(Code::MidLimit.num()), "CP-CODE-LISTEN-LIMIT① the next ROOM_JOIN is not refused by the m-line budget first: {}", brief(&r));
-    assert_eq!(f.as_ref().map(|f| f.code), Some(Code::ListenLimit.num()), "CP-CODE-LISTEN-LIMIT① the next ROOM_JOIN fails with 4004: {}", brief(&r));
+    assert_eq!(f.as_ref().map(|f| f.code), Some(Code::ListenLimit.num()), "CP-CODE-LISTEN-LIMIT① SV-CODE-4001-4002-4004-4005 the next ROOM_JOIN fails with 4004: {}", brief(&r));
     assert_eq!(f.and_then(|f| f.details), Some(json!({ "limit": max, "current": max })), "CP-CODE-LISTEN-LIMIT① details.limit = MaxRooms · current");
     assert!(u.p.rooms().len() == max && !over.has(&u.p.user) && !u.p.in_room(&over.id), "CP-CODE-LISTEN-LIMIT① the refused join leaves nothing behind");
 }
@@ -821,7 +821,7 @@ fn the_join_past_a_cut_slot_budget_fails_with_the_mline_count() {
     let over = room(&tag("midlim-over"));
     let r = ops::rooms::join(&ctx_of(&u.p), &json!({ "room_id": over.id }));
     let f = r.as_ref().err().cloned();
-    assert_eq!(f.as_ref().map(|f| f.code), Some(Code::MidLimit.num()), "CP-CODE-MID-LIMIT① a ROOM_JOIN past the slot budget fails with 4005: {}", brief(&r));
+    assert_eq!(f.as_ref().map(|f| f.code), Some(Code::MidLimit.num()), "CP-CODE-MID-LIMIT① SV-CODE-4001-4002-4004-4005 a ROOM_JOIN past the slot budget fails with 4005: {}", brief(&r));
     assert_eq!(f.and_then(|f| f.details), Some(json!({ "limit": slots, "current": slots })), "CP-CODE-MID-LIMIT① details.limit · current are line counts (the slot budget)");
     assert!(slots < u.t.limit(), "CP-CODE-MID-LIMIT③ fixed split — the subscribe budget {} still has room while the slot budget refuses", u.t.limit());
     assert!(u.p.rooms().len() == fit && !over.has(&u.p.user) && !u.p.in_room(&over.id), "CP-CODE-MID-LIMIT① the refused join leaves nothing behind");
@@ -878,4 +878,12 @@ fn t57_layer_matching_sees_only_packets_with_a_send_path() {
         "정:RULE-FWD-STEPS S-sym-RULE-FWD-STEPS-4① FWD.model.AdmitAfterPath layer matching (adopt · keyframe commit · retry PLI) runs after the send path check — before it, a joiner whose READY beats the nomination spends the PLI window and loses the keyframe: send_ok at {path:?} · admit at {}",
         admits[0].line
     );
+}
+
+#[test]
+fn the_media_server_never_issues_quota_exceeded() {
+    let lines = product_lines();
+    assert!(lines.len() > 1_000, "stand check — the product sources were read ({})", lines.len());
+    let hits: Vec<String> = lines.iter().filter(|l| l.text.contains("QuotaExceeded")).map(at).collect();
+    assert!(hits.is_empty(), "SV-CODE-4001-4002-4004-4005 4003 QUOTA_EXCEEDED is issued by the hub only — the media server sources never name it: {hits:?}");
 }
