@@ -60,8 +60,8 @@ fn the_client_room_view_carries_no_floor_even_while_someone_speaks() {
     keys(&got, &mut all);
     let top: BTreeSet<String> = got.as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default();
     let want: BTreeSet<String> = ["room_id", "name", "capacity", "user_count", "participants", "me", "created_at", "record", "media_codecs", "version", "tracks"].into_iter().map(String::from).collect();
-    assert_eq!(top, want, "S-sym-RULE-FLR-SNAPSHOT-2① the client room view has room · roster · tracks · version only");
+    assert_eq!(top, want, "S-sym-RULE-FLR-SNAPSHOT-1① the client room view has room · roster · tracks · version only");
     let floor_names = ["speaker", "queue", "floor", "priority", "first_rtp_at", "last_rtp_at", "timers", "state"];
     let leaked: Vec<&str> = floor_names.iter().copied().filter(|n| all.contains(*n)).collect();
-    assert!(leaked.is_empty(), "S-sym-RULE-FLR-SNAPSHOT-2① no floor name anywhere in the client room view while a speaks: {leaked:?}");
+    assert!(leaked.is_empty(), "S-sym-RULE-FLR-SNAPSHOT-1① no floor name anywhere in the client room view while a speaks: {leaked:?}");
 }

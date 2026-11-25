@@ -273,7 +273,7 @@ async fn what_the_gate_does_not_take() {
     let _cid = open_cid(&r).await;
     let refused0 = r.gate.drops.refused.load(Ordering::Relaxed);
     let _outside = s.declare_queryable(format!("ox/{NS}/elsewhere/q")).await.expect("outside queryable");
-    assert!(wait(3_000, || r.gate.drops.refused.load(Ordering::Relaxed) > refused0).await, "S-rule-RULE-HOOK-CHAT-SUB-12② · S-sym-RULE-BUS-PUBLIC-4① — 허용 키 밖 선언은 무시하고 센다");
+    assert!(wait(3_000, || r.gate.drops.refused.load(Ordering::Relaxed) > refused0).await, "S-rule-RULE-HOOK-CHAT-SUB-12② · S-sym-RULE-BUS-PUBLIC-3① — 허용 키 밖 선언은 무시하고 센다");
     s.put(format!("ox/{NS}/pub/v1/x"), b"v".to_vec()).await.expect("put");
     assert!(wait(3_000, || r.gate.drops.push_dropped.load(Ordering::Relaxed) >= 1).await, "S-rule-RULE-HOOK-CHAT-SUB-12① — 3rd 의 put 은 버리고 센다");
     let started = Instant::now();
@@ -294,8 +294,8 @@ async fn what_the_gate_does_not_take() {
     let _forged = s.liveliness().declare_token(format!("ox/{NS}/int/sess/u9/n9/s9")).await.expect("forged token");
     s.put(format!("ox/{NS}/int/ev/room/r1"), b"v".to_vec()).await.expect("put int");
     tokio::time::sleep(Duration::from_millis(800)).await;
-    assert!(r.bus.find_sess("s9").await.is_none() && !r.bus.session_users().await.contains(&"u9".to_string()), "S-sym-RULE-BUS-PUBLIC-4① — 3rd 가 int/** 에 쓴 토큰은 안쪽에 서지 않는다");
-    assert!(r.gate.drops.push_dropped.load(Ordering::Relaxed) > pushed0, "S-sym-RULE-BUS-PUBLIC-4① — 3rd 가 int/** 에 쓴 put 은 버리고 센다");
+    assert!(r.bus.find_sess("s9").await.is_none() && !r.bus.session_users().await.contains(&"u9".to_string()), "S-sym-RULE-BUS-PUBLIC-3① — 3rd 가 int/** 에 쓴 토큰은 안쪽에 서지 않는다");
+    assert!(r.gate.drops.push_dropped.load(Ordering::Relaxed) > pushed0, "S-sym-RULE-BUS-PUBLIC-3① — 3rd 가 int/** 에 쓴 put 은 버리고 센다");
     _forged.undeclare().await.expect("undeclare forged");
     let started = Instant::now();
     let inner = s.get(format!("ox/{NS}/int/**")).await.expect("get int");
@@ -308,7 +308,7 @@ async fn what_the_gate_does_not_take() {
     while inner_tokens.recv_async().await.is_ok() {
         seen_tokens += 1;
     }
-    assert!(seen == 0 && seen_tokens == 0 && started.elapsed() < Duration::from_secs(5), "S-sym-RULE-BUS-PUBLIC-4① — 3rd 는 int/** 를 읽지 못한다(질의 {seen} · 토큰 {seen_tokens} · {:?})", started.elapsed());
+    assert!(seen == 0 && seen_tokens == 0 && started.elapsed() < Duration::from_secs(5), "S-sym-RULE-BUS-PUBLIC-3① — 3rd 는 int/** 를 읽지 못한다(질의 {seen} · 토큰 {seen_tokens} · {:?})", started.elapsed());
     assert_eq!(r.gate.conns().len(), 1, "S-rule-RULE-HOOK-CHAT-SUB-12④ — 그동안 세션은 산다");
     drop(q);
     drop(s);
@@ -331,12 +331,12 @@ async fn refused_before_the_session() {
     let r = rig().await;
     let ep = tls_endpoint(&r);
     let tcp = format!("tcp/127.0.0.1:{}", r.gate.addr.port());
-    assert!(refused_open(client_cfg(&r, &ep, None)).await && counted(&r, 0).await, "S-rule-RULE-HOOK-CREDENTIAL-9① · S-sym-RULE-BUS-PUBLIC-4② — 인증서 없음은 붙지 못하고 ext_refused +1");
+    assert!(refused_open(client_cfg(&r, &ep, None)).await && counted(&r, 0).await, "S-rule-RULE-HOOK-CREDENTIAL-9① · S-sym-RULE-BUS-PUBLIC-3② — 인증서 없음은 붙지 못하고 ext_refused +1");
     assert!(refused_open(client_cfg(&r, &ep, Some("rogue"))).await && counted(&r, 1).await, "S-rule-RULE-HOOK-CREDENTIAL-9② — 다른 CA 인증서는 붙지 못하고 ext_refused +1");
     assert!(refused_open(client_cfg(&r, &ep, Some("nohook"))).await && counted(&r, 2).await, "S-rule-RULE-HOOK-CREDENTIAL-9③ — 연동 허용 없는 계정은 붙지 못하고 ext_refused +1");
     assert!(refused_open(client_cfg(&r, &ep, Some("nosub"))).await && counted(&r, 3).await, "S-rule-RULE-HOOK-CREDENTIAL-9④ — 구독 빈 계정은 붙지 못하고 ext_refused +1");
     assert!(refused_open(client_cfg(&r, &ep, Some("stranger"))).await && counted(&r, 4).await, "정:RULE-CHAT-EXT-SUB 7 — 모르는 계정은 붙지 못하고 ext_refused +1");
-    assert!(refused_open(client_cfg(&r, &tcp, None)).await && counted(&r, 5).await, "S-rule-RULE-HOOK-CHAT-SUB-1② · S-sym-RULE-BUS-PUBLIC-4② — 평문 TCP 는 닫히고 ext_refused +1");
+    assert!(refused_open(client_cfg(&r, &tcp, None)).await && counted(&r, 5).await, "S-rule-RULE-HOOK-CHAT-SUB-1② · S-sym-RULE-BUS-PUBLIC-3② — 평문 TCP 는 닫히고 ext_refused +1");
     assert!(r.gate.conns().is_empty(), "형상 — 거절된 것은 연결표에 들지 않는다");
     let s = open(&r, "acme").await;
     assert!(wait(3_000, || r.gate.conns().len() == 1).await, "S-rule-RULE-HOOK-CHAT-SUB-1① · S-rule-RULE-HOOK-CREDENTIAL-9⑤ — tls 로 붙는다");
