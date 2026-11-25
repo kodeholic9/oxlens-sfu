@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 운영:RULE-READ-SFUS · 운영:RULE-READ-ROOMS · 운영:RULE-READ-USERS · 운영:RULE-READ-SNAPSHOT · 운영:RULE-READ-DROPS · 운영:RULE-READ-TRANSIT · 운영:RULE-READ-ROOM-DETAIL · 운영:RULE-READ-NODE-ROOMS · 운영:RULE-READ-BUS · 운영:RULE-READ-BUS-ALL · 운영:RULE-READ-HISTORY · 운영:RULE-READ-USER-MEDIA · 운영:RULE-READ-USER-PROBE · 운영:RULE-CTL-SUPERVISOR · 운영:RULE-CTL-CUT · 운영:RULE-CTL-ROOM · 운영:RULE-CTL-LOG-LEVEL · 운영:RULE-FMT-NO-INVENT · 정:IMPL-OPS-CUT · 정:IMPL-OPS-DESTROY-REAP · 정:RULE-CHAT-EXT-SUB · model: claude-opus-5-5
+// spec: v1.6 · 운영:RULE-READ-SFUS · 운영:RULE-READ-ROOMS · 운영:RULE-READ-USERS · 운영:RULE-READ-SNAPSHOT · 운영:RULE-READ-DROPS · 운영:RULE-READ-TRANSIT · 운영:RULE-READ-ROOM-DETAIL · 운영:RULE-READ-NODE-ROOMS · 운영:RULE-READ-BUS · 운영:RULE-READ-BUS-ALL · 운영:RULE-READ-HISTORY · 운영:RULE-READ-USER-MEDIA · 운영:RULE-READ-USER-PROBE · 운영:RULE-CTL-SUPERVISOR · 운영:RULE-CTL-CUT · 운영:RULE-CTL-ROOM · 운영:RULE-CTL-LOG-LEVEL · 운영:RULE-FMT-NO-INVENT · 정:IMPL-OPS-CUT · 정:IMPL-OPS-DESTROY-REAP · 정:RULE-CHAT-EXT-SUB · 운영:RULE-RISK-CONFIRM · 운영:RULE-ERR-ADMIN-CODES · model: claude-opus-5-5
 //! `/admin` — 읽기(유닛 · 방 · 세션 · 버림 · 체류 · 버스 · 사건 이력) · 제어(supervisor · 절단 · 퇴장 · 폭파 · 수준). 정본은 sfud 를 경유해 가져온다 · 못 닿은 곳은 `error`.
 
 use std::sync::Arc;
@@ -451,8 +451,21 @@ pub async fn sup_ctl(hub: &Hub, id: &str, which: &str, if_epoch: Option<&str>) -
             return Err(Code::PreconditionFailed.failure().with_details(json!({ "expected": want, "actual": have })));
         }
     }
-    let (from, to) = hub.sup.request(id, which).await.map_err(|e| Code::PreconditionFailed.failure().with_message(e))?;
+    let before = (u.kind.as_str(), u.state().as_str());
+    let (from, to) = hub.sup.request(id, which).await.map_err(|e| Code::PreconditionFailed.failure().with_message(e).with_details(refused_details(u.role, which, before)))?;
     Ok(json!({ "id": id, "from": from.as_str(), "to": to.as_str() }))
+}
+
+fn refused_details(role: Role, which: &str, (kind, state): (&str, &str)) -> Value {
+    if matches!(role, Role::Log | Role::Bus) {
+        return json!({ "expected": "process | remote", "actual": kind });
+    }
+    let wants = match which {
+        "load" => "Stopped | Blocked",
+        "stop" => "Running | Down | Blocked",
+        _ => "Running",
+    };
+    json!({ "expected": wants, "actual": state })
 }
 
 pub fn shutdown(hub: &Hub, confirm: Option<&str>) -> AdminResult {
@@ -495,8 +508,15 @@ pub async fn reap(hub: &Hub, room: &str, user: &str) -> AdminResult {
     }
 }
 
+fn if_version_form(v: &str) -> bool {
+    v.rsplit_once(':').is_some_and(|(epoch, seq)| !epoch.is_empty() && !seq.is_empty() && seq.bytes().all(|b| b.is_ascii_digit()) && seq.parse::<u64>().is_ok())
+}
+
 pub async fn destroy(hub: &Hub, room: &str, if_version: Option<&str>) -> AdminResult {
     let iv = if_version.ok_or_else(|| Code::MissingField.failure().with_message("if_version"))?;
+    if !if_version_form(iv) {
+        return Err(Code::InvalidPayload.failure().with_message("if_version — {epoch}:{seq}"));
+    }
     let loc = hub.bus.room_route(room).ok_or_else(|| Code::RoomNotFound.failure())?;
     let v = sfu_admin(hub, &loc.node, "POST", &format!("/admin/rooms/{room}/destroy"), json!({ "if_version": iv })).await?;
     let until = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
@@ -554,5 +574,15 @@ mod tests {
             (lg.history_max_lines as usize, true, false, None, Some("r")),
             "PL-KEY-LOGGING-HISTORY-MAX-LINES 상한 = 정책값"
         );
+    }
+
+    #[test]
+    fn the_destroy_confirmation_must_be_epoch_colon_seq() {
+        for ok in ["e1:0", "sfu-ab12:42", "a:b:7"] {
+            assert!(if_version_form(ok), "stand check — {ok} is a room version");
+        }
+        for bad in ["garbage", "e1:", ":7", "e1:x1", "e1:+5", "e1:-1", ""] {
+            assert!(!if_version_form(bad), "CP-CODE-PRECONDITION-FAILED④ {bad:?} is a malformed confirmation — 1002, not a stale value 3009");
+        }
     }
 }

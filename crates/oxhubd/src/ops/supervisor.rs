@@ -1,12 +1,15 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-OPS-SUPERVISOR · 정:RULE-OPS-SURFACE · 정:RULE-BUS-FATE · 정:IMPL-CFG-SYSTEM-FILE · 정:IMPL-BUS-FAULTS · 운영:RULE-CTL-SUPERVISOR · 정:CAND-OPS-SUPERVISOR-DEFAULTS · 정:CAND-OPS-SHUTDOWN-NO-RESTART · 정:CAND-OPS-SUPERVISOR-EXTRA-TRANSITIONS · 정:CAND-OPS-ZENOH-UNIT-DOWN · 정:CAND-OPS-UNIT-STATE-LINE · 정:IMPL-OPS-REC-UNIT · model: claude-opus-5-5
-//! supervisor — `UnitState` 여덟 · 못 띄운 것도 기동 시도로 센다 · `Stopped` 뒤 기동은 창에 안 쌓는다 · 준비 = Hello 성공(녹음 유닛도 같다 — 그 Handle 은 유닛이 쥐고 로컬 미디어 서버 길과 섞지 않는다 · ready 에 세지 않는다 · 띄울 때마다 녹화 참가자 토큰) · 부모 생존 채널(stdin) · 종료 중엔 되살리지 않는다.
+// spec: v1.6 · 정:RULE-OPS-SUPERVISOR · 정:RULE-OPS-SURFACE · 정:RULE-BUS-FATE · 정:IMPL-CFG-SYSTEM-FILE · 정:IMPL-BUS-FAULTS · 운영:RULE-CTL-SUPERVISOR · 정:CAND-OPS-SUPERVISOR-DEFAULTS · 정:CAND-OPS-SHUTDOWN-NO-RESTART · 정:CAND-OPS-SUPERVISOR-EXTRA-TRANSITIONS · 정:CAND-OPS-ZENOH-UNIT-DOWN · 정:CAND-OPS-UNIT-STATE-LINE · 정:IMPL-OPS-REC-UNIT · 정:RULE-OPS-LOGGER · model: claude-opus-5-5
+//! supervisor — `UnitState` 여덟 · 못 띄운 것도 기동 시도로 센다 · `Stopped` 뒤 기동은 창에 안 쌓는다 · 준비 = Hello 성공(녹음 유닛도 같다 — 그 Handle 은 유닛이 쥐고 로컬 미디어 서버 길과 섞지 않는다 · ready 에 세지 않는다 · 띄울 때마다 녹화 참가자 토큰) · 부모 생존 채널(stdin) · 종료 중엔 되살리지 않는다 · remote 는 같은 기계의 sfud 에 붙기만 한다(포트 기다림 없음 · 붙은 동안 1초마다 `Hello` — 실패 · 기동 신원 바뀜이면 `Down` · `stop` = 떼기 · `kill` = 떼고 다시 붙기) · 녹음 유닛 토큰은 수명의 3분의 1 마다 새로 서명해 `Call` 로 넘긴다 · 꺼 둔 유닛과 로거 유닛에 온 명령은 거절한다.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use common::envelope::handle::handle_client::HandleClient;
+use common::envelope::handle::{CallReq, HelloReq};
+use common::envelope::{CallKind, Envelope, Reply};
 use common::system::{Unit, UnitKind};
 use tokio::sync::{mpsc, oneshot};
 
@@ -292,7 +295,7 @@ impl Supervisor {
                 let r = self.cfg.rec.as_ref()?;
                 c.args(&r.args);
                 let Some(tok) = r.accounts.sign_unit(&rec_user(&self.cfg.node), r.ttl_secs) else {
-                    tracing::warn!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", unit = %u.id, "rec unit token not signed — no account secret");
+                    tracing::warn!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", unit = %u.id, "rec unit token not signed — no unit key (os random unavailable), unit not started");
                     return None;
                 };
                 c.args(["--token", &tok]);
@@ -378,7 +381,9 @@ impl Supervisor {
                 u.set(UnitState::Starting, "start");
             }
             if first {
-                self.wait_port_free(&u).await;
+                if u.kind == UnitKind::Process {
+                    self.wait_port_free(&u).await;
+                }
                 first = false;
             }
             let blocked = self.note_attempt(&u, counted);
@@ -414,7 +419,7 @@ impl Supervisor {
                     let _ = h.replace(local);
                 }
                 u.set(UnitState::Running, "hello");
-                let outcome = self.supervise(&u, child, &mut rx).await;
+                let outcome = self.supervise(&u, child, &mut rx, None).await;
                 if let Ok(mut h) = u.handle.lock() {
                     let _ = h.take();
                 }
@@ -422,12 +427,12 @@ impl Supervisor {
                     r.epoch = None;
                 }
                 match outcome {
-                    Outcome::Exited | Outcome::Killed => {
+                    Outcome::Exited | Outcome::Killed | Outcome::Lost(_) => {
                         if self.stopping.load(Ordering::SeqCst) {
                             u.set(UnitState::Stopped, "shutdown");
                             return;
                         }
-                        self.go_down(&u, if matches!(outcome, Outcome::Killed) { "kill" } else { "exit" });
+                        self.go_down(&u, outcome.cause());
                     }
                     Outcome::Stopped => {}
                     Outcome::Gone => return,
@@ -442,19 +447,20 @@ impl Supervisor {
                 self.go_down(&u, "hello timeout");
                 continue;
             };
+            let watch = (u.kind == UnitKind::Remote).then(|| Watch { client: local.client.clone(), epoch: local.epoch.clone() });
             self.became_running(&u, &bus, local, build).await;
-            let outcome = self.supervise(&u, child, &mut rx).await;
+            let outcome = self.supervise(&u, child, &mut rx, watch).await;
             bus.set_local(None);
             if let Ok(mut r) = u.rec.lock() {
                 r.epoch = None;
             }
             match outcome {
-                Outcome::Exited | Outcome::Killed => {
+                Outcome::Exited | Outcome::Killed | Outcome::Lost(_) => {
                     if self.stopping.load(Ordering::SeqCst) {
                         u.set(UnitState::Stopped, "shutdown");
                         return;
                     }
-                    self.go_down(&u, if matches!(outcome, Outcome::Killed) { "kill" } else { "exit" });
+                    self.go_down(&u, outcome.cause());
                 }
                 Outcome::Stopped => {}
                 Outcome::Gone => return,
@@ -474,30 +480,58 @@ impl Supervisor {
         }
     }
 
-    async fn supervise(&self, u: &UnitHandle, child: Option<tokio::process::Child>, rx: &mut mpsc::UnboundedReceiver<Cmd>) -> Outcome {
+    async fn remote_lost(&self, w: &mut Option<(Watch, tokio::time::Interval)>) -> &'static str {
+        let Some((w, tick)) = w.as_mut() else { return std::future::pending().await };
+        loop {
+            tick.tick().await;
+            let req = HelloReq { node: self.cfg.node.clone(), hub_inst: self.cfg.hub_inst.clone() };
+            match tokio::time::timeout(REMOTE_CHECK, w.client.hello(req)).await {
+                Ok(Ok(r)) if r.get_ref().epoch == w.epoch => {}
+                Ok(Ok(_)) => return "remote identity changed",
+                Ok(Err(_)) => return "remote lost",
+                Err(_) => {}
+            }
+        }
+    }
+
+    async fn supervise(&self, u: &UnitHandle, child: Option<tokio::process::Child>, rx: &mut mpsc::UnboundedReceiver<Cmd>, watch: Option<Watch>) -> Outcome {
         let Some(mut child) = child else {
+            let mut watch = watch.map(|w| (w, tokio::time::interval_at(tokio::time::Instant::now() + REMOTE_CHECK, REMOTE_CHECK)));
             loop {
-                match rx.recv().await {
-                    Some(Cmd::Stop(ack)) => {
-                        let from = u.set(UnitState::Stopped, "stop");
-                        let _ = ack.send(Ok((from, UnitState::Stopped)));
-                        return Outcome::Stopped;
+                tokio::select! {
+                    why = self.remote_lost(&mut watch) => return Outcome::Lost(why),
+                    c = rx.recv() => match c {
+                        Some(Cmd::Stop(ack)) => {
+                            let from = u.set(UnitState::Stopped, "stop");
+                            let _ = ack.send(Ok((from, UnitState::Stopped)));
+                            return Outcome::Stopped;
+                        }
+                        Some(Cmd::Kill(ack)) => {
+                            let _ = ack.send(Ok((UnitState::Running, UnitState::Down)));
+                            return Outcome::Killed;
+                        }
+                        Some(Cmd::Load(ack)) => {
+                            let _ = ack.send(Err("already running".into()));
+                        }
+                        None => return Outcome::Gone,
                     }
-                    Some(Cmd::Kill(ack)) => {
-                        let _ = ack.send(Ok((UnitState::Running, UnitState::Down)));
-                        return Outcome::Killed;
-                    }
-                    Some(Cmd::Load(ack)) => {
-                        let _ = ack.send(Err("already running".into()));
-                    }
-                    None => return Outcome::Gone,
                 }
             }
         };
         let _parent_channel = child.stdin.take();
+        let mut renew = match (u.role, self.cfg.rec.as_ref()) {
+            (Role::Rec, Some(r)) => {
+                let every = renew_every(r.ttl_secs);
+                let mut t = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+                t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                Some(t)
+            }
+            _ => None,
+        };
         loop {
             tokio::select! {
                 _ = child.wait() => return Outcome::Exited,
+                _ = next_tick(&mut renew) => self.hand_token(u),
                 c = rx.recv() => match c {
                     Some(Cmd::Stop(ack)) => {
                         let from = u.set(UnitState::Stopping, "stop");
@@ -522,16 +556,50 @@ impl Supervisor {
         }
     }
 
+    fn hand_token(&self, u: &UnitHandle) {
+        let Some(r) = self.cfg.rec.as_ref() else { return };
+        let Some(tok) = r.accounts.sign_unit(&rec_user(&self.cfg.node), r.ttl_secs) else {
+            tracing::warn!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", unit = %u.id, "rec unit token not signed — no unit key (os random unavailable), token not handed");
+            return;
+        };
+        let Some(mut client) = u.handle.lock().ok().and_then(|h| h.as_ref().map(|l| l.client.clone())) else { return };
+        let mut env = Envelope::new(CallKind::Admin);
+        env.method = Some("POST".into());
+        env.path = Some(format!("/{}", common::system::REC_TOKEN_PATH));
+        env.body = serde_json::json!({ "token": tok });
+        let id = u.id.clone();
+        tokio::spawn(async move {
+            let req = CallReq { envelope: env.encode() };
+            let why = match tokio::time::timeout(crate::bus::LOCAL_CALL_TIMEOUT, client.call(req)).await {
+                Ok(Ok(r)) => match Reply::decode(&r.into_inner().reply) {
+                    Ok(Reply::Ok { .. }) => None,
+                    Ok(other) => Some(format!("refused {other:?}")),
+                    Err(e) => Some(format!("bad reply {e}")),
+                },
+                Ok(Err(e)) => Some(format!("call failed {:?}", e.code())),
+                Err(_) => Some("call timed out".to_string()),
+            };
+            match why {
+                None => common::log::emit(common::log::Line::diag("SV-IMPL-OPS-REC-UNIT").key("unit", &id).msg("rec unit token handed")),
+                Some(w) => tracing::warn!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", unit = %id, "rec unit token not handed — {w} — the next period tries again"),
+            }
+        });
+    }
+
     pub async fn request(&self, id: &str, which: &str) -> Result<(UnitState, UnitState), String> {
         let u = self.unit(id).ok_or_else(|| "no unit".to_string())?;
-        if u.role == Role::Bus || u.role == Role::Log {
+        if u.state() == UnitState::Disabled {
+            return Err("disabled unit — enable it in the system file and restart the hub".into());
+        }
+        if u.role == Role::Log {
+            return Err("inproc unit — the logger has no stop device, it ends with the hub".into());
+        }
+        if u.role == Role::Bus {
             if which == "load" {
                 return Err("inproc unit".into());
             }
             let from = u.state();
-            if u.role == Role::Bus {
-                let _ = self.fatal.send(format!("bus unit {which}"));
-            }
+            let _ = self.fatal.send(format!("bus unit {which}"));
             return Ok((from, if which == "kill" { UnitState::Down } else { UnitState::Stopped }));
         }
         let (tx, rx) = oneshot::channel();
@@ -560,12 +628,43 @@ pub fn rec_user(node: &str) -> String {
     format!("rec-{node}")
 }
 
+pub fn renew_every(ttl_secs: u32) -> Duration {
+    Duration::from_secs(u64::from(ttl_secs / 3).max(1))
+}
+
+async fn next_tick(t: &mut Option<tokio::time::Interval>) {
+    match t {
+        Some(t) => {
+            t.tick().await;
+        }
+        None => std::future::pending::<()>().await,
+    }
+}
+
 enum Outcome {
     Exited,
     Killed,
+    Lost(&'static str),
     Stopped,
     Gone,
 }
+
+impl Outcome {
+    fn cause(&self) -> &'static str {
+        match self {
+            Outcome::Killed => "kill",
+            Outcome::Lost(why) => *why,
+            _ => "exit",
+        }
+    }
+}
+
+struct Watch {
+    client: HandleClient<tonic::transport::Channel>,
+    epoch: String,
+}
+
+pub const REMOTE_CHECK: Duration = Duration::from_secs(1);
 
 async fn terminate(child: &mut tokio::process::Child, grace: Duration) {
     if let Some(pid) = child.id() {

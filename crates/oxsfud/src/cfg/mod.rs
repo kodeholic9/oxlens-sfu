@@ -46,6 +46,7 @@ pub struct SfuCfg {
     pub workers: usize,
     pub control_threads: usize,
     pub queue_packets: usize,
+    pub no_parent: bool,
 }
 
 pub fn compiled_build() -> &'static str {
@@ -70,7 +71,7 @@ pub fn default_workers() -> usize {
 
 impl SfuCfg {
     pub fn load(argv: Vec<String>) -> Result<SfuCfg, String> {
-        let args = Args::parse(argv, ARGS, &["version"]).map_err(|e| e.to_string())?;
+        let args = Args::parse(argv, ARGS, &["version", "no-parent"]).map_err(|e| e.to_string())?;
         let e = |x: common::args::ArgError| x.to_string();
         let node = args.require("id").map_err(e)?.to_string();
         if !common::keyspace::valid_piece(&node) {
@@ -99,7 +100,9 @@ impl SfuCfg {
         let control_threads = args.parse_num::<usize>("control-threads").map_err(e)?.unwrap_or(DEFAULT_CONTROL_THREADS).max(1);
         let queue_packets = args.parse_num::<usize>("worker-queue-packets").map_err(e)?.unwrap_or(crate::fwd::rt::DEFAULT_QUEUE_PACKETS).max(1);
         let build_label = args.get("build").filter(|s| !s.is_empty()).map(|s| s.to_string());
+        let no_parent = args.flag("no-parent");
         Ok(SfuCfg {
+            no_parent,
             args,
             policy,
             node,
@@ -136,6 +139,7 @@ impl SfuCfg {
                 e.1 = x;
             }
         }
+        v.push(("no-parent".to_string(), self.no_parent.to_string()));
         v.extend(self.policy.banner_fields_sfu());
         v
     }

@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.6 · 정:IMPL-OPS-REC-UNIT · 정:IMPL-CFG-SYSTEM-FILE · 정:RULE-OPS-SUPERVISOR · 정:RULE-BUS-FATE · 정:RULE-BUS-KEYSPACE · 정:RULE-BUS-SHAPE · 정:IMPL-FLR-TALK-REPORT · 운영:RULE-BOOT-ARGS · model: claude-opus-5-5
-//! 녹음 유닛 실행 파일 — 슈퍼바이저가 띄운다(`--id` · `--build` · `--bus-namespace` · `--bus-connect` · `--log-dir`? · `--log-socket`? · `--data-root` · `--rec-keep-days` · `--token` · `--hub-base` · `--hub-ca`? · 유닛 명령의 `--grpc-listen`) · Handle(`Hello` 준비 신호 · `Call` 은 `/admin/drops`) · 버스로 그 node 의 방 토큰을 보고 `record` 방에 녹화 참가자로 든다 · 발언마다 파일 하나(영상 트랙이 든 발언은 mkv · 아니면 ogg)를 다 쓰고 이름을 바꿔 닫은 뒤 `rec` 알림 · 영상 키프레임 요청은 SDK 에 · 하루 한 번 보관 지우기 · 부모 생존 채널(stdin)이 닫히면 끝 · 토큰을 다시 요구받거나 세션이 끝나면 끝(슈퍼바이저가 새 토큰으로 되살린다).
+//! 녹음 유닛 실행 파일 — 슈퍼바이저가 띄운다(`--id` · `--build` · `--bus-namespace` · `--bus-connect` · `--log-dir`? · `--log-socket`? · `--data-root` · `--rec-keep-days` · `--token` · `--hub-base` · `--hub-ca`? · 유닛 명령의 `--grpc-listen`) · Handle(`Hello` 준비 신호 · `Call` 은 `/admin/drops` 와 감독자의 토큰 넘김 — 새 토큰은 방 상세 조회와 세션의 다시 BIND 에 쓴다) · 방 상세를 못 읽으면 경고 줄 · 버스로 그 node 의 방 토큰을 보고 `record` 방에 녹화 참가자로 든다 · 발언마다 파일 하나(영상 트랙이 든 발언은 mkv · 아니면 ogg)를 다 쓰고 이름을 바꿔 닫은 뒤 `rec` 알림 · 영상 키프레임 요청은 SDK 에 · 하루 한 번 보관 지우기 · 부모 생존 채널(stdin)이 닫히면 끝 · 토큰을 다시 요구받거나 세션이 끝나면 끝(슈퍼바이저가 새 토큰으로 되살린다).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
@@ -104,7 +104,8 @@ async fn run(a: Args) -> i32 {
         return 2;
     };
     let drops = Arc::new(AtomicU64::new(0));
-    let svc = oxtapd::Svc { epoch, build: common::ident::build_id(common::ident::COMPILED, Some(&a.build)), drops: drops.clone() };
+    let (tok_tx, tok_rx) = tokio::sync::watch::channel(a.token.clone());
+    let svc = oxtapd::Svc { epoch, build: common::ident::build_id(common::ident::COMPILED, Some(&a.build)), drops: drops.clone(), token: tok_tx };
     let addr = a.grpc;
     tokio::spawn(async move {
         if let Err(e) = tonic::transport::Server::builder().add_service(common::envelope::handle::handle_server::HandleServer::new(svc)).serve(addr).await {
@@ -158,7 +159,7 @@ async fn run(a: Args) -> i32 {
         .await
     });
     let (room_tx, mut room_rx) = mpsc::unbounded_channel::<RoomCmd>();
-    if let Err(e) = discover(&bus, hub, a.token.clone(), room_tx).await {
+    if let Err(e) = discover(&bus, hub, tok_rx.clone(), room_tx).await {
         eprintln!("oxtapd: bus watch: {e}");
         return 2;
     }
@@ -182,8 +183,15 @@ async fn run(a: Args) -> i32 {
         }
     };
     let mut joined: BTreeSet<String> = BTreeSet::new();
+    let mut tok = tok_rx;
     loop {
         tokio::select! {
+            Ok(()) = tok.changed() => {
+                let t = tok.borrow_and_update().clone();
+                if let Err(e) = client.set_token(t) {
+                    tracing::warn!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", "renewed token not given to the session: {e}");
+                }
+            }
             c = room_rx.recv() => match c {
                 Some(RoomCmd::Join(r)) if joined.insert(r.clone()) => {
                     if let Err(e) = client.join(&r).await {
@@ -223,7 +231,7 @@ async fn run(a: Args) -> i32 {
     }
 }
 
-async fn discover(bus: &Bus, hub: Hub, token: String, tx: mpsc::UnboundedSender<RoomCmd>) -> Result<(), String> {
+async fn discover(bus: &Bus, hub: Hub, token: tokio::sync::watch::Receiver<String>, tx: mpsc::UnboundedSender<RoomCmd>) -> Result<(), String> {
     let mut sub = bus.rooms().await?;
     let keys = bus.keys.clone();
     let hub = Arc::new(hub);
@@ -249,13 +257,14 @@ async fn discover(bus: &Bus, hub: Hub, token: String, tx: mpsc::UnboundedSender<
             }
             match (was, now) {
                 (false, true) => {
-                    let (hub, token, tx) = (hub.clone(), token.clone(), tx.clone());
+                    let (hub, token, tx) = (hub.clone(), token.borrow().clone(), tx.clone());
                     tokio::spawn(async move {
                         match oxtapd::get_json(&hub, &format!("/rooms/{room}"), &token).await {
                             Some((200, body)) if oxtapd::recorded(&body) => {
                                 let _ = tx.send(RoomCmd::Join(room));
                             }
-                            Some(_) => {}
+                            Some((200, _)) => {}
+                            Some((status, _)) => tracing::warn!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", room = %room, status, "room detail refused by the local gateway — the room is not recorded"),
                             None => tracing::warn!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", room = %room, "room detail not read from the local gateway"),
                         }
                     });

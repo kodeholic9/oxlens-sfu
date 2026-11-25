@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-SES-DATA · 정:IMPL-SES-BIND · 정:IMPL-SES-HANDOVER · 정:IMPL-SES-RESUME · 정:IMPL-SES-ADMISSION · 정:RULE-BUS-REQUEST · 정:RULE-BUS-EVENTS · 연:SES.S.bind_new · 연:SES.S.bind_resume · 연:SES.S.resume_ok · 연:SES.S.leave · 연:SES.S.drop · 연:SES.S.TWindow · 정:RULE-SES-GATEWAY-SCOPE · 정:CAND-AFF-SPLIT-ROUTE · 정:CAND-SES-SUBROOMS-RECONCILE · 연:RULE-ERR-4009-SUPPRESS · 연:RULE-SES-SOCKET-CLOSE-NORMAL · 연:RULE-SES-SERVER-POLICY · 정:RULE-CHAT-GATEWAY-MODULE · 정:IMPL-CHAT-FANOUT · 정:IMPL-CHAT-STORE-FAULTS · 정:RULE-OPS-DROPS · model: claude-opus-5-5
+// spec: v1.6 · 정:IMPL-SES-DATA · 정:IMPL-SES-BIND · 정:IMPL-SES-HANDOVER · 정:IMPL-SES-RESUME · 정:IMPL-SES-ADMISSION · 정:RULE-BUS-REQUEST · 정:RULE-BUS-EVENTS · 연:SES.S.bind_new · 연:SES.S.bind_resume · 연:SES.S.resume_ok · 연:SES.S.leave · 연:SES.S.drop · 연:SES.S.TWindow · 정:RULE-SES-GATEWAY-SCOPE · 정:CAND-AFF-SPLIT-ROUTE · 정:CAND-SES-SUBROOMS-RECONCILE · 연:RULE-ERR-4009-SUPPRESS · 연:RULE-SES-SOCKET-CLOSE-NORMAL · 연:RULE-SES-SERVER-POLICY · 정:RULE-CHAT-GATEWAY-MODULE · 정:IMPL-CHAT-FANOUT · 정:IMPL-CHAT-STORE-FAULTS · 정:RULE-OPS-DROPS · 정:IMPL-CHAT-CATCHUP · model: claude-opus-5-5
 //! 게이트웨이의 세션 — 세션 자료 · 인증 두 갈래 · 축출 · 넘겨받기 · RESUME 모으기 · op 라우팅 · 세션 폐기 한 길 · 통지 배달.
 
 pub mod conn;
@@ -48,6 +48,7 @@ pub struct Session {
     pub created_at: u64,
     pub st: Mutex<SesState>,
     pub catchup_slot: Arc<tokio::sync::Semaphore>,
+    pub catchup_read: Arc<tokio::sync::Semaphore>,
 }
 
 impl Session {
@@ -309,6 +310,7 @@ pub async fn bind(ctx: &Arc<Ctx>, conn: &Conn, op: u16, pid: u32, flags: u8, bod
         created_at: common::now_ms(),
         st: Mutex::new(SesState { bound: true, live: true, conn: Some(conn.clone()), ..Default::default() }),
         catchup_slot: Arc::new(tokio::sync::Semaphore::new(1)),
+        catchup_read: Arc::new(tokio::sync::Semaphore::new(1)),
     });
     register(ctx, &s).await;
     let to = s.state_name(ctx.full_flag());
@@ -374,6 +376,7 @@ async fn resume_session(ctx: &Arc<Ctx>, sid: &str) -> Option<Arc<Session>> {
         created_at: common::now_ms(),
         st: Mutex::new(SesState { servers: d.servers.clone(), epochs: d.epochs, touched: d.touched, ..Default::default() }),
         catchup_slot: Arc::new(tokio::sync::Semaphore::new(1)),
+        catchup_read: Arc::new(tokio::sync::Semaphore::new(1)),
     });
     register(ctx, &s).await;
     for rooms in d.servers.values() {
@@ -802,10 +805,23 @@ fn start_catchup(ctx: &Arc<Ctx>, s: &Arc<Session>, req: oxsig::msg::CatchupReq) 
     }
 }
 
+async fn one_read<T: Send + 'static>(gate: &Arc<tokio::sync::Semaphore>, read: impl std::future::Future<Output = T> + Send + 'static) -> Option<T> {
+    let permit = gate.clone().acquire_owned().await.ok()?;
+    tokio::spawn(async move {
+        let out = read.await;
+        drop(permit);
+        out
+    })
+    .await
+    .ok()
+}
+
 async fn catchup_run(s: Arc<Session>, chat: Arc<crate::chat::Chat>, req: oxsig::msg::CatchupReq) {
     let mut after = crate::chat::store::Cursor::default();
     loop {
-        let page = match chat.catchup_page(&s.user_id, &req, &after).await {
+        let (c, user, rq, at) = (chat.clone(), s.user_id.clone(), req.clone(), after.clone());
+        let Some(read) = one_read(&s.catchup_read, async move { c.catchup_page(&user, &rq, &at).await }).await else { return };
+        let page = match read {
             Ok(p) => p,
             Err(c) => {
                 tracing::warn!(kind = "diag", spec = "SV-IMPL-CHAT-STORE-FAULTS", session = %s.fp, user = %s.user_id, code = c.num(), "catchup stopped — store read failed, the rest stays undelivered");
@@ -969,5 +985,45 @@ pub async fn room_dropped(ctx: &Ctx, room: &str) {
             }
             ctx.bus.interest_room(room, -1).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod catchup_read_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn push(v: &Mutex<Vec<&'static str>>, x: &'static str) {
+        if let Ok(mut g) = v.lock() {
+            g.push(x);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stopped_catchup_read_ends_before_the_next_read_starts() {
+        let gate = Arc::new(tokio::sync::Semaphore::new(1));
+        let seen: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+        let (g1, s1) = (gate.clone(), seen.clone());
+        let old = tokio::spawn(async move {
+            one_read(&g1, async move {
+                tokio::task::spawn_blocking(move || {
+                    push(&s1, "old read start");
+                    std::thread::sleep(Duration::from_millis(300));
+                    push(&s1, "old read end");
+                })
+                .await
+            })
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        old.abort();
+        let (g2, s2) = (gate.clone(), seen.clone());
+        let new = tokio::spawn(async move { one_read(&g2, async move { push(&s2, "new read start") }).await });
+        let got = tokio::time::timeout(Duration::from_secs(2), new).await;
+        assert!(matches!(got, Ok(Ok(Some(())))), "stand check — the new catchup reads: {got:?}");
+        let order = seen.lock().map(|v| v.clone()).unwrap_or_default();
+        assert_eq!(order, vec!["old read start", "old read end", "new read start"], "S-sym-IMPL-CHAT-CATCHUP-2② the new catchup's store read starts only after the stopped one's read has ended — two reads never overlap");
+        let product = include_str!("mod.rs").split("#[cfg(test)]").next().unwrap_or_default();
+        assert!(product.contains("one_read(&s.catchup_read, async move { c.catchup_page("), "S-sym-IMPL-CHAT-CATCHUP-2② the catchup reads the store only through the session's one-read gate");
     }
 }

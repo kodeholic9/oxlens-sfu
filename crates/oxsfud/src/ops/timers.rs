@@ -46,7 +46,7 @@ pub fn start() {
         }
     });
     super::spawn(async {
-        let ms = super::policy().logging.stat_interval_ms.max(1_000) as u64;
+        let ms = super::policy().logging.stat_interval_ms as u64;
         let mut t = tokio::time::interval(Duration::from_millis(ms));
         loop {
             t.tick().await;

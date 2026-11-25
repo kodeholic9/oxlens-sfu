@@ -19,6 +19,7 @@ use crate::room::{Member, PERMANENT, Room, RoomInit};
 use crate::sub::Table;
 
 pub const MAX_ROOMS: usize = 20;
+pub const UNIT_MAX_ROOMS: usize = 250;
 
 fn sfu() -> Result<&'static Arc<super::Sfu>, Failure> {
     super::sfu().ok_or_else(|| Code::InternalError.failure())
@@ -88,7 +89,11 @@ fn new_peer(c: &Ctx) -> Result<Arc<Peer>, Failure> {
         }
         PcMode::Two => (new_transport(s, c, Role::Publish)?, new_transport(s, c, Role::Subscribe)?),
     };
-    let table = Table::new(subscribe.clone(), c.pc_mode, s.policy.media.slot_mid_reserve as usize);
+    let table = if c.claims.as_ref().is_some_and(|k| k.unit) {
+        Table::for_unit(subscribe.clone(), c.pc_mode, UNIT_MAX_ROOMS)
+    } else {
+        Table::new(subscribe.clone(), c.pc_mode, s.policy.media.slot_mid_reserve as usize)
+    };
     let floor = s.tables.floor(&c.sid);
     if floor > 0 {
         table.carry(floor + 1);
@@ -150,10 +155,11 @@ pub fn join(c: &Ctx, body: &Value) -> Result<Value, Failure> {
         return Err(Code::RoomFull.failure().with_details(serde_json::json!({ "capacity": room.capacity })));
     }
     let existing = s.peer(&c.user);
-    if let Some(p) = &existing
-        && p.rooms().len() >= MAX_ROOMS
-    {
-        return Err(Code::ListenLimit.failure().with_details(serde_json::json!({ "limit": MAX_ROOMS, "current": p.rooms().len() })));
+    if let Some(p) = &existing {
+        let limit = if p.claims.unit { UNIT_MAX_ROOMS } else { MAX_ROOMS };
+        if p.rooms().len() >= limit {
+            return Err(Code::ListenLimit.failure().with_details(serde_json::json!({ "limit": limit, "current": p.rooms().len() })));
+        }
     }
     let peer = match existing {
         Some(p) => p,

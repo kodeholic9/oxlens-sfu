@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.6 · 정:RULE-BUS-FATE · 정:RULE-FWD-MEDIA-WORKERS · 정:RULE-OPS-SURFACE · 운영:RULE-BOOT-ARGS · 운영:RULE-BOOT-BANNER · 정:CAND-BUS-SELF-WATCH-VALUES · 정:CAND-BUS-NO-ZENOH-BOOT · model: claude-opus-5-5
-//! oxsfud — 기동(로그 → 배너 → 인증서 → 미디어 스레드 → 버스 → 주기 작업 → Handle) · 부모 생존 채널(stdin EOF 면 끝낸다) · 자가 감시(제어 런타임이 10s 멎으면 끝낸다).
+//! oxsfud — 기동(로그 → 배너 → 인증서 → 미디어 스레드 → 버스 → 주기 작업 → Handle) · 부모 생존 채널(stdin EOF 면 끝낸다 · `--no-parent` 면 그 대신 hub 와의 버스 세션이 닫히거나 상대가 바뀌면 끝낸다) · 자가 감시(제어 런타임이 10s 멎으면 끝낸다).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,6 +13,8 @@ use oxsfud::ops::{self, Sfu};
 const BEAT_MS: u64 = 500;
 const HANG_MS: u64 = 10_000;
 const EXIT_DRAIN_MS: u64 = 500;
+const BUS_WATCH_MS: u64 = 100;
+const EXIT_HUB_GONE: i32 = 69;
 
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -59,6 +61,32 @@ fn parent_watch() {
             std::process::exit(0);
         })
         .ok();
+}
+
+fn bus_watch(bus: Arc<oxsfud::bus::Bus>) {
+    tokio::spawn(async move {
+        let mut held: Option<(String, u64)> = None;
+        loop {
+            let now = bus.router_session().await;
+            let why = match (&held, &now) {
+                (None, Some(s)) => {
+                    held = Some(s.clone());
+                    None
+                }
+                (None, None) => None,
+                (Some(h), Some(s)) if h == s => None,
+                (Some(_), Some(_)) => Some("bus_peer_changed"),
+                (Some(_), None) => Some("bus_closed"),
+            };
+            if let Some(why) = why {
+                eprintln!("oxsfud: bus session to the hub closed — exiting");
+                tracing::warn!(kind = "diag", spec = "SV-RULE-BUS-FATE", "in.why" = why, "in.exit" = EXIT_HUB_GONE, "sfud exiting: bus session to the hub closed (no parent channel)");
+                common::log::drain(Duration::from_millis(EXIT_DRAIN_MS));
+                std::process::exit(EXIT_HUB_GONE);
+            }
+            tokio::time::sleep(Duration::from_millis(BUS_WATCH_MS)).await;
+        }
+    });
 }
 
 fn self_watch(beat: Arc<AtomicU64>) {
@@ -112,7 +140,9 @@ async fn run(cfg: SfuCfg) -> i32 {
             return 2;
         }
     }
-    parent_watch();
+    if !cfg.no_parent {
+        parent_watch();
+    }
     let (cert, fingerprint) = match oxsfud::link::dtls::certificate() {
         Ok(c) => c,
         Err(e) => {
@@ -138,6 +168,9 @@ async fn run(cfg: SfuCfg) -> i32 {
             return 1;
         }
     };
+    if cfg.no_parent {
+        bus_watch(bus.clone());
+    }
     ops::install(Sfu {
         node: cfg.node.clone(),
         epoch: epoch.clone(),

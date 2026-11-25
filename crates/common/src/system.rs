@@ -36,6 +36,7 @@ pub struct System {
 
 pub const REC_KEEP_DAYS_DEFAULT: u32 = 30;
 pub const ROLE_REC: &str = "rec";
+pub const REC_TOKEN_PATH: &str = "unit/token";
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]

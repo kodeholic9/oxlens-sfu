@@ -20,9 +20,13 @@ pub fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-pub fn random_bytes(n: usize) -> Vec<u8> {
+pub fn os_random_bytes(n: usize) -> Option<Vec<u8>> {
     let mut buf = vec![0u8; n];
-    if getrandom::fill(&mut buf).is_ok() {
+    getrandom::fill(&mut buf).ok().map(|_| buf)
+}
+
+pub fn random_bytes(n: usize) -> Vec<u8> {
+    if let Some(buf) = os_random_bytes(n) {
         return buf;
     }
     let t = std::time::SystemTime::now()

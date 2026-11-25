@@ -74,4 +74,9 @@ impl Client {
     pub async fn close(&self) {
         self.mesh.close().await;
     }
+
+    pub async fn router_session(&self) -> Option<(String, u64)> {
+        let info = self.mesh.info().await.ok()?;
+        info.sessions.iter().find(|s| s.router).map(|s| (s.peer.clone(), s.boot))
+    }
 }

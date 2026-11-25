@@ -54,6 +54,22 @@ fn the_gateway_signs_a_hidden_recorder_token_for_the_unit() {
     let tok = acc.sign_unit(&rec_user("n1"), 3_600).expect("signed");
     let id = acc.verify_user(&tok).expect("valid");
     assert_eq!((id.user_id.as_str(), id.claims.participant_type, id.claims.hidden), ("rec-n1", 1, true), "정:IMPL-OPS-REC-UNIT 신원 — rec-{{node}} · participant_type 1 · hidden");
+    assert!(id.claims.unit, "정:IMPL-OPS-REC-UNIT I2 the supervisor-signed unit token carries the unit mark");
     let none = Accounts { keys: Vec::new(), jwt_secret: None };
-    assert!(none.sign_unit("rec-n1", 60).is_none(), "no secret — no token (the unit is not started)");
+    let bare = none.sign_unit("rec-n1", 60).expect("I2 the unit key lives in the hub process — no account secret is needed to sign");
+    assert!(acc.verify_user(&bare).is_ok_and(|i| i.claims.unit), "I2 any verifier in the same hub process accepts the unit token with its mark");
+}
+
+#[test]
+fn an_account_signed_token_cannot_claim_the_unit_mark() {
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+    let acc = Accounts { keys: vec![ApiKey { key: "k".into(), secret: "s".into(), name: None, participant_types: vec![0, 1], hidden_allowed: true, ops_allowed: false, hook_allowed: false, subscribe: None }], jwt_secret: Some("j".into()) };
+    let now = common::now_ms() / 1000;
+    let forged = serde_json::json!({ "sub": "rec-n1", "participant_type": 1, "hidden": true, "unit": true, "iat": now, "exp": now + 60 });
+    for (who, secret) in [("account secret", "s"), ("jwt_secret", "j")] {
+        let t = encode(&Header::new(Algorithm::HS256), &forged, &EncodingKey::from_secret(secret.as_bytes())).expect("signed");
+        let id = acc.verify_user(&t).expect("stand check — the forged token is still a valid user token");
+        assert!(!id.claims.unit, "I2 a token signed with the {who} that claims unit:true does not get the unit mark — only the supervisor's unit key gives it");
+        assert_eq!((id.claims.participant_type, id.claims.hidden), (1, true), "stand check — the other claims pass as before");
+    }
 }

@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.6 · 정:IMPL-OPS-REC-UNIT · 정:IMPL-CHAT-TALK · 정:IMPL-FLR-TALK-REPORT · 정:RULE-OPS-DROPS · 정:RULE-BUS-KEYSPACE · 연:RULE-CHAT-REC-FILE · 연:ROOM.http.CREATE_ROOM · model: claude-opus-5-5
-//! 녹음 유닛 — 발언마다 파일 하나(영상 트랙이 든 발언은 `.mkv` — 음성도 그 안 · 아니면 `.ogg` · 알림도 하나) · 파일 자리(`<root>/.rec-part/` 에 다 쓰고 `<root>/rec/{space_id}/` 로 이름 바꿔 닫는다 — 같은 저장소라 바꾸기는 한 번에) · 닫은 녹취의 `rec` 알림 · 하루 한 번 보관 기간을 넘긴 녹취 지우기 · 알림은 한 줄로(일시 실패는 백오프로 다시 · 상한을 넘기면 버리고 센다) · 로컬 게이트웨이(`--hub-base` · TLS 면 `--hub-ca` 인증서 하나로 검증) 방 상세의 `record` · 운영 표면(Handle `Call` 은 `/admin/drops` 만).
+//! 녹음 유닛 — 발언마다 파일 하나(영상 트랙이 든 발언은 `.mkv` — 음성도 그 안 · 아니면 `.ogg` · 알림도 하나) · 파일 자리(`<root>/.rec-part/` 에 다 쓰고 `<root>/rec/{space_id}/` 로 이름 바꿔 닫는다 — 같은 저장소라 바꾸기는 한 번에) · 닫은 녹취의 `rec` 알림 · 하루 한 번 보관 기간을 넘긴 녹취 지우기 · 알림은 한 줄로(일시 실패는 백오프로 다시 · 상한을 넘기면 버리고 센다) · 로컬 게이트웨이(`--hub-base` · TLS 면 `--hub-ca` 인증서 하나로 검증) 방 상세의 `record` · 운영 표면(Handle `Call` 은 `/admin/drops` 와 감독자의 토큰 넘김 `POST /unit/token` 만).
 
 pub mod bus;
 
@@ -286,6 +286,15 @@ pub struct Svc {
     pub epoch: String,
     pub build: String,
     pub drops: std::sync::Arc<AtomicU64>,
+    pub token: tokio::sync::watch::Sender<String>,
+}
+
+pub fn handed_token(env: &common::envelope::Envelope) -> Option<String> {
+    let post = env.method.as_deref() == Some("POST");
+    match (&env.kind, post, env.path.as_deref().map(|p| p.trim_matches('/'))) {
+        (common::envelope::CallKind::Admin, true, Some(common::system::REC_TOKEN_PATH)) => env.body.get("token").and_then(|t| t.as_str()).filter(|t| !t.is_empty()).map(str::to_string),
+        _ => None,
+    }
 }
 
 #[tonic::async_trait]
@@ -298,6 +307,11 @@ impl common::envelope::handle::handle_server::Handle for Svc {
 
     async fn call(&self, req: tonic::Request<common::envelope::handle::CallReq>) -> Result<tonic::Response<common::envelope::handle::CallRes>, tonic::Status> {
         let env = common::envelope::Envelope::decode(&req.into_inner().envelope).map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
+        if let Some(t) = handed_token(&env) {
+            self.token.send_replace(t);
+            tracing::info!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", "rec unit token renewed");
+            return Ok(tonic::Response::new(common::envelope::handle::CallRes { reply: common::envelope::Reply::ok(serde_json::json!({})).encode() }));
+        }
         let log = common::log::global().map(|l| (l.counters.queue_full.load(Ordering::Relaxed), l.counters.spool_full.load(Ordering::Relaxed)));
         let reply = admin_answer(&env, self.drops.load(Ordering::Relaxed), log);
         Ok(tonic::Response::new(common::envelope::handle::CallRes { reply: reply.encode() }))

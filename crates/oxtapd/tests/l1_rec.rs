@@ -207,7 +207,8 @@ async fn the_unit_answers_hello_and_drops_over_its_handle() {
     let addr = probe.local_addr().expect("addr");
     drop(probe);
     let drops = std::sync::Arc::new(AtomicU64::new(0));
-    let svc = oxtapd::Svc { epoch: "e-rec".into(), build: "b1".into(), drops: drops.clone() };
+    let (tok_tx, mut tok_rx) = tokio::sync::watch::channel("t0".to_string());
+    let svc = oxtapd::Svc { epoch: "e-rec".into(), build: "b1".into(), drops: drops.clone(), token: tok_tx };
     tokio::spawn(tonic::transport::Server::builder().add_service(HandleServer::new(svc)).serve(addr));
     let mut c = None;
     for _ in 0..50 {
@@ -229,6 +230,16 @@ async fn the_unit_answers_hello_and_drops_over_its_handle() {
     env.path = Some("/admin/rooms".into());
     let r = Reply::decode(&c.call(CallReq { envelope: env.encode() }).await.expect("call").into_inner().reply).expect("reply");
     assert!(matches!(r, Reply::Fail { .. }), "정:IMPL-OPS-REC-UNIT — other Call paths fail");
+    let mut give = Envelope::new(CallKind::Admin);
+    give.method = Some("POST".into());
+    give.path = Some("/unit/token".into());
+    give.body = serde_json::json!({ "token": "t1" });
+    let r = Reply::decode(&c.call(CallReq { envelope: give.encode() }).await.expect("call").into_inner().reply).expect("reply");
+    assert!(matches!(r, Reply::Ok { .. }) && tok_rx.has_changed().unwrap_or(false), "S-sym-IMPL-OPS-REC-UNIT-4① the supervisor's token handover is the one more Call path the unit takes: {r:?}");
+    assert_eq!(tok_rx.borrow_and_update().as_str(), "t1", "S-sym-IMPL-OPS-REC-UNIT-4① the handed token replaces the one the unit reads rooms and re-binds with");
+    give.body = serde_json::json!({ "token": "" });
+    let r = Reply::decode(&c.call(CallReq { envelope: give.encode() }).await.expect("call").into_inner().reply).expect("reply");
+    assert!(matches!(r, Reply::Fail { .. }) && tok_rx.borrow().as_str() == "t1", "S-sym-IMPL-OPS-REC-UNIT-4① an empty token is not a handover — it fails and the held token stays");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

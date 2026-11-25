@@ -36,6 +36,10 @@ pub fn get() -> Option<&'static Arc<Bus>> {
 }
 
 impl Bus {
+    pub async fn router_session(&self) -> Option<(String, u64)> {
+        self.session.router_session().await
+    }
+
     pub fn ev_dropped(&self) -> u64 {
         self.ev_drop.load(std::sync::atomic::Ordering::Relaxed) + self.session.dropped()
     }

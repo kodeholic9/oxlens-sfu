@@ -37,6 +37,8 @@ pub struct Claims {
     pub metadata: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission: Option<Permission>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unit: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

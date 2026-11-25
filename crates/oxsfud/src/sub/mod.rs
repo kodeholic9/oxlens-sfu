@@ -185,7 +185,12 @@ pub struct Table {
     pub acked: Arc<AtomicU64>,
     pub st: Mutex<State>,
     pub slot_budget: usize,
+    pub cap: usize,
     pub turn: Mutex<()>,
+}
+
+fn start_of(pc_mode: PcMode) -> u16 {
+    if pc_mode == PcMode::One { START_1PC } else { START_2PC }
 }
 
 fn rand_u32() -> u32 {
@@ -194,6 +199,16 @@ fn rand_u32() -> u32 {
 
 impl Table {
     pub fn new(conn: Arc<Transport>, pc_mode: PcMode, slot_budget: usize) -> Arc<Table> {
+        let cap = if pc_mode == PcMode::One { SUB_1PC } else { SUB_2PC };
+        Self::with_caps(conn, pc_mode, slot_budget, cap)
+    }
+
+    pub fn for_unit(conn: Arc<Transport>, pc_mode: PcMode, rooms: usize) -> Arc<Table> {
+        let slots = rooms * 2;
+        Self::with_caps(conn, pc_mode, slots, slots + FULL_AUDIO + FULL_VIDEO)
+    }
+
+    fn with_caps(conn: Arc<Transport>, pc_mode: PcMode, slot_budget: usize, cap: usize) -> Arc<Table> {
         Arc::new(Table {
             conn,
             pc_mode,
@@ -201,16 +216,17 @@ impl Table {
             acked: Arc::new(AtomicU64::new(0)),
             st: Mutex::new(State::default()),
             slot_budget,
+            cap,
             turn: Mutex::new(()),
         })
     }
 
     fn start(&self) -> u16 {
-        if self.pc_mode == PcMode::One { START_1PC } else { START_2PC }
+        start_of(self.pc_mode)
     }
 
     pub fn limit(&self) -> usize {
-        if self.pc_mode == PcMode::One { SUB_1PC } else { SUB_2PC }
+        self.cap
     }
 
     pub fn seed(&self, codecs: &[JoinCodec], extmap: &[ExtMap]) -> Vec<String> {
@@ -462,20 +478,31 @@ impl Table {
         out.push(Change { down: r.down.clone(), class: r.class, old: Some(old), was, new: None, rev });
     }
 
-    fn fresh_slot_rows(s: &State, cands: &[Cand], want_slot: &BTreeSet<(String, Kind)>) -> usize {
+    fn fresh_slot_rows(s: &State, cands: &[Cand], want_slot: &BTreeSet<(String, Kind)>, spare: usize) -> usize {
         let unwanted = |r: &Row| r.class == Class::Slot && r.track.as_ref().map(|t| !want_slot.contains(&(t.1.clone(), r.kind))).unwrap_or(false);
+        let free = |r: &Row| r.class == Class::Slot && (r.track.is_none() || unwanted(r));
         let mut claimed: BTreeSet<usize> = BTreeSet::new();
-        let mut fresh = 0;
+        let mut rest: Vec<&Cand> = Vec::new();
         for c in cands.iter().filter(|c| c.class == Class::Slot) {
             if s.rows.iter().any(|r| r.class == Class::Slot && r.kind == c.kind && r.track.as_ref().map(|t| t.1 == c.room).unwrap_or(false)) {
                 continue;
             }
             let t = tuple_of(c.kind, &c.codec);
-            let free = (0..s.rows.len()).find(|&i| {
-                let r = &s.rows[i];
-                !claimed.contains(&i) && r.class == Class::Slot && r.kind == c.kind && r.tuple == t && (r.track.is_none() || unwanted(r))
-            });
-            match free {
+            match (0..s.rows.len()).find(|&i| !claimed.contains(&i) && free(&s.rows[i]) && s.rows[i].kind == c.kind && s.rows[i].tuple == t) {
+                Some(i) => {
+                    claimed.insert(i);
+                }
+                None => rest.push(c),
+            }
+        }
+        let mut fresh = 0;
+        for c in rest {
+            if fresh < spare {
+                fresh += 1;
+                continue;
+            }
+            let other = (0..s.rows.len()).filter(|&i| !claimed.contains(&i) && free(&s.rows[i]) && s.rows[i].kind == c.kind).min_by_key(|&i| s.rows[i].loaded_at);
+            match other {
                 Some(i) => {
                     claimed.insert(i);
                 }
@@ -493,8 +520,9 @@ impl Table {
         let rows_before = s.rows.len();
         let mut tuned = false;
         let want_slot: BTreeSet<(String, Kind)> = cands.iter().filter(|c| c.class == Class::Slot).map(|c| (c.room.clone(), c.kind)).collect();
-        let fresh = Self::fresh_slot_rows(&s, cands, &want_slot);
         let slot_rows = s.rows.iter().filter(|r| r.class == Class::Slot).count();
+        let spare = self.slot_budget.saturating_sub(slot_rows).min(self.limit().saturating_sub(s.rows.len()));
+        let fresh = Self::fresh_slot_rows(&s, cands, &want_slot, spare);
         if fresh > 0 && (slot_rows + fresh > self.slot_budget || s.rows.len() + fresh > self.limit()) {
             out.mid_limit = true;
             out.budget = Some(if slot_rows + fresh > self.slot_budget { (self.slot_budget, slot_rows) } else { (self.limit(), s.rows.len()) });
@@ -511,23 +539,37 @@ impl Table {
             .filter(|c| c.class == Class::Slot)
             .filter(|c| !s.rows.iter().any(|r| r.class == Class::Slot && r.kind == c.kind && r.track.as_ref().map(|t| t.1 == c.room).unwrap_or(false)))
             .collect();
+        let mut rest: Vec<&Cand> = Vec::new();
         for c in slots_needed {
             let t = tuple_of(c.kind, &c.codec);
             let free = (0..s.rows.len()).find(|&i| {
                 let r = &s.rows[i];
                 r.class == Class::Slot && r.kind == c.kind && r.track.is_none() && r.tuple == t
             });
-            let i = match free {
-                Some(i) => i,
-                None => {
-                    let slot_rows = s.rows.iter().filter(|r| r.class == Class::Slot).count();
-                    if slot_rows >= self.slot_budget || s.rows.len() >= self.limit() {
-                        out.mid_limit = true;
-                        out.budget = Some(if slot_rows >= self.slot_budget { (self.slot_budget, slot_rows) } else { (self.limit(), s.rows.len()) });
-                        break;
-                    }
-                    self.new_row(&mut s, c.kind, Class::Slot, &c.codec)
-                }
+            match free {
+                Some(i) => Self::load(&mut s, i, c, rev, now, &mut ch),
+                None => rest.push(c),
+            }
+        }
+        for c in rest {
+            let slot_rows = s.rows.iter().filter(|r| r.class == Class::Slot).count();
+            let i = if slot_rows < self.slot_budget && s.rows.len() < self.limit() {
+                self.new_row(&mut s, c.kind, Class::Slot, &c.codec)
+            } else {
+                let other = (0..s.rows.len())
+                    .filter(|&i| {
+                        let r = &s.rows[i];
+                        r.class == Class::Slot && r.kind == c.kind && r.track.is_none()
+                    })
+                    .min_by_key(|&i| s.rows[i].loaded_at);
+                let Some(i) = other else {
+                    out.mid_limit = true;
+                    out.budget = Some(if slot_rows >= self.slot_budget { (self.slot_budget, slot_rows) } else { (self.limit(), s.rows.len()) });
+                    break;
+                };
+                self.retune(&mut s, i, &c.codec);
+                tuned = true;
+                i
             };
             Self::load(&mut s, i, c, rev, now, &mut ch);
         }
@@ -1093,5 +1135,65 @@ mod tests {
         assert!(t.sync(&more, 3).mid_limit);
         assert_eq!(remembers(&t, "x"), (true, true), "정:IMPL-SUB-READY-GATE a resync that returns at the row limit judges nothing and forgets nothing");
         assert_eq!(gate_open(&t, "v"), Some(true));
+    }
+
+    fn slot_v(room: &str, codec: &str) -> Cand {
+        Cand { track_id: format!("ptt-{room}-video"), room: room.into(), kind: Kind::Video, class: Class::Slot, codec: codec.into(), rank: 0, paused: false }
+    }
+
+    fn slot_lines(t: &Table) -> Vec<(u16, String, Option<String>)> {
+        t.snapshot("l1").mlines.iter().map(|m| (m.mid.parse().unwrap_or(u16::MAX), m.codec.to_ascii_uppercase(), m.room_id.clone())).collect()
+    }
+
+    #[test]
+    fn slot_candidates_of_one_pass_pair_same_tuple_rows_before_any_retune() {
+        let t = Table::new(Transport::new(1, "u", "", Role::Both, 0, false), PcMode::Two, 2);
+        t.sync(&[slot_v("a", "H264")], 10);
+        t.sync(&[slot_v("a", "H264"), slot_v("b", "VP9")], 20);
+        t.sync(&[], 30);
+        assert_eq!(slot_lines(&t), vec![(0, "H264".into(), None), (1, "VP9".into(), None)], "stand check — the share of two is full and both slot rows are empty (H264 used at 10 · VP9 at 20)");
+        let out = t.sync(&[slot_v("c", "AV1"), slot_v("d", "H264")], 40);
+        assert!(!out.mid_limit, "stand check — two empty rows serve two candidates");
+        assert_eq!(
+            slot_lines(&t),
+            vec![(0, "H264".into(), Some("d".into())), (1, "AV1".into(), Some("c".into()))],
+            "정:IMPL-SUB-TABLE I3 one pass pairs same tuples first — d keeps the H264 row and only c retunes (one SDP change, not two); the earlier candidate c does not take the older H264 row d needs"
+        );
+    }
+
+    #[test]
+    fn a_slot_retune_takes_the_free_row_used_longest_ago() {
+        let t = Table::new(Transport::new(1, "u", "", Role::Both, 0, false), PcMode::Two, 2);
+        t.sync(&[slot_v("a", "H264")], 10);
+        t.sync(&[slot_v("a", "H264"), slot_v("b", "VP9")], 20);
+        t.sync(&[slot_v("b", "VP9")], 30);
+        t.sync(&[slot_v("b", "VP9"), slot_v("e", "H264")], 40);
+        t.sync(&[], 50);
+        assert_eq!(slot_lines(&t), vec![(0, "H264".into(), None), (1, "VP9".into(), None)], "stand check — both slot rows empty · the H264 row was last used at 40 · the VP9 row at 20");
+        t.sync(&[slot_v("c", "AV1")], 60);
+        assert_eq!(
+            slot_lines(&t),
+            vec![(0, "H264".into(), None), (1, "AV1".into(), Some("c".into()))],
+            "정:IMPL-SUB-TABLE I3 with the share full the retune takes the free slot row used longest ago (the VP9 row · loaded at 20), not the lower mid"
+        );
+    }
+
+    #[test]
+    fn a_unit_table_holds_two_slot_rows_per_room_plus_the_full_duplex_caps() {
+        for mode in [PcMode::One, PcMode::Two] {
+            let t = Table::for_unit(Transport::new(1, "u", "", Role::Both, 0, false), mode, 250);
+            assert_eq!((t.slot_budget, t.limit()), (500, 550), "정:IMPL-SUB-TABLE I2 {mode:?} — the unit table's slot share is two rows per room (250 rooms → 500) and its row ceiling adds the full-duplex caps (25 + 25 → 550)");
+            let mut cands: Vec<Cand> = Vec::new();
+            for i in 0..250 {
+                let room = format!("r{i}");
+                cands.push(Cand { track_id: format!("ptt-{room}-audio"), room: room.clone(), kind: Kind::Audio, class: Class::Slot, codec: "opus".into(), rank: 0, paused: false });
+                cands.push(slot_v(&room, "H264"));
+            }
+            assert!(!t.sync(&cands, 1).mid_limit, "정:IMPL-SUB-TABLE I2 {mode:?} — 250 slot rooms fit the unit table");
+            assert_eq!(t.rows().len(), 500, "stand check — two loaded slot rows per room");
+            cands.push(slot_v("over", "VP8"));
+            let out = t.sync(&cands, 2);
+            assert!(out.mid_limit && out.budget == Some((500, 500)), "정:IMPL-SUB-TABLE I2 {mode:?} — a slot room past the 500 slot rows is MID_LIMIT {{500,500}}: {:?}", out.budget);
+        }
     }
 }

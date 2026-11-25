@@ -42,12 +42,32 @@ impl Ctx {
 
 pub struct Svc;
 
+static HELLO_HUB: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
+static REFUSED_HUB: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
+
+pub fn new_caller(last: &std::sync::Mutex<Option<(String, String)>>, node: &str, hub_inst: &str) -> bool {
+    let Ok(mut g) = last.lock() else { return true };
+    if g.as_ref().is_some_and(|(n, i)| n == node && i == hub_inst) {
+        return false;
+    }
+    let _ = g.replace((node.to_string(), hub_inst.to_string()));
+    true
+}
+
 #[tonic::async_trait]
 impl Handle for Svc {
     async fn hello(&self, req: tonic::Request<HelloReq>) -> Result<tonic::Response<HelloRes>, tonic::Status> {
         let r = req.into_inner();
         let s = super::sfu().ok_or_else(|| tonic::Status::unavailable("starting"))?;
-        tracing::info!(kind = "diag", spec = "SV-RULE-OPS-SURFACE", "hello from hub {} ({})", r.node, r.hub_inst);
+        if r.node != s.node {
+            if new_caller(&REFUSED_HUB, &r.node, &r.hub_inst) {
+                tracing::warn!(kind = "diag", spec = "SV-RULE-BUS-SHAPE", "in.hub_node" = %r.node, "hello refused — the hub of node {} is not this sfud's node {}", r.node, s.node);
+            }
+            return Err(tonic::Status::permission_denied(format!("node {} is not this sfud's node", r.node)));
+        }
+        if new_caller(&HELLO_HUB, &r.node, &r.hub_inst) {
+            tracing::info!(kind = "diag", spec = "SV-RULE-OPS-SURFACE", "hello from hub {} ({})", r.node, r.hub_inst);
+        }
         Ok(tonic::Response::new(HelloRes { epoch: s.epoch.clone(), build: s.build.clone() }))
     }
 
@@ -110,5 +130,22 @@ fn op(env: &Envelope) -> Result<Value, Failure> {
         Op::IceRestart => super::media::ice_restart(&c, b),
         Op::Affiliation => super::media::affiliation(&c, b),
         _ => Err(Code::UnknownOp.failure()),
+    }
+}
+
+#[cfg(test)]
+mod hello_line_tests {
+    use super::new_caller;
+
+    #[test]
+    fn the_hello_line_is_written_once_per_calling_hub() {
+        let last = std::sync::Mutex::new(None);
+        assert!(new_caller(&last, "n1", "i1"), "정:RULE-BUS-SHAPE the first hello from a hub is written");
+        for _ in 0..3 {
+            assert!(!new_caller(&last, "n1", "i1"), "정:RULE-BUS-SHAPE the remote check's repeated hello from the same hub writes no line");
+        }
+        assert!(new_caller(&last, "n1", "i2"), "정:RULE-BUS-SHAPE a hub that came back with a new boot identity is written again");
+        assert!(new_caller(&last, "n2", "i2"), "정:RULE-BUS-SHAPE another node's hub is written again");
+        assert!(!new_caller(&last, "n2", "i2"), "stand check — and then quiet again");
     }
 }
