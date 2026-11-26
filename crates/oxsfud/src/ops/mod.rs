@@ -6,6 +6,7 @@ pub mod admin;
 pub mod floor;
 pub mod handle;
 pub mod media;
+pub mod permission;
 pub mod rooms;
 pub mod timers;
 

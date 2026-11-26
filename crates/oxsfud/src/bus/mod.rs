@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · 정:RULE-BUS-PRESENCE · 정:RULE-BUS-EVENTS · 정:IMPL-BUS-HOME-LOST · 운영:LOG.log.LINE · 운영:RULE-LOG-KIND · 정:IMPL-ROOM-LIFE · 정:IMPL-FLR-TALK-REPORT · model: claude-opus-5-5
-//! sfud 의 버스 — `common::bus` client(`{node}.sfud` · 로컬 hub 에만 · 202610/20261031e) · `room` 토큰 선언(토큰은 그 방이 든다 — 재선언은 방 집합에서) · `ev` put 은 낸 차례 그대로 한 줄로(데이터 레인 — 차면 버리고 센다) · `node` 토큰 history 구독(홈 잃음) · 로컬 hub 에 묻기(`q/node/{node}/talk`).
+// spec: v1.6 · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · 정:RULE-BUS-PRESENCE · 정:RULE-BUS-EVENTS · 정:IMPL-BUS-HOME-LOST · 운영:LOG.log.LINE · 운영:RULE-LOG-KIND · 정:IMPL-ROOM-LIFE · 정:IMPL-FLR-TALK-REPORT · 정:RULE-BUS-PUBLIC · model: claude-opus-5-5
+//! sfud 의 버스 — `common::bus` client(`{node}.sfud` · 로컬 hub 에만 · 202610/20261031e) · `room` 토큰 선언(토큰은 그 방이 든다 — 재선언은 방 집합에서) · `ev` put 은 낸 차례 그대로 한 줄로(데이터 레인 — 차면 버리고 센다) · hub 만 읽는 사실 재료(표지 0xF001)도 같은 `ev/room` 줄로 · `node` 토큰 history 구독(홈 잃음) · 로컬 hub 에 묻기(`q/node/{node}/talk`).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -169,6 +169,9 @@ impl Bus {
 }
 
 pub fn notice_line(n: &Notice) -> common::log::Line {
+    if n.op == common::envelope::OP_FACT_MATERIAL {
+        return common::log::Line::diag("SV-RULE-BUS-EVENTS").key("type", n.body.get("type").and_then(|v| v.as_str()).unwrap_or("")).msg("fact material");
+    }
     let Some(op) = oxsig::Op::from_u16(n.op) else {
         return common::log::Line::diag("SV-RULE-BUS-EVENTS").rec("op", n.op).msg("notice of unknown op");
     };
@@ -190,6 +193,11 @@ pub fn room_notice(room: &str, n: Notice) {
     if let Some(b) = get() {
         b.room_notice(room, n);
     }
+}
+
+pub fn room_material(room: &str, m: &common::envelope::Material) {
+    let sfu = get().map(|b| b.epoch.clone()).unwrap_or_default();
+    room_notice(room, m.notice(room, &sfu));
 }
 
 pub fn user_notice(user: &str, n: Notice) {

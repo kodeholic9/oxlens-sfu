@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.7 · 정:IMPL-FLR-LOCK · 정:IMPL-FLR-RTP-OBSERVE · 정:IMPL-FLR-MEDIA-BIND · 정:IMPL-FLR-FIRST-NOTICE · 정:IMPL-FLR-MEMBER-JOIN · 정:RULE-FLR-SNAPSHOT · 연:RULE-FLR-TIMERS · 연:TRN.frame.DC · 정:IMPL-FLR-POLICY · 운영:RULE-LOG-TRANSITION · 정:IMPL-FWD-ROOM · 정:IMPL-ROOM-LIFE · 정:RULE-CONC-SIX · 정:IMPL-FLR-TALK-REPORT · 연:RULE-FLR-TLV · model: claude-opus-5-5
+// spec: v1.7 · 정:IMPL-FLR-LOCK · 정:IMPL-FLR-RTP-OBSERVE · 정:IMPL-FLR-MEDIA-BIND · 정:IMPL-FLR-FIRST-NOTICE · 정:IMPL-FLR-MEMBER-JOIN · 정:RULE-FLR-SNAPSHOT · 연:RULE-FLR-TIMERS · 연:TRN.frame.DC · 정:IMPL-FLR-POLICY · 운영:RULE-LOG-TRANSITION · 정:IMPL-FWD-ROOM · 정:IMPL-ROOM-LIFE · 정:RULE-CONC-SIX · 정:IMPL-FLR-TALK-REPORT · 연:RULE-FLR-TLV · 정:RULE-HOOK-FACTS · 정:RULE-BUS-PUBLIC · model: claude-opus-5-5
 //! 발언권 집행 — 판정은 방 락 안(보낼 것 · 걸 타이머 · 효과에 `grant_no`) · 집행은 락 밖(MBCP 를 DC 로 · 타이머는 가장 이른 만료 시각에 깨어난다 · 슬롯 결합 · PLI burst — 서버가 지은 프레임은 슬롯에 내지 않는다) · 발언 알림(허가에 발언 id · 끝에 상태 — 방마다 한 줄). 시계 · 집행 큐 · 집행자는 그 방의 것(`Room.exec`) — 지음 → 돎 을 이긴 쪽만 집행자를 띄우고, 돎일 때만 판정한다.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,6 +13,7 @@ use oxsig::msg::Kind;
 use crate::flr::bind::Effect;
 use crate::flr::core::{Floor, Fx, G, Msg, Mt, Step};
 use crate::flr::talk::{self, End, Talk};
+use common::envelope::{FloorIdle, FloorRevoke, FloorTaken, Material, RoomFloor as FloorView};
 use common::talk::Report;
 use crate::fwd::rt::mono_us;
 use crate::fwd::SlotFan;
@@ -266,6 +267,7 @@ where
         let now = now_ms();
         let t2_left = ck.timers.get(&("T2", None)).map(|at| (at.saturating_sub(now) / 1000) as u32).unwrap_or((t2_ms() / 1000) as u32);
         let from = fl.g;
+        let held = fl.holder();
         let Some(step) = f(&mut fl, t2_left) else { return Step::default() };
         ck.events += 1;
         trace(&room.id, &e, from, fl.g, &step, ck.events);
@@ -288,9 +290,13 @@ where
             }
         }
         rearm(&fl, &mut ck, now);
-        let sources = step.out.iter().map(|o| if o.m.t == Mt::Taken { o.m.a.as_deref().map(|u| slot_sources(room, u)).unwrap_or_default() } else { Vec::new() }).collect();
+        let sources: Vec<Vec<u32>> = step.out.iter().map(|o| if o.m.t == Mt::Taken { o.m.a.as_deref().map(|u| slot_sources(room, u)).unwrap_or_default() } else { Vec::new() }).collect();
         let ret = step.clone();
         let talk = ck.talk.as_ref().map(|t| t.id.clone());
+        let fact = fact_of((from, held.as_deref()), (fl.g, fl.holder().as_deref()));
+        if let Some(m) = fact.and_then(|name| floor_material(name, &room.id, &fl, &step, &sources, talk.as_deref())) {
+            crate::bus::room_material(&room.id, &m);
+        }
         if !(step.out.is_empty() && effects.is_empty()) && rf.jobs.send(Job { step, sources, effects, talk }).is_err() {
             super::drop_count("exec_order");
         }
@@ -298,6 +304,44 @@ where
     };
     rf.wake.notify_one();
     plan
+}
+
+pub fn fact_of(before: (G, Option<&str>), after: (G, Option<&str>)) -> Option<&'static str> {
+    let ((bg, bh), (ag, ah)) = (before, after);
+    if ag == G::Taken && (bg != G::Taken || bh != ah) {
+        return Some("floor_granted");
+    }
+    if ag == G::Idle && bg != G::Idle {
+        return Some("floor_released");
+    }
+    if bg == G::Taken && ag == G::Prevoke {
+        return Some("floor_revoked");
+    }
+    None
+}
+
+fn floor_material(name: &str, room: &str, fl: &Floor, step: &Step, sources: &[Vec<u32>], talk: Option<&str>) -> Option<Material> {
+    let first = |t: Mt| step.out.iter().position(|o| o.m.t == t);
+    match name {
+        "floor_granted" => {
+            let i = first(Mt::Taken);
+            let speaker = i.and_then(|i| step.out[i].m.a.clone()).or_else(|| fl.speaker.clone())?;
+            let seq = i.map(|i| step.out[i].m.q).unwrap_or(fl.seq) as u16;
+            let src = i.and_then(|i| sources.get(i)).filter(|v| !v.is_empty()).cloned();
+            Some(Material::FloorGranted(FloorTaken { speaker, sources: src, seq, room: room.to_string(), talk: talk.map(str::to_string) }))
+        }
+        "floor_released" => {
+            let i = first(Mt::Idle);
+            let seq = i.map(|i| step.out[i].m.q).unwrap_or(fl.seq) as u16;
+            let prev = i.and_then(|i| step.out[i].m.a.clone()).or_else(|| fl.prev.clone());
+            Some(Material::FloorReleased(FloorIdle { prev, seq, room: room.to_string() }))
+        }
+        "floor_revoked" => {
+            let cause = first(Mt::Revoke).map(|i| step.out[i].m.n).unwrap_or(fl.rcause_g) as u8;
+            Some(Material::FloorRevoked(FloorRevoke { cause, reason: None, room: room.to_string() }))
+        }
+        _ => None,
+    }
 }
 
 fn rearm(fl: &Floor, ck: &mut Clock, now: u64) {
@@ -584,6 +628,15 @@ fn pli_while_bound(fan: &Arc<SlotFan>, t: &Arc<crate::r#pub::PubTrack>) {
             }
         });
     }
+}
+
+pub fn detail(room: &Room) -> FloorView {
+    let (speaker, queue) = match room.floor.lock() {
+        Ok(f) => (f.holder(), f.queue.iter().map(|w| w.u.clone()).collect()),
+        Err(_) => (None, Vec::new()),
+    };
+    let start = speaker.as_ref().and_then(|_| room.exec.clock.lock().ok().map(|c| wall(c.granted_at)));
+    FloorView { speaker, queue, start }
 }
 
 pub fn snapshot(room: &Room) -> serde_json::Value {

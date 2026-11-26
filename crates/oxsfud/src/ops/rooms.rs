@@ -1,13 +1,13 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-ROOM-JOIN · 정:IMPL-ROOM-LIFE · 정:IMPL-ROOM-SERVER-CONFIG · 정:IMPL-ROOM-RESYNC · 정:IMPL-ROOM-DERIVED · 정:IMPL-SES-RESUME · 정:IMPL-FLR-MEMBER-JOIN · 정:CAND-ROOM-JOIN-AGAIN-EDGE · 정:CAND-ROOM-TTL-PERMANENT-MARK · 연:RULE-ROOM-LEAVE-PROC · 연:RULE-ROOM-LEAVE-FAIL · 연:RULE-ROOM-SELECT · 연:RULE-ROOM-JOIN-NO-TYPE-CHECK · 연:RULE-ROOM-DETAIL-PROC · 연:RULE-ROOM-DETAIL-TWO-USES · 연:RULE-ROOM-DETAIL-FAIL · 연:RULE-ROOM-LIST-PROC · 연:RULE-ROOM-LIST-FORM · 연:RULE-ROOM-CREATE-FAIL · 연:RULE-ROOM-JOIN-ID · 연:RULE-ROOM-JOIN-REPLACE · 연:RULE-ROOM-LEAVE-FORM · 연:RULE-TRN-IDEMPOTENT · 정:IMPL-GC-PEER-REAP · 정:IMPL-FLR-LOCK · 정:RULE-BUS-PRESENCE · model: claude-opus-5-5
-//! 방 op 조율 — 입장 차례 ②재입장 축출 ③정원 ④방 수 ⑤배정표(원자 — 모자라면 되돌림) ⑥명단 · `pub_room` · 통지 · 퇴장 · 재개 스냅샷 · 방 생성(멱등 — 방 집합에 새로 넣은 쪽만 집행자를 띄우고 토큰을 선언) · 상세 · 목록 · 방 지우기(그 방일 때만) · `room` 토큰 재선언(방 집합에서) · 세션 폐기.
+// spec: v1.6 · 정:IMPL-ROOM-JOIN · 정:IMPL-ROOM-LIFE · 정:IMPL-ROOM-SERVER-CONFIG · 정:IMPL-ROOM-RESYNC · 정:IMPL-ROOM-DERIVED · 정:IMPL-SES-RESUME · 정:IMPL-FLR-MEMBER-JOIN · 정:CAND-ROOM-JOIN-AGAIN-EDGE · 정:CAND-ROOM-TTL-PERMANENT-MARK · 연:RULE-ROOM-LEAVE-PROC · 연:RULE-ROOM-LEAVE-FAIL · 연:RULE-ROOM-SELECT · 연:RULE-ROOM-JOIN-NO-TYPE-CHECK · 연:RULE-ROOM-DETAIL-PROC · 연:RULE-ROOM-DETAIL-TWO-USES · 연:RULE-ROOM-DETAIL-FAIL · 연:RULE-ROOM-LIST-PROC · 연:RULE-ROOM-LIST-FORM · 연:RULE-ROOM-CREATE-FAIL · 연:RULE-ROOM-JOIN-ID · 연:RULE-ROOM-JOIN-REPLACE · 연:RULE-ROOM-LEAVE-FORM · 연:RULE-TRN-IDEMPOTENT · 정:IMPL-GC-PEER-REAP · 정:IMPL-FLR-LOCK · 정:RULE-BUS-PRESENCE · 정:RULE-BUS-PUBLIC · model: claude-opus-5-5
+//! 방 op 조율 — 입장 차례 ②재입장 축출 ③정원 ④방 수 ⑤배정표(원자 — 모자라면 되돌림) ⑥명단 · `pub_room` · 통지 · 퇴장 · 재개 스냅샷 · 방 생성(멱등 — 방 집합에 새로 넣은 쪽만 집행자를 띄우고 토큰을 선언한 뒤 사실 재료) · 상세 · 목록 · 방 지우기(그 방일 때만 · 토큰 철회 앞 사실 재료) · `room` 토큰 재선언(방 집합에서) · 세션 폐기.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use common::envelope::Envelope;
+use common::envelope::{Envelope, Material, RoomDetail};
 use oxsig::msg::*;
 use oxsig::{Code, Failure};
 use serde_json::{Value, json};
@@ -207,8 +207,8 @@ pub fn join(c: &Ctx, body: &Value) -> Result<Value, Failure> {
     super::media::resync_peer(&peer, false);
     let me = room.member(&c.user).ok_or_else(|| Code::InternalError.failure())?;
     let u = c.user.clone();
-    let fr = me.permission.floor_request;
-    super::floor::run(&room, super::floor::Entry::of("ws_join", &u).with("perm", fr.to_string()), |f, _| Some(f.ws_join(&u, fr)));
+    let (fr, why) = super::permission::floor_perm(&me.permission, &super::permission::half_kinds(&room.id, &u));
+    super::floor::run(&room, super::floor::Entry::of("ws_join", &u).with("perm", fr.to_string()).with("why", why), |f, _| Some(f.ws_join(&u, fr)));
     let old_pub = crate::aff::pub_room(&peer);
     if select {
         match super::media::move_pub(&peer, Some(&room), claims.permission) {
@@ -358,6 +358,7 @@ pub async fn create(env: &Envelope) -> Result<Value, Failure> {
         {
             room.hold_token(t);
         }
+        crate::bus::room_material(&room.id, &Material::RoomCreated(room.summary()));
         tracing::info!(kind = "diag", spec = "SV-IMPL-ROOM-LIFE", room = %room.id, "in.unused_ttl" = room.unused_ttl, "in.departure_ttl" = room.departure_ttl, "room created");
     }
     ok(&CreateRoomRes { room_id: room.id.clone(), name: room.name.clone(), capacity: room.capacity, created_at: room.created_at, record: room.record, media_codecs: room.media_codecs.clone() })
@@ -383,6 +384,9 @@ pub fn get(env: &Envelope) -> Result<Value, Failure> {
         version: room.version(),
         tracks: if tracks { Some(tracks_of(&room)) } else { None },
     };
+    if env.floor {
+        return ok(&RoomDetail { room: res, floor: super::floor::detail(&room) });
+    }
     ok(&res)
 }
 
@@ -403,6 +407,7 @@ pub async fn destroy_room(room: &Arc<Room>, spec: &str, why: &str) {
     for t in s.tables.map.lock().map(|g| g.values().cloned().collect::<Vec<_>>()).unwrap_or_default() {
         t.forget_room(&room.id);
     }
+    crate::bus::room_material(&room.id, &Material::RoomClosed(room.summary()));
     room.drop_token();
     tracing::info!(kind = "diag", spec = spec, room = %room.id, "room removed ({why})");
 }

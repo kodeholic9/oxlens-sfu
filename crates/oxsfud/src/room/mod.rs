@@ -1,12 +1,12 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-ROOM-LIFE · 정:IMPL-ROOM-DERIVED · 정:IMPL-ROOM-VERSION-ISSUE · 정:IMPL-ROOM-EMIT · 정:IMPL-ROOM-PERMISSION · 연:RULE-ROOM-HIDDEN · 연:ROOM.type.MemberInfo · 정:RULE-ROOM-SERVER-SCOPE · 연:RULE-ROOM-LISTENERS-IN-ROSTER · 연:RULE-ROOM-PARTICIPANT-TYPE · 정:RULE-DOC-SCOPE-SERVER · 정:IMPL-ROOM-JOIN · 정:IMPL-FWD-ROOM · 정:IMPL-FLR-LOCK · model: claude-opus-5-5
+// spec: v1.6 · 정:IMPL-ROOM-LIFE · 정:IMPL-ROOM-DERIVED · 정:IMPL-ROOM-VERSION-ISSUE · 정:IMPL-ROOM-EMIT · 정:IMPL-ROOM-PERMISSION · 연:RULE-ROOM-HIDDEN · 연:ROOM.type.MemberInfo · 정:RULE-ROOM-SERVER-SCOPE · 연:RULE-ROOM-LISTENERS-IN-ROSTER · 연:RULE-ROOM-PARTICIPANT-TYPE · 정:RULE-DOC-SCOPE-SERVER · 정:IMPL-ROOM-JOIN · 정:IMPL-FWD-ROOM · 정:IMPL-FLR-LOCK · 정:RULE-BUS-PUBLIC · model: claude-opus-5-5
 //! 방 — 정체 · 명단(등록 기준 — 투명 포함) · 권한 오버라이드 표 · version(seq 증가와 통지 enqueue 를 한 임계 구역에서) · 수명(TTL 둘 · 영구 표지) · 발언권 판정 로직 · 집행 재료 · 슬롯 둘 · `room` 토큰. 방 집합은 넣기 · 빼기가 그 잠금 안에서 패킷 길의 방 → 슬롯 사본까지 고치고, 빼기는 그 방일 때만 뺀다.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
-use common::envelope::Notice;
+use common::envelope::{Material, Notice};
 use oxsig::msg::{MediaCodecs, MemberInfo, ParticipantEventBody, ParticipantEventType, Permission, RoomSummary, Version};
 use oxsig::{Code, Op};
 
@@ -129,7 +129,21 @@ impl Room {
     }
 
     pub fn remove(&self, user: &str) -> Option<Member> {
-        self.st.lock().ok().and_then(|mut s| s.members.remove(user))
+        let Ok(mut s) = self.st.lock() else { return None };
+        let was = rec_of(&s);
+        let m = s.members.remove(user);
+        self.rec_changed(&s, was);
+        m
+    }
+
+    fn rec_changed(&self, s: &RoomState, was: bool) {
+        let now = rec_of(s);
+        if now == was {
+            return;
+        }
+        let sum = self.summary_in(s);
+        let m = if now { Material::RecordingStarted(sum) } else { Material::RecordingEnded(sum) };
+        crate::bus::room_material(&self.id, &m);
     }
 
     pub fn announce_left(&self, user: &str) -> u64 {
@@ -189,7 +203,7 @@ impl Room {
     }
 
     pub fn rec(&self) -> bool {
-        self.st.lock().map(|s| s.members.values().any(|m| m.participant_type == 1)).unwrap_or(false)
+        self.st.lock().map(|s| rec_of(&s)).unwrap_or(false)
     }
 
     pub fn participants(&self) -> Vec<MemberInfo> {
@@ -201,13 +215,20 @@ impl Room {
     }
 
     pub fn summary(&self) -> RoomSummary {
+        match self.st.lock() {
+            Ok(s) => self.summary_in(&s),
+            Err(_) => self.summary_in(&RoomState::default()),
+        }
+    }
+
+    fn summary_in(&self, s: &RoomState) -> RoomSummary {
         RoomSummary {
             room_id: self.id.clone(),
             name: self.name.clone(),
             capacity: self.capacity,
-            user_count: self.user_count(),
+            user_count: s.members.values().filter(|m| !m.hidden).count() as u32,
             created_at: self.created_at,
-            rec: self.rec(),
+            rec: rec_of(s),
             record: self.record,
         }
     }
@@ -242,6 +263,7 @@ impl Room {
         let notify = fresh && !m.hidden;
         let info = m.info();
         let user = m.user.clone();
+        let was = rec_of(&s);
         s.members.insert(user.clone(), m);
         if notify {
             s.seq += 1;
@@ -258,6 +280,7 @@ impl Room {
             };
             crate::bus::room_notice(&self.id, notice(Op::ParticipantEvent, &body, vec![user], &self.id));
         }
+        self.rec_changed(&s, was);
         Ok(s.seq)
     }
 
@@ -321,6 +344,10 @@ impl Room {
         }
         due
     }
+}
+
+fn rec_of(s: &RoomState) -> bool {
+    s.members.values().any(|m| m.participant_type == 1)
 }
 
 pub fn notice<T: serde::Serialize>(op: Op, body: &T, exclude: Vec<String>, room: &str) -> Notice {

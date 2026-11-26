@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.12 · 정:RULE-FLR-SNAPSHOT · 연:RULE-ROOM-DETAIL-NO-FLOOR · model: claude-opus-5-5
-//! 1층 제어 층 — 클라 경로의 방 조회(`GET /rooms/{id}?tracks=1` 이 미디어 서버에 묻는 `GetRoom`)에는 발언권을 싣지 않는다: 화자가 발언권을 쥐고 있는 동안에도 응답의 칸은 방 · 명단 · 트랙 · 판번호뿐이고 발언권 이름(화자 · 큐 · 상태 · 우선순위 · 시작 시각)이 어디에도 없다(context 202611/20261124b 서버 규칙 갈래).
+// spec: v1.12 · 정:RULE-FLR-SNAPSHOT · 연:RULE-ROOM-DETAIL-NO-FLOOR · 정:RULE-HOOK-STATUS · model: claude-opus-5-5
+//! 1층 제어 층 — 클라 경로의 방 조회(`GET /rooms/{id}?tracks=1` 이 미디어 서버에 묻는 `GetRoom`)에는 발언권을 싣지 않는다: 화자가 발언권을 쥐고 있는 동안에도 응답의 칸은 방 · 명단 · 트랙 · 판번호뿐이고 발언권 이름(화자 · 큐 · 상태 · 우선순위 · 시작 시각)이 어디에도 없다(context 202611/20261124b 서버 규칙 갈래). 3rd 현황 조회 길(봉투의 발언권 요청 칸)은 같은 몸에 `floor{speaker, queue, start}` 를 더한다 — 비어도 칸 셋이 있고 판번호는 없다.
 
 mod support;
 
@@ -64,4 +64,32 @@ fn the_client_room_view_carries_no_floor_even_while_someone_speaks() {
     let floor_names = ["speaker", "queue", "floor", "priority", "first_rtp_at", "last_rtp_at", "timers", "state"];
     let leaked: Vec<&str> = floor_names.iter().copied().filter(|n| all.contains(*n)).collect();
     assert!(leaked.is_empty(), "S-sym-RULE-FLR-SNAPSHOT-1① no floor name anywhere in the client room view while a speaks: {leaked:?}");
+}
+
+#[test]
+fn the_third_party_room_view_adds_the_floor_speaker_queue_and_start() {
+    let _g = serial();
+    let r = create(&tag("rdh"));
+    let (a, b) = (tag("rdh-a"), tag("rdh-b"));
+    let mut env = envelope(CallKind::GetRoom, None, None);
+    env.body = json!({ "room_id": r.id });
+    env.floor = true;
+    let idle = ops::rooms::get(&env).expect("stand check — the room view answers");
+    assert_eq!(idle["floor"], json!({ "speaker": null, "queue": [], "start": null }), "S-rule-RULE-HOOK-STATUS-3① an empty floor still has its three fields");
+    for u in [&a, &b] {
+        r.join(member(u), None).expect("stand check — registered");
+        floor::run(&r, Entry::of("ws_join", u), |f, _| Some(f.ws_join(u, true)));
+        floor::run(&r, Entry::of("ws_pub_select", u), |f, _| Some(f.ws_pub_select(u)));
+    }
+    let before = common::now_ms();
+    for (u, p) in [(&a, 5), (&b, 3)] {
+        let m = Msg::new(Mt::Request, None, p, 0);
+        floor::run(&r, Entry::of("server_rx", u), |f, t2| Some(f.server_rx(u, &m, true, t2)));
+    }
+    let got = ops::rooms::get(&env).expect("stand check — the room view answers");
+    let d: common::envelope::RoomDetail = serde_json::from_value(got.clone()).expect("the third-party view reads as the shared detail form");
+    assert_eq!((d.floor.speaker.as_deref(), d.floor.queue.clone()), (Some(a.as_str()), vec![b.clone()]), "S-rule-RULE-HOOK-STATUS-3① the speaker and the queue in order come with the room");
+    assert!(d.floor.start.is_some_and(|s| s >= before.saturating_sub(5) && s <= common::now_ms() + 5), "S-rule-RULE-HOOK-STATUS-3② the speaker's start comes in UNIX ms {:?}", d.floor.start);
+    assert!(got["floor"].get("version").is_none(), "S-rule-RULE-HOOK-STATUS-3③ the floor part carries no version");
+    assert_eq!(d.room.room_id, r.id, "stand check — the room part is the client room view");
 }

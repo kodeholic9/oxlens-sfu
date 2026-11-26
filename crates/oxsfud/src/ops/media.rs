@@ -496,18 +496,24 @@ fn unpublish(c: &Ctx, room_id: &str, join_id: &str, ids: &[String]) -> Result<Va
     for id in ids {
         list.push(ctx.find(id).ok_or_else(|| Code::TrackNotFound.failure().with_details(json!({ "track_id": id })))?);
     }
+    remove_streams(&peer, &list);
+    ok(&PublishTracksRes::Remove {})
+}
+
+pub fn remove_streams(peer: &Peer, list: &[Arc<PubStream>]) {
+    let Some(s) = super::sfu() else { return };
     let mut removed: std::collections::BTreeMap<String, Vec<TrackEntry>> = std::collections::BTreeMap::new();
-    for st in &list {
+    for st in list {
         if st.is_half()
-            && let Some(pr) = crate::aff::pub_room(&peer)
+            && let Some(pr) = crate::aff::pub_room(peer)
         {
-            release_floor_if_speaker(&c.user, &pr);
+            release_floor_if_speaker(&peer.user, &pr);
         }
         let listed = st.listed.swap(false, Ordering::AcqRel);
-        drop_stream(&peer, st);
-        let at = st.room.load().as_str().to_string();
-        if listed && !at.is_empty() {
-            removed.entry(at).or_default().push(crate::trk::entry(st));
+        drop_stream(peer, st);
+        let e = crate::trk::entry(st);
+        if listed && !e.room_id.is_empty() {
+            removed.entry(e.room_id.clone()).or_default().push(e);
         }
     }
     for (at, es) in removed {
@@ -516,7 +522,6 @@ fn unpublish(c: &Ctx, room_id: &str, join_id: &str, ids: &[String]) -> Result<Va
             resync_room(&at);
         }
     }
-    ok(&PublishTracksRes::Remove {})
 }
 
 pub fn ready(c: &Ctx, body: &Value) -> Result<Value, Failure> {
