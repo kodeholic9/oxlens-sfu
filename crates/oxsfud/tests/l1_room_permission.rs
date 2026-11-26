@@ -306,3 +306,80 @@ fn joining_again_with_a_lowered_held_half_duplex_bit_has_no_right_to_ask() {
     r.remove(&b);
     drive(ops::rooms::destroy_room(&r, "SV-IMPL-ROOM-LIFE", "l1"));
 }
+
+#[test]
+fn ctl_failures_are_one_failure_form_with_old_codes_and_no_credential_failure() {
+    let _g = serial();
+    router();
+    let id = tag("perm-fail");
+    let r = create(&id);
+    let u = tag("pfl-u");
+    r.join(member(&u), None).expect("registered");
+    let no_room = call(&tag("perm-fail-none"), &u, Permission::ALL).expect_err("no room");
+    assert!(no_room.code == 3001 && no_room.code == Code::RoomNotFound.num(), "S-rule-RULE-HOOK-PERMISSION-14① — 없는 방은 Failure · 이미 있는 번호 3001 ROOM_NOT_FOUND(새 코드 0) {no_room:?}");
+    let not_in = call(&id, "pfl-nobody", Permission::ALL).expect_err("not in the roster");
+    assert!(not_in.code == 3002 && not_in.code == Code::NotInRoom.num(), "S-rule-RULE-HOOK-PERMISSION-14① — 명단에 없는 사람은 Failure · 이미 있는 번호 3002 NOT_IN_ROOM {not_in:?}");
+    let mut bad = envelope(CallKind::Permission, None, None);
+    bad.target_user = Some(u.clone());
+    bad.body = json!({ "room_id": id, "permission": "all" });
+    let unreadable = ops::permission::apply(&bad).expect_err("unreadable permission");
+    let mut nobody = envelope(CallKind::Permission, None, None);
+    nobody.body = json!({ "room_id": id, "permission": Permission::ALL });
+    let untargeted = ops::permission::apply(&nobody).expect_err("no target user");
+    let none = without(|p| {
+        p.publish_audio = false;
+        p.publish_video = false;
+        p.publish_screen = false;
+        p.floor_request = false;
+    });
+    assert_eq!(call(&id, &u, none).ok(), Some(json!(none)), "stand check — every bit goes down");
+    assert_eq!(
+        call(&id, &u, Permission::ALL).ok(),
+        Some(json!(Permission::ALL)),
+        "S-rule-RULE-HOOK-PERMISSION-14② — 호출자 신원이 없는(user_id · sid 없음) ctl 이 비트가 모두 내려간 사람을 올려도 자격을 보지 않고 적용된다(자격은 붙을 때 본다)"
+    );
+    for f in [&no_room, &not_in, &unreadable, &untargeted] {
+        assert_ne!(f.code, Code::NotAuthorized.num(), "S-rule-RULE-HOOK-PERMISSION-14② — ctl 의 실패에 자격 실패(2006)는 없다 {f:?}");
+    }
+    r.remove(&u);
+    drive(ops::rooms::destroy_room(&r, "SV-IMPL-ROOM-LIFE", "l1"));
+}
+
+#[test]
+fn lowering_bits_takes_back_what_is_up_now_and_refuses_the_next_publish() {
+    let _g = serial();
+    router();
+    let id = tag("perm-now");
+    let r = create(&id);
+    let (u, b) = (tag("pn-u"), tag("pn-b"));
+    floor_join(&r, &b);
+    let sub_u = subscriber(&u);
+    enter(&sub_u.p, &r);
+    oxsfud::aff::set_pub_room(&sub_u.p, Some(&id));
+    let (st, _) = published(&sub_u.p, &id, Kind::Audio, Duplex::Full);
+    list(&st, true);
+    floor::run(&r, Entry::of("ws_join", &u), |f, _| Some(f.ws_join(&u, true)));
+    floor::run(&r, Entry::of("ws_pub_select", &u), |f, _| Some(f.ws_pub_select(&u)));
+    request(&r, &u);
+    assert!(r.floor.lock().is_ok_and(|f| f.g == G::Taken && f.speaker.as_deref() == Some(u.as_str())), "stand check — u publishes audio and holds the floor");
+    let down = without(|p| {
+        p.publish_audio = false;
+        p.floor_request = false;
+    });
+    call(&id, &u, down).expect("applied");
+    let gone = sfu().pubs.get(&u).and_then(|c| c.find(&st.track_id)).is_none();
+    let revoked = r.floor.lock().is_ok_and(|f| f.g == G::Prevoke && f.revoking.as_deref() == Some(u.as_str()));
+    assert!(
+        gone && revoked,
+        "S-rule-RULE-HOOK-PERMISSION-3③ — ctl 이 돌아온 그때 이미 올라온 트랙은 내려가 있고 발언은 회수 중이다(그 사람의 다음 발행 · 발언 요청까지 미루지 않는다) track gone {gone} · revoked {revoked}"
+    );
+    let body = json!({ "room_id": id, "join_id": format!("j-{id}"), "tracks": [{ "kind": "audio", "ssrc": 0x5b5b_0001u32, "mid": "7", "pt": 111, "duplex": "full" }] });
+    let next = ops::media::publish(&ctx_of(&sub_u.p), &body);
+    assert!(
+        next.as_ref().err().is_some_and(|f| f.code == 2006 && f.code == Code::NotAuthorized.num() && f.details == Some(json!({ "denied": ["publish_audio"] }))),
+        "S-rule-RULE-HOOK-PERMISSION-7① — ctl 로 비트를 내린 뒤의 발행은 2006 · details.denied = 막힌 비트 이름 배열 {next:?}"
+    );
+    r.remove(&u);
+    r.remove(&b);
+    drive(ops::rooms::destroy_room(&r, "SV-IMPL-ROOM-LIFE", "l1"));
+}

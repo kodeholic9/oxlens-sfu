@@ -239,3 +239,166 @@ async fn run_wakes_on_new_facts() {
     let b: FactsBundle = serde_json::from_slice(&s[0].body).expect("body");
     assert_eq!((b.facts.len(), b.dropped), (1, None), "S-rule-RULE-HOOK-FACTS-SUB-5③ — 버린 것이 없으면 dropped 칸 없음");
 }
+
+async fn read_one(c: &mut tokio::net::TcpStream) -> Option<Seen> {
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 4096];
+    loop {
+        let n = c.read(&mut tmp).await.unwrap_or(0);
+        if n == 0 {
+            return None;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else { continue };
+        let text = String::from_utf8_lossy(&buf[..end]).to_string();
+        let mut lines = text.split("\r\n");
+        let line = lines.next().unwrap_or("").to_string();
+        let head: HashMap<String, String> = lines.filter_map(|l| l.split_once(':')).map(|(k, v)| (k.trim().to_lowercase(), v.trim().to_string())).collect();
+        let len: usize = head.get("content-length").and_then(|v| v.parse().ok()).unwrap_or(0);
+        while buf.len() < end + 4 + len {
+            let n = c.read(&mut tmp).await.unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+        }
+        return Some(Seen { line, head, body: buf[end + 4..(end + 4 + len).min(buf.len())].to_vec() });
+    }
+}
+
+type Arrivals = Arc<Mutex<Vec<(std::time::Instant, Seen)>>>;
+
+async fn responder(steps: Vec<(u64, u16, &'static str)>) -> (u16, Arrivals) {
+    let l = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = l.local_addr().expect("addr").port();
+    let seen: Arrivals = Arc::new(Mutex::new(Vec::new()));
+    let s2 = seen.clone();
+    tokio::spawn(async move {
+        let mut i = 0usize;
+        loop {
+            let Ok((mut c, _)) = l.accept().await else { break };
+            let Some(req) = read_one(&mut c).await else { continue };
+            s2.lock().expect("seen").push((std::time::Instant::now(), req));
+            let (delay, st, extra) = steps.get(i).copied().unwrap_or((0, 200, ""));
+            i += 1;
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+            let _ = c.write_all(format!("HTTP/1.1 {st} X\r\n{extra}content-length: 0\r\nconnection: close\r\n\r\n").as_bytes()).await;
+            let _ = c.shutdown().await;
+        }
+    });
+    (port, seen)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_response_inside_the_timeout_decides() {
+    let (port, _seen) = responder(vec![(150, 503, ""), (150, 204, ""), (150, 200, "")]).await;
+    let t = target(&format!("http://127.0.0.1:{port}/in")).expect("target");
+    let late_fail = post(&t, &tls(), &[], Bytes::from_static(b"{}"), Duration::from_millis(1_000)).await;
+    assert_eq!(late_fail, Sent::Status(503), "PL-KEY-HOOK-WEBHOOK-TIMEOUT-MS② — 값(1000 ms) 안에 온 응답은 150 ms 늦어도 그 응답(503 = 실패)으로 판정");
+    let late_ok = post(&t, &tls(), &[], Bytes::from_static(b"{}"), Duration::from_millis(1_000)).await;
+    assert!(late_ok == Sent::Status(204) && late_ok.ok(), "PL-KEY-HOOK-WEBHOOK-TIMEOUT-MS② — 값 안에 온 2xx 는 150 ms 늦어도 성공으로 판정 {late_ok:?}");
+    let over = post(&t, &tls(), &[], Bytes::from_static(b"{}"), Duration::from_millis(50)).await;
+    assert_eq!(over, Sent::Timeout, "positive control — 같은 늦음(150 ms)도 값(50 ms)을 넘기면 시한 넘김");
+}
+
+fn verify(key: &[u8], s: &Seen, now: u64, tolerance: u64) -> bool {
+    use hmac::Mac;
+    let (Some(id), Some(ts), Some(sigs)) = (s.head.get("webhook-id"), s.head.get("webhook-timestamp").and_then(|v| v.parse::<u64>().ok()), s.head.get("webhook-signature")) else {
+        return false;
+    };
+    if now.abs_diff(ts) > tolerance {
+        return false;
+    }
+    let Ok(mut m) = <hmac::Hmac<sha2::Sha256> as Mac>::new_from_slice(key) else { return false };
+    m.update(format!("{id}.{ts}.").as_bytes());
+    m.update(&s.body);
+    let want = format!("v1,{}", base64::engine::general_purpose::STANDARD.encode(m.finalize().into_bytes()));
+    sigs.split(' ').any(|one| one == want)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_receiver_can_drop_unsigned_and_replayed_requests() {
+    let (port, seen) = receiver(vec![200], false).await;
+    let h = hook();
+    let b = bundle(&h, 1);
+    assert!(deliver(&h, &webhook(port), &knobs(1, 2_000), &tls(), b).await, "형상 — 보냈다");
+    let s = seen.lock().expect("seen")[0].clone();
+    let key = common::system::webhook_secret_key(SECRET).expect("secret");
+    let now = common::now_ms() / 1000;
+    let ts: u64 = s.head.get("webhook-timestamp").and_then(|v| v.parse().ok()).expect("webhook-timestamp");
+    assert!(now.abs_diff(ts) <= 2, "S-rule-RULE-HOOK-WEBHOOK-3④ — webhook-timestamp 는 보낸 시각이다({ts} · 지금 {now})");
+    assert!(verify(&key, &s, now, 300), "positive control — 우리가 보낸 요청은 수신기 검증(Standard Webhooks 대칭 v1 · 허용 오차 5 분)을 지난다");
+    let mut unsigned = s.clone();
+    unsigned.head.remove("webhook-signature");
+    assert!(!verify(&key, &unsigned, now, 300), "형상 — 시험 수신기는 서명 없는 요청을 거른다");
+    let mut forged = s.clone();
+    forged.body = br#"{"facts":[]}"#.to_vec();
+    assert!(!verify(&key, &forged, now, 300), "형상 — 시험 수신기는 몸을 바꾼 요청을 거른다");
+    assert!(!verify(&key, &s, ts + 600, 300), "S-rule-RULE-HOOK-WEBHOOK-3④ — 10 분 뒤 그대로 되쏘면 발신 시각이 허용 오차를 넘어 걸린다");
+    let mut refreshed = s.clone();
+    refreshed.head.insert("webhook-timestamp".into(), (ts + 600).to_string());
+    assert!(!verify(&key, &refreshed, ts + 600, 300), "S-rule-RULE-HOOK-WEBHOOK-3④ — 시각만 새로 바꿔 되쏘면 서명이 시각을 덮어 맞지 않는다");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gone_too_many_and_retry_after_are_plain_failures() {
+    let (port, seen) = responder(vec![(0, 410, ""), (0, 429, "retry-after: 30\r\n"), (0, 503, "retry-after: 30\r\n"), (0, 200, "")]).await;
+    let h = hook();
+    let b = bundle(&h, 1);
+    let ok = deliver(&h, &webhook(port), &knobs(5, 2_000), &tls(), b).await;
+    let at: Vec<std::time::Instant> = seen.lock().expect("seen").iter().map(|(t, _)| *t).collect();
+    assert!(ok && at.len() == 4, "S-rule-RULE-HOOK-WEBHOOK-10① — 410 도 「그 밖의 응답 = 실패」로 같은 재시도를 탄다(넷째에 2xx · 요청 {})", at.len());
+    let gaps: Vec<Duration> = at.windows(2).map(|w| w[1] - w[0]).collect();
+    assert!(gaps[0] >= Duration::from_millis(10), "S-rule-RULE-HOOK-WEBHOOK-10① — 410 뒤 첫 백오프(10 ms) 뒤 다시 보낸다 {gaps:?}");
+    assert!(
+        gaps[1] >= Duration::from_millis(20) && gaps[1] < Duration::from_secs(5),
+        "S-rule-RULE-HOOK-WEBHOOK-10② — 429 + retry-after 30 은 그 머리를 따르지 않고 백오프 간격(20 ms)으로 다시 보낸다 {gaps:?}"
+    );
+    assert!(
+        gaps[2] >= Duration::from_millis(40) && gaps[2] < Duration::from_secs(5),
+        "S-rule-RULE-HOOK-WEBHOOK-10③ — 5xx + retry-after 30 도 그 머리를 따르지 않고 백오프 간격(40 ms)으로 다시 보낸다 {gaps:?}"
+    );
+    let (port2, seen2) = responder(vec![(0, 410, ""); 400]).await;
+    let h2 = hook();
+    tokio::spawn(run(h2.clone(), webhook(port2), knobs(1, 2_000), tls()));
+    h2.offer(h2.build("r1", "room_created", json!({ "room_id": "r1" }), 1));
+    assert!(wait_given_up(&h2, 1).await, "형상 — 410 만 받은 첫 묶음은 재시도 상한(1)에서 버렸다");
+    let kinds = |s: &Arrivals| -> Vec<String> {
+        s.lock()
+            .map(|g| g.iter().filter_map(|(_, x)| serde_json::from_slice::<FactsBundle>(&x.body).ok()).flat_map(|b| b.facts.into_iter().map(|f| f.kind)).collect())
+            .unwrap_or_default()
+    };
+    h2.offer(h2.build("r1", "room_closed", json!({ "room_id": "r1" }), 2));
+    let until = tokio::time::Instant::now() + Duration::from_secs(2);
+    while !kinds(&seen2).iter().any(|k| k == "room_closed") && tokio::time::Instant::now() < until {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(kinds(&seen2).iter().any(|k| k == "room_closed"), "S-rule-RULE-HOOK-WEBHOOK-10① — 410 을 받은 수신처를 끄지 않는다(다음 묶음도 그 수신처로 간다)");
+}
+
+async fn wait_given_up(h: &Hook, n: u64) -> bool {
+    let until = tokio::time::Instant::now() + Duration::from_secs(2);
+    while h.given_up.load(Ordering::Relaxed) < n && tokio::time::Instant::now() < until {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    h.given_up.load(Ordering::Relaxed) >= n
+}
+
+#[test]
+fn there_is_no_slot_for_a_webhook_ca() {
+    let base = format!(
+        "[hub]\nlisten = \"0.0.0.0:1974\"\n[bus]\nnamespace = \"ox\"\n[[hub.auth.api_keys]]\nkey = \"acme\"\nsecret = \"s\"\nhook_allowed = true\nfacts = [\"*\"]\n[[hook.webhooks]]\nurl = \"https://h.example/in\"\nsecret = \"{SECRET}\"\nkey = \"acme\"\n"
+    );
+    assert!(common::system::System::parse(&base).is_ok(), "positive control — https 수신처 하나가 선다");
+    for extra in ["ca = \"/etc/ca.pem\"\n", "root_ca = \"/etc/ca.pem\"\n", "ca_file = \"/etc/ca.pem\"\n"] {
+        assert!(
+            common::system::System::parse(&format!("{base}{extra}")).is_err(),
+            "S-rule-RULE-HOOK-WEBHOOK-11③ — 수신처마다 CA 를 두는 칸이 없다(모르는 키 = 기동 실패) {extra:?}"
+        );
+    }
+    assert!(common::system::System::parse(&format!("[hook]\nfacts_bundle_max_bytes = 1024\n{base}")).is_ok(), "positive control — [hook] 표의 아는 키는 선다");
+    assert!(
+        common::system::System::parse(&format!("[hook]\nwebhook_ca = \"/etc/ca.pem\"\n{base}")).is_err(),
+        "S-rule-RULE-HOOK-WEBHOOK-11③ — [hook] 에도 webhook CA 칸이 없다(모르는 키 = 기동 실패)"
+    );
+}

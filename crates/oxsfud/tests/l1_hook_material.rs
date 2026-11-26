@@ -248,3 +248,44 @@ fn a_destroy_while_talking_closes_after_the_queued_floor_facts() {
     assert_eq!(names[names.len() - 2], "floor_released", "HK-FACT-ROOM-CLOSED⑤ the talker sent out by the destroy is released before the room closes");
     assert_eq!(count("room_closed"), 1, "HK-FACT-ROOM-CLOSED③ one room_closed");
 }
+
+fn participant_events_within(sub: &mut Subscriber, wait: std::time::Duration) -> Vec<Notice> {
+    drive(async {
+        let mut out = Vec::new();
+        while let Ok(Some(s)) = tokio::time::timeout(wait, sub.recv()).await {
+            let n: Notice = serde_json::from_slice(&s.payload).expect("notice JSON");
+            if n.op == oxsig::Op::ParticipantEvent.as_u16() {
+                out.push(n);
+            }
+        }
+        out
+    })
+}
+
+#[test]
+fn leave_kick_and_session_gone_each_send_one_left_without_a_reason() {
+    let _g = serial();
+    router();
+    let id = tag("left-three");
+    let r = create(&id);
+    let keep = tag("lt-keep");
+    r.join(member(&keep), None).expect("registered");
+    let mut sub = listen(&id);
+    for why in [oxsfud::gc::Why::Leave, oxsfud::gc::Why::Kick, oxsfud::gc::Why::SessionGone] {
+        let u = tag(&format!("lt-{}", why.as_str()));
+        let s = subscriber(&u);
+        enter(&s.p, &r);
+        let _ = participant_events_within(&mut sub, std::time::Duration::from_millis(300));
+        assert!(oxsfud::gc::leave(&s.p, &id, why, false), "stand check — {} goes through the one leave procedure", why.as_str());
+        let lefts: Vec<Notice> = participant_events_within(&mut sub, WAIT).into_iter().filter(|n| n.body["type"] == "left" && n.body["user_id"] == u.as_str()).collect();
+        assert_eq!(lefts.len(), 1, "HK-FACT-PARTICIPANT-LEFT② — {} 는 PARTICIPANT_EVENT left 하나를 낸다(hub 는 이것 하나로 participant_left 를 짓는다) {lefts:?}", why.as_str());
+        let keys: Vec<&str> = lefts[0].body.as_object().expect("obj").keys().map(String::as_str).collect();
+        assert!(
+            ["reason", "why", "cause"].iter().all(|k| !keys.contains(k)),
+            "HK-FACT-PARTICIPANT-LEFT② — {} 의 left 에 까닭 칸 0 {keys:?}",
+            why.as_str()
+        );
+    }
+    r.remove(&keep);
+    drive(ops::rooms::destroy_room(&r, "SV-IMPL-ROOM-LIFE", "l1"));
+}

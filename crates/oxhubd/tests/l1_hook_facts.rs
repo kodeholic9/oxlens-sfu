@@ -149,3 +149,44 @@ fn every_hub_follows_facts_tokens() {
         &main[line_start..at + 30]
     );
 }
+
+#[test]
+fn the_policy_queue_max_drops_the_oldest_first_and_counts() {
+    let p = common::policy::Policy::parse("[hook]\nqueue_max = 3\n").expect("policy");
+    let h = Hook::new("hubA", vec![("acme".into(), vec!["*".into()])], p.hook.queue_max);
+    let mut ids = Vec::new();
+    for t in 0..5u64 {
+        let f = h.build("r1", "participant_joined", json!({ "n": t }), 1 + t);
+        ids.push(f.fact_id.clone());
+        h.offer(f);
+    }
+    assert_eq!(
+        (h.queued("acme"), h.queue_full.load(Ordering::Relaxed)),
+        (3, 2),
+        "PL-KEY-HOOK-QUEUE-MAX① — 계정 큐가 hook.queue_max(3)에 닿으면 넘친 만큼 버리고 fact_queue_full 을 센다"
+    );
+    let b = h.take("acme", 1 << 20).expect("bundle");
+    let got: Vec<String> = b.facts.iter().map(|f| f.fact_id.clone()).collect();
+    assert_eq!(got, ids[2..].to_vec(), "PL-KEY-HOOK-QUEUE-MAX① — 오래된 것부터 버린다(남은 것은 늦게 든 셋)");
+    assert_eq!(b.dropped, Some(2), "PL-KEY-HOOK-QUEUE-MAX③ — 버린 수가 다음 묶음의 버림 표지(dropped)에 든다");
+}
+
+#[test]
+fn facts_have_no_room_scope() {
+    let h = hook(&[("named", &["participant_joined"]), ("all", &["*"])], 100);
+    for (t, room) in ["r1", "r2", "r9"].iter().enumerate() {
+        h.offer(h.build(room, "participant_joined", json!({}), 1 + t as u64));
+    }
+    let rooms = |k: &str| -> Vec<String> { h.take(k, 1 << 20).map(|b| b.facts.into_iter().map(|f| f.room_id).collect()).unwrap_or_default() };
+    let all = vec!["r1".to_string(), "r2".to_string(), "r9".to_string()];
+    assert_eq!(rooms("named"), all, "S-rule-RULE-HOOK-FACTS-SUB-2④ — 방 범위 칸이 없다: 이름 목록 계정도 배포의 모든 방 사실을 받는다");
+    assert_eq!(rooms("all"), all, "S-rule-RULE-HOOK-FACTS-SUB-2④ — \"*\" 계정도 배포의 모든 방 사실을 받는다");
+    let base = "[hub]\nlisten = \"0.0.0.0:1974\"\n[bus]\nnamespace = \"ox\"\n[[hub.auth.api_keys]]\nkey = \"acme\"\nsecret = \"s\"\nhook_allowed = true\nfacts = [\"*\"]\n";
+    assert!(common::system::System::parse(base).is_ok(), "positive control — 사실 구독 계정이 선다");
+    for extra in ["rooms = [\"r1\"]\n", "facts_rooms = [\"r1\"]\n", "room = \"r1\"\n"] {
+        assert!(
+            common::system::System::parse(&format!("{base}{extra}")).is_err(),
+            "S-rule-RULE-HOOK-FACTS-SUB-2④ — 계정에 방 범위 칸을 둘 자리가 없다(모르는 키 = 기동 실패) {extra:?}"
+        );
+    }
+}
