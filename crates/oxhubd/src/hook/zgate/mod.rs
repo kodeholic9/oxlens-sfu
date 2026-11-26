@@ -262,7 +262,7 @@ impl Gate {
         }
     }
 
-    fn sparse(&self, why: &'static str, detail: &str) {
+    pub fn sparse(&self, why: &'static str, detail: &str) {
         let n = self.bump(why);
         if n.is_power_of_two() {
             tracing::warn!(kind = "diag", spec = "SV-RULE-CHAT-EXT-SUB", why = why, detail = %detail, times = n, "zenoh gate");
@@ -397,11 +397,12 @@ impl Gate {
                     Ok(p) => out.parts.extend(p),
                     Err(w) => self.sparse("send did not encode", &format!("{w:?}")),
                 },
-                Effect::Open(Lane::Chat) if self.chat.is_none() => {
-                    self.drops.refused.fetch_add(1, Ordering::Relaxed);
-                    self.sparse("chat/sub declared on a hub without [chat]", &session.cn);
-                }
                 Effect::Open(lane) => {
+                    if let Err(why) = judge::lane_served(lane, &session.cn, &self.accounts, self.chat.is_some()) {
+                        self.drops.refused.fetch_add(1, Ordering::Relaxed);
+                        self.sparse(why, &session.cn);
+                        continue;
+                    }
                     let declared = match lane {
                         Lane::Chat => self.bus.declare_ext(&session.cn, cid).await,
                         Lane::Facts => self.bus.declare_facts(&session.cn, cid).await,

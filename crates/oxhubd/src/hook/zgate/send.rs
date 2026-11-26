@@ -223,7 +223,7 @@ impl Gate {
         if f.lane == Lane::Chat
             && let Some(c) = &self.chat
         {
-            c.done(&self.drops, key, f.ids, o);
+            c.done(self, key, f.ids, o);
         }
         if let Some(w) = f.waiter {
             let _ = w.send(o);

@@ -126,6 +126,10 @@ async fn rig_with(k: TestKnobs) -> Rig {
 }
 
 async fn rig_full(k: TestKnobs, with_chat: bool) -> Rig {
+    rig_accounts(k, with_chat, &[]).await
+}
+
+async fn rig_accounts(k: TestKnobs, with_chat: bool, webhooked: &[&str]) -> Rig {
     let _ = tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).with_test_writer().try_init();
     let pki = Pki::new();
     let (bus, events) = Bus::open("n1", "e1", 1_000, BusCfg { listen: vec!["127.0.0.1:0".into()], advertise: vec![], connect: vec![], namespace: NS.into() }).await.expect("bus");
@@ -136,7 +140,8 @@ async fn rig_full(k: TestKnobs, with_chat: bool) -> Rig {
         ("other".into(), Standing::Ok),
         ("nohook".into(), Standing::NoHook),
         ("nosub".into(), Standing::Ok),
-    ]);
+    ])
+    .with_webhooks(webhooked);
     let subs = ExtSubs::new(vec![("acme".into(), Subscribe::try_from(vec![String::new()]).expect("subscribe"))]);
     let store = Store::open("memory:", Visibility::Shared).expect("store").subscribed(subs);
     let chat = Arc::new(Chat::new(store, Limits::default()));
@@ -1046,6 +1051,282 @@ async fn the_facts_lane_has_its_own_token_and_carries_bundles() {
     assert!(seen[0].1.get("live").is_none(), "S-rule-RULE-HOOK-FACTS-SUB-5② — live 칸 0");
     drop(q);
     assert!(wait(3_000, || r.bus.facts_list("acme").is_empty()).await, "정:RULE-BUS-PRESENCE — 사실 queryable 이 걷히면 토큰을 놓는다");
+    drop(s);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_facts_bundle_never_acked_is_given_up_after_max_tries() {
+    let r = rig().await;
+    let hook = Arc::new(oxhubd::hook::Hook::new("e1", vec![("acme".into(), vec!["*".into()])], 100));
+    let _ = hook.zgate.set(r.gate.clone());
+    let s = open(&r, "acme").await;
+    let q = s.declare_queryable(facts_key("acme")).await.expect("facts queryable");
+    let _cid = open_cid(&r).await;
+    assert!(wait(3_000, || r.bus.facts_list("acme").len() == 1).await, "형상 — 사실 구독 연결 하나");
+    const MAX: u32 = 3;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
+    let _h = tokio::spawn(async move {
+        let mut n = 0u32;
+        while let Ok(query) = q.recv_async().await {
+            let _ = tx.send(body_of(&query));
+            n += 1;
+            if n <= MAX {
+                let _ = query.reply_err(b"no".to_vec()).await;
+            } else {
+                let _ = query.reply(query.key_expr().clone(), b"ok".to_vec()).await;
+            }
+        }
+    });
+    let knobs = oxhubd::hook::carry::Knobs { max_tries: MAX, bundle_max_bytes: 65_536, reply_timeout: Duration::from_millis(800), window: 4, backoff_ms: vec![150, 300] };
+    tokio::spawn(oxhubd::hook::carry::run(hook.clone(), r.bus.clone(), "acme".into(), knobs));
+    hook.offer(hook.build("r1", "room_created", serde_json::json!({ "room_id": "r1" }), 1));
+    let mut seen = Vec::new();
+    let mut at = Vec::new();
+    for _ in 0..MAX {
+        seen.push(tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.expect("query in time").expect("query"));
+        at.push(Instant::now());
+    }
+    assert!(seen.iter().all(|b| b == &seen[0]), "S-rule-RULE-HOOK-FACTS-SUB-6② — ACK 아닌 끝마다 같은 묶음이 다시 온다");
+    let gaps: Vec<Duration> = at.windows(2).map(|w| w[1] - w[0]).collect();
+    assert!(
+        gaps[0] >= Duration::from_millis(130) && gaps[1] >= Duration::from_millis(270),
+        "PL-KEY-HOOK-RETRY-BACKOFF-MS① · S-rule-RULE-HOOK-FACTS-SUB-6⑥ — 사실 다시 보내기 간격은 n 번째 ACK 아닌 끝 뒤 retry_backoff_ms 의 n 번째 값(한순간에 상한을 소진하지 않는다): {gaps:?}"
+    );
+    assert!(wait(3_000, || hook.given_up.load(Ordering::Relaxed) == 1).await, "S-rule-RULE-HOOK-FACTS-SUB-6⑤ · PL-KEY-HOOK-EXT-MAX-TRIES — 사실 묶음은 ext_max_tries 번 뒤 버리고 fact_given_up +1");
+    let next = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.expect("next in time").expect("next");
+    assert_eq!(next["dropped"], 1, "S-rule-RULE-HOOK-FACTS-SUB-6⑤ · PL-KEY-HOOK-EXT-MAX-TRIES — 버린 사실 수가 다음 묶음의 버림 표지(dropped)에 든다");
+    assert_eq!(next["facts"], serde_json::json!([]), "S-rule-RULE-HOOK-FACTS-SUB-5⑦ — 줄이 비어도 버린 수가 있으면 빈 묶음으로 알린다");
+    hook.offer(hook.build("r1", "room_closed", serde_json::json!({ "room_id": "r1" }), 2));
+    let after = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.expect("after in time").expect("after");
+    assert_eq!(after["facts"][0]["type"], "room_closed");
+    assert!(after.get("dropped").is_none(), "S-rule-RULE-HOOK-FACTS-SUB-5③ — 알린 뒤에는 버림 표지가 0(칸 없음)");
+    drop(s);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_slow_facts_connection_does_not_stall_the_others() {
+    let r = rig().await;
+    let hook = Arc::new(oxhubd::hook::Hook::new("e1", vec![("acme".into(), vec!["*".into()])], 100));
+    let _ = hook.zgate.set(r.gate.clone());
+    let slow = open(&r, "acme").await;
+    let qs = slow.declare_queryable(facts_key("acme")).await.expect("slow queryable");
+    assert!(wait(3_000, || r.bus.facts_list("acme").len() == 1).await, "형상 — 느린 연결");
+    let fast = open(&r, "acme").await;
+    let qf = fast.declare_queryable(facts_key("acme")).await.expect("fast queryable");
+    assert!(wait(3_000, || r.bus.facts_list("acme").len() == 2).await, "형상 — 연결 둘");
+    let (held_tx, mut held_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let _hs = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok(query) = qs.recv_async().await {
+            let _ = held_tx.send(());
+            held.push(query);
+        }
+    });
+    let (fast_tx, mut fast_rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
+    let _hf = tokio::spawn(async move {
+        while let Ok(query) = qf.recv_async().await {
+            let _ = fast_tx.send(body_of(&query));
+            let _ = query.reply(query.key_expr().clone(), b"ok".to_vec()).await;
+        }
+    });
+    const WINDOW: usize = 2;
+    const N: usize = 8;
+    let knobs = oxhubd::hook::carry::Knobs { max_tries: 10, bundle_max_bytes: 1, reply_timeout: Duration::from_secs(20), window: WINDOW, backoff_ms: vec![100] };
+    tokio::spawn(oxhubd::hook::carry::run(hook.clone(), r.bus.clone(), "acme".into(), knobs));
+    for i in 0..N {
+        hook.offer(hook.build("r1", "participant_joined", serde_json::json!({ "user_id": format!("u{i}") }), 1 + i as u64));
+    }
+    let started = Instant::now();
+    let mut fast_got = 0usize;
+    while fast_got < N - WINDOW && started.elapsed() < Duration::from_secs(5) {
+        if tokio::time::timeout(Duration::from_millis(500), fast_rx.recv()).await.ok().flatten().is_some() {
+            fast_got += 1;
+        }
+    }
+    let mut slow_got = 0usize;
+    while held_rx.try_recv().is_ok() {
+        slow_got += 1;
+    }
+    assert!(slow_got <= WINDOW, "S-rule-RULE-HOOK-FACTS-SUB-7① — 사실 키의 답 못 받은 query ≤ ext_window: {slow_got}");
+    assert_eq!(fast_got + slow_got, N, "정:RULE-BUS-PUBLIC zenoh 넘기기 — 느린 연결이 창을 채워도 건강한 연결로 나머지가 간다(끝을 기다리지 않는다) · fast {fast_got} · slow {slow_got}");
+    assert!(started.elapsed() < Duration::from_secs(5), "정:RULE-BUS-PUBLIC zenoh 넘기기 — 느린 연결의 시한(20s)을 기다리지 않는다 {:?}", started.elapsed());
+    drop(slow);
+    drop(fast);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_webhook_accounts_facts_key_is_ignored_and_counted() {
+    let r = rig_accounts(knobs(), true, &["acme"]).await;
+    let s = open(&r, "acme").await;
+    assert!(wait(3_000, || r.gate.conns().len() == 1).await, "형상 — 붙었다");
+    let refused0 = r.gate.drops.refused.load(Ordering::Relaxed);
+    let _q = s.declare_queryable(facts_key("acme")).await.expect("facts queryable");
+    assert!(wait(3_000, || r.gate.drops.refused.load(Ordering::Relaxed) > refused0).await, "S-rule-RULE-HOOK-FACTS-SUB-3③ — webhook 이 붙은 계정의 사실 구독 선언은 무시하고 ext_refused 를 센다");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(r.bus.facts_list("acme").is_empty(), "S-rule-RULE-HOOK-FACTS-SUB-3③ — 토큰을 세우지 않는다(계정마다 운반 하나)");
+    assert_eq!(r.gate.conns().len(), 1, "S-rule-RULE-HOOK-FACTS-SUB-3③ — 세션은 유지");
+    drop(s);
+}
+
+fn holding(q: zenoh::query::Queryable<zenoh::handlers::FifoChannelHandler<zenoh::query::Query>>, err_first: usize) -> (tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>, tokio::task::JoinHandle<()>) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let h = tokio::spawn(async move {
+        let mut held = Vec::new();
+        let mut n = 0usize;
+        while let Ok(query) = q.recv_async().await {
+            let _ = tx.send(body_of(&query));
+            n += 1;
+            if n <= err_first {
+                let _ = query.reply_err(b"no".to_vec()).await;
+            } else {
+                held.push(query);
+            }
+        }
+    });
+    (rx, h)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_due_bundle_with_every_window_full_does_not_spin() {
+    let mut gk = knobs();
+    gk.reply_timeout = Duration::from_secs(20);
+    let r = rig_with(gk).await;
+    let hook = Arc::new(oxhubd::hook::Hook::new("e1", vec![("acme".into(), vec!["*".into()])], 100));
+    let _ = hook.zgate.set(r.gate.clone());
+    let a = open(&r, "acme").await;
+    let (mut ra, _ha) = holding(a.declare_queryable(facts_key("acme")).await.expect("a"), 0);
+    assert!(wait(3_000, || r.bus.facts_list("acme").len() == 1).await, "형상 — 연결 A");
+    let b = open(&r, "acme").await;
+    let (mut rb, _hb) = holding(b.declare_queryable(facts_key("acme")).await.expect("b"), 1);
+    assert!(wait(3_000, || r.bus.facts_list("acme").len() == 2).await, "형상 — 연결 B");
+    let knobs = oxhubd::hook::carry::Knobs { max_tries: 10, bundle_max_bytes: 1, reply_timeout: Duration::from_secs(20), window: 1, backoff_ms: vec![50] };
+    tokio::spawn(oxhubd::hook::carry::run(hook.clone(), r.bus.clone(), "acme".into(), knobs));
+    for i in 0..3 {
+        hook.offer(hook.build("r1", "participant_joined", serde_json::json!({ "user_id": format!("u{i}") }), 1 + i as u64));
+    }
+    let mut seen = 0usize;
+    let end = Instant::now() + Duration::from_secs(2);
+    while seen < 3 && Instant::now() < end {
+        tokio::select! {
+            Some(_) = ra.recv() => seen += 1,
+            Some(_) = rb.recv() => seen += 1,
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
+    }
+    assert_eq!(seen, 3, "형상 — A 하나 · B 거절 하나 · B 하나 = 두 연결 창이 다 찼고 다시 보낼 묶음 하나가 기다린다");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let before = hook.carry_turns.load(Ordering::Relaxed);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let spun = hook.carry_turns.load(Ordering::Relaxed) - before;
+    assert!(spun <= 5, "정:RULE-BUS-PUBLIC zenoh 넘기기 · 원천 HOOK.model.NextWait — 다시 보낼 묶음의 때가 지났어도 넣을 자리가 없으면 사건으로만 깬다(1초 동안 깸 {spun}번)");
+    drop(a);
+    drop(b);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_bundle_waits_quietly_while_no_connection_and_goes_when_one_comes_back() {
+    let mut gk = knobs();
+    gk.reply_timeout = Duration::from_secs(20);
+    let r = rig_with(gk).await;
+    let hook = Arc::new(oxhubd::hook::Hook::new("e1", vec![("acme".into(), vec!["*".into()])], 100));
+    let _ = hook.zgate.set(r.gate.clone());
+    let a = open(&r, "acme").await;
+    let qa = a.declare_queryable(facts_key("acme")).await.expect("a");
+    assert!(wait(3_000, || r.bus.facts_list("acme").len() == 1).await, "형상 — 연결 A");
+    let (mut ra, ha) = holding(qa, 1);
+    let knobs = oxhubd::hook::carry::Knobs { max_tries: 10, bundle_max_bytes: 65_536, reply_timeout: Duration::from_secs(20), window: 1, backoff_ms: vec![300] };
+    tokio::spawn(oxhubd::hook::carry::run(hook.clone(), r.bus.clone(), "acme".into(), knobs));
+    hook.offer(hook.build("r1", "room_created", serde_json::json!({ "room_id": "r1" }), 1));
+    let first = tokio::time::timeout(Duration::from_secs(3), ra.recv()).await.expect("first in time").expect("first");
+    ha.abort();
+    drop(a);
+    assert!(wait(5_000, || r.bus.facts_list("acme").is_empty()).await, "형상 — 연결이 다 빠졌다(묶음은 다시 보낼 줄에)");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let before = hook.carry_turns.load(Ordering::Relaxed);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let spun = hook.carry_turns.load(Ordering::Relaxed) - before;
+    assert!(spun <= 5, "정:RULE-BUS-PUBLIC zenoh 넘기기 · 원천 HOOK.model.NextWait — 연결이 없으면 연결이 생길 때까지 잔다(1초 동안 깸 {spun}번)");
+    let c = open(&r, "acme").await;
+    let qc = c.declare_queryable(facts_key("acme")).await.expect("c");
+    let got = tokio::time::timeout(Duration::from_secs(5), qc.recv_async()).await.expect("bundle after reconnect").expect("query");
+    let body = body_of(&got);
+    let _ = got.reply(got.key_expr().clone(), b"ok".to_vec()).await;
+    assert_eq!(body["facts"], first["facts"], "정:RULE-BUS-PUBLIC zenoh 넘기기 — 연결이 다시 붙으면 기다리던 그 묶음이 간다");
+    drop(c);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_full_chat_window_does_not_hold_back_facts() {
+    let r = rig().await;
+    let s = open(&r, "acme").await;
+    let qc = s.declare_queryable(sub_key("acme")).await.expect("chat queryable");
+    let qf = s.declare_queryable(facts_key("acme")).await.expect("facts queryable");
+    let cid = open_cid(&r).await;
+    assert!(wait(3_000, || r.gate.lane_open(&cid, Lane::Chat) && r.gate.lane_open(&cid, Lane::Facts)).await, "형상 — 한 연결에 두 키");
+    let (chat_tx, mut chat_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let _hc = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok(query) = qc.recv_async().await {
+            let _ = chat_tx.send(());
+            held.push(query);
+        }
+    });
+    let (facts_tx, mut facts_rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
+    let _hf = tokio::spawn(async move {
+        while let Ok(query) = qf.recv_async().await {
+            let _ = facts_tx.send(body_of(&query));
+            let _ = query.reply(query.key_expr().clone(), b"ok".to_vec()).await;
+        }
+    });
+    let window = knobs().window;
+    for i in 0..window + 3 {
+        post(&r, 100 + i);
+        let msg = r.chat.store.history("u1", "S", oxhubd::chat::store::Dir::Latest, 1).expect("history").messages.remove(0);
+        let _ = r.gate.deliver(&cid, true, vec![msg], None);
+    }
+    let mut chat_seen = 0;
+    while tokio::time::timeout(Duration::from_millis(300), chat_rx.recv()).await.ok().flatten().is_some() {
+        chat_seen += 1;
+    }
+    assert_eq!(chat_seen, window, "형상 — 채팅 키 창이 찼다(답 못 받은 query = ext_window)");
+    let started = Instant::now();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    assert!(r.gate.deliver_facts(&cid, &bundle("floor1"), Some(tx)).expect("deliver").accepted());
+    let got = tokio::time::timeout(Duration::from_secs(2), facts_rx.recv()).await.expect("facts not held back").expect("facts");
+    assert_eq!(got["facts"][0]["fact_id"], "floor1");
+    assert_eq!(tokio::time::timeout(Duration::from_secs(2), rx).await.expect("ended").expect("outcome"), oxhubd::chat::ext::plan::Outcome::Ack);
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "S-rule-RULE-HOOK-FACTS-SUB-7② · S-sym-RULE-HOOK-FACTS-SUB-1 — 채팅 키 창이 차도 사실은 그 뒤에 묶이지 않는다(키마다 창) {:?}",
+        started.elapsed()
+    );
+    drop(s);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn facts_timeouts_in_a_row_close_the_session() {
+    let r = rig().await;
+    let close_at = knobs().close_at;
+    let s = open(&r, "acme").await;
+    let qf = s.declare_queryable(facts_key("acme")).await.expect("facts queryable");
+    let cid = open_cid(&r).await;
+    let _h = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok(query) = qf.recv_async().await {
+            held.push(query);
+        }
+    });
+    let timeouts0 = r.gate.drops.reply_timeout.load(Ordering::Relaxed);
+    for i in 0..close_at {
+        assert!(r.gate.deliver_facts(&cid, &bundle(&format!("t{i}")), None).expect("deliver").accepted(), "형상 — 사실 키 줄에 섰다");
+    }
+    assert!(
+        wait(6_000, || !r.gate.conns().iter().any(|c| c.cid == cid)).await,
+        "S-rule-RULE-HOOK-FACTS-SUB-7③ — 사실 키의 잇단 시한 넘김 ext_timeout_close 번에 그 세션이 닫힌다(클라이언트는 새 연결로 다시 붙는다) · timeouts {} · conns {:?}",
+        r.gate.drops.reply_timeout.load(Ordering::Relaxed) - timeouts0,
+        r.gate.conns()
+    );
+    assert!(r.gate.drops.reply_timeout.load(Ordering::Relaxed) >= timeouts0 + u64::from(close_at), "S-rule-RULE-HOOK-FACTS-SUB-7③ — 시한 넘김을 센다(ext_reply_timeout)");
     drop(s);
 }
 

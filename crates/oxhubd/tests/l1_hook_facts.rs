@@ -139,18 +139,6 @@ async fn owned_interest_and_strict_list() {
 }
 
 #[test]
-fn facts_carry_steps() {
-    use oxhubd::hook::carry::{Step, Try, step};
-    use oxhubd::hook::zgate::send::End;
-    assert_eq!(step(Try::Ended(End::Ack), 2, 10), Step::Done, "S-rule-RULE-HOOK-FACTS-SUB-6① — ACK 면 끝(다시 오지 않는다)");
-    for e in [End::Fail, End::Timeout, End::Closed] {
-        assert_eq!(step(Try::Ended(e), 2, 10), Step::Next(3), "정:RULE-HOOK-FACTS-SUB ACK — ACK 아닌 끝은 시도 수 +1 · 다음 연결 {e:?}");
-    }
-    assert_eq!(step(Try::Ended(End::Fail), 9, 10), Step::GiveUp, "정:RULE-HOOK-FACTS-SUB ACK — 시도 수 상한에 닿으면 버린다");
-    assert_eq!(step(Try::Refused, 4, 10), Step::Next(4), "정:RULE-BUS-PUBLIC zenoh 넘기기 — 줄에 못 넣으면(연결 없음 · 밀림 · 못 닿음) 시도로 세지 않고 다음 연결");
-}
-
-#[test]
 fn every_hub_follows_facts_tokens() {
     let main = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs")).expect("main.rs");
     let at = main.find("bus.follow_facts().await").expect("stand check — main.rs follows int/facts");

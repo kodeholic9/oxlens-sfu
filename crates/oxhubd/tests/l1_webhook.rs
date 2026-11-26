@@ -121,7 +121,7 @@ fn only_2xx_succeeds() {
 fn backoff_then_give_up() {
     let b = [1000, 2000, 4000, 8000, 16000];
     let got: Vec<Option<u64>> = (1..=6).map(|f| retry_after(f, &b, 5).map(|d| d.as_millis() as u64)).collect();
-    assert_eq!(got, vec![Some(1000), Some(2000), Some(4000), Some(8000), Some(16000), None], "S-rule-RULE-HOOK-WEBHOOK-4① — 간격이 지수로 는다(retry_max 를 넘으면 더 기다리지 않는다)");
+    assert_eq!(got, vec![Some(1000), Some(2000), Some(4000), Some(8000), Some(16000), None], "S-rule-RULE-HOOK-WEBHOOK-4① · PL-KEY-HOOK-RETRY-BACKOFF-MS① — 간격이 배열대로(지수로) 는다(retry_max 를 넘으면 더 기다리지 않는다)");
     assert_eq!(retry_after(1, &b, 0), None, "형상 — retry_max 0 이면 첫 실패에 버린다");
 }
 
@@ -206,9 +206,9 @@ async fn give_up_counts_and_hands_back_dropped() {
     let ok = deliver(&h, &webhook(port), &knobs(2, 2_000), &tls(), b).await;
     assert!(!ok, "S-rule-RULE-HOOK-WEBHOOK-4② — 상한을 넘으면 버린다");
     assert_eq!(seen.lock().expect("seen").len(), 3, "정:RULE-HOOK-WEBHOOK 재시도 — 처음 하나 + 재시도 retry_max");
-    assert_eq!(h.given_up.load(Ordering::Relaxed), 3, "S-rule-RULE-HOOK-WEBHOOK-4② — fact_given_up 에 사실 수");
+    assert_eq!(h.given_up.load(Ordering::Relaxed), 3, "S-rule-RULE-HOOK-WEBHOOK-4② · PL-KEY-HOOK-RETRY-MAX② — retry_max 를 넘으면 버리고 fact_given_up 에 사실 수");
     let next = h.take("acme", 65_536).expect("next bundle");
-    assert_eq!(next.dropped, Some(8), "S-rule-RULE-HOOK-WEBHOOK-4④ — 버린 묶음의 사실 수와 실었던 dropped 를 다음 묶음이 알린다");
+    assert_eq!(next.dropped, Some(8), "S-rule-RULE-HOOK-WEBHOOK-4④ · PL-KEY-HOOK-RETRY-MAX② — 버린 묶음의 사실 수와 실었던 dropped 를 다음 묶음이 알린다(버림 표지에 더한다)");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

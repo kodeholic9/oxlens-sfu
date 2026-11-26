@@ -233,7 +233,7 @@ async fn run(cfg: HubCfg) -> i32 {
     }
     let carry = oxhubd::hook::carry::Knobs::of(&cfg.policy.hook, bundle_max);
     for key in hook.zenoh_accounts(&cfg.system) {
-        tokio::spawn(oxhubd::hook::carry::run(hook.clone(), bus.clone(), key, carry));
+        tokio::spawn(oxhubd::hook::carry::run(hook.clone(), bus.clone(), key, carry.clone()));
     }
     let (shut_tx, mut shut_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let hub = Arc::new(Hub {

@@ -2,7 +2,7 @@
 // spec: v1.6 · 정:RULE-CHAT-EXT-SUB · 정:IMPL-CFG-SYSTEM-FILE · 정:RULE-HOOK-DIRECT · 정:RULE-HOOK-CREDENTIAL · 정:RULE-HOOK-KEYSPACE · 정:RULE-HOOK-STATUS · 정:RULE-HOOK-PERMISSION · 정:RULE-HOOK-FACTS-SUB · model: claude-opus-5-5
 //! zenoh 입구의 판단 — 순수 함수 + 사유(키 판단은 원천 `server/areas/hook/behavior/judge.ts` 의 거울 · 벡터 `hook.json`): 선언 키 → 제 계정의 갈래(채팅 · 사실) · 다른 계정 · 허용 키 밖 · get 키 → 방 목록 · 방 상세 · 권한 제어 · 그 밖(답 없이 끝) · 인증서 계정이 붙을 수 있나(연동 허용이면 붙는다 — 채팅 구독 · 사실 칸이 비어도) · InitSyn(판 0x09 · client 만)을 받나와 합의 값(해상도 · 배치 크기는 둘 중 작은 것) · queryable 선언 키가 제 계정 키인가(다른 계정 키 = 세션 닫기 · 허용 키 밖 = 무시).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use common::system::System;
 use zenoh_protocol::core::resolution::Field;
@@ -18,26 +18,48 @@ pub enum Standing {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Accounts(HashMap<String, Standing>);
+pub struct Accounts {
+    standing: HashMap<String, Standing>,
+    webhook: HashSet<String>,
+}
 
 impl Accounts {
     pub fn of(sys: &System) -> Accounts {
-        Accounts(
-            sys.hub
+        Accounts {
+            standing: sys
+                .hub
                 .auth
                 .api_keys
                 .iter()
                 .map(|k| (k.key.clone(), if k.hook_allowed { Standing::Ok } else { Standing::NoHook }))
                 .collect(),
-        )
+            webhook: sys.hook.iter().flat_map(|h| h.webhooks.iter().map(|w| w.key.clone())).collect(),
+        }
     }
 
     pub fn new(list: Vec<(String, Standing)>) -> Accounts {
-        Accounts(list.into_iter().collect())
+        Accounts { standing: list.into_iter().collect(), webhook: HashSet::new() }
+    }
+
+    pub fn with_webhooks(mut self, keys: &[&str]) -> Accounts {
+        self.webhook.extend(keys.iter().map(|k| k.to_string()));
+        self
     }
 
     pub fn standing(&self, cn: &str) -> Option<Standing> {
-        self.0.get(cn).copied()
+        self.standing.get(cn).copied()
+    }
+
+    pub fn has_webhook(&self, cn: &str) -> bool {
+        self.webhook.contains(cn)
+    }
+}
+
+pub fn lane_served(lane: Lane, cn: &str, accounts: &Accounts, has_chat: bool) -> Result<(), &'static str> {
+    match lane {
+        Lane::Chat if !has_chat => Err("chat/sub declared on a hub without [chat]"),
+        Lane::Facts if accounts.has_webhook(cn) => Err("facts/sub declared by an account carried by webhook"),
+        _ => Ok(()),
     }
 }
 

@@ -30,6 +30,7 @@ pub struct Hook {
     pub given_up: AtomicU64,
     pub wake: tokio::sync::Notify,
     pub zgate: std::sync::OnceLock<std::sync::Arc<zgate::Gate>>,
+    pub carry_turns: AtomicU64,
 }
 
 impl Hook {
@@ -44,6 +45,7 @@ impl Hook {
             given_up: AtomicU64::new(0),
             wake: tokio::sync::Notify::new(),
             zgate: std::sync::OnceLock::new(),
+            carry_turns: AtomicU64::new(0),
         }
     }
 

@@ -72,15 +72,15 @@ impl ChatExt {
         ChatExt { store, acks, keys, knobs, drain_st: Mutex::new(HashMap::new()) }
     }
 
-    pub fn done(&self, drops: &Arc<Drops>, key: &str, ids: Vec<String>, o: Outcome) {
+    pub fn done(&self, gate: &Gate, key: &str, ids: Vec<String>, o: Outcome) {
         match o {
             Outcome::Ack => {
                 if self.acks.push(Lane::Ext, (key.to_string(), ids)) != Push::Queued {
-                    tracing::warn!(kind = "diag", spec = "SV-RULE-CHAT-EXT-SUB", key = %key, "ext ack queue full");
+                    gate.sparse("ext ack queue full", key);
                 }
             }
             Outcome::Fail | Outcome::Timeout => {
-                let (st, k, max, drops) = (self.store.clone(), key.to_string(), self.knobs.max_tries, drops.clone());
+                let (st, k, max, drops): (_, _, _, Arc<Drops>) = (self.store.clone(), key.to_string(), self.knobs.max_tries, gate.drops.clone());
                 tokio::task::spawn_blocking(move || match st.ext_failed(&k, &ids, max) {
                     Ok(gone) => {
                         drops.given_up.fetch_add(gone.len() as u64, Ordering::Relaxed);

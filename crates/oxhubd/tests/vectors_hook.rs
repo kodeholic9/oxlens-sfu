@@ -111,6 +111,69 @@ fn judge_declare_vectors() {
 }
 
 #[test]
+fn carry_step_vectors() {
+    use oxhubd::hook::carry::{Step, Try, step};
+    use oxhubd::hook::zgate::send::End;
+    let v = load();
+    for c in cases(&v, "carry_step") {
+        let t = match c["t"].as_str().expect("t") {
+            "ack" => Try::Ended(End::Ack),
+            "fail" => Try::Ended(End::Fail),
+            "timeout" => Try::Ended(End::Timeout),
+            "closed" => Try::Ended(End::Closed),
+            _ => Try::Refused,
+        };
+        let tries = u32::try_from(c["tries"].as_u64().expect("tries")).expect("u32");
+        let max = u32::try_from(c["max"].as_u64().expect("max")).expect("u32");
+        let want = match c["step"]["kind"].as_str().expect("kind") {
+            "done" => Step::Done,
+            "give_up" => Step::GiveUp,
+            _ => Step::Next(u32::try_from(c["step"]["tries"].as_u64().expect("next tries")).expect("u32")),
+        };
+        assert_eq!(step(t, tries, max), want, "S-rule-RULE-HOOK-FACTS-SUB-6①②③④⑤ · PL-KEY-HOOK-EXT-MAX-TRIES · 원천 HOOK.model.CarryStep — ACK 면 끝 · ACK 아닌 끝은 시도 +1 · 상한이면 버림 · 못 넣음은 세지 않음 · {c}");
+    }
+}
+
+#[test]
+fn backoff_vectors() {
+    let v = load();
+    for c in cases(&v, "backoff") {
+        let failures = u32::try_from(c["failures"].as_u64().expect("failures")).expect("u32");
+        let ms: Vec<u32> = c["ms"].as_array().expect("ms").iter().filter_map(|x| x.as_u64().and_then(|n| u32::try_from(n).ok())).collect();
+        let want = c["wait"].as_u64().expect("wait");
+        assert_eq!(oxhubd::hook::carry::backoff(failures, &ms).as_millis(), u128::from(want), "PL-KEY-HOOK-RETRY-BACKOFF-MS① · S-rule-RULE-HOOK-FACTS-SUB-6⑥ · 원천 HOOK.model.Backoff — n 번째 값 · 넘으면 마지막 값 · {c}");
+    }
+}
+
+#[test]
+fn next_wait_vectors() {
+    use oxhubd::hook::carry::{Wait, next_wait};
+    let v = load();
+    for c in cases(&v, "next_wait") {
+        let conns = usize::try_from(c["conns"].as_u64().expect("conns")).expect("usize");
+        let free = c["free"].as_bool().expect("free");
+        let ready = c["ready_in_ms"].as_i64();
+        let want = match c["wait"]["kind"].as_str().expect("kind") {
+            "until" => Wait::Until(std::time::Duration::from_millis(c["wait"]["in_ms"].as_u64().expect("in_ms"))),
+            _ => Wait::Event,
+        };
+        assert_eq!(next_wait(conns, free, ready), want, "정:RULE-BUS-PUBLIC zenoh 넘기기 · 원천 HOOK.model.NextWait — 연결이 없거나 창이 다 찼으면 사건으로만 깬다 · {c}");
+    }
+}
+
+#[test]
+fn pick_vectors() {
+    let v = load();
+    for c in cases(&v, "pick") {
+        let inflight: Vec<usize> = c["inflight"].as_array().expect("inflight").iter().filter_map(|x| x.as_u64().and_then(|n| usize::try_from(n).ok())).collect();
+        let window = usize::try_from(c["window"].as_u64().expect("window")).expect("usize");
+        let rr = c["rr"].as_u64().expect("rr");
+        let want = c["pick"].as_u64().map(|i| usize::try_from(i).expect("usize"));
+        assert_eq!(oxhubd::hook::carry::pick(&inflight, window, rr), want, "S-rule-RULE-HOOK-FACTS-SUB-7① · 원천 HOOK.model.Pick — 창이 찬 연결은 건너뛰고 · 모두 차면 보내지 않는다 · {c}");
+    }
+}
+
+#[test]
 fn queue_vectors() {
     let v = load();
     for c in cases(&v, "queue") {

@@ -95,6 +95,7 @@ pub struct Bus {
     keep: Mutex<Vec<Forward>>,
     pub ev_drop: AtomicU64,
     pub malformed: Arc<AtomicU64>,
+    pub facts_changed: tokio::sync::Notify,
 }
 
 enum Ev {
@@ -143,6 +144,7 @@ impl Bus {
             keep: Mutex::new(Vec::new()),
             ev_drop: AtomicU64::new(0),
             malformed: Arc::new(AtomicU64::new(0)),
+            facts_changed: tokio::sync::Notify::new(),
         });
         bus.start().await?;
         Ok((bus, rx))
@@ -242,6 +244,7 @@ impl Bus {
 
     fn on_token_sample(&self, keys: &Keys, key: &str, put: bool) -> Option<String> {
         let parsed = keys.parse(key);
+        let facts = matches!(&parsed, Some(Parsed::Facts { .. }));
         let own = match &parsed {
             Some(Parsed::Room { room, node, .. }) if put && node == &self.node => Some(room.clone()),
             _ => None,
@@ -264,6 +267,9 @@ impl Bus {
         };
         if let Ok(mut v) = self.view.lock() {
             v.on_token(ev, common::now_ms());
+        }
+        if facts {
+            self.facts_changed.notify_waiters();
         }
         own
     }

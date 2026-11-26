@@ -1204,5 +1204,339 @@
     "kind": "outside"
    }
   }
+ ],
+ "carry_step": [
+  {
+   "t": "ack",
+   "tries": 2,
+   "max": 10,
+   "step": {
+    "kind": "done"
+   }
+  },
+  {
+   "t": "refused",
+   "tries": 4,
+   "max": 10,
+   "step": {
+    "kind": "next",
+    "tries": 4
+   }
+  },
+  {
+   "t": "refused",
+   "tries": 0,
+   "max": 1,
+   "step": {
+    "kind": "next",
+    "tries": 0
+   }
+  },
+  {
+   "t": "fail",
+   "tries": 2,
+   "max": 10,
+   "step": {
+    "kind": "next",
+    "tries": 3
+   }
+  },
+  {
+   "t": "timeout",
+   "tries": 2,
+   "max": 10,
+   "step": {
+    "kind": "next",
+    "tries": 3
+   }
+  },
+  {
+   "t": "closed",
+   "tries": 2,
+   "max": 10,
+   "step": {
+    "kind": "next",
+    "tries": 3
+   }
+  },
+  {
+   "t": "fail",
+   "tries": 8,
+   "max": 10,
+   "step": {
+    "kind": "next",
+    "tries": 9
+   }
+  },
+  {
+   "t": "fail",
+   "tries": 9,
+   "max": 10,
+   "step": {
+    "kind": "give_up"
+   }
+  },
+  {
+   "t": "timeout",
+   "tries": 0,
+   "max": 1,
+   "step": {
+    "kind": "give_up"
+   }
+  },
+  {
+   "t": "ack",
+   "tries": 9,
+   "max": 10,
+   "step": {
+    "kind": "done"
+   }
+  }
+ ],
+ "backoff": [
+  {
+   "failures": 1,
+   "ms": [
+    1000,
+    2000,
+    4000,
+    8000,
+    16000
+   ],
+   "wait": 1000
+  },
+  {
+   "failures": 2,
+   "ms": [
+    1000,
+    2000,
+    4000,
+    8000,
+    16000
+   ],
+   "wait": 2000
+  },
+  {
+   "failures": 5,
+   "ms": [
+    1000,
+    2000,
+    4000,
+    8000,
+    16000
+   ],
+   "wait": 16000
+  },
+  {
+   "failures": 6,
+   "ms": [
+    1000,
+    2000,
+    4000,
+    8000,
+    16000
+   ],
+   "wait": 16000
+  },
+  {
+   "failures": 9,
+   "ms": [
+    1000,
+    2000,
+    4000,
+    8000,
+    16000
+   ],
+   "wait": 16000
+  },
+  {
+   "failures": 0,
+   "ms": [
+    1000,
+    2000,
+    4000,
+    8000,
+    16000
+   ],
+   "wait": 1000
+  },
+  {
+   "failures": 1,
+   "ms": [
+    150,
+    300
+   ],
+   "wait": 150
+  },
+  {
+   "failures": 3,
+   "ms": [
+    150,
+    300
+   ],
+   "wait": 300
+  },
+  {
+   "failures": 1,
+   "ms": [],
+   "wait": 0
+  }
+ ],
+ "pick": [
+  {
+   "inflight": [
+    0,
+    0
+   ],
+   "window": 2,
+   "rr": 0,
+   "pick": 0
+  },
+  {
+   "inflight": [
+    0,
+    0
+   ],
+   "window": 2,
+   "rr": 1,
+   "pick": 1
+  },
+  {
+   "inflight": [
+    2,
+    0
+   ],
+   "window": 2,
+   "rr": 0,
+   "pick": 1
+  },
+  {
+   "inflight": [
+    2,
+    1
+   ],
+   "window": 2,
+   "rr": 0,
+   "pick": 1
+  },
+  {
+   "inflight": [
+    2,
+    2
+   ],
+   "window": 2,
+   "rr": 0,
+   "pick": null
+  },
+  {
+   "inflight": [
+    1,
+    2,
+    0
+   ],
+   "window": 2,
+   "rr": 1,
+   "pick": 2
+  },
+  {
+   "inflight": [],
+   "window": 2,
+   "rr": 0,
+   "pick": null
+  },
+  {
+   "inflight": [
+    0
+   ],
+   "window": 1,
+   "rr": 7,
+   "pick": 0
+  }
+ ],
+ "next_wait": [
+  {
+   "conns": 0,
+   "free": false,
+   "ready_in_ms": null,
+   "wait": {
+    "kind": "event"
+   }
+  },
+  {
+   "conns": 0,
+   "free": false,
+   "ready_in_ms": 200,
+   "wait": {
+    "kind": "event"
+   }
+  },
+  {
+   "conns": 2,
+   "free": false,
+   "ready_in_ms": null,
+   "wait": {
+    "kind": "event"
+   }
+  },
+  {
+   "conns": 2,
+   "free": false,
+   "ready_in_ms": -5,
+   "wait": {
+    "kind": "event"
+   }
+  },
+  {
+   "conns": 2,
+   "free": false,
+   "ready_in_ms": 300,
+   "wait": {
+    "kind": "event"
+   }
+  },
+  {
+   "conns": 2,
+   "free": true,
+   "ready_in_ms": null,
+   "wait": {
+    "kind": "event"
+   }
+  },
+  {
+   "conns": 2,
+   "free": true,
+   "ready_in_ms": 0,
+   "wait": {
+    "kind": "until",
+    "in_ms": 0
+   }
+  },
+  {
+   "conns": 2,
+   "free": true,
+   "ready_in_ms": -40,
+   "wait": {
+    "kind": "until",
+    "in_ms": 0
+   }
+  },
+  {
+   "conns": 2,
+   "free": true,
+   "ready_in_ms": 250,
+   "wait": {
+    "kind": "until",
+    "in_ms": 250
+   }
+  },
+  {
+   "conns": 1,
+   "free": true,
+   "ready_in_ms": 1,
+   "wait": {
+    "kind": "until",
+    "in_ms": 1
+   }
+  }
  ]
 }
