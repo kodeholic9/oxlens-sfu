@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-OPS-SURFACE · 정:RULE-BUS-EVENTS · 정:RULE-BUS-REQUEST · 정:IMPL-SES-HANDOVER · 정:CAND-DOC-ORCHESTRATION-ASPECT · 정:IMPL-CHAT-FANOUT · model: claude-opus-5-5
-//! 운영 · 조율 — hub 상태 묶음 · 버스 사건(통지 · 방 소멸 · node 사이 요청)을 세션 · 방에 잇는다 · HTTP 표면.
+// spec: v1.6 · 정:RULE-OPS-SURFACE · 정:RULE-BUS-EVENTS · 정:RULE-BUS-REQUEST · 정:IMPL-SES-HANDOVER · 정:CAND-DOC-ORCHESTRATION-ASPECT · 정:IMPL-CHAT-FANOUT · 정:RULE-BUS-PUBLIC · 정:RULE-HOOK-FACTS · model: claude-opus-5-5
+//! 운영 · 조율 — hub 상태 묶음 · 버스 사건(통지 · 방 소멸 · node 사이 요청)을 세션 · 방에 잇는다 · HTTP 표면 · ★방 통지 길목 한 곳에서 가른다(재료 표지는 맡은 hub 만 사실로 · 맡지 않은 hub 는 로그 · 계수 없이 버림 · A 평면 통지는 배달하고 맡은 방이면 사실 하나 더) · 방 소멸에 늘 관심을 거둔다.
 
 pub mod admin;
 pub mod http;
@@ -16,6 +16,7 @@ use oxsig::Code;
 use tokio::sync::mpsc;
 
 use crate::bus::{Bus, BusEvent, Query};
+use crate::hook::facts::{self, Route};
 use crate::ses;
 use supervisor::Supervisor;
 
@@ -33,6 +34,7 @@ pub struct Hub {
     pub shutdown: mpsc::UnboundedSender<String>,
     pub log_files: Option<std::path::PathBuf>,
     pub data_root: Option<std::path::PathBuf>,
+    pub hook: Arc<crate::hook::Hook>,
 }
 
 impl Hub {
@@ -45,14 +47,33 @@ impl Hub {
 pub async fn dispatch(hub: Arc<Hub>, mut rx: mpsc::UnboundedReceiver<BusEvent>) {
     while let Some(ev) = rx.recv().await {
         match ev {
-            BusEvent::RoomNotice { room, notice } => ses::deliver_room(&hub.ses, &room, &notice),
+            BusEvent::RoomNotice { room, notice } => room_notice(&hub, &room, &notice),
             BusEvent::UserNotice { user, notice } => ses::deliver_user(&hub.ses, &user, &notice).await,
-            BusEvent::RoomDropped(room) => ses::room_dropped(&hub.ses, &room).await,
+            BusEvent::RoomDropped(room) => {
+                ses::room_dropped(&hub.ses, &room).await;
+                hub.bus.disown_room(&room).await;
+            }
             BusEvent::Query(q) => {
                 let hub = hub.clone();
                 tokio::spawn(async move { answer(&hub, q).await });
             }
         }
+    }
+}
+
+fn room_notice(hub: &Hub, room: &str, notice: &common::envelope::Notice) {
+    match facts::route(notice, hub.bus.owns(room)) {
+        Route::Deliver(kind) => {
+            ses::deliver_room(&hub.ses, room, notice);
+            if let Some(k) = kind {
+                hub.hook.offer(hub.hook.build(room, k, notice.body.clone(), common::now_ms()));
+            }
+        }
+        Route::Build(m) => {
+            hub.hook.offer(hub.hook.of_material(room, &m, common::now_ms()));
+        }
+        Route::NotOwner => {}
+        Route::Malformed => hub.bus.count_malformed(),
     }
 }
 

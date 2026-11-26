@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-BUS-PLACEMENT · 정:RULE-BUS-REQUEST · 정:IMPL-ROOM-LIFE · 연:ROOM.http.CREATE_ROOM · 연:ROOM.http.GET_ROOM · 연:ROOM.http.LIST_ROOMS · 연:RULE-ROOM-CREATE-FORM · 정:CAND-ROOM-CREATE-WAITS-TOKEN · 정:CAND-ROOM-TTL-PERMANENT-MARK · model: claude-opus-5-5
-//! hub 의 방 HTTP — 생성은 배치(HRW) 뒤 그 node 로 · 맵에 보일 때까지 응답을 미룬다 · 상세는 방 → node 맵으로 · 목록은 전 node 병합.
+// spec: v1.6 · 정:RULE-BUS-PLACEMENT · 정:RULE-BUS-REQUEST · 정:IMPL-ROOM-LIFE · 연:ROOM.http.CREATE_ROOM · 연:ROOM.http.GET_ROOM · 연:ROOM.http.LIST_ROOMS · 연:RULE-ROOM-CREATE-FORM · 정:CAND-ROOM-CREATE-WAITS-TOKEN · 정:CAND-ROOM-TTL-PERMANENT-MARK · 정:RULE-HOOK-STATUS · model: claude-opus-5-5
+//! hub 의 방 HTTP — 생성은 배치(HRW) 뒤 그 node 로 · 맵에 보일 때까지 응답을 미룬다 · 상세는 방 → node 맵으로 · 목록은 전 node 병합(클라 길은 못 닿은 node 를 경고하고 나머지로 · ★대외 현황 조회는 엄격 — 못 닿은 node 가 하나라도 있으면 그 Call 의 실패 코드 그대로).
 
 use std::time::Duration;
 
@@ -95,17 +95,28 @@ pub async fn get(bus: &Bus, room: &str, user: Option<&str>, me_allowed: bool, tr
 }
 
 pub async fn list(bus: &Bus) -> Result<ListRoomsRes, Failure> {
+    gather(bus, false).await
+}
+
+pub async fn list_strict(bus: &Bus) -> Result<ListRoomsRes, Failure> {
+    gather(bus, true).await
+}
+
+async fn gather(bus: &Bus, strict: bool) -> Result<ListRoomsRes, Failure> {
     let mut rooms: Vec<RoomSummary> = Vec::new();
     for (node, _) in bus.live_nodes() {
         let env = Envelope::new(CallKind::ListRooms);
         match unwrap(bus.call(&node, &env).await) {
-            Ok(v) => {
-                if let Ok(r) = serde_json::from_value::<ListRoomsRes>(v) {
-                    rooms.extend(r.rooms);
-                }
-            }
+            Ok(v) => match serde_json::from_value::<ListRoomsRes>(v) {
+                Ok(r) => rooms.extend(r.rooms),
+                Err(_) if strict => return Err(Code::SfuError.failure()),
+                Err(_) => {}
+            },
             Err(f) => {
-                tracing::warn!(kind = "diag", spec = "SV-RULE-BUS-REQUEST", target_node = %node, code = f.code, "room list — node did not answer");
+                tracing::warn!(kind = "diag", spec = "SV-RULE-BUS-REQUEST", target_node = %node, code = f.code, strict = strict, "room list — node did not answer");
+                if strict {
+                    return Err(f);
+                }
             }
         }
     }

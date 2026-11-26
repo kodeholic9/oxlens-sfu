@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.12 · 정:RULE-BUS-PRESENCE · 정:RULE-BUS-KEYSPACE · model: claude-opus-5-5
-//! 1층 소스 가드 — 버스 토큰은 `node` · `room` · `sess` · `ext` 넷뿐이다: 운영 소스의 `declare_token` 자리마다 키가 그 넷의 키 짓기 함수에서 나온다 · 방 명단 토큰은 없다(명단의 권위는 sfud 스냅샷 하나)(context 202611/20261124b 서버 규칙 갈래).
+// spec: v1.12 · 정:RULE-BUS-PRESENCE · 정:RULE-BUS-KEYSPACE · 정:RULE-HOOK-FACTS-SUB · model: claude-opus-5-5
+//! 1층 소스 가드 — 버스 토큰은 `node` · `room` · `sess` · `ext` · `facts`(사실 구독 연결 위치) 다섯뿐이다: 운영 소스의 `declare_token` 자리마다 키가 그 다섯의 키 짓기 함수에서 나온다 · 방 명단 토큰은 없다(명단의 권위는 sfud 스냅샷 하나)(context 202611/20261124b 서버 규칙 갈래).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -18,7 +18,7 @@ fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-const KINDS: [&str; 4] = ["node_token(", "room_token(", "sess_token(", "ext_token("];
+const KINDS: [&str; 5] = ["node_token(", "room_token(", "sess_token(", "ext_token(", "facts_token("];
 
 #[test]
 fn bus_tokens_are_node_room_sess_ext_only() {
@@ -53,6 +53,6 @@ fn bus_tokens_are_node_room_sess_ext_only() {
         }
     }
     assert!(sites >= 4, "stand check — the token declarations were found ({sites})");
-    assert!(bad.is_empty(), "S-sym-RULE-BUS-PRESENCE-4 every bus token key comes from node · room · sess · ext — no roster token: {bad:?}");
-    assert_eq!(kinds.len(), 4, "S-sym-RULE-BUS-PRESENCE-4 the four token kinds are all in use: {kinds:?}");
+    assert!(bad.is_empty(), "S-sym-RULE-BUS-PRESENCE-4 every bus token key comes from node · room · sess · ext · facts — no roster token: {bad:?}");
+    assert_eq!(kinds.len(), 5, "S-sym-RULE-BUS-PRESENCE-4 the five token kinds are all in use(facts = 사실 구독 연결 위치 · 정:RULE-BUS-KEYSPACE): {kinds:?}");
 }

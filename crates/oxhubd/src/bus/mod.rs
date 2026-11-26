@@ -5,14 +5,14 @@
 pub mod placement;
 pub mod view;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::envelope::handle::handle_client::HandleClient;
 use common::envelope::handle::{CallReq, HelloReq};
-use common::envelope::{Envelope, Notice, Reply};
+use common::envelope::{CallKind, Envelope, Notice, Reply};
 use common::keyspace::{Keys, Parsed};
 use oxmesh::{Mesh, Token, TokenEvent};
 use oxsig::Code;
@@ -87,6 +87,8 @@ pub struct Bus {
     node_token: Mutex<Option<Token>>,
     sess_tokens: Mutex<HashMap<String, Token>>,
     ext_tokens: Mutex<HashMap<String, Token>>,
+    facts_tokens: Mutex<HashMap<String, Token>>,
+    owned: Mutex<HashSet<String>>,
     room_subs: SubMap,
     user_subs: SubMap,
     local: Mutex<Option<Local>>,
@@ -133,6 +135,8 @@ impl Bus {
             node_token: Mutex::new(None),
             sess_tokens: Mutex::new(HashMap::new()),
             ext_tokens: Mutex::new(HashMap::new()),
+            facts_tokens: Mutex::new(HashMap::new()),
+            owned: Mutex::new(HashSet::new()),
             room_subs: Mutex::new(HashMap::new()),
             user_subs: Mutex::new(HashMap::new()),
             local: Mutex::new(None),
@@ -149,13 +153,21 @@ impl Bus {
         let keys = self.keys.clone();
         let sess = key == self.keys.sess_all();
         let ext = key == self.keys.ext_all();
+        let facts = key == self.keys.facts_all();
         let mut sub = self.session.token_sub(&key, true).await.map_err(|e| format!("token sub: {e}"))?;
         let h = tokio::spawn(async move {
             while let Some(ev) = sub.recv().await {
                 let Some(b) = me.upgrade() else { break };
                 match ev {
-                    TokenEvent::Put(k) => b.on_token_sample(&keys, &k, true),
-                    TokenEvent::Delete(k) => b.on_token_sample(&keys, &k, false),
+                    TokenEvent::Put(k) => {
+                        if let Some(room) = b.on_token_sample(&keys, &k, true) {
+                            let b = b.clone();
+                            tokio::spawn(async move { b.own_room(&room).await });
+                        }
+                    }
+                    TokenEvent::Delete(k) => {
+                        let _ = b.on_token_sample(&keys, &k, false);
+                    }
                     TokenEvent::BatchEnd if sess => {
                         if let Ok(mut v) = b.view.lock() {
                             v.sessions_followed();
@@ -164,6 +176,11 @@ impl Bus {
                     TokenEvent::BatchEnd if ext => {
                         if let Ok(mut v) = b.view.lock() {
                             v.ext_followed();
+                        }
+                    }
+                    TokenEvent::BatchEnd if facts => {
+                        if let Ok(mut v) = b.view.lock() {
+                            v.facts_followed();
                         }
                     }
                     TokenEvent::BatchEnd => {}
@@ -223,8 +240,13 @@ impl Bus {
         Ok(())
     }
 
-    fn on_token_sample(&self, keys: &Keys, key: &str, put: bool) {
-        let ev = match keys.parse(key) {
+    fn on_token_sample(&self, keys: &Keys, key: &str, put: bool) -> Option<String> {
+        let parsed = keys.parse(key);
+        let own = match &parsed {
+            Some(Parsed::Room { room, node, .. }) if put && node == &self.node => Some(room.clone()),
+            _ => None,
+        };
+        let ev = match parsed {
             Some(Parsed::Node { node, inst }) if put => TokenEv::NodePut { node, inst },
             Some(Parsed::Node { node, inst }) => TokenEv::NodeDel { node, inst },
             Some(Parsed::Room { room, node, inst }) if put => TokenEv::RoomPut { room, node, inst },
@@ -233,13 +255,68 @@ impl Bus {
             Some(Parsed::Sess { user, node, sid }) => TokenEv::SessDel { user, node, sid },
             Some(Parsed::Ext { key, node, cid }) if put => TokenEv::ExtPut { key, node, cid },
             Some(Parsed::Ext { key, node, cid }) => TokenEv::ExtDel { key, node, cid },
+            Some(Parsed::Facts { key, node, cid }) if put => TokenEv::FactsPut { key, node, cid },
+            Some(Parsed::Facts { key, node, cid }) => TokenEv::FactsDel { key, node, cid },
             _ => {
                 self.count_malformed();
-                return;
+                return None;
             }
         };
         if let Ok(mut v) = self.view.lock() {
             v.on_token(ev, common::now_ms());
+        }
+        own
+    }
+
+    pub async fn own_room(&self, room: &str) -> bool {
+        let fresh = self.owned.lock().map(|mut g| g.insert(room.to_string())).unwrap_or(false);
+        if fresh {
+            self.interest_room(room, 1).await;
+        }
+        fresh
+    }
+
+    pub async fn disown_room(&self, room: &str) {
+        let had = self.owned.lock().map(|mut g| g.remove(room)).unwrap_or(false);
+        if had {
+            self.interest_room(room, -1).await;
+        }
+    }
+
+    pub fn owns(&self, room: &str) -> bool {
+        self.owned.lock().map(|g| g.contains(room)).unwrap_or(false)
+    }
+
+    pub async fn follow_facts(self: &Arc<Self>) -> Result<(), String> {
+        if let Ok(mut v) = self.view.lock() {
+            v.follow_facts();
+        }
+        let sub = self.token_sub(self.keys.facts_all()).await?;
+        if let Ok(mut k) = self.keep.lock() {
+            k.push(sub);
+        }
+        Ok(())
+    }
+
+    pub fn facts_list(&self, key: &str) -> Vec<(String, String)> {
+        self.view.lock().ok().and_then(|v| v.facts.as_ref().map(|t| t.list(key))).unwrap_or_default()
+    }
+
+    pub async fn declare_facts(&self, key: &str, cid: &str) -> Result<(), String> {
+        let t = self.session.declare_token(&self.keys.facts_token(key, &self.node, cid)).await.map_err(|e| format!("facts token: {e}"))?;
+        if let Ok(mut g) = self.facts_tokens.lock() {
+            g.insert(cid.to_string(), t);
+        }
+        Ok(())
+    }
+
+    pub fn facts_declared(&self) -> usize {
+        self.facts_tokens.lock().map(|g| g.len()).unwrap_or(0)
+    }
+
+    pub fn undeclare_facts(&self, cid: &str) {
+        if let Ok(mut g) = self.facts_tokens.lock() {
+            g.remove(cid);
         }
     }
 
@@ -469,6 +546,22 @@ impl Bus {
     }
 
     pub async fn call_local(&self, env: &Envelope) -> Reply {
+        let created = match env.kind {
+            CallKind::CreateRoom => env.body.get("room_id").and_then(|r| r.as_str()).map(str::to_string),
+            _ => None,
+        };
+        let fresh = match &created {
+            Some(r) => self.own_room(r).await,
+            None => false,
+        };
+        let reply = self.call_unit(env).await;
+        if let (Some(r), true, Reply::Fail { .. }) = (&created, fresh, &reply) {
+            self.disown_room(r).await;
+        }
+        reply
+    }
+
+    async fn call_unit(&self, env: &Envelope) -> Reply {
         let Some(mut l) = self.local() else {
             return Reply::fail(Code::SfuUnavailable);
         };
@@ -552,6 +645,9 @@ impl Bus {
             g.clear();
         }
         if let Ok(mut g) = self.ext_tokens.lock() {
+            g.clear();
+        }
+        if let Ok(mut g) = self.facts_tokens.lock() {
             g.clear();
         }
         self.session.close().await;

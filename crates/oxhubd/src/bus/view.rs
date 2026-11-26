@@ -18,6 +18,8 @@ pub enum TokenEv {
     SessDel { user: String, node: String, sid: String },
     ExtPut { key: String, node: String, cid: String },
     ExtDel { key: String, node: String, cid: String },
+    FactsPut { key: String, node: String, cid: String },
+    FactsDel { key: String, node: String, cid: String },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -109,6 +111,7 @@ pub struct View {
     pub recovered: bool,
     pub sess: Option<SessTable>,
     pub ext: Option<ExtTable>,
+    pub facts: Option<ExtTable>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -137,6 +140,17 @@ impl View {
             recovered: false,
             sess: None,
             ext: None,
+            facts: None,
+        }
+    }
+
+    pub fn follow_facts(&mut self) {
+        self.facts.get_or_insert_with(ExtTable::default);
+    }
+
+    pub fn facts_followed(&mut self) {
+        if let Some(t) = self.facts.as_mut() {
+            t.following = true;
         }
     }
 
@@ -194,6 +208,18 @@ impl View {
                 }
                 return;
             }
+            TokenEv::FactsPut { key, node, cid } => {
+                if let Some(t) = self.facts.as_mut() {
+                    t.put(key, node, cid);
+                }
+                return;
+            }
+            TokenEv::FactsDel { key, node, cid } => {
+                if let Some(t) = self.facts.as_mut() {
+                    t.del(&key, node, cid);
+                }
+                return;
+            }
             ev => ev,
         };
         self.last_token_at = now;
@@ -202,7 +228,12 @@ impl View {
             TokenEv::NodeDel { node, inst } => ("delete", format!("node/{node}/{inst}")),
             TokenEv::RoomPut { room, node, inst } => ("put", format!("room/{room}/{node}/{inst}")),
             TokenEv::RoomDel { room, node, inst } => ("delete", format!("room/{room}/{node}/{inst}")),
-            TokenEv::SessPut { .. } | TokenEv::SessDel { .. } | TokenEv::ExtPut { .. } | TokenEv::ExtDel { .. } => return,
+            TokenEv::SessPut { .. }
+            | TokenEv::SessDel { .. }
+            | TokenEv::ExtPut { .. }
+            | TokenEv::ExtDel { .. }
+            | TokenEv::FactsPut { .. }
+            | TokenEv::FactsDel { .. } => return,
         };
         self.last_event = Some(LastEvent { at_ms: now, kind, key });
         match ev {

@@ -61,7 +61,7 @@ fn hook_ext_window_zero_fails_the_boot() {
 
 #[test]
 fn hook_webhook_timeout_defaults_and_zero_fails_the_boot() {
-    assert_eq!(Policy::parse("").expect("empty").hook.webhook_timeout_ms, 15_000, "PL-KEY-HOOK-WEBHOOK-TIMEOUT-MS default 15000");
+    assert_eq!(Policy::parse("").expect("empty").hook.webhook_timeout_ms, 15_000, "정책:hook.webhook_timeout_ms default 15000");
     assert!(boots("[hook]\nwebhook_timeout_ms = 1\n"), "positive control — 1 boots");
     assert!(!boots("[hook]\nwebhook_timeout_ms = 0\n"), "PL-KEY-HOOK-WEBHOOK-TIMEOUT-MS③ 0 is out of range — the boot fails");
 }

@@ -691,7 +691,7 @@ mod tests {
         let zs = System::parse(&format!("{MIN}{z}{chat}")).unwrap();
         assert_eq!(zs.zenoh_listen(), Some("tls/0.0.0.0:7447"));
         assert!(zs.banner_fields().iter().any(|(k, v)| k == "hook.zenoh_ca" && v == "ca.pem"));
-        assert!(System::parse(&format!("{MIN}{z}")).is_ok(), "S-rule-RULE-HOOK-DIRECT-2 ④ — [chat] 없이 zenoh 입구가 선다(사실 구독 · 현황 · 제어)");
+        assert!(System::parse(&format!("{MIN}{z}")).is_ok(), "정:IMPL-CFG-SYSTEM-FILE · 정:RULE-HOOK-DIRECT — [chat] 없이 zenoh 입구가 선다(사실 구독 · 현황 · 제어)");
         assert!(System::parse(&format!("{MIN}{}{chat}", z.replace("tls/", "tcp/"))).is_err(), "정:IMPL-CFG-SYSTEM-FILE — tls/ 꼴만");
         assert!(System::parse(&format!("{MIN}{}{chat}", z.replace("zenoh_ca = \"ca.pem\"\n", ""))).is_err(), "정:IMPL-CFG-SYSTEM-FILE — 입구가 있는데 CA 가 없음");
         assert!(System::parse(&format!("{MIN}[hook]\nzenoh_cert = \"c.pem\"\n{chat}")).is_err(), "정:IMPL-CFG-SYSTEM-FILE — 입구 없이 인증서(읽지 않는 키)");
@@ -711,14 +711,14 @@ mod tests {
     #[test]
     fn facts_field_boot() {
         let ok = System::parse(&format!("{MIN}{}", acct("acme", true, "facts = [\"floor_granted\", \"room_created\"]\n"))).unwrap();
-        assert!(ok.hub.auth.api_keys[0].wants_facts(), "S-rule-RULE-HOOK-FACTS-SUB-2 ① — 이름 목록");
+        assert!(ok.hub.auth.api_keys[0].wants_facts(), "정:IMPL-CFG-SYSTEM-FILE — facts 이름 목록");
         assert!(
             ok.banner_fields().iter().any(|(k, v)| k == "hub.auth.api_keys[0].facts" && v == "[\"floor_granted\",\"room_created\"]"),
             "정:IMPL-CFG-SYSTEM-FILE — 배너는 계정마다 facts"
         );
-        assert!(System::parse(&format!("{MIN}{}", acct("acme", true, "facts = [\"*\"]\n"))).is_ok(), "S-rule-RULE-HOOK-FACTS-SUB-2 ② — \"*\"");
+        assert!(System::parse(&format!("{MIN}{}", acct("acme", true, "facts = [\"*\"]\n"))).is_ok(), "정:IMPL-CFG-SYSTEM-FILE — facts \"*\"");
         let chat_star = System::parse(&format!("{MIN}{}[chat]\ndb = \"memory:\"\n", acct("acme", true, "subscribe = [\"*\"]\n"))).unwrap();
-        assert!(!chat_star.hub.auth.api_keys[0].wants_facts(), "S-rule-RULE-HOOK-FACTS-SUB-2 ③ — 채팅 subscribe 의 \"*\" 는 사실을 열지 않는다");
+        assert!(!chat_star.hub.auth.api_keys[0].wants_facts(), "S-rule-RULE-HOOK-FACTS-SUB-2③ — 채팅 subscribe 의 \"*\" 는 사실을 열지 않는다(따로 둔 칸)");
         for bad in ["room_*", "floor", "ROOM_CREATED", "", "message_sent"] {
             assert!(
                 System::parse(&format!("{MIN}{}", acct("acme", true, &format!("facts = [\"{bad}\"]\n")))).is_err(),
@@ -739,10 +739,10 @@ mod tests {
         let base = acct("acme", true, "");
         let ok = System::parse(&format!("{MIN}{base}[hook]\n{}", webhook("https://h.example/in", SECRET32, "acme"))).unwrap();
         let hk = ok.hook.as_ref().unwrap();
-        assert_eq!(hk.webhook_of("acme").map(|w| w.url.as_str()), Some("https://h.example/in"), "S-rule-RULE-HOOK-WEBHOOK-2 ③ — 받는 계정은 webhook 에 묶인 계정");
+        assert_eq!(hk.webhook_of("acme").map(|w| w.url.as_str()), Some("https://h.example/in"), "정:IMPL-CFG-SYSTEM-FILE — webhook 은 key 로 계정에 묶인다");
         assert!(ok.banner_fields().iter().any(|(k, v)| k == "hook.webhooks[0].key" && v == "acme"), "정:IMPL-CFG-SYSTEM-FILE — 배너는 webhook 마다 key");
         assert!(ok.banner_fields().iter().any(|(k, v)| k == "hook.webhooks[0].secret" && v == "***"));
-        assert_eq!(webhook_secret_key(SECRET32).map(|k| k.len()), Ok(32), "S-rule-RULE-HOOK-WEBHOOK-3 ② — HMAC 키는 whsec_ 뒤를 base64 로 푼 바이트");
+        assert_eq!(webhook_secret_key(SECRET32).map(|k| k.len()), Ok(32), "정:RULE-HOOK-WEBHOOK 서명 — HMAC 키는 whsec_ 뒤를 base64 로 푼 바이트");
         assert!(System::parse(&format!("{MIN}{base}[hook]\n{}", webhook("http://h:8080/in", SECRET32, "acme"))).is_ok(), "정:IMPL-CFG-SYSTEM-FILE — http 도 받는다");
         let w24 = "whsec_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
         let w64 = "whsec_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==";

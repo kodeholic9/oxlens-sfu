@@ -2,7 +2,8 @@
 // spec: v1.6 · 정:RULE-CHAT-EXT-SUB · 정:RULE-BUS-PUBLIC · 정:RULE-HOOK-FACTS-SUB · model: claude-opus-5-5
 //! 1층 — node 사이 3rd 넘기기(`q/node/{node}/ext`)의 몸은 갈래(`lane`) 둘이다: 채팅 묶음(`chat` — 메시지 목록)과 사실 묶음(`facts` — `{"facts": [...], "dropped": N?}`). 사실 묶음 몸은 3rd 가 받는 몸 그대로이고 `live` 칸이 없으며 버림이 없으면 `dropped` 칸도 없다.
 
-use oxhubd::hook::zgate::send::{ExtDeliver, Fact, FactsBundle};
+use oxhubd::hook::facts::Fact;
+use oxhubd::hook::zgate::send::{ExtDeliver, FactsBundle};
 use serde_json::json;
 
 #[test]
@@ -46,10 +47,10 @@ fn facts_lane_carries_the_bundle_body_as_is() {
     let v = serde_json::to_value(&d).expect("encode");
     assert_eq!(v["lane"], "facts");
     let b = &v["bundle"];
-    assert_eq!(b["facts"][0]["type"], "room_created", "S-rule-RULE-HOOK-FACTS-SUB-5 ① — 사실 꼴은 봉투(type = 카탈로그 이름)");
-    assert!(b.get("live").is_none(), "S-rule-RULE-HOOK-FACTS-SUB-5 ② — live 칸 0");
-    assert!(b.get("dropped").is_none(), "S-rule-RULE-HOOK-FACTS-SUB-5 ③ — 버린 것이 없으면 dropped 칸 0");
+    assert_eq!(b["facts"][0]["type"], "room_created", "S-rule-RULE-HOOK-FACTS-SUB-5① — 묶음 몸의 사실 꼴은 봉투(type = 카탈로그 이름)");
+    assert!(b.get("live").is_none(), "S-rule-RULE-HOOK-FACTS-SUB-5② — live 칸 0");
+    assert!(b.get("dropped").is_none(), "S-rule-RULE-HOOK-FACTS-SUB-5③ — 버린 것이 없으면 dropped 칸 0");
     let with = FactsBundle { facts: Vec::new(), dropped: Some(8) };
-    assert_eq!(serde_json::to_value(&with).expect("encode"), json!({ "facts": [], "dropped": 8 }), "S-rule-RULE-HOOK-FACTS-SUB-5 ① — 빈 묶음 몸 {{\"facts\": [], \"dropped\": N}}");
+    assert_eq!(serde_json::to_value(&with).expect("encode"), json!({ "facts": [], "dropped": 8 }), "S-rule-RULE-HOOK-FACTS-SUB-5⑦ — 빈 묶음 몸 {{\"facts\": [], \"dropped\": N}}");
     assert_eq!(serde_json::from_value::<ExtDeliver>(v).expect("decode"), d);
 }

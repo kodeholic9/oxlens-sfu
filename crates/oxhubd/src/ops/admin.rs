@@ -120,6 +120,8 @@ pub async fn drops(hub: &Hub) -> Value {
         "ext_reply_timeout": gate.map_or(0, |g| g.drops.reply_timeout.load(Ordering::Relaxed)),
         "ext_given_up": gate.map_or(0, |g| g.drops.given_up.load(Ordering::Relaxed)),
         "ext_push_dropped": gate.map_or(0, |g| g.drops.push_dropped.load(Ordering::Relaxed)),
+        "fact_queue_full": hub.hook.queue_full.load(Ordering::Relaxed),
+        "fact_given_up": hub.hook.given_up.load(Ordering::Relaxed),
         "bus_ev_drop": hub.bus.ev_dropped(),
         "bus_malformed": hub.bus.malformed.load(Ordering::Relaxed),
         "log_queue_full": c.queue_full.load(Ordering::Relaxed),

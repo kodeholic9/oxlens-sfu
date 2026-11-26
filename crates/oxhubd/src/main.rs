@@ -144,6 +144,28 @@ async fn run(cfg: HubCfg) -> i32 {
         eprintln!("oxhubd: {e}");
         return 2;
     }
+    if let Err(e) = bus.follow_facts().await {
+        eprintln!("oxhubd: {e}");
+        return 2;
+    }
+    let hook = Arc::new(oxhubd::hook::Hook::new(&inst, oxhubd::hook::Hook::accounts_of(&cfg.system), cfg.policy.hook.queue_max));
+    if let Some(hk) = &cfg.system.hook
+        && !hk.webhooks.is_empty()
+    {
+        let tls = oxhubd::hook::webhook::tls();
+        let knobs = oxhubd::hook::webhook::Knobs::of(&cfg.policy.hook, hk.facts_bundle_max_bytes());
+        for w in &hk.webhooks {
+            match oxhubd::hook::webhook::Webhook::of(w) {
+                Ok(wh) => {
+                    tokio::spawn(oxhubd::hook::webhook::run(hook.clone(), wh, knobs.clone(), tls.clone()));
+                }
+                Err(e) => {
+                    eprintln!("oxhubd: {e}");
+                    return 2;
+                }
+            }
+        }
+    }
     if let Some(c) = &cfg.system.chat {
         match oxhubd::chat::store::Store::open_pool(&c.db, c.pool(), c.history_visibility) {
             Ok(st) => {
@@ -213,6 +235,7 @@ async fn run(cfg: HubCfg) -> i32 {
         shutdown: shut_tx,
         log_files,
         data_root: cfg.system.data_root().map(std::path::PathBuf::from),
+        hook,
     });
     tokio::spawn(ops::dispatch(hub.clone(), bus_rx));
     tokio::spawn(ops::sweeper(hub.clone()));

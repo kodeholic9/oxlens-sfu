@@ -28,8 +28,8 @@ fn facts_item_vectors() {
     for c in cases {
         let item = c["item"].as_str().expect("item");
         let want = c["ok"].as_bool().expect("ok");
-        assert_eq!(facts_item_ok(item), want, "S-rule-RULE-HOOK-FACTS-SUB-2 — 항목 {item:?} 꼴");
+        assert_eq!(facts_item_ok(item), want, "정:IMPL-CFG-SYSTEM-FILE · 원천 HOOK.model.FactsItem — 항목 {item:?} 꼴");
     }
     let named: Vec<&str> = cases.iter().filter(|c| c["ok"] == true).filter_map(|c| c["item"].as_str()).filter(|s| *s != "*").collect();
-    assert_eq!(named, FACT_CATALOG.to_vec(), "HK-FACT-ROOM-CREATED ~ HK-FACT-RECORDING-ENDED 묶음 행 ② — 카탈로그 열세 이름이 원천과 같다(밖 이름 0)");
+    assert_eq!(named, FACT_CATALOG.to_vec(), "정:RULE-HOOK-FACTS 카탈로그 — 열세 이름이 원천과 같다");
 }

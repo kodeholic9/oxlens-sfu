@@ -195,13 +195,13 @@ mod tests {
     #[test]
     fn facts_token_and_facts_sub_keys() {
         let k = Keys::new("c1");
-        assert_eq!(k.facts_token("acme", "n1", "e1a"), "ox/c1/int/facts/acme/n1/e1a", "S-rule-RULE-HOOK-DIRECT-2 ② — 사실 구독 선언 → int/facts/{{key}}/{{node}}/{{cid}}");
+        assert_eq!(k.facts_token("acme", "n1", "e1a"), "ox/c1/int/facts/acme/n1/e1a", "정:RULE-BUS-KEYSPACE — 사실 구독 연결 위치 토큰 int/facts/{{key}}/{{node}}/{{cid}}");
         assert_eq!(
             k.parse("ox/c1/int/facts/acme/n1/e1a"),
             Some(Parsed::Facts { key: "acme".into(), node: "n1".into(), cid: "e1a".into() })
         );
         assert_eq!(k.facts_all(), "ox/c1/int/facts/**");
-        assert_eq!(k.facts_sub("acme"), "ox/c1/pub/v1/facts/sub/acme", "HK-KEY-PUB-V1-FACTS-SUB-KEY ① — hub 가 묻는 키");
+        assert_eq!(k.facts_sub("acme"), "ox/c1/pub/v1/facts/sub/acme", "정:RULE-HOOK-KEYSPACE — 사실 구독 키 facts/sub/{{key}}");
         assert_eq!(k.pub_prefix(), "ox/c1/pub/v1/");
     }
 }

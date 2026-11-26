@@ -1,9 +1,9 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.6 · 정:RULE-BUS-SHAPE · 정:RULE-BUS-REQUEST · 정:RULE-BUS-EVENTS · 정:IMPL-BUS-HOME-LOST · 정:CAND-BUS-HANDLE-SHAPE · 정:CAND-BUS-NOTICE-ENVELOPE · 정:RULE-HOOK-FACTS · 정:RULE-HOOK-PERMISSION · 정:RULE-HOOK-STATUS · 연:RULE-TRN-OP-NUMBERS · 연:FLR.wire · model: claude-opus-5-5
-//! node 안 Handle 과 node 사이 `q/node/{node}/call` 이 함께 나르는 봉투 · 답 · 통지 봉투(JSON) · hub 만 읽는 사실 재료(표지 0xF001 · 몸 `{type, body}` — 발언권은 MBCP 필드 이름 그대로 JSON) · 대외 권한 제어 Call · 방 상세의 발언권 요청 칸.
+//! node 안 Handle 과 node 사이 `q/node/{node}/call` 이 함께 나르는 봉투 · 답 · 통지 봉투(JSON) · hub 만 읽는 사실 재료(표지 0xF001 · 몸 `{type, body}` — 발언권은 MBCP 필드 이름 그대로 JSON) · 대외 권한 제어 Call · 방 상세의 발언권 요청 칸 · 대외 방 상세(`GET_ROOM` 몸 + 발언권 칸 `floor{speaker, queue, start}` — 칸 셋은 늘 있다 · 정:RULE-FLR-SNAPSHOT 꼴).
 
 use oxsig::Failure;
-use oxsig::msg::{PcMode, Permission, RoomSummary};
+use oxsig::msg::{GetRoomRes, PcMode, Permission, RoomSummary};
 use serde::{Deserialize, Serialize};
 
 pub mod handle {
@@ -44,6 +44,20 @@ pub const FACT_CATALOG: [&str; 13] = [
 
 pub fn facts_item_ok(s: &str) -> bool {
     s == "*" || FACT_CATALOG.contains(&s)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RoomFloor {
+    pub speaker: Option<String>,
+    pub queue: Vec<String>,
+    pub start: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoomDetail {
+    #[serde(flatten)]
+    pub room: GetRoomRes,
+    pub floor: RoomFloor,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -258,9 +272,17 @@ mod tests {
         let plain = Envelope::new(CallKind::GetRoom);
         assert!(!String::from_utf8(plain.encode()).unwrap().contains("floor"), "연:RULE-ROOM-DETAIL-NO-FLOOR — 클라 길 GetRoom 봉투에 발언권 칸 없음");
         let hook = Envelope { floor: true, ..Envelope::new(CallKind::GetRoom) };
-        assert_eq!(Envelope::decode(&hook.encode()).unwrap(), hook, "HK-KEY-PUB-V1-Q-ROOM-R ② — 방 상세 + 발언권 요청 칸");
+        assert_eq!(Envelope::decode(&hook.encode()).unwrap(), hook, "정:RULE-HOOK-STATUS — 방 상세의 발언권 요청 칸");
         let perm = Envelope::new(CallKind::Permission);
         assert!(String::from_utf8(perm.encode()).unwrap().contains("\"permission\""));
+    }
+
+    #[test]
+    fn room_floor_fields_always_present() {
+        let v = serde_json::to_value(RoomFloor::default()).unwrap();
+        assert_eq!(v, serde_json::json!({ "speaker": null, "queue": [], "start": null }), "정:RULE-FLR-SNAPSHOT 꼴 — 발언권 칸 셋은 늘 있다(비었으면 null · [] · null)");
+        let f = RoomFloor { speaker: Some("u1".into()), queue: vec!["u2".into(), "u3".into()], start: Some(1) };
+        assert_eq!(serde_json::from_value::<RoomFloor>(serde_json::to_value(&f).unwrap()).unwrap(), f);
     }
 
     #[test]
@@ -269,13 +291,13 @@ mod tests {
         let m = Material::RoomCreated(room);
         let n = m.notice("r1", "e1");
         assert_eq!(n.op, 0xF001, "정:RULE-BUS-EVENTS hub 만 읽는 갈래 — 재료 표지 0xF001");
-        assert_eq!(n.body["type"], "room_created", "HK-FACT-ROOM-CREATED ① — 봉투 type 은 카탈로그 이름");
+        assert_eq!(n.body["type"], "room_created", "정:RULE-BUS-EVENTS hub 만 읽는 갈래 — 재료 몸 type 은 카탈로그 이름");
         assert_eq!(Material::of_notice(&n), Some(m));
         let g = Material::FloorGranted(FloorTaken { speaker: "u1".into(), sources: None, seq: 7, room: "r1".into(), talk: Some("t1".into()) });
         let v = serde_json::to_value(&g).unwrap();
-        assert_eq!(v["body"]["talk"], "t1", "HK-FACT-FLOOR-GRANTED ① — 발언 id 가 실린다");
+        assert_eq!(v["body"]["talk"], "t1", "정:RULE-HOOK-FACTS — 획득 재료에 발언 id 칸");
         let i = serde_json::to_value(Material::FloorReleased(FloorIdle { prev: None, seq: 8, room: "r1".into() })).unwrap();
-        assert!(i["body"].get("talk").is_none(), "HK-FACT-FLOOR-RELEASED ② — 발언 id 없음");
+        assert!(i["body"].get("talk").is_none(), "정:RULE-HOOK-FACTS — 비움 재료에 발언 id 칸 없음");
         let other = Notice { op: 0xF002, body: v, exclude: Vec::new(), room_id: None, sfu_id: None };
         assert_eq!(Material::of_notice(&other), None, "정:RULE-BUS-EVENTS — 구간의 다른 번호는 재료가 아님");
         for (m, name) in [

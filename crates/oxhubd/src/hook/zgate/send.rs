@@ -17,6 +17,7 @@ use crate::chat::ext::plan::{After, Due, Item, Knobs, Offer, Outcome, Row, drain
 use super::{Cmd, Gate, QueryError};
 use crate::chat::acks::{AckLanes, Push};
 use crate::chat::store::{Cursor, Lane, Store};
+use crate::hook::facts::Fact;
 
 pub const DRAIN_TICK: Duration = Duration::from_secs(1);
 pub const WHAT: &str = "ext";
@@ -113,16 +114,6 @@ impl ExtDeliver {
             ExtDeliver::Chat { cid, .. } | ExtDeliver::Facts { cid, .. } => cid,
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Fact {
-    pub fact_id: String,
-    #[serde(rename = "type")]
-    pub kind: String,
-    pub t: u64,
-    pub room_id: String,
-    pub body: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
