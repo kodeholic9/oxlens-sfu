@@ -170,7 +170,7 @@ impl Bus {
 
 pub fn notice_line(n: &Notice) -> common::log::Line {
     if n.op == common::envelope::OP_FACT_MATERIAL {
-        return common::log::Line::diag("SV-RULE-BUS-EVENTS").key("type", n.body.get("type").and_then(|v| v.as_str()).unwrap_or("")).msg("fact material");
+        return common::log::Line::diag("SV-RULE-BUS-EVENTS").rec("type", n.body.get("type").and_then(|v| v.as_str()).unwrap_or("")).msg("fact material");
     }
     let Some(op) = oxsig::Op::from_u16(n.op) else {
         return common::log::Line::diag("SV-RULE-BUS-EVENTS").rec("op", n.op).msg("notice of unknown op");

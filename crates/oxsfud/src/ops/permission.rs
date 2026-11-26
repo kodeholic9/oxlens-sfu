@@ -70,21 +70,26 @@ pub fn apply(env: &Envelope) -> Result<Value, Failure> {
     let room = s.rooms.get(&call.room_id).ok_or_else(|| Code::RoomNotFound.failure())?;
     let (old, new, hidden) = room.set_permission(user, call.permission).ok_or_else(|| Code::NotInRoom.failure())?;
     if old == new {
-        super::transition("ROOM", user, "SV-IMPL-ROOM-PERMISSION", &bits(&old), &bits(&new), "same", &[("room", &room.id), ("user", user)]);
+        record(&room.id, user, &old, &new, "same", None);
         return serde_json::to_value(new).map_err(|_| Code::InternalError.failure());
     }
     let (removed, mv, why) = revoke(&room, user, &old, &new);
     notify(&room, user, new, hidden);
-    super::transition(
-        "ROOM",
-        user,
-        "SV-IMPL-ROOM-PERMISSION",
-        &bits(&old),
-        &bits(&new),
-        "applied",
-        &[("room", &room.id), ("user", user), ("floor", mv.as_str()), ("floor_why", why), ("removed", &removed.to_string()), ("hidden", if hidden { "true" } else { "false" })],
-    );
+    record(&room.id, user, &old, &new, "applied", Some((mv, why, removed, hidden)));
     serde_json::to_value(new).map_err(|_| Code::InternalError.failure())
+}
+
+fn record(room: &str, user: &str, old: &Permission, new: &Permission, what: &str, done: Option<(FloorMove, &str, usize, bool)>) {
+    let mut l = common::log::Line::diag("SV-IMPL-ROOM-PERMISSION")
+        .key("room", room)
+        .key("user", user)
+        .key("session", super::session_of(user))
+        .rec("old", bits(old))
+        .rec("new", bits(new));
+    if let Some((mv, why, removed, hidden)) = done {
+        l = l.rec("floor", mv.as_str()).rec("floor_why", why).rec("removed", removed).rec("hidden", hidden);
+    }
+    common::log::emit(l.msg(&format!("permission {what}")));
 }
 
 fn revoke(room: &Arc<Room>, user: &str, old: &Permission, new: &Permission) -> (usize, FloorMove, &'static str) {

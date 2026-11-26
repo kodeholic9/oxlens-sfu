@@ -34,6 +34,17 @@ hidden_allowed = false
 ops_allowed = false
 hook_allowed = true
 subscribe = ["", "talk"]
+facts = ["*"]
+
+[[hub.auth.api_keys]]
+key = "ox_hook"
+secret = "ox_s_hook"
+name = "hook"
+participant_types = [0]
+hidden_allowed = false
+ops_allowed = false
+hook_allowed = true
+facts = ["*"]
 
 [[unit]]
 id = "log-node-b"
@@ -73,3 +84,8 @@ zenoh_listen = "tls/127.0.0.1:7548"
 zenoh_cert = "dev/pki/hub.pem"
 zenoh_key = "dev/pki/hub.key"
 zenoh_ca = "dev/pki/ca.pem"
+
+[[hook.webhooks]]
+url = "http://127.0.0.1:19790/hook"
+secret = "whsec_b3hsZW5zLWRldi13ZWJob29rLXNlY3JldC0zMmJ5dGU="
+key = "ox_hook"

@@ -22,5 +22,6 @@ leaf() {
 leaf hub hub 'basicConstraints=CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectAltName=IP:127.0.0.1,DNS:localhost'
 leaf ox_3rd ox_3rd 'basicConstraints=CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=clientAuth'
 leaf ox_k_demo ox_k_demo 'basicConstraints=CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=clientAuth'
+leaf ox_hook ox_hook 'basicConstraints=CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=clientAuth'
 rm -f ca.srl
 ls -1
