@@ -1,10 +1,9 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-CHAT-EXT-SUB · 정:IMPL-CFG-SYSTEM-FILE · 정:RULE-BUS-KEYSPACE · 정:RULE-BUS-PRESENCE · 정:RULE-OPS-DROPS · model: claude-opus-5-5
+// spec: v1.6 · 정:RULE-CHAT-EXT-SUB · 정:IMPL-CFG-SYSTEM-FILE · 정:RULE-BUS-KEYSPACE · 정:RULE-BUS-PRESENCE · 정:RULE-HOOK-DIRECT ·정:RULE-OPS-DROPS · model: claude-opus-5-5
 //! zenoh 입구(zgate) — hub 의 바깥 포트 하나(`[hook] zenoh_listen` · `tls/` 만): 3rd 의 zenoh 1.x 클라이언트를 직접 받는다(zenohd 없음 · 버스 그물에 안 들인다) · TLS 인증서 첫 CN = 계정 · InitSyn → InitAck(쿠키) → OpenSyn → OpenAck · 판 0x09 · client 만 · 확장은 되돌리지 않는다 · 연결마다 hub 가 짓는 이름(`{기동 신원}{세션 번호 hex}`) · 제 계정 키 queryable 이 서면 버스 토큰 `int/ext/{key}/{node}/{cid}` 를 내고 걷히거나 닫히면 거둔다 · lease 넘김 · KeepAlive · 연결표 · 연결에 묶음 질의를 보내고 결과(ACK · 거절 · 답 없음 · 닫힘)를 돌려받는 경계(창 · 줄 · drain 은 그 위) · 연결마다 보낼 줄(창 · 줄 · 시간 넘김 — `send`) · drain · 버림 계수 다섯(거절 · Push · 시간 넘김 · 줄 넘침 · 시도 수 포기)의 주인 · 토큰 선언이 실패하면 세션을 닫는다(3rd 가 다시 붙는다).
 
 pub mod judge;
 pub mod link;
-pub mod plan;
 pub mod send;
 pub mod session;
 pub mod wire;
@@ -30,6 +29,7 @@ use zenoh_protocol::transport::init::ext::PatchType;
 use zenoh_protocol::transport::{BatchSize, Close, InitAck, KeepAlive, OpenAck, TransportBody, TransportMessage, TransportSn, batch_size};
 
 use crate::bus::Bus;
+use crate::chat::ext::plan;
 use judge::{Accounts, Agreed, Refuse, judge_account, judge_init};
 use session::{Answer, Effect, End, Opened, Session};
 

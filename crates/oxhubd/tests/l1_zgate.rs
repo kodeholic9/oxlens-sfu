@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-CHAT-EXT-SUB · 정:IMPL-CFG-SYSTEM-FILE · 정:RULE-BUS-KEYSPACE · 정:RULE-OPS-DROPS · model: claude-opus-5-5
-//! 1층 상호운용 — zenoh 입구(zgate)에 실제 zenoh 1.10.1 클라이언트(`zenoh = "=1.10.1"`)로 붙는다: queryable 선언 → 버스 토큰 · 질의 → reply = ACK · reply_err = 거절 · 답 없이 놓음 = 답 없음 · 512 KiB 질의 한 건(Fragment) · 지금 Interest 에 DeclareFinal(liveliness get 이 시한 전에 끝) · 3rd 의 put 버림 · 3rd 의 get 은 결과 없이 끝 · 허용 키 밖 선언 무시 · 다른 계정 키 선언 = 세션 닫힘 · 거절(인증서 없음 · 다른 CA · 모르는 계정 · 연동 허용 없음 · 구독 없음 · 평문 TCP) · Close 와 lease 넘김에 토큰이 걷힌다 · 판 · client 아님 거절은 우리 코덱으로 짠 날 클라이언트로.
+// spec: v1.6 · 정:RULE-CHAT-EXT-SUB · 정:IMPL-CFG-SYSTEM-FILE · 정:RULE-BUS-KEYSPACE · 정:RULE-OPS-DROPS · 정:RULE-HOOK-DIRECT · 정:RULE-HOOK-CREDENTIAL · model: claude-opus-5-5
+//! 1층 상호운용 — zenoh 입구(zgate)에 실제 zenoh 1.10.1 클라이언트(`zenoh = "=1.10.1"`)로 붙는다: queryable 선언 → 버스 토큰 · 질의 → reply = ACK · reply_err = 거절 · 답 없이 놓음 = 답 없음 · 512 KiB 질의 한 건(Fragment) · 지금 Interest 에 DeclareFinal(liveliness get 이 시한 전에 끝) · 3rd 의 put 버림 · 3rd 의 get 은 결과 없이 끝 · 허용 키 밖 선언 무시 · 다른 계정 키 선언 = 세션 닫힘 · 거절(인증서 없음 · 다른 CA · 모르는 계정 · 연동 허용 없음 · 평문 TCP) · 연동 허용 계정은 구독 칸이 비어도 붙는다 · Close 와 lease 넘김에 토큰이 걷힌다 · 판 · client 아님 거절은 우리 코덱으로 짠 날 클라이언트로.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -8,10 +8,10 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use oxhubd::bus::{Bus, BusCfg};
-use oxhubd::chat::zgate::judge::{Accounts, Standing};
-use oxhubd::chat::zgate::session::Answer;
-use oxhubd::chat::zgate::send::{GateDeps, GateKnobs};
-use oxhubd::chat::zgate::{Gate, GateCfg, link, wire};
+use oxhubd::hook::zgate::judge::{Accounts, Standing};
+use oxhubd::hook::zgate::session::Answer;
+use oxhubd::hook::zgate::send::{GateDeps, GateKnobs};
+use oxhubd::hook::zgate::{Gate, GateCfg, link, wire};
 use oxhubd::chat::store::Store;
 use oxhubd::chat::{Chat, Limits};
 use common::extsub::{ExtSubs, Subscribe};
@@ -116,7 +116,7 @@ async fn rig_with(k: GateKnobs) -> Rig {
         ("acme".into(), Standing::Ok),
         ("other".into(), Standing::Ok),
         ("nohook".into(), Standing::NoHook),
-        ("nosub".into(), Standing::NoSubscribe),
+        ("nosub".into(), Standing::Ok),
     ]);
     let subs = ExtSubs::new(vec![("acme".into(), Subscribe::try_from(vec![String::new()]).expect("subscribe"))]);
     let store = Store::open("memory:", Visibility::Shared).expect("store").subscribed(subs);
@@ -211,7 +211,7 @@ async fn a_zenoh_client_receives_queries_and_its_answers_come_back() {
     let t = wait_tokens(&r, 1, 3_000).await;
     assert_eq!(t, vec![("acme".to_string(), "n1".to_string(), cid.clone())], "HK-KEY-PUB-V1-CHAT-SUB-KEY① 정:RULE-CHAT-EXT-SUB 3 — 제 계정 키 queryable 이 서면 토큰 int/ext/acme/n1/{{cid}}");
     let now = common::now_ms();
-    let at = oxhubd::chat::zgate::plan::opened(&cid);
+    let at = oxhubd::chat::ext::plan::opened(&cid);
     assert!(at <= now && now - at < 60_000 && cid[12..].starts_with("e1"), "정:RULE-CHAT-EXT-SUB 3 — cid = 열린 시각 12 자리 hex + 기동 신원 + 세션 번호 {cid}");
     let replier = tokio::spawn(async move {
         let mut seen = Vec::new();
@@ -334,9 +334,17 @@ async fn refused_before_the_session() {
     assert!(refused_open(client_cfg(&r, &ep, None)).await && counted(&r, 0).await, "S-rule-RULE-HOOK-CREDENTIAL-9① · S-sym-RULE-BUS-PUBLIC-3② — 인증서 없음은 붙지 못하고 ext_refused +1");
     assert!(refused_open(client_cfg(&r, &ep, Some("rogue"))).await && counted(&r, 1).await, "S-rule-RULE-HOOK-CREDENTIAL-9② — 다른 CA 인증서는 붙지 못하고 ext_refused +1");
     assert!(refused_open(client_cfg(&r, &ep, Some("nohook"))).await && counted(&r, 2).await, "S-rule-RULE-HOOK-CREDENTIAL-9③ — 연동 허용 없는 계정은 붙지 못하고 ext_refused +1");
-    assert!(refused_open(client_cfg(&r, &ep, Some("nosub"))).await && counted(&r, 3).await, "S-rule-RULE-HOOK-CREDENTIAL-9④ — 구독 빈 계정은 붙지 못하고 ext_refused +1");
-    assert!(refused_open(client_cfg(&r, &ep, Some("stranger"))).await && counted(&r, 4).await, "정:RULE-CHAT-EXT-SUB 7 — 모르는 계정은 붙지 못하고 ext_refused +1");
-    assert!(refused_open(client_cfg(&r, &tcp, None)).await && counted(&r, 5).await, "S-rule-RULE-HOOK-CHAT-SUB-1② · S-sym-RULE-BUS-PUBLIC-3② — 평문 TCP 는 닫히고 ext_refused +1");
+    let refused3 = r.gate.drops.refused.load(Ordering::Relaxed);
+    let bare = open(&r, "nosub").await;
+    assert!(
+        wait(3_000, || r.gate.conns().len() == 1).await,
+        "S-rule-RULE-HOOK-CREDENTIAL-9④ · S-rule-RULE-HOOK-DIRECT-3① — 연동 허용 계정은 채팅 구독 · 사실 칸이 비어도 붙는다"
+    );
+    assert_eq!(r.gate.drops.refused.load(Ordering::Relaxed), refused3, "S-rule-RULE-HOOK-DIRECT-3① — 붙은 계정은 ext_refused 를 올리지 않는다");
+    drop(bare);
+    assert!(wait(5_000, || r.gate.conns().is_empty()).await, "형상 — 닫힌 세션은 연결표에서 빠진다");
+    assert!(refused_open(client_cfg(&r, &ep, Some("stranger"))).await && counted(&r, 3).await, "정:RULE-CHAT-EXT-SUB 7 — 모르는 계정은 붙지 못하고 ext_refused +1");
+    assert!(refused_open(client_cfg(&r, &tcp, None)).await && counted(&r, 4).await, "S-rule-RULE-HOOK-CHAT-SUB-1② · S-sym-RULE-BUS-PUBLIC-3② — 평문 TCP 는 닫히고 ext_refused +1");
     assert!(r.gate.conns().is_empty(), "형상 — 거절된 것은 연결표에 들지 않는다");
     let s = open(&r, "acme").await;
     assert!(wait(3_000, || r.gate.conns().len() == 1).await, "S-rule-RULE-HOOK-CHAT-SUB-1① · S-rule-RULE-HOOK-CREDENTIAL-9⑤ — tls 로 붙는다");
@@ -472,14 +480,23 @@ async fn a_client_with_usrpwd_on_fails_on_its_own_side() {
 
 #[test]
 fn judgments_are_pure_with_reasons() {
-    use oxhubd::chat::zgate::judge::{DeclareVerdict, Refuse, judge_account, judge_declare, judge_init};
+    use oxhubd::hook::zgate::judge::{DeclareVerdict, Refuse, judge_account, judge_declare, judge_init};
     use zenoh_protocol::core::Bits;
     use zenoh_protocol::core::resolution::Field;
-    let acc = Accounts::new(vec![("acme".into(), Standing::Ok), ("nohook".into(), Standing::NoHook), ("nosub".into(), Standing::NoSubscribe)]);
+    let sys = common::system::System::parse(concat!(
+        "[hub]\nlisten = \"0.0.0.0:1974\"\n[bus]\nnamespace = \"ox\"\n[chat]\ndb = \"memory:\"\n",
+        "[[hub.auth.api_keys]]\nkey = \"acme\"\nsecret = \"s\"\nhook_allowed = true\nsubscribe = [\"\"]\n",
+        "[[hub.auth.api_keys]]\nkey = \"nohook\"\nsecret = \"s\"\n",
+        "[[hub.auth.api_keys]]\nkey = \"nosub\"\nsecret = \"s\"\nhook_allowed = true\n",
+        "[[hub.auth.api_keys]]\nkey = \"facts\"\nsecret = \"s\"\nhook_allowed = true\nfacts = [\"*\"]\n",
+    ))
+    .expect("system");
+    let acc = Accounts::of(&sys);
     assert_eq!(judge_account(Some("acme"), &acc), Ok("acme".to_string()));
     assert_eq!(judge_account(None, &acc), Err(Refuse::NoCn));
-    assert_eq!(judge_account(Some("nohook"), &acc).map_err(|r| r.reason()), Err("hook not allowed"));
-    assert_eq!(judge_account(Some("nosub"), &acc).map_err(|r| r.reason()), Err("no subscribe"));
+    assert_eq!(judge_account(Some("nohook"), &acc).map_err(|r| r.reason()), Err("hook not allowed"), "S-rule-RULE-HOOK-DIRECT-3② — 연동 허용 없는 계정은 닫힌다");
+    assert_eq!(judge_account(Some("nosub"), &acc), Ok("nosub".to_string()), "S-rule-RULE-HOOK-CREDENTIAL-9④ · S-rule-RULE-HOOK-DIRECT-3① — 채팅 구독 · 사실 칸이 비어도 붙는다");
+    assert_eq!(judge_account(Some("facts"), &acc), Ok("facts".to_string()), "S-rule-RULE-HOOK-DIRECT-3① — 사실 구독만 둔 계정도 붙는다");
     assert_eq!(judge_account(Some("x"), &acc).map_err(|r| r.reason()), Err("unknown account"));
     let syn = |v: u8, w: WhatAmI, res: Resolution, b: u16| InitSyn {
         version: v,
@@ -511,7 +528,7 @@ fn judgments_are_pure_with_reasons() {
 
 #[test]
 fn sequence_numbers_fragments_and_batches() {
-    use oxhubd::chat::zgate::wire::{Defrag, Piece, RxSn, SnVerdict, TxSn, pack, parts, room};
+    use oxhubd::hook::zgate::wire::{Defrag, Piece, RxSn, SnVerdict, TxSn, pack, parts, room};
     use zenoh_protocol::network::{Push, push};
     let mask = u32::MAX >> 4;
     let mut rx = RxSn::new(5, mask);
@@ -525,7 +542,7 @@ fn sequence_numbers_fragments_and_batches() {
     assert_eq!(d.push(SnVerdict::Next, false, &z(b"cd")), Piece::Whole(b"abcd".to_vec()));
     assert_eq!(d.push(SnVerdict::Next, true, &z(b"ab")), Piece::More);
     assert_eq!(d.push(SnVerdict::Gap, false, &z(b"cd")), Piece::Dropped("fragment sn gap"), "번호가 비면 잇던 것을 버린다");
-    let big = vec![0u8; oxhubd::chat::zgate::wire::DEFRAG_MAX + 1];
+    let big = vec![0u8; oxhubd::hook::zgate::wire::DEFRAG_MAX + 1];
     assert_eq!(d.push(SnVerdict::Next, true, &zenoh_buffers::ZSlice::from(big)), Piece::Dropped("fragment over the defrag limit"));
     let push = |n: usize| NetworkMessage {
         body: NetworkBody::Push(Push {
@@ -864,7 +881,7 @@ fn spec_dir() -> PathBuf {
 
 #[test]
 fn one_ack_clears_the_streak_of_reply_timeouts() {
-    use oxhubd::chat::zgate::plan::{After, Item, Knobs, Outbox, Outcome};
+    use oxhubd::chat::ext::plan::{After, Item, Knobs, Outbox, Outcome};
     let mut o: Outbox<(), ()> = Outbox::new(Knobs { window: 1, cap: 1_000, live_max: 100, close_at: 3 });
     let mut step = |o: &mut Outbox<(), ()>, oc: Outcome| {
         let n = o.queued() as u64 + 1;
@@ -884,7 +901,7 @@ fn one_ack_clears_the_streak_of_reply_timeouts() {
 
 #[test]
 fn send_plan_vectors() {
-    use oxhubd::chat::zgate::plan::{After, Due, Item, Knobs, Outbox, Outcome, Row, drain_due, drain_owner, drain_pick, ring};
+    use oxhubd::chat::ext::plan::{After, Due, Item, Knobs, Outbox, Outcome, Row, drain_due, drain_owner, drain_pick, ring};
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(spec_dir().join("server/out/vectors/chat.json")).expect("vectors")).expect("json");
     let arr = |k: &str| v[k].as_array().cloned().unwrap_or_else(|| panic!("판 묶음 {k} 없음"));
     let ringv = arr("ext_ring");

@@ -59,7 +59,7 @@ fn only_the_media_server_room_issues_a_version() {
                 && !low.contains("versionmismatch")
                 && !low.contains("--version")
                 && !low.contains("\"version\"]")
-                && !f.starts_with("oxhubd/src/chat/zgate/")
+                && !f.starts_with("oxhubd/src/hook/zgate/")
         })
         .map(|(f, n, l)| format!("{f}:{n} {}", l.trim()))
         .collect();

@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-CHAT-EXT-SUB · 정:IMPL-CFG-SYSTEM-FILE · model: claude-opus-5-5
-//! zenoh 입구의 판단 — 순수 함수 + 사유: 인증서 계정(연동 허용 · 구독)이 붙을 수 있나 · InitSyn(판 0x09 · client 만)을 받나와 합의 값(해상도 · 배치 크기는 둘 중 작은 것) · queryable 선언 키가 제 계정 키인가(다른 계정 키 = 세션 닫기 · 허용 키 밖 = 무시).
+// spec: v1.6 · 정:RULE-CHAT-EXT-SUB · 정:IMPL-CFG-SYSTEM-FILE · 정:RULE-HOOK-DIRECT · 정:RULE-HOOK-CREDENTIAL · model: claude-opus-5-5
+//! zenoh 입구의 판단 — 순수 함수 + 사유: 인증서 계정이 붙을 수 있나(연동 허용이면 붙는다 — 채팅 구독 · 사실 칸이 비어도) · InitSyn(판 0x09 · client 만)을 받나와 합의 값(해상도 · 배치 크기는 둘 중 작은 것) · queryable 선언 키가 제 계정 키인가(다른 계정 키 = 세션 닫기 · 허용 키 밖 = 무시).
 
 use std::collections::HashMap;
 
@@ -15,7 +15,6 @@ pub const VERSION: u8 = zenoh_protocol::VERSION;
 pub enum Standing {
     Ok,
     NoHook,
-    NoSubscribe,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -28,16 +27,7 @@ impl Accounts {
                 .auth
                 .api_keys
                 .iter()
-                .map(|k| {
-                    let s = if !k.hook_allowed {
-                        Standing::NoHook
-                    } else if !k.subscribes() {
-                        Standing::NoSubscribe
-                    } else {
-                        Standing::Ok
-                    };
-                    (k.key.clone(), s)
-                })
+                .map(|k| (k.key.clone(), if k.hook_allowed { Standing::Ok } else { Standing::NoHook }))
                 .collect(),
         )
     }
@@ -57,7 +47,6 @@ pub enum Refuse {
     NoCn,
     UnknownAccount(String),
     NoHook(String),
-    NoSubscribe(String),
     Version(u8),
     NotClient(String),
     Protocol(&'static str),
@@ -72,7 +61,6 @@ impl Refuse {
             Refuse::NoCn => "no cn",
             Refuse::UnknownAccount(_) => "unknown account",
             Refuse::NoHook(_) => "hook not allowed",
-            Refuse::NoSubscribe(_) => "no subscribe",
             Refuse::Version(_) => "zenoh version",
             Refuse::NotClient(_) => "not a client",
             Refuse::Protocol(_) => "protocol",
@@ -85,7 +73,7 @@ impl Refuse {
         match self {
             Refuse::Tls(e) => e.clone(),
             Refuse::NoCn => "-".into(),
-            Refuse::UnknownAccount(c) | Refuse::NoHook(c) | Refuse::NoSubscribe(c) => format!("cn={c}"),
+            Refuse::UnknownAccount(c) | Refuse::NoHook(c) => format!("cn={c}"),
             Refuse::Version(v) => format!("got=0x{v:02x} want=0x{VERSION:02x}"),
             Refuse::NotClient(w) => format!("got={w}"),
             Refuse::Protocol(p) => (*p).to_string(),
@@ -100,7 +88,6 @@ pub fn judge_account(cn: Option<&str>, acc: &Accounts) -> Result<String, Refuse>
     match acc.standing(cn) {
         None => Err(Refuse::UnknownAccount(cn.to_string())),
         Some(Standing::NoHook) => Err(Refuse::NoHook(cn.to_string())),
-        Some(Standing::NoSubscribe) => Err(Refuse::NoSubscribe(cn.to_string())),
         Some(Standing::Ok) => Ok(cn.to_string()),
     }
 }

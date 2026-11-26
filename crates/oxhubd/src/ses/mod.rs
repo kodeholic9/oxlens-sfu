@@ -859,13 +859,13 @@ async fn ext_fanout(ctx: &Ctx, chat: &crate::chat::Chat, key: &str, msg: oxsig::
         return;
     }
     let start = chat.rr_next(key);
-    for i in crate::chat::zgate::plan::ring(list.len(), start) {
+    for i in crate::chat::ext::plan::ring(list.len(), start) {
         let (node, cid) = &list[i];
         let ok = if *node == ctx.bus.node {
             chat.zgate.get().is_some_and(|g| g.deliver(cid, true, vec![msg.clone()], None).is_ok_and(|o| o.accepted()))
         } else {
-            let payload = serde_json::to_vec(&crate::chat::zgate::send::ExtDeliver { key: key.to_string(), cid: cid.clone(), messages: vec![msg.clone()] }).unwrap_or_default();
-            ctx.bus.query(node, crate::chat::zgate::send::WHAT, payload).await.ok().and_then(|b| Reply::decode(&b).ok()).is_some_and(|r| matches!(r, Reply::Ok { .. }))
+            let payload = serde_json::to_vec(&crate::hook::zgate::send::ExtDeliver::Chat { key: key.to_string(), cid: cid.clone(), messages: vec![msg.clone()] }).unwrap_or_default();
+            ctx.bus.query(node, crate::hook::zgate::send::WHAT, payload).await.ok().and_then(|b| Reply::decode(&b).ok()).is_some_and(|r| matches!(r, Reply::Ok { .. }))
         };
         if ok {
             return;
@@ -885,10 +885,11 @@ async fn ext_fanout(ctx: &Ctx, chat: &crate::chat::Chat, key: &str, msg: oxsig::
 pub async fn deliver_ext(ctx: &Ctx, payload: &[u8]) -> Vec<u8> {
     let Some(chat) = ctx.chat.get() else { return Reply::fail(Code::ChatDisabled).encode() };
     let Some(gate) = chat.zgate.get() else { return Reply::fail(Code::SessionNotFound).encode() };
-    let Ok(d) = serde_json::from_slice::<crate::chat::zgate::send::ExtDeliver>(payload) else { return Reply::fail(Code::InvalidPayload).encode() };
-    match gate.deliver(&d.cid, true, d.messages, None) {
+    let Ok(d) = serde_json::from_slice::<crate::hook::zgate::send::ExtDeliver>(payload) else { return Reply::fail(Code::InvalidPayload).encode() };
+    let crate::hook::zgate::send::ExtDeliver::Chat { cid, messages, .. } = d else { return Reply::fail(Code::UnknownOp).encode() };
+    match gate.deliver(&cid, true, messages, None) {
         Ok(o) if o.accepted() => Reply::ok(serde_json::json!({})).encode(),
-        Ok(o) => Reply::fail(crate::chat::zgate::send::refusal_code(o)).encode(),
+        Ok(o) => Reply::fail(crate::hook::zgate::send::refusal_code(o)).encode(),
         Err(_) => Reply::fail(Code::SessionNotFound).encode(),
     }
 }

@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-CHAT-EXT-SUB · model: claude-opus-5-5
-//! zenoh 종속 가드 — 운영 소스(`crates/*/src`)에서 zenoh 크레이트(`zenoh` · `zenoh_*`)를 쓰는 곳은 zenoh 입구 `crates/oxhubd/src/chat/zgate/` 하나뿐 · `[dependencies]` 에 zenoh 크레이트를 두는 크레이트는 oxhubd 뿐이고 셋(`zenoh-protocol` · `zenoh-codec` · `zenoh-buffers`)만 `=1.10.1` 로 고정(상호운용 시험의 실제 클라이언트 `zenoh` 는 `[dev-dependencies]`).
+// spec: v1.6 · 정:RULE-CHAT-EXT-SUB · 정:RULE-HOOK-DIRECT · model: claude-opus-5-5
+//! zenoh 종속 가드 — 운영 소스(`crates/*/src`)에서 zenoh 크레이트(`zenoh` · `zenoh_*`)를 쓰는 곳은 대외 연동의 zenoh 입구 `crates/oxhubd/src/hook/zgate/` 하나뿐 · `[dependencies]` 에 zenoh 크레이트를 두는 크레이트는 oxhubd 뿐이고 셋(`zenoh-protocol` · `zenoh-codec` · `zenoh-buffers`)만 `=1.10.1` 로 고정(상호운용 시험의 실제 클라이언트 `zenoh` 는 `[dev-dependencies]`).
 
 use std::path::{Path, PathBuf};
 
@@ -33,7 +33,7 @@ fn crate_names() -> Vec<String> {
 }
 
 fn owner(krate: &str, rel: &Path) -> bool {
-    krate == "oxhubd" && rel.to_string_lossy().replace('\\', "/").starts_with("src/chat/zgate/")
+    krate == "oxhubd" && rel.to_string_lossy().replace('\\', "/").starts_with("src/hook/zgate/")
 }
 
 fn ident_char(c: char) -> bool {
@@ -92,7 +92,7 @@ fn deps(toml: &str, section: &str) -> Vec<(String, String)> {
 
 #[test]
 fn zenoh_reads_split() {
-    let found = zenoh_uses("use zenoh_protocol::core;\nlet x = zenoh_codec::Zenoh080::new();\n// zenoh_buffers::ZBuf\nlet s = \"zenoh_protocol\";\nlet my_zenoh_x = 1;\nzenoh::open(c);\nuse oxhubd::chat::zgate;\n");
+    let found = zenoh_uses("use zenoh_protocol::core;\nlet x = zenoh_codec::Zenoh080::new();\n// zenoh_buffers::ZBuf\nlet s = \"zenoh_protocol\";\nlet my_zenoh_x = 1;\nzenoh::open(c);\nuse oxhubd::hook::zgate;\n");
     assert_eq!(found.iter().map(|(n, _)| *n).collect::<Vec<_>>(), vec![1, 2, 6], "판독기 — 경로 · use 는 잡고 주석 · 문자열 · 다른 이름은 안 잡는다");
     assert_eq!(deps("[dependencies]\nzenoh-codec = \"=1.10.1\"\n[dev-dependencies]\nzenoh = { version = \"=1.10.1\" }\n", "[dependencies]").len(), 1);
 }
@@ -138,5 +138,5 @@ fn zenoh_only_in_zgate() {
     }
     assert!(scanned > 0, "소스 파일을 못 찾았다(안 쟀다)");
     assert!(owner_uses > 0, "zgate 에서 zenoh 사용을 하나도 못 봤다 — 주인 경로가 낡았다");
-    assert!(leaks.is_empty(), "정:RULE-CHAT-EXT-SUB — zenoh 크레이트는 oxhubd chat/zgate 에서만 쓴다 · 샌 곳 {}:\n{}", leaks.len(), leaks.join("\n"));
+    assert!(leaks.is_empty(), "정:RULE-HOOK-DIRECT — zenoh 크레이트는 oxhubd hook/zgate 에서만 쓴다 · 샌 곳 {}:\n{}", leaks.len(), leaks.join("\n"));
 }

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
-use super::plan::{After, Due, Item, Knobs, Offer, Outcome, Row, drain_due, drain_owner, drain_pick};
+use crate::chat::ext::plan::{After, Due, Item, Knobs, Offer, Outcome, Row, drain_due, drain_owner, drain_pick};
 use super::{Cmd, Gate, QueryError};
 use crate::chat::acks::{AckLanes, Push};
 use crate::chat::store::{Cursor, Lane, Store};
@@ -63,11 +63,73 @@ pub struct GateDeps {
     pub knobs: GateKnobs,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExtDeliver {
-    pub key: String,
-    pub cid: String,
-    pub messages: Vec<ChatMessage>,
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "lane", rename_all = "snake_case", try_from = "ExtWire")]
+pub enum ExtDeliver {
+    Chat { key: String, cid: String, messages: Vec<ChatMessage> },
+    Facts { key: String, cid: String, bundle: FactsBundle },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtLane {
+    #[default]
+    Chat,
+    Facts,
+}
+
+#[derive(Deserialize)]
+pub struct ExtWire {
+    #[serde(default)]
+    lane: ExtLane,
+    key: String,
+    cid: String,
+    #[serde(default)]
+    messages: Option<Vec<ChatMessage>>,
+    #[serde(default)]
+    bundle: Option<FactsBundle>,
+}
+
+impl TryFrom<ExtWire> for ExtDeliver {
+    type Error = &'static str;
+
+    fn try_from(w: ExtWire) -> Result<ExtDeliver, &'static str> {
+        match w.lane {
+            ExtLane::Chat => Ok(ExtDeliver::Chat { key: w.key, cid: w.cid, messages: w.messages.ok_or("chat lane without messages")? }),
+            ExtLane::Facts => Ok(ExtDeliver::Facts { key: w.key, cid: w.cid, bundle: w.bundle.ok_or("facts lane without bundle")? }),
+        }
+    }
+}
+
+impl ExtDeliver {
+    pub fn key(&self) -> &str {
+        match self {
+            ExtDeliver::Chat { key, .. } | ExtDeliver::Facts { key, .. } => key,
+        }
+    }
+
+    pub fn cid(&self) -> &str {
+        match self {
+            ExtDeliver::Chat { cid, .. } | ExtDeliver::Facts { cid, .. } => cid,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Fact {
+    pub fact_id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub t: u64,
+    pub room_id: String,
+    pub body: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct FactsBundle {
+    pub facts: Vec<Fact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dropped: Option<u64>,
 }
 
 pub type Waiter = oneshot::Sender<Outcome>;

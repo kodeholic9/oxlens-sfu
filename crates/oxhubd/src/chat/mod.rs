@@ -3,8 +3,8 @@
 //! 채팅 — 게이트웨이 안 모듈 · op 다섯 · 발언 기록(node 안 요청 `talk` — 같은 저장 길목 · 보낸 세션 없음) · 저장이 낸 `{멤버 판, 보낸 세션, 메시지}` 를 다른 node 에 뿌린다(실패 수를 돌려주고 다시 안 보낸다) · 공간마다 멤버 캐시로 `명단(t_M)` 을 낸다 · 받은 ACK 는 줄(멤버 · 3rd — 따로 둔 상한)에 넣기만 하고 지우는 스레드 하나가 줄마다 모아 한 트랜잭션에 지운다 · 3rd 몫이 ACK 아닌 끝이면 시도 수를 올리고 상한에서 지운 것을 돌려준다(세는 것은 부른 쪽) · 보관 기간을 넘긴 미전송 기록을 지운다. 세션은 모른다 — 세션이 이 모듈을 부른다.
 
 pub mod acks;
+pub mod ext;
 pub mod store;
-pub mod zgate;
 
 use std::collections::HashMap;
 use std::ops::AddAssign;
@@ -51,7 +51,7 @@ pub struct Chat {
     acks: Arc<AckLanes>,
     ack_dropped: AtomicU64,
     ext_ack_dropped: AtomicU64,
-    pub zgate: OnceLock<Arc<zgate::Gate>>,
+    pub zgate: OnceLock<Arc<crate::hook::zgate::Gate>>,
     rr: Mutex<HashMap<String, u64>>,
 }
 

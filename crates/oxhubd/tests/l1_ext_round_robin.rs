@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 
 use common::system::Visibility;
 use oxhubd::chat::store::Store;
-use oxhubd::chat::zgate::plan::ring;
+use oxhubd::chat::ext::plan::ring;
 use oxhubd::chat::{Chat, Limits};
 
 #[test]
@@ -21,5 +21,5 @@ fn live_messages_take_turns_over_both_connections_of_one_account() {
     let start = text.find("async fn ext_fanout(").expect("stand check — ext_fanout");
     let body = &text[start..start + text[start..].find("\n}\n").expect("end")];
     assert!(body.contains("let start = chat.rr_next(key);"), "S-sym-RULE-CHAT-EXT-SUB-4② the fan-out takes the account counter for its start");
-    assert!(body.contains("for i in crate::chat::zgate::plan::ring(list.len(), start) {"), "S-sym-RULE-CHAT-EXT-SUB-4② the fan-out offers the connections in ring order from that start");
+    assert!(body.contains("for i in crate::chat::ext::plan::ring(list.len(), start) {"), "S-sym-RULE-CHAT-EXT-SUB-4② the fan-out offers the connections in ring order from that start");
 }
