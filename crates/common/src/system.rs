@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-CFG-SYSTEM-FILE · 정:RULE-CFG-THREE-PLACES · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · 정:RULE-MESH-SHAPE · 정:RULE-CHAT-GATEWAY-MODULE · 정:IMPL-CHAT-MEMBERSHIP · 정:IMPL-CHAT-STORE-FORMS · 정:IMPL-OPS-REC-UNIT · 정:RULE-CHAT-EXT-SUB · model: claude-opus-5-5
-//! 시스템 파일(hub 전용) — 키 전량 strict(모르는 키 = 기동 실패) · `[bus]` 는 oxmesh router 의 접속 좌표와 배포 이름공간 · `[chat] db` 값의 꼴이 채팅 저장소를 고른다(모르는 꼴 = 기동 실패 · 배너는 비밀번호를 가린다) · `[data]` 는 남아야 할 파일의 뿌리(녹음 유닛이 있으면 필수) · 계정 `subscribe`(꼴이 틀린 항목 · 연동 허용 없는 계정 · 키 조각이 못 되는 계정 키 · 채팅 없음 = 기동 실패) · `[hook] zenoh_*`(zenoh 입구 — `tls/` 꼴 · 인증서 · 키 · CA 넷이 함께).
+// spec: v1.6 · 정:IMPL-CFG-SYSTEM-FILE · 정:RULE-CFG-THREE-PLACES · 정:RULE-BUS-SHAPE · 정:RULE-BUS-KEYSPACE · 정:RULE-MESH-SHAPE · 정:RULE-CHAT-GATEWAY-MODULE · 정:IMPL-CHAT-MEMBERSHIP · 정:IMPL-CHAT-STORE-FORMS · 정:IMPL-OPS-REC-UNIT · 정:RULE-CHAT-EXT-SUB · 정:RULE-HOOK-FACTS-SUB · 정:RULE-HOOK-WEBHOOK · 정:RULE-HOOK-DIRECT · model: claude-opus-5-5
+//! 시스템 파일(hub 전용) — 키 전량 strict(모르는 키 = 기동 실패) · `[bus]` 는 oxmesh router 의 접속 좌표와 배포 이름공간 · `[chat] db` 값의 꼴이 채팅 저장소를 고른다(모르는 꼴 = 기동 실패 · 배너는 비밀번호를 가린다) · `[data]` 는 남아야 할 파일의 뿌리(녹음 유닛이 있으면 필수) · 계정 `subscribe`(꼴이 틀린 항목 · 연동 허용 없는 계정 · 키 조각이 못 되는 계정 키 · 채팅 없음 = 기동 실패) · 계정 `facts`(카탈로그 밖 이름 · 연동 허용 없는 계정 · 키 조각이 못 되는 계정 키 = 기동 실패) · `[[hook.webhooks]]`(url http · https · secret `whsec_` + base64 · 풀린 24 ~ 64 바이트 · 연동 허용 계정 key 하나에 하나) · `[hook] zenoh_*`(zenoh 입구 — `tls/` 꼴 · 인증서 · 키 · CA 넷이 함께 · `[chat]` 없이 선다) · `facts_bundle_max_bytes`.
 
 use serde::Deserialize;
 
@@ -210,12 +210,35 @@ pub struct ApiKey {
     pub hook_allowed: bool,
     #[serde(default)]
     pub subscribe: Option<Subscribe>,
+    #[serde(default)]
+    pub facts: Option<Vec<String>>,
 }
 
 impl ApiKey {
     pub fn subscribes(&self) -> bool {
         self.subscribe.as_ref().is_some_and(|s| !s.is_empty())
     }
+
+    pub fn wants_facts(&self) -> bool {
+        self.facts.as_ref().is_some_and(|f| !f.is_empty())
+    }
+}
+
+pub const WEBHOOK_SECRET_PREFIX: &str = "whsec_";
+pub const WEBHOOK_SECRET_BYTES: std::ops::RangeInclusive<usize> = 24..=64;
+
+pub fn webhook_secret_key(secret: &str) -> Result<Vec<u8>, &'static str> {
+    use base64::Engine;
+    let rest = secret.strip_prefix(WEBHOOK_SECRET_PREFIX).ok_or("whsec_ 로 시작하지 않는다")?;
+    let key = base64::engine::general_purpose::STANDARD.decode(rest).map_err(|_| "whsec_ 뒤가 base64 로 풀리지 않는다")?;
+    if !WEBHOOK_SECRET_BYTES.contains(&key.len()) {
+        return Err("풀린 바이트가 24 ~ 64 밖");
+    }
+    Ok(key)
+}
+
+pub fn webhook_url_ok(url: &str) -> bool {
+    ["http://", "https://"].iter().any(|p| url.strip_prefix(p).is_some_and(|h| !h.is_empty()))
 }
 
 fn default_participant_types() -> Vec<u8> {
@@ -338,11 +361,18 @@ pub struct HookSection {
     pub zenoh_key: Option<String>,
     #[serde(default)]
     pub zenoh_ca: Option<String>,
+    #[serde(default)]
+    pub facts_bundle_max_bytes: Option<usize>,
 }
 
 pub const ZENOH_SCHEME: &str = "tls/";
+pub const FACTS_BUNDLE_MAX_BYTES_DEFAULT: usize = 65_536;
 
 impl HookSection {
+    pub fn facts_bundle_max_bytes(&self) -> usize {
+        self.facts_bundle_max_bytes.unwrap_or(FACTS_BUNDLE_MAX_BYTES_DEFAULT)
+    }
+
     pub fn zenoh_files(&self) -> [(&'static str, Option<&str>); 3] {
         [("zenoh_cert", self.zenoh_cert.as_deref()), ("zenoh_key", self.zenoh_key.as_deref()), ("zenoh_ca", self.zenoh_ca.as_deref())]
     }
@@ -366,6 +396,33 @@ impl HookSection {
         }
         Ok(())
     }
+
+    fn validate_webhooks(&self, keys: &[ApiKey]) -> Result<(), SystemError> {
+        let mut seen = std::collections::HashSet::new();
+        for (i, w) in self.webhooks.iter().enumerate() {
+            if !webhook_url_ok(&w.url) {
+                return Err(SystemError(format!("hook.webhooks[{i}].url {:?} — http · https 꼴만 받는다", w.url)));
+            }
+            if let Err(why) = webhook_secret_key(&w.secret) {
+                return Err(SystemError(format!("hook.webhooks[{i}].secret — {why}")));
+            }
+            match keys.iter().find(|k| k.key == w.key) {
+                None => return Err(SystemError(format!("hook.webhooks[{i}].key {:?} 가 계정 목록에 없다", w.key))),
+                Some(k) if !k.hook_allowed => {
+                    return Err(SystemError(format!("hook.webhooks[{i}].key {:?} — hook_allowed 계정이 아니다", w.key)));
+                }
+                Some(_) => {}
+            }
+            if !seen.insert(w.key.as_str()) {
+                return Err(SystemError(format!("hook.webhooks[{i}].key {:?} — 한 계정에 webhook 둘", w.key)));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn webhook_of(&self, key: &str) -> Option<&Webhook> {
+        self.webhooks.iter().find(|w| w.key == key)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -373,6 +430,7 @@ impl HookSection {
 pub struct Webhook {
     pub url: String,
     pub secret: String,
+    pub key: String,
 }
 
 impl System {
@@ -407,26 +465,30 @@ impl System {
             return Err(SystemError("role = rec 유닛이 있는데 [data] root 가 없다".into()));
         }
         for k in &self.hub.auth.api_keys {
-            if !k.subscribes() {
+            if let Some(bad) = k.facts.iter().flatten().find(|f| !crate::envelope::facts_item_ok(f)) {
+                return Err(SystemError(format!("계정 {:?} — facts 항목 {bad:?} 는 사실 카탈로그에 없다", k.key)));
+            }
+            if !k.subscribes() && !k.wants_facts() {
                 continue;
             }
             if !k.hook_allowed {
-                return Err(SystemError(format!("계정 {:?} — subscribe 는 hook_allowed 계정에만 둔다", k.key)));
+                return Err(SystemError(format!("계정 {:?} — subscribe · facts 는 hook_allowed 계정에만 둔다", k.key)));
             }
             if !crate::keyspace::valid_piece(&k.key) {
-                return Err(SystemError(format!("계정 {:?} — subscribe 가 있는 계정의 key 는 버스 키 조각이 못 된다(빈 값 · / * $ ? #)", k.key)));
+                return Err(SystemError(format!(
+                    "계정 {:?} — subscribe · facts 가 있는 계정의 key 는 버스 키 조각이 못 된다(빈 값 · / * $ ? #)",
+                    k.key
+                )));
             }
         }
         if let Some(h) = &self.hook {
             h.validate()?;
+            h.validate_webhooks(&self.hub.auth.api_keys)?;
         }
-        if self.chat.is_none() {
-            if let Some(k) = self.hub.auth.api_keys.iter().find(|k| k.subscribes()) {
-                return Err(SystemError(format!("계정 {:?} — subscribe 가 있는데 [chat] 이 없다", k.key)));
-            }
-            if self.zenoh_listen().is_some() {
-                return Err(SystemError("hook.zenoh_listen 이 있는데 [chat] 이 없다".into()));
-            }
+        if self.chat.is_none()
+            && let Some(k) = self.hub.auth.api_keys.iter().find(|k| k.subscribes())
+        {
+            return Err(SystemError(format!("계정 {:?} — subscribe 가 있는데 [chat] 이 없다", k.key)));
         }
         if let Some(c) = &self.chat {
             let form = c.form().map_err(SystemError)?;
@@ -499,6 +561,13 @@ impl System {
                     None => "-".into(),
                 },
             ));
+            v.push((
+                format!("{p}.facts"),
+                match &k.facts {
+                    Some(f) => format!("[{}]", f.iter().map(|x| format!("{x:?}")).collect::<Vec<_>>().join(",")),
+                    None => "-".into(),
+                },
+            ));
         }
         for (i, u) in self.unit.iter().enumerate() {
             let p = format!("unit[{i}]");
@@ -527,6 +596,7 @@ impl System {
                 for (i, w) in hk.webhooks.iter().enumerate() {
                     v.push((format!("hook.webhooks[{i}].url"), w.url.clone()));
                     v.push((format!("hook.webhooks[{i}].secret"), "***".into()));
+                    v.push((format!("hook.webhooks[{i}].key"), w.key.clone()));
                 }
             }
             _ => v.push(("hook.webhooks".into(), "-".into())),
@@ -536,6 +606,7 @@ impl System {
         for (k, val) in hk.zenoh_files() {
             v.push((format!("hook.{k}"), val.unwrap_or("-").to_string()));
         }
+        v.push(("hook.facts_bundle_max_bytes".into(), hk.facts_bundle_max_bytes().to_string()));
         match &self.chat {
             Some(c) => {
                 v.push(("chat.db".into(), ChatDb::shown_of(&c.db)));
@@ -620,10 +691,83 @@ mod tests {
         let zs = System::parse(&format!("{MIN}{z}{chat}")).unwrap();
         assert_eq!(zs.zenoh_listen(), Some("tls/0.0.0.0:7447"));
         assert!(zs.banner_fields().iter().any(|(k, v)| k == "hook.zenoh_ca" && v == "ca.pem"));
-        assert!(System::parse(&format!("{MIN}{z}")).is_err(), "정:IMPL-CFG-SYSTEM-FILE — [chat] 없이 zenoh_listen");
+        assert!(System::parse(&format!("{MIN}{z}")).is_ok(), "S-rule-RULE-HOOK-DIRECT-2 ④ — [chat] 없이 zenoh 입구가 선다(사실 구독 · 현황 · 제어)");
         assert!(System::parse(&format!("{MIN}{}{chat}", z.replace("tls/", "tcp/"))).is_err(), "정:IMPL-CFG-SYSTEM-FILE — tls/ 꼴만");
         assert!(System::parse(&format!("{MIN}{}{chat}", z.replace("zenoh_ca = \"ca.pem\"\n", ""))).is_err(), "정:IMPL-CFG-SYSTEM-FILE — 입구가 있는데 CA 가 없음");
         assert!(System::parse(&format!("{MIN}[hook]\nzenoh_cert = \"c.pem\"\n{chat}")).is_err(), "정:IMPL-CFG-SYSTEM-FILE — 입구 없이 인증서(읽지 않는 키)");
         assert!(System::parse(&format!("{MIN}[hook]\nzenoh_port = 1\n{chat}")).is_err(), "형상 — 모르는 키");
+    }
+
+    const SECRET32: &str = "whsec_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+
+    fn acct(key: &str, hook: bool, extra: &str) -> String {
+        format!("[[hub.auth.api_keys]]\nkey = \"{key}\"\nsecret = \"s\"\nhook_allowed = {hook}\n{extra}")
+    }
+
+    fn webhook(url: &str, secret: &str, key: &str) -> String {
+        format!("[[hook.webhooks]]\nurl = \"{url}\"\nsecret = \"{secret}\"\nkey = \"{key}\"\n")
+    }
+
+    #[test]
+    fn facts_field_boot() {
+        let ok = System::parse(&format!("{MIN}{}", acct("acme", true, "facts = [\"floor_granted\", \"room_created\"]\n"))).unwrap();
+        assert!(ok.hub.auth.api_keys[0].wants_facts(), "S-rule-RULE-HOOK-FACTS-SUB-2 ① — 이름 목록");
+        assert!(
+            ok.banner_fields().iter().any(|(k, v)| k == "hub.auth.api_keys[0].facts" && v == "[\"floor_granted\",\"room_created\"]"),
+            "정:IMPL-CFG-SYSTEM-FILE — 배너는 계정마다 facts"
+        );
+        assert!(System::parse(&format!("{MIN}{}", acct("acme", true, "facts = [\"*\"]\n"))).is_ok(), "S-rule-RULE-HOOK-FACTS-SUB-2 ② — \"*\"");
+        let chat_star = System::parse(&format!("{MIN}{}[chat]\ndb = \"memory:\"\n", acct("acme", true, "subscribe = [\"*\"]\n"))).unwrap();
+        assert!(!chat_star.hub.auth.api_keys[0].wants_facts(), "S-rule-RULE-HOOK-FACTS-SUB-2 ③ — 채팅 subscribe 의 \"*\" 는 사실을 열지 않는다");
+        for bad in ["room_*", "floor", "ROOM_CREATED", "", "message_sent"] {
+            assert!(
+                System::parse(&format!("{MIN}{}", acct("acme", true, &format!("facts = [\"{bad}\"]\n")))).is_err(),
+                "정:IMPL-CFG-SYSTEM-FILE — 카탈로그에 없는 facts 항목 {bad:?}"
+            );
+        }
+        assert!(System::parse(&format!("{MIN}{}", acct("acme", false, "facts = [\"*\"]\n"))).is_err(), "정:IMPL-CFG-SYSTEM-FILE — hook_allowed 아닌 계정의 facts");
+        assert!(System::parse(&format!("{MIN}{}", acct("ac/me", true, "facts = [\"*\"]\n"))).is_err(), "정:RULE-BUS-KEYSPACE — facts 계정 키가 버스 금지 문자를 품음");
+        assert!(System::parse(&format!("{MIN}{}", acct("acme", true, "facts = []\n"))).is_ok(), "정:IMPL-CFG-SYSTEM-FILE — 빈 배열은 없는 것과 같다");
+        let none = System::parse(MIN).unwrap();
+        assert!(none.banner_fields().iter().any(|(k, v)| k == "hook.facts_bundle_max_bytes" && v == "65536"), "정:IMPL-CFG-SYSTEM-FILE — facts_bundle_max_bytes 기본 65536");
+        let b = System::parse(&format!("{MIN}[hook]\nfacts_bundle_max_bytes = 1024\n")).unwrap();
+        assert_eq!(b.hook.as_ref().map(HookSection::facts_bundle_max_bytes), Some(1024));
+    }
+
+    #[test]
+    fn webhook_boot() {
+        let base = acct("acme", true, "");
+        let ok = System::parse(&format!("{MIN}{base}[hook]\n{}", webhook("https://h.example/in", SECRET32, "acme"))).unwrap();
+        let hk = ok.hook.as_ref().unwrap();
+        assert_eq!(hk.webhook_of("acme").map(|w| w.url.as_str()), Some("https://h.example/in"), "S-rule-RULE-HOOK-WEBHOOK-2 ③ — 받는 계정은 webhook 에 묶인 계정");
+        assert!(ok.banner_fields().iter().any(|(k, v)| k == "hook.webhooks[0].key" && v == "acme"), "정:IMPL-CFG-SYSTEM-FILE — 배너는 webhook 마다 key");
+        assert!(ok.banner_fields().iter().any(|(k, v)| k == "hook.webhooks[0].secret" && v == "***"));
+        assert_eq!(webhook_secret_key(SECRET32).map(|k| k.len()), Ok(32), "S-rule-RULE-HOOK-WEBHOOK-3 ② — HMAC 키는 whsec_ 뒤를 base64 로 푼 바이트");
+        assert!(System::parse(&format!("{MIN}{base}[hook]\n{}", webhook("http://h:8080/in", SECRET32, "acme"))).is_ok(), "정:IMPL-CFG-SYSTEM-FILE — http 도 받는다");
+        let w24 = "whsec_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let w64 = "whsec_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==";
+        for s in [w24, w64] {
+            assert!(System::parse(&format!("{MIN}{base}[hook]\n{}", webhook("https://h/in", s, "acme"))).is_ok(), "정:IMPL-CFG-SYSTEM-FILE — 풀린 바이트 24 · 64 는 안쪽");
+        }
+        let bad_secret = [
+            ("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=", "whsec_ 없음"),
+            ("whsec_@@@", "base64 아님"),
+            ("whsec_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "23 바이트"),
+            ("whsec_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "65 바이트"),
+            ("whsec_", "빈 값"),
+        ];
+        for (s, why) in bad_secret {
+            assert!(System::parse(&format!("{MIN}{base}[hook]\n{}", webhook("https://h/in", s, "acme"))).is_err(), "정:IMPL-CFG-SYSTEM-FILE — webhook secret {why}");
+        }
+        for u in ["ftp://h/in", "h/in", "https://", ""] {
+            assert!(System::parse(&format!("{MIN}{base}[hook]\n{}", webhook(u, SECRET32, "acme"))).is_err(), "정:IMPL-CFG-SYSTEM-FILE — webhook url {u:?}");
+        }
+        assert!(System::parse(&format!("{MIN}{base}[hook]\n{}", webhook("https://h/in", SECRET32, "nobody"))).is_err(), "정:IMPL-CFG-SYSTEM-FILE — 계정 목록에 없는 key");
+        let plain = acct("acme", false, "");
+        assert!(System::parse(&format!("{MIN}{plain}[hook]\n{}", webhook("https://h/in", SECRET32, "acme"))).is_err(), "정:IMPL-CFG-SYSTEM-FILE — hook_allowed 아닌 계정의 webhook");
+        let two = format!("{MIN}{base}[hook]\n{}{}", webhook("https://a/in", SECRET32, "acme"), webhook("https://b/in", SECRET32, "acme"));
+        assert!(System::parse(&two).is_err(), "정:IMPL-CFG-SYSTEM-FILE — 한 계정에 webhook 둘");
+        let nokey = format!("{MIN}{base}[hook]\n[[hook.webhooks]]\nurl = \"https://h/in\"\nsecret = \"{SECRET32}\"\n");
+        assert!(System::parse(&nokey).is_err(), "정:IMPL-CFG-SYSTEM-FILE — webhook key 없음");
     }
 }

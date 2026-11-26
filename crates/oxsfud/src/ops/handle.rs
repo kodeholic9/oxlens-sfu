@@ -113,6 +113,7 @@ pub async fn dispatch(env: &Envelope) -> Reply {
         CallKind::ListRooms => reply(super::rooms::list()),
         CallKind::Admin => reply(super::admin::handle(env)),
         CallKind::LogLevel => reply(super::admin::log_level(env)),
+        CallKind::Permission => reply(Err(Code::UnknownOp.failure())),
     }
 }
 

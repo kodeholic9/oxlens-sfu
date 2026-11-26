@@ -1,0 +1,1208 @@
+{
+ "generated": "spec/server/gen/vectors.mts — 손으로 고치지 않는다 · 기대값 = 원천 산수(areas/*/behavior)",
+ "labels": [
+  "정:RULE-HOOK-FACTS",
+  "정:RULE-HOOK-FACTS-SUB",
+  "정:RULE-BUS-PUBLIC",
+  "정:RULE-HOOK-DIRECT"
+ ],
+ "units": {
+  "sub": "A 평면 통지 몸의 갈래 칸(PARTICIPANT_EVENT.type · TRACK_EVENT.action · TRACK_STATE.type · PARTICIPANT_STATE.type · 없으면 null)",
+  "g": "발언권 전체 상태 idle(G: Floor Idle) · taken(G: Floor Taken) · revoking(G: pending Floor Revoke)",
+  "now": "받은 시각 UNIX ms",
+  "tail": "공개 접두 ox/{c}/pub/v1/ 뒤 키 꼬리",
+  "bytes": "사실 하나의 직렬화 바이트"
+ },
+ "of_notice": [
+  {
+   "op": "PARTICIPANT_EVENT",
+   "sub": "joined",
+   "fact": "participant_joined"
+  },
+  {
+   "op": "PARTICIPANT_EVENT",
+   "sub": "left",
+   "fact": "participant_left"
+  },
+  {
+   "op": "TRACK_EVENT",
+   "sub": "add",
+   "fact": "track_published"
+  },
+  {
+   "op": "TRACK_EVENT",
+   "sub": "remove",
+   "fact": "track_unpublished"
+  },
+  {
+   "op": "TRACK_STATE",
+   "sub": "muted",
+   "fact": "track_state"
+  },
+  {
+   "op": "PARTICIPANT_STATE",
+   "sub": "permission",
+   "fact": "permission_changed"
+  },
+  {
+   "op": "PARTICIPANT_EVENT",
+   "sub": "kicked",
+   "fact": null
+  },
+  {
+   "op": "TRACK_EVENT",
+   "sub": "update",
+   "fact": null
+  },
+  {
+   "op": "PARTICIPANT_STATE",
+   "sub": "present",
+   "fact": null
+  },
+  {
+   "op": "ROOM_EVENT",
+   "sub": null,
+   "fact": null
+  },
+  {
+   "op": "FLOOR_TAKEN",
+   "sub": null,
+   "fact": null
+  },
+  {
+   "op": "MESSAGE_EVENT",
+   "sub": null,
+   "fact": null
+  }
+ ],
+ "floor_fact": [
+  {
+   "name": "빈 데서 화자를 세움 — 획득",
+   "before": {
+    "g": "idle",
+    "holder": null
+   },
+   "after": {
+    "g": "taken",
+    "holder": "u1"
+   },
+   "fact": "floor_granted"
+  },
+  {
+   "name": "큐 승계(화자가 바뀜) — 획득",
+   "before": {
+    "g": "taken",
+    "holder": "u1"
+   },
+   "after": {
+    "g": "taken",
+    "holder": "u2"
+   },
+   "fact": "floor_granted"
+  },
+  {
+   "name": "회수 대기 뒤 큐 승계 — 획득",
+   "before": {
+    "g": "revoking",
+    "holder": "u1"
+   },
+   "after": {
+    "g": "taken",
+    "holder": "u2"
+   },
+   "fact": "floor_granted"
+  },
+  {
+   "name": "같은 화자 재허가 — 사실 아님",
+   "before": {
+    "g": "taken",
+    "holder": "u1"
+   },
+   "after": {
+    "g": "taken",
+    "holder": "u1"
+   },
+   "fact": null
+  },
+  {
+   "name": "화자 → 빈 상태 — 비움",
+   "before": {
+    "g": "taken",
+    "holder": "u1"
+   },
+   "after": {
+    "g": "idle",
+    "holder": null
+   },
+   "fact": "floor_released"
+  },
+  {
+   "name": "회수 대기 → 빈 상태 — 비움",
+   "before": {
+    "g": "revoking",
+    "holder": "u1"
+   },
+   "after": {
+    "g": "idle",
+    "holder": null
+   },
+   "fact": "floor_released"
+  },
+  {
+   "name": "빈 상태 재전송 답 — 사실 아님",
+   "before": {
+    "g": "idle",
+    "holder": null
+   },
+   "after": {
+    "g": "idle",
+    "holder": null
+   },
+   "fact": null
+  },
+  {
+   "name": "화자 → 회수 대기 — 회수",
+   "before": {
+    "g": "taken",
+    "holder": "u1"
+   },
+   "after": {
+    "g": "revoking",
+    "holder": "u1"
+   },
+   "fact": "floor_revoked"
+  },
+  {
+   "name": "회수 대기 그대로 — 사실 아님",
+   "before": {
+    "g": "revoking",
+    "holder": "u1"
+   },
+   "after": {
+    "g": "revoking",
+    "holder": "u1"
+   },
+   "fact": null
+  }
+ ],
+ "stamp": [
+  {
+   "name": "처음 — 받은 시각 · 카운터 0",
+   "start": null,
+   "steps": [
+    {
+     "now": 1764000000000,
+     "got": {
+      "ms": 1764000000000,
+      "counter": 0
+     }
+    }
+   ]
+  },
+  {
+   "name": "같은 ms — 카운터 +1",
+   "start": null,
+   "steps": [
+    {
+     "now": 1764000000000,
+     "got": {
+      "ms": 1764000000000,
+      "counter": 0
+     }
+    },
+    {
+     "now": 1764000000000,
+     "got": {
+      "ms": 1764000000000,
+      "counter": 1
+     }
+    },
+    {
+     "now": 1764000000000,
+     "got": {
+      "ms": 1764000000000,
+      "counter": 2
+     }
+    }
+   ]
+  },
+  {
+   "name": "ms 가 오르면 카운터 0",
+   "start": null,
+   "steps": [
+    {
+     "now": 1764000000000,
+     "got": {
+      "ms": 1764000000000,
+      "counter": 0
+     }
+    },
+    {
+     "now": 1764000000000,
+     "got": {
+      "ms": 1764000000000,
+      "counter": 1
+     }
+    },
+    {
+     "now": 1764000000001,
+     "got": {
+      "ms": 1764000000001,
+      "counter": 0
+     }
+    },
+    {
+     "now": 1764000000005,
+     "got": {
+      "ms": 1764000000005,
+      "counter": 0
+     }
+    }
+   ]
+  },
+  {
+   "name": "★앞서 나간 ms 와 같은 now — 카운터 +1(ms 를 다시 0 으로 세지 않는다)",
+   "start": {
+    "ms": 1764000000000,
+    "counter": 65535
+   },
+   "steps": [
+    {
+     "now": 1764000000000,
+     "got": {
+      "ms": 1764000000001,
+      "counter": 0
+     }
+    },
+    {
+     "now": 1764000000001,
+     "got": {
+      "ms": 1764000000001,
+      "counter": 1
+     }
+    },
+    {
+     "now": 1764000000001,
+     "got": {
+      "ms": 1764000000001,
+      "counter": 2
+     }
+    },
+    {
+     "now": 1764000000002,
+     "got": {
+      "ms": 1764000000002,
+      "counter": 0
+     }
+    }
+   ]
+  },
+  {
+   "name": "★벽시계가 뒤로 — 앞 ms 그대로 · 카운터 +1",
+   "start": null,
+   "steps": [
+    {
+     "now": 1764000000000,
+     "got": {
+      "ms": 1764000000000,
+      "counter": 0
+     }
+    },
+    {
+     "now": 1763999999997,
+     "got": {
+      "ms": 1764000000000,
+      "counter": 1
+     }
+    },
+    {
+     "now": 1763999999997,
+     "got": {
+      "ms": 1764000000000,
+      "counter": 2
+     }
+    },
+    {
+     "now": 1764000000001,
+     "got": {
+      "ms": 1764000000001,
+      "counter": 0
+     }
+    }
+   ]
+  },
+  {
+   "name": "★카운터가 4 자리를 다 씀 — ms 하나 올리고 0",
+   "start": {
+    "ms": 1764000000000,
+    "counter": 65534
+   },
+   "steps": [
+    {
+     "now": 1764000000000,
+     "got": {
+      "ms": 1764000000000,
+      "counter": 65535
+     }
+    },
+    {
+     "now": 1764000000000,
+     "got": {
+      "ms": 1764000000001,
+      "counter": 0
+     }
+    },
+    {
+     "now": 1764000000002,
+     "got": {
+      "ms": 1764000000002,
+      "counter": 0
+     }
+    }
+   ]
+  }
+ ],
+ "fact_id": [
+  {
+   "ms": 1764000000000,
+   "counter": 0,
+   "inst": "h1",
+   "id": "019ab697e8000000h1"
+  },
+  {
+   "ms": 1764000000000,
+   "counter": 1,
+   "inst": "h1",
+   "id": "019ab697e8000001h1"
+  },
+  {
+   "ms": 1764000000000,
+   "counter": 65535,
+   "inst": "h1",
+   "id": "019ab697e800ffffh1"
+  },
+  {
+   "ms": 0,
+   "counter": 0,
+   "inst": "x",
+   "id": "0000000000000000x"
+  },
+  {
+   "ms": 281474976710655,
+   "counter": 171,
+   "inst": "019a8f000000ab12cd341",
+   "id": "ffffffffffff00ab019a8f000000ab12cd341"
+  }
+ ],
+ "facts_item": [
+  {
+   "item": "*",
+   "ok": true
+  },
+  {
+   "item": "room_created",
+   "ok": true
+  },
+  {
+   "item": "room_closed",
+   "ok": true
+  },
+  {
+   "item": "participant_joined",
+   "ok": true
+  },
+  {
+   "item": "participant_left",
+   "ok": true
+  },
+  {
+   "item": "track_published",
+   "ok": true
+  },
+  {
+   "item": "track_unpublished",
+   "ok": true
+  },
+  {
+   "item": "track_state",
+   "ok": true
+  },
+  {
+   "item": "permission_changed",
+   "ok": true
+  },
+  {
+   "item": "floor_granted",
+   "ok": true
+  },
+  {
+   "item": "floor_released",
+   "ok": true
+  },
+  {
+   "item": "floor_revoked",
+   "ok": true
+  },
+  {
+   "item": "recording_started",
+   "ok": true
+  },
+  {
+   "item": "recording_ended",
+   "ok": true
+  },
+  {
+   "item": "room_*",
+   "ok": false
+  },
+  {
+   "item": "floor",
+   "ok": false
+  },
+  {
+   "item": "ROOM_CREATED",
+   "ok": false
+  },
+  {
+   "item": "",
+   "ok": false
+  },
+  {
+   "item": "message_sent",
+   "ok": false
+  }
+ ],
+ "wants": [
+  {
+   "facts": [
+    "*"
+   ],
+   "type": "room_created",
+   "wants": true
+  },
+  {
+   "facts": [
+    "floor_granted"
+   ],
+   "type": "floor_granted",
+   "wants": true
+  },
+  {
+   "facts": [
+    "floor_granted"
+   ],
+   "type": "floor_released",
+   "wants": false
+  },
+  {
+   "facts": [],
+   "type": "room_created",
+   "wants": false
+  },
+  {
+   "facts": [
+    "room_closed",
+    "*"
+   ],
+   "type": "track_state",
+   "wants": true
+  },
+  {
+   "facts": [
+    "participant_joined",
+    "participant_left"
+   ],
+   "type": "participant_left",
+   "wants": true
+  }
+ ],
+ "queue": [
+  {
+   "name": "빈 줄 · 버림 없음 — 꺼낼 것 없음",
+   "max": 3,
+   "steps": [
+    {
+     "step": [
+      "take",
+      1000
+     ],
+     "got": null,
+     "queued": [],
+     "dropped": 0
+    }
+   ]
+  },
+  {
+   "name": "넣고 꺼냄 — 바이트 상한까지",
+   "max": 5,
+   "steps": [
+    {
+     "step": [
+      "put",
+      "a",
+      400
+     ],
+     "got": "queued",
+     "queued": [
+      "a"
+     ],
+     "dropped": 0
+    },
+    {
+     "step": [
+      "put",
+      "b",
+      400
+     ],
+     "got": "queued",
+     "queued": [
+      "a",
+      "b"
+     ],
+     "dropped": 0
+    },
+    {
+     "step": [
+      "put",
+      "c",
+      400
+     ],
+     "got": "queued",
+     "queued": [
+      "a",
+      "b",
+      "c"
+     ],
+     "dropped": 0
+    },
+    {
+     "step": [
+      "take",
+      1000
+     ],
+     "got": {
+      "ids": [
+       "a",
+       "b"
+      ],
+      "dropped": 0
+     },
+     "queued": [
+      "c"
+     ],
+     "dropped": 0
+    },
+    {
+     "step": [
+      "take",
+      1000
+     ],
+     "got": {
+      "ids": [
+       "c"
+      ],
+      "dropped": 0
+     },
+     "queued": [],
+     "dropped": 0
+    }
+   ]
+  },
+  {
+   "name": "첫 것은 커도 혼자 간다",
+   "max": 5,
+   "steps": [
+    {
+     "step": [
+      "put",
+      "a",
+      5000
+     ],
+     "got": "queued",
+     "queued": [
+      "a"
+     ],
+     "dropped": 0
+    },
+    {
+     "step": [
+      "put",
+      "b",
+      1
+     ],
+     "got": "queued",
+     "queued": [
+      "a",
+      "b"
+     ],
+     "dropped": 0
+    },
+    {
+     "step": [
+      "take",
+      1000
+     ],
+     "got": {
+      "ids": [
+       "a"
+      ],
+      "dropped": 0
+     },
+     "queued": [
+      "b"
+     ],
+     "dropped": 0
+    },
+    {
+     "step": [
+      "take",
+      1000
+     ],
+     "got": {
+      "ids": [
+       "b"
+      ],
+      "dropped": 0
+     },
+     "queued": [],
+     "dropped": 0
+    }
+   ]
+  },
+  {
+   "name": "상한에 닿으면 오래된 것부터 버리고 센다 · 묶음에 싣고 0",
+   "max": 2,
+   "steps": [
+    {
+     "step": [
+      "put",
+      "a",
+      1
+     ],
+     "got": "queued",
+     "queued": [
+      "a"
+     ],
+     "dropped": 0
+    },
+    {
+     "step": [
+      "put",
+      "b",
+      1
+     ],
+     "got": "queued",
+     "queued": [
+      "a",
+      "b"
+     ],
+     "dropped": 0
+    },
+    {
+     "step": [
+      "put",
+      "c",
+      1
+     ],
+     "got": "dropped_oldest",
+     "queued": [
+      "b",
+      "c"
+     ],
+     "dropped": 1
+    },
+    {
+     "step": [
+      "put",
+      "d",
+      1
+     ],
+     "got": "dropped_oldest",
+     "queued": [
+      "c",
+      "d"
+     ],
+     "dropped": 2
+    },
+    {
+     "step": [
+      "take",
+      1000
+     ],
+     "got": {
+      "ids": [
+       "c",
+       "d"
+      ],
+      "dropped": 2
+     },
+     "queued": [],
+     "dropped": 0
+    },
+    {
+     "step": [
+      "take",
+      1000
+     ],
+     "got": null,
+     "queued": [],
+     "dropped": 0
+    }
+   ]
+  },
+  {
+   "name": "줄이 비어도 버림 수가 있으면 빈 묶음으로 알린다 — 버린 묶음(사실 1 · 실었던 dropped 1)을 되돌려 더함",
+   "max": 1,
+   "steps": [
+    {
+     "step": [
+      "put",
+      "a",
+      1
+     ],
+     "got": "queued",
+     "queued": [
+      "a"
+     ],
+     "dropped": 0
+    },
+    {
+     "step": [
+      "put",
+      "b",
+      1
+     ],
+     "got": "dropped_oldest",
+     "queued": [
+      "b"
+     ],
+     "dropped": 1
+    },
+    {
+     "step": [
+      "take",
+      1000
+     ],
+     "got": {
+      "ids": [
+       "b"
+      ],
+      "dropped": 1
+     },
+     "queued": [],
+     "dropped": 0
+    },
+    {
+     "step": [
+      "lost",
+      1,
+      1
+     ],
+     "got": null,
+     "queued": [],
+     "dropped": 2
+    },
+    {
+     "step": [
+      "take",
+      1000
+     ],
+     "got": {
+      "ids": [],
+      "dropped": 2
+     },
+     "queued": [],
+     "dropped": 0
+    },
+    {
+     "step": [
+      "take",
+      1000
+     ],
+     "got": null,
+     "queued": [],
+     "dropped": 0
+    }
+   ]
+  },
+  {
+   "name": "끝내 못 보낸 묶음의 수는 다음 묶음이 알린다",
+   "max": 4,
+   "steps": [
+    {
+     "step": [
+      "put",
+      "a",
+      1
+     ],
+     "got": "queued",
+     "queued": [
+      "a"
+     ],
+     "dropped": 0
+    },
+    {
+     "step": [
+      "take",
+      1000
+     ],
+     "got": {
+      "ids": [
+       "a"
+      ],
+      "dropped": 0
+     },
+     "queued": [],
+     "dropped": 0
+    },
+    {
+     "step": [
+      "lost",
+      1,
+      0
+     ],
+     "got": null,
+     "queued": [],
+     "dropped": 1
+    },
+    {
+     "step": [
+      "put",
+      "b",
+      1
+     ],
+     "got": "queued",
+     "queued": [
+      "b"
+     ],
+     "dropped": 1
+    },
+    {
+     "step": [
+      "take",
+      1000
+     ],
+     "got": {
+      "ids": [
+       "b"
+      ],
+      "dropped": 1
+     },
+     "queued": [],
+     "dropped": 0
+    }
+   ]
+  },
+  {
+   "name": "★버린 묶음 {사실 3 · dropped 5} — 둘 다 되돌려 다음 묶음이 8 을 알린다",
+   "max": 3,
+   "steps": [
+    {
+     "step": [
+      "put",
+      "a",
+      1
+     ],
+     "got": "queued",
+     "queued": [
+      "a"
+     ],
+     "dropped": 0
+    },
+    {
+     "step": [
+      "put",
+      "b",
+      1
+     ],
+     "got": "queued",
+     "queued": [
+      "a",
+      "b"
+     ],
+     "dropped": 0
+    },
+    {
+     "step": [
+      "put",
+      "c",
+      1
+     ],
+     "got": "queued",
+     "queued": [
+      "a",
+      "b",
+      "c"
+     ],
+     "dropped": 0
+    },
+    {
+     "step": [
+      "put",
+      "d",
+      1
+     ],
+     "got": "dropped_oldest",
+     "queued": [
+      "b",
+      "c",
+      "d"
+     ],
+     "dropped": 1
+    },
+    {
+     "step": [
+      "put",
+      "e",
+      1
+     ],
+     "got": "dropped_oldest",
+     "queued": [
+      "c",
+      "d",
+      "e"
+     ],
+     "dropped": 2
+    },
+    {
+     "step": [
+      "put",
+      "f",
+      1
+     ],
+     "got": "dropped_oldest",
+     "queued": [
+      "d",
+      "e",
+      "f"
+     ],
+     "dropped": 3
+    },
+    {
+     "step": [
+      "put",
+      "g",
+      1
+     ],
+     "got": "dropped_oldest",
+     "queued": [
+      "e",
+      "f",
+      "g"
+     ],
+     "dropped": 4
+    },
+    {
+     "step": [
+      "put",
+      "h",
+      1
+     ],
+     "got": "dropped_oldest",
+     "queued": [
+      "f",
+      "g",
+      "h"
+     ],
+     "dropped": 5
+    },
+    {
+     "step": [
+      "take",
+      1000
+     ],
+     "got": {
+      "ids": [
+       "f",
+       "g",
+       "h"
+      ],
+      "dropped": 5
+     },
+     "queued": [],
+     "dropped": 0
+    },
+    {
+     "step": [
+      "lost",
+      3,
+      5
+     ],
+     "got": null,
+     "queued": [],
+     "dropped": 8
+    },
+    {
+     "step": [
+      "take",
+      1000
+     ],
+     "got": {
+      "ids": [],
+      "dropped": 8
+     },
+     "queued": [],
+     "dropped": 0
+    },
+    {
+     "step": [
+      "take",
+      1000
+     ],
+     "got": null,
+     "queued": [],
+     "dropped": 0
+    }
+   ]
+  }
+ ],
+ "judge_request": [
+  {
+   "tail": "q/rooms",
+   "ask": {
+    "kind": "list"
+   }
+  },
+  {
+   "tail": "q/room/r1",
+   "ask": {
+    "kind": "detail",
+    "room": "r1"
+   }
+  },
+  {
+   "tail": "ctl/room/r1/permission",
+   "ask": {
+    "kind": "ctl",
+    "room": "r1"
+   }
+  },
+  {
+   "tail": "q/room",
+   "ask": {
+    "kind": "outside"
+   }
+  },
+  {
+   "tail": "q/room/",
+   "ask": {
+    "kind": "outside"
+   }
+  },
+  {
+   "tail": "q/room/*",
+   "ask": {
+    "kind": "outside"
+   }
+  },
+  {
+   "tail": "q/room/r1/x",
+   "ask": {
+    "kind": "outside"
+   }
+  },
+  {
+   "tail": "ctl/room/r1",
+   "ask": {
+    "kind": "outside"
+   }
+  },
+  {
+   "tail": "ctl/room/$*/permission",
+   "ask": {
+    "kind": "outside"
+   }
+  },
+  {
+   "tail": "q",
+   "ask": {
+    "kind": "outside"
+   }
+  },
+  {
+   "tail": "q/rooms/x",
+   "ask": {
+    "kind": "outside"
+   }
+  },
+  {
+   "tail": "facts/sub/k1",
+   "ask": {
+    "kind": "outside"
+   }
+  },
+  {
+   "tail": "media/r1",
+   "ask": {
+    "kind": "outside"
+   }
+  }
+ ],
+ "judge_declare": [
+  {
+   "tail": "chat/sub/k1",
+   "cn": "k1",
+   "verdict": {
+    "kind": "own",
+    "lane": "chat"
+   }
+  },
+  {
+   "tail": "facts/sub/k1",
+   "cn": "k1",
+   "verdict": {
+    "kind": "own",
+    "lane": "facts"
+   }
+  },
+  {
+   "tail": "chat/sub/k2",
+   "cn": "k1",
+   "verdict": {
+    "kind": "other_account"
+   }
+  },
+  {
+   "tail": "facts/sub/k2",
+   "cn": "k1",
+   "verdict": {
+    "kind": "other_account"
+   }
+  },
+  {
+   "tail": "facts/sub/k1/x",
+   "cn": "k1",
+   "verdict": {
+    "kind": "other_account"
+   }
+  },
+  {
+   "tail": "facts/sub/",
+   "cn": "k1",
+   "verdict": {
+    "kind": "other_account"
+   }
+  },
+  {
+   "tail": "q/rooms",
+   "cn": "k1",
+   "verdict": {
+    "kind": "outside"
+   }
+  },
+  {
+   "tail": "chat/k1",
+   "cn": "k1",
+   "verdict": {
+    "kind": "outside"
+   }
+  },
+  {
+   "tail": "media/sub/k1",
+   "cn": "k1",
+   "verdict": {
+    "kind": "outside"
+   }
+  }
+ ]
+}

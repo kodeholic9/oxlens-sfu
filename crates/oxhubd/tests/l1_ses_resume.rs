@@ -17,7 +17,7 @@ use serde_json::json;
 use tokio::sync::{Notify, mpsc};
 
 fn key() -> ApiKey {
-    ApiKey { key: "k".into(), secret: "s".into(), name: None, participant_types: vec![0], hidden_allowed: false, ops_allowed: false, hook_allowed: false, subscribe: None }
+    ApiKey { key: "k".into(), secret: "s".into(), name: None, participant_types: vec![0], hidden_allowed: false, ops_allowed: false, hook_allowed: false, subscribe: None, facts: None }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

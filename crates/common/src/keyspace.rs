@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-BUS-KEYSPACE · 정:RULE-CHAT-EXT-SUB · model: claude-opus-5-5
-//! 버스 키 공간 — 알릴 것을 전부 키에 적는다(liveliness 토큰은 값을 못 싣는다) · 방 id 가 node 앞 · 3rd 연결 위치(`ext`) · 대외 채팅 구독 키(`pub/v1/chat/sub`).
+// spec: v1.6 · 정:RULE-BUS-KEYSPACE · 정:RULE-CHAT-EXT-SUB · 정:RULE-HOOK-KEYSPACE · 정:RULE-HOOK-FACTS-SUB · model: claude-opus-5-5
+//! 버스 키 공간 — 알릴 것을 전부 키에 적는다(liveliness 토큰은 값을 못 싣는다) · 방 id 가 node 앞 · 3rd 연결 위치(`ext` · 사실 구독 `facts`) · 대외 채팅 · 사실 구독 키(`pub/v1/chat/sub` · `pub/v1/facts/sub`).
 
 pub const FORBIDDEN: &[char] = &['*', '$', '?', '#', '/'];
 
@@ -62,6 +62,26 @@ impl Keys {
         format!("{}/ext/**", self.base())
     }
 
+    pub fn facts_token(&self, key: &str, node: &str, cid: &str) -> String {
+        format!("{}/facts/{key}/{node}/{cid}", self.base())
+    }
+
+    pub fn facts_all(&self) -> String {
+        format!("{}/facts/**", self.base())
+    }
+
+    pub fn pub_prefix(&self) -> String {
+        format!("ox/{}/pub/v1/", self.ns)
+    }
+
+    pub fn facts_sub_prefix(&self) -> String {
+        format!("{}facts/sub/", self.pub_prefix())
+    }
+
+    pub fn facts_sub(&self, key: &str) -> String {
+        format!("{}{key}", self.facts_sub_prefix())
+    }
+
     pub fn chat_sub_prefix(&self) -> String {
         format!("ox/{}/pub/v1/chat/sub/", self.ns)
     }
@@ -114,6 +134,9 @@ impl Keys {
                 Some(Parsed::Sess { user: user.to_string(), node: node.to_string(), sid: sid.to_string() })
             }
             ["ext", key, node, cid] => Some(Parsed::Ext { key: key.to_string(), node: node.to_string(), cid: cid.to_string() }),
+            ["facts", key, node, cid] => {
+                Some(Parsed::Facts { key: key.to_string(), node: node.to_string(), cid: cid.to_string() })
+            }
             ["ev", "room", room] => Some(Parsed::EvRoom(room.to_string())),
             ["ev", "user", user] => Some(Parsed::EvUser(user.to_string())),
             ["ev", "node", node] => Some(Parsed::EvNode(node.to_string())),
@@ -129,6 +152,7 @@ pub enum Parsed {
     Room { room: String, node: String, inst: String },
     Sess { user: String, node: String, sid: String },
     Ext { key: String, node: String, cid: String },
+    Facts { key: String, node: String, cid: String },
     EvRoom(String),
     EvUser(String),
     EvNode(String),
@@ -166,5 +190,18 @@ mod tests {
         assert_eq!(k.parse("ox/c1/int/ext/acme/n1/e1a"), Some(Parsed::Ext { key: "acme".into(), node: "n1".into(), cid: "e1a".into() }));
         assert_eq!(k.ext_all(), "ox/c1/int/ext/**");
         assert_eq!(k.chat_sub("acme"), "ox/c1/pub/v1/chat/sub/acme");
+    }
+
+    #[test]
+    fn facts_token_and_facts_sub_keys() {
+        let k = Keys::new("c1");
+        assert_eq!(k.facts_token("acme", "n1", "e1a"), "ox/c1/int/facts/acme/n1/e1a", "S-rule-RULE-HOOK-DIRECT-2 ② — 사실 구독 선언 → int/facts/{{key}}/{{node}}/{{cid}}");
+        assert_eq!(
+            k.parse("ox/c1/int/facts/acme/n1/e1a"),
+            Some(Parsed::Facts { key: "acme".into(), node: "n1".into(), cid: "e1a".into() })
+        );
+        assert_eq!(k.facts_all(), "ox/c1/int/facts/**");
+        assert_eq!(k.facts_sub("acme"), "ox/c1/pub/v1/facts/sub/acme", "HK-KEY-PUB-V1-FACTS-SUB-KEY ① — hub 가 묻는 키");
+        assert_eq!(k.pub_prefix(), "ox/c1/pub/v1/");
     }
 }

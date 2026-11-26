@@ -233,6 +233,7 @@ pub struct Hook {
     pub retry_backoff_ms: Vec<u32>,
     pub retry_max: u8,
     pub queue_max: u32,
+    pub webhook_timeout_ms: u32,
     pub ext_window: u16,
     pub ext_reply_timeout_ms: u32,
     pub ext_timeout_close: u8,
@@ -245,6 +246,7 @@ impl Default for Hook {
             retry_backoff_ms: vec![1000, 2000, 4000, 8000, 16000],
             retry_max: 5,
             queue_max: 10_000,
+            webhook_timeout_ms: 15_000,
             ext_window: 8,
             ext_reply_timeout_ms: 10_000,
             ext_timeout_close: 3,
@@ -345,6 +347,9 @@ impl Policy {
         if self.hook.queue_max < 1 {
             return bad(format!("hook.queue_max {} 는 1 미만", self.hook.queue_max));
         }
+        if self.hook.webhook_timeout_ms < 1 {
+            return bad(format!("hook.webhook_timeout_ms {} 는 1 미만", self.hook.webhook_timeout_ms));
+        }
         if self.hook.ext_window < 1 {
             return bad(format!("hook.ext_window {} 는 1 미만", self.hook.ext_window));
         }
@@ -417,6 +422,7 @@ impl Policy {
             ),
             ("hook.retry_max", self.hook.retry_max.to_string()),
             ("hook.queue_max", self.hook.queue_max.to_string()),
+            ("hook.webhook_timeout_ms", self.hook.webhook_timeout_ms.to_string()),
             ("hook.ext_window", self.hook.ext_window.to_string()),
             ("hook.ext_reply_timeout_ms", self.hook.ext_reply_timeout_ms.to_string()),
             ("hook.ext_timeout_close", self.hook.ext_timeout_close.to_string()),

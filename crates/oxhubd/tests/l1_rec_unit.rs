@@ -50,7 +50,7 @@ fn the_hub_base_is_the_listen_and_base_path_with_loopback_for_any() {
 
 #[test]
 fn the_gateway_signs_a_hidden_recorder_token_for_the_unit() {
-    let acc = Accounts { keys: vec![ApiKey { key: "k".into(), secret: "s".into(), name: None, participant_types: vec![0, 1], hidden_allowed: true, ops_allowed: false, hook_allowed: false, subscribe: None }], jwt_secret: None };
+    let acc = Accounts { keys: vec![ApiKey { key: "k".into(), secret: "s".into(), name: None, participant_types: vec![0, 1], hidden_allowed: true, ops_allowed: false, hook_allowed: false, subscribe: None, facts: None }], jwt_secret: None };
     let tok = acc.sign_unit(&rec_user("n1"), 3_600).expect("signed");
     let id = acc.verify_user(&tok).expect("valid");
     assert_eq!((id.user_id.as_str(), id.claims.participant_type, id.claims.hidden), ("rec-n1", 1, true), "정:IMPL-OPS-REC-UNIT 신원 — rec-{{node}} · participant_type 1 · hidden");
@@ -63,7 +63,7 @@ fn the_gateway_signs_a_hidden_recorder_token_for_the_unit() {
 #[test]
 fn an_account_signed_token_cannot_claim_the_unit_mark() {
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-    let acc = Accounts { keys: vec![ApiKey { key: "k".into(), secret: "s".into(), name: None, participant_types: vec![0, 1], hidden_allowed: true, ops_allowed: false, hook_allowed: false, subscribe: None }], jwt_secret: Some("j".into()) };
+    let acc = Accounts { keys: vec![ApiKey { key: "k".into(), secret: "s".into(), name: None, participant_types: vec![0, 1], hidden_allowed: true, ops_allowed: false, hook_allowed: false, subscribe: None, facts: None }], jwt_secret: Some("j".into()) };
     let now = common::now_ms() / 1000;
     let forged = serde_json::json!({ "sub": "rec-n1", "participant_type": 1, "hidden": true, "unit": true, "iat": now, "exp": now + 60 });
     for (who, secret) in [("account secret", "s"), ("jwt_secret", "j")] {

@@ -127,7 +127,7 @@ async fn the_last_member_leaving_while_a_join_is_in_flight_does_not_drop_the_roo
     }
     bus.set_local(Some(Local { client: client.expect("node listens"), epoch: "e1".into(), unit: "sfu".into() }));
 
-    let key = ApiKey { key: "k".into(), secret: "s".into(), name: None, participant_types: vec![0], hidden_allowed: false, ops_allowed: false, hook_allowed: false, subscribe: None };
+    let key = ApiKey { key: "k".into(), secret: "s".into(), name: None, participant_types: vec![0], hidden_allowed: false, ops_allowed: false, hook_allowed: false, subscribe: None, facts: None };
     let accounts = Accounts { keys: vec![key.clone()], jwt_secret: None };
     let ctx = Ctx::new(common::policy::Policy::default(), Accounts { keys: vec![key], jwt_secret: None }, bus.clone(), 1 << 20);
     let (sa, ca, mut ra) = session(&ctx, &accounts, "a591", 1).await;
