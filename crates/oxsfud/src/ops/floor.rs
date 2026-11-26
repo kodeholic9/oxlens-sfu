@@ -45,9 +45,16 @@ const BUILT: u8 = 0;
 const RUNNING: u8 = 1;
 const STOPPED: u8 = 2;
 
+#[derive(Default)]
+struct Drained {
+    done: std::sync::atomic::AtomicBool,
+    wake: tokio::sync::Notify,
+}
+
 pub struct RoomFloor {
     pub clock: Mutex<Clock>,
     pub wake: tokio::sync::Notify,
+    end: Arc<Drained>,
     state: AtomicU8,
     jobs: tokio::sync::mpsc::UnboundedSender<Job>,
     rx: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Job>>>,
@@ -57,7 +64,7 @@ pub struct RoomFloor {
 impl RoomFloor {
     pub fn new() -> RoomFloor {
         let (jobs, rx) = tokio::sync::mpsc::unbounded_channel();
-        RoomFloor { clock: Mutex::new(Clock::default()), wake: tokio::sync::Notify::new(), state: AtomicU8::new(BUILT), jobs, rx: Mutex::new(Some(rx)), talks: talk::Queue::new() }
+        RoomFloor { clock: Mutex::new(Clock::default()), wake: tokio::sync::Notify::new(), end: Arc::new(Drained::default()), state: AtomicU8::new(BUILT), jobs, rx: Mutex::new(Some(rx)), talks: talk::Queue::new() }
     }
 
     pub fn running(&self) -> bool {
@@ -77,11 +84,13 @@ impl Default for RoomFloor {
 
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 
-struct Live;
+struct Live(Arc<Drained>);
 
 impl Drop for Live {
     fn drop(&mut self) {
         LIVE.fetch_sub(1, Ordering::AcqRel);
+        self.0.done.store(true, Ordering::Release);
+        self.0.wake.notify_waiters();
     }
 }
 
@@ -104,7 +113,7 @@ pub fn start(room: &Arc<Room>) -> bool {
     }
     let Some(rx) = rf.rx.lock().ok().and_then(|mut g| g.take()) else { return false };
     LIVE.fetch_add(1, Ordering::AcqRel);
-    let (r, live) = (room.clone(), Live);
+    let (r, live) = (room.clone(), Live(rf.end.clone()));
     super::spawn(async move { room_task(r, rx, live).await });
     if let Some(trx) = rf.talks.claim() {
         super::spawn(talk_reporter(room.id.clone(), trx));
@@ -146,8 +155,23 @@ async fn talk_reporter(room: String, mut rx: tokio::sync::mpsc::UnboundedReceive
     }
 }
 
-pub fn stop(room: &Room) {
-    room.exec.state.store(STOPPED, Ordering::Release);
+pub async fn drained(room: &Room) {
+    let end = &room.exec.end;
+    loop {
+        let n = end.wake.notified();
+        tokio::pin!(n);
+        n.as_mut().enable();
+        if end.done.load(Ordering::Acquire) {
+            return;
+        }
+        n.await;
+    }
+}
+
+pub fn stop(room: &Room) -> bool {
+    if room.exec.state.swap(STOPPED, Ordering::AcqRel) != RUNNING {
+        return false;
+    }
     if let Ok(mut ck) = room.exec.clock.lock()
         && let Some(t) = ck.talk.take()
     {
@@ -155,6 +179,7 @@ pub fn stop(room: &Room) {
         room.exec.talks.push(Report::End { talk_id: t.id, state: oxsig::msg::TalkState::Lost, reason: None, duration_ms: dur });
     }
     room.exec.wake.notify_one();
+    true
 }
 
 pub fn talk_deadline(at_ms: u64) -> u64 {
@@ -215,6 +240,7 @@ pub struct Job {
     sources: Vec<Vec<u32>>,
     effects: Vec<Exec>,
     talk: Option<String>,
+    fact: Option<FactAt>,
 }
 
 pub struct Entry<'a> {
@@ -293,11 +319,9 @@ where
         let sources: Vec<Vec<u32>> = step.out.iter().map(|o| if o.m.t == Mt::Taken { o.m.a.as_deref().map(|u| slot_sources(room, u)).unwrap_or_default() } else { Vec::new() }).collect();
         let ret = step.clone();
         let talk = ck.talk.as_ref().map(|t| t.id.clone());
-        let fact = fact_of((from, held.as_deref()), (fl.g, fl.holder().as_deref()));
-        if let Some(m) = fact.and_then(|name| floor_material(name, &room.id, &fl, &step, &sources, talk.as_deref())) {
-            crate::bus::room_material(&room.id, &m);
-        }
-        if !(step.out.is_empty() && effects.is_empty()) && rf.jobs.send(Job { step, sources, effects, talk }).is_err() {
+        let fact = fact_of((from, held.as_deref()), (fl.g, fl.holder().as_deref()))
+            .map(|name| FactAt { name, speaker: fl.speaker.clone(), prev: fl.prev.clone(), seq: fl.seq, rcause: fl.rcause_g });
+        if !(step.out.is_empty() && effects.is_empty() && fact.is_none()) && rf.jobs.send(Job { step, sources, effects, talk, fact }).is_err() {
             super::drop_count("exec_order");
         }
         ret
@@ -320,25 +344,34 @@ pub fn fact_of(before: (G, Option<&str>), after: (G, Option<&str>)) -> Option<&'
     None
 }
 
-fn floor_material(name: &str, room: &str, fl: &Floor, step: &Step, sources: &[Vec<u32>], talk: Option<&str>) -> Option<Material> {
+pub struct FactAt {
+    name: &'static str,
+    speaker: Option<String>,
+    prev: Option<String>,
+    seq: u32,
+    rcause: u32,
+}
+
+fn floor_material(fa: &FactAt, room: &str, step: &Step, sources: &[Vec<u32>], talk: Option<&str>) -> Option<Material> {
     let first = |t: Mt| step.out.iter().position(|o| o.m.t == t);
-    match name {
+    let room = String::from(room);
+    match fa.name {
         "floor_granted" => {
             let i = first(Mt::Taken);
-            let speaker = i.and_then(|i| step.out[i].m.a.clone()).or_else(|| fl.speaker.clone())?;
-            let seq = i.map(|i| step.out[i].m.q).unwrap_or(fl.seq) as u16;
+            let speaker = i.and_then(|i| step.out[i].m.a.clone()).or_else(|| fa.speaker.clone())?;
+            let seq = i.map(|i| step.out[i].m.q).unwrap_or(fa.seq) as u16;
             let src = i.and_then(|i| sources.get(i)).filter(|v| !v.is_empty()).cloned();
-            Some(Material::FloorGranted(FloorTaken { speaker, sources: src, seq, room: room.to_string(), talk: talk.map(str::to_string) }))
+            Some(Material::FloorGranted(FloorTaken { speaker, sources: src, seq, room, talk: talk.map(str::to_string) }))
         }
         "floor_released" => {
             let i = first(Mt::Idle);
-            let seq = i.map(|i| step.out[i].m.q).unwrap_or(fl.seq) as u16;
-            let prev = i.and_then(|i| step.out[i].m.a.clone()).or_else(|| fl.prev.clone());
-            Some(Material::FloorReleased(FloorIdle { prev, seq, room: room.to_string() }))
+            let seq = i.map(|i| step.out[i].m.q).unwrap_or(fa.seq) as u16;
+            let prev = i.and_then(|i| step.out[i].m.a.clone()).or_else(|| fa.prev.clone());
+            Some(Material::FloorReleased(FloorIdle { prev, seq, room }))
         }
         "floor_revoked" => {
-            let cause = first(Mt::Revoke).map(|i| step.out[i].m.n).unwrap_or(fl.rcause_g) as u8;
-            Some(Material::FloorRevoked(FloorRevoke { cause, reason: None, room: room.to_string() }))
+            let cause = first(Mt::Revoke).map(|i| step.out[i].m.n).unwrap_or(fa.rcause) as u8;
+            Some(Material::FloorRevoked(FloorRevoke { cause, reason: None, room }))
         }
         _ => None,
     }
@@ -416,6 +449,11 @@ fn execute(room: &Arc<Room>, job: Job) {
         if let Some(m) = to_mbcp(&o.m, &room.id, reason, sources, job.talk.as_deref()) {
             send(&o.to, &m);
         }
+    }
+    if let Some(fa) = &job.fact
+        && let Some(m) = floor_material(fa, &room.id, &job.step, &job.sources, job.talk.as_deref())
+    {
+        crate::bus::room_material(&room.id, &m);
     }
     let fan = room.slot(Kind::Video);
     for t in &plan.burst {

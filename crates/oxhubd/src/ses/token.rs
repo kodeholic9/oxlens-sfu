@@ -244,23 +244,21 @@ mod tests {
     }
 
     #[derive(Serialize)]
-    struct HookClaims {
+    struct NoOpsClaims {
         iss: String,
-        hook: bool,
         iat: u64,
         exp: u64,
     }
 
     #[test]
-    fn a_hook_token_is_not_an_ops_credential() {
+    fn a_signed_token_without_ops_is_not_an_ops_credential() {
         let mut a = accounts();
-        a.keys[0].hook_allowed = true;
         let now = secs_now();
-        let hook = encode(&Header::new(Algorithm::HS256), &HookClaims { iss: "k".into(), hook: true, iat: now, exp: now + 60 }, &EncodingKey::from_secret(b"s")).expect("signed");
+        let t = encode(&Header::new(Algorithm::HS256), &NoOpsClaims { iss: "k".into(), iat: now, exp: now + 60 }, &EncodingKey::from_secret(b"s")).expect("signed");
         assert_eq!(a.verify_ops(&a.sign_ops("k", 60).unwrap()), Ok("k".to_string()), "positive control — the ops token of the same account passes");
-        assert_eq!(a.verify_ops(&hook), Err(Code::NotAuthorized), "S-sym-RULE-HOOK-NO-ROOM-TOKEN-1① — a correctly signed hook token of a hook-allowed account is refused 2006 on the ops path");
-        assert_eq!(Code::NotAuthorized.failure().code, 2006, "S-sym-RULE-HOOK-NO-ROOM-TOKEN-1① — the refusal code is 2006");
+        assert_eq!(a.verify_ops(&t), Err(Code::NotAuthorized), "O-sym-RULE-AUTH-THREE-1② — a correctly signed token of an ops-allowed account without `ops` does not pass the ops path");
+        assert_eq!(Code::NotAuthorized.failure().code, 2006, "O-sym-RULE-AUTH-THREE-1② — the refusal code is 2006");
         a.keys[0].ops_allowed = false;
-        assert_eq!(a.verify_ops(&hook), Err(Code::NotAuthorized), "S-sym-RULE-HOOK-NO-ROOM-TOKEN-1① — still 2006 when the account has no ops allowance");
+        assert_eq!(a.verify_ops(&t), Err(Code::NotAuthorized), "O-sym-RULE-AUTH-THREE-1② — still refused when the account has no ops allowance");
     }
 }

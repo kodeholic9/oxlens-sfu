@@ -348,6 +348,21 @@ fn t67_4_no_judging_without_a_running_executor() {
 }
 
 #[test]
+fn t67_5_a_stop_before_start_keeps_the_executor_off() {
+    let _g = serial();
+    let r = room(&tag("t675"));
+    let base = floor::count();
+    assert!(!floor::stop(&r), "정:IMPL-FLR-LOCK 정:IMPL-ROOM-LIFE a stop of a never-started room has no executor to wait for");
+    assert!(!floor::start(&r), "정:IMPL-FLR-LOCK 정:IMPL-ROOM-LIFE a start after the stop starts nothing — the removed room keeps no running executor");
+    assert!(!r.exec.running() && floor::count() == base, "정:IMPL-FLR-LOCK 정:IMPL-ROOM-LIFE no executor runs for the stopped room");
+    destroy(&r);
+    let fresh = room(&tag("t675-b"));
+    assert!(floor::start(&fresh), "stand check — a fresh room still starts");
+    destroy(&fresh);
+    assert!(settle(|| floor::count() == base), "stand check — the fresh room's executor ends with it");
+}
+
+#[test]
 fn t67_3_start_twice_runs_one_executor() {
     let _g = serial();
     let r = room(&tag("t673"));

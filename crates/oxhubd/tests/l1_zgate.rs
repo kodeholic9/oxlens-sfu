@@ -360,14 +360,14 @@ async fn refused_before_the_session() {
     let r = rig().await;
     let ep = tls_endpoint(&r);
     let tcp = format!("tcp/127.0.0.1:{}", r.gate.addr.port());
-    assert!(refused_open(client_cfg(&r, &ep, None)).await && counted(&r, 0).await, "S-rule-RULE-HOOK-CREDENTIAL-9① · S-sym-RULE-BUS-PUBLIC-3② — 인증서 없음은 붙지 못하고 ext_refused +1");
-    assert!(refused_open(client_cfg(&r, &ep, Some("rogue"))).await && counted(&r, 1).await, "S-rule-RULE-HOOK-CREDENTIAL-9② — 다른 CA 인증서는 붙지 못하고 ext_refused +1");
-    assert!(refused_open(client_cfg(&r, &ep, Some("nohook"))).await && counted(&r, 2).await, "S-rule-RULE-HOOK-CREDENTIAL-9③ — 연동 허용 없는 계정은 붙지 못하고 ext_refused +1");
+    assert!(refused_open(client_cfg(&r, &ep, None)).await && counted(&r, 0).await, "S-rule-RULE-HOOK-CREDENTIAL-1① · S-sym-RULE-BUS-PUBLIC-3② — 인증서 없음은 붙지 못하고 ext_refused +1");
+    assert!(refused_open(client_cfg(&r, &ep, Some("rogue"))).await && counted(&r, 1).await, "S-rule-RULE-HOOK-CREDENTIAL-1② — 다른 CA 인증서는 붙지 못하고 ext_refused +1");
+    assert!(refused_open(client_cfg(&r, &ep, Some("nohook"))).await && counted(&r, 2).await, "S-rule-RULE-HOOK-CREDENTIAL-1③ — 연동 허용 없는 계정은 붙지 못하고 ext_refused +1");
     let refused3 = r.gate.drops.refused.load(Ordering::Relaxed);
     let bare = open(&r, "nosub").await;
     assert!(
         wait(3_000, || r.gate.conns().len() == 1).await,
-        "S-rule-RULE-HOOK-CREDENTIAL-9④ · S-rule-RULE-HOOK-DIRECT-3① — 연동 허용 계정은 채팅 구독 · 사실 칸이 비어도 붙는다"
+        "S-rule-RULE-HOOK-CREDENTIAL-1④ · S-rule-RULE-HOOK-DIRECT-3① — 연동 허용 계정은 채팅 구독 · 사실 칸이 비어도 붙는다"
     );
     assert_eq!(r.gate.drops.refused.load(Ordering::Relaxed), refused3, "S-rule-RULE-HOOK-DIRECT-3① — 붙은 계정은 ext_refused 를 올리지 않는다");
     drop(bare);
@@ -376,7 +376,7 @@ async fn refused_before_the_session() {
     assert!(refused_open(client_cfg(&r, &tcp, None)).await && counted(&r, 4).await, "S-rule-RULE-HOOK-CHAT-SUB-1② · S-sym-RULE-BUS-PUBLIC-3② — 평문 TCP 는 닫히고 ext_refused +1");
     assert!(r.gate.conns().is_empty(), "형상 — 거절된 것은 연결표에 들지 않는다");
     let s = open(&r, "acme").await;
-    assert!(wait(3_000, || r.gate.conns().len() == 1).await, "S-rule-RULE-HOOK-CHAT-SUB-1① · S-rule-RULE-HOOK-CREDENTIAL-9⑤ — tls 로 붙는다");
+    assert!(wait(3_000, || r.gate.conns().len() == 1).await, "S-rule-RULE-HOOK-CHAT-SUB-1① · S-rule-RULE-HOOK-CREDENTIAL-1⑤ — tls 로 붙는다");
     drop(s);
 }
 
@@ -524,7 +524,7 @@ fn judgments_are_pure_with_reasons() {
     assert_eq!(judge_account(Some("acme"), &acc), Ok("acme".to_string()));
     assert_eq!(judge_account(None, &acc), Err(Refuse::NoCn));
     assert_eq!(judge_account(Some("nohook"), &acc).map_err(|r| r.reason()), Err("hook not allowed"), "S-rule-RULE-HOOK-DIRECT-3② — 연동 허용 없는 계정은 닫힌다");
-    assert_eq!(judge_account(Some("nosub"), &acc), Ok("nosub".to_string()), "S-rule-RULE-HOOK-CREDENTIAL-9④ · S-rule-RULE-HOOK-DIRECT-3① — 채팅 구독 · 사실 칸이 비어도 붙는다");
+    assert_eq!(judge_account(Some("nosub"), &acc), Ok("nosub".to_string()), "S-rule-RULE-HOOK-CREDENTIAL-1④ · S-rule-RULE-HOOK-DIRECT-3① — 채팅 구독 · 사실 칸이 비어도 붙는다");
     assert_eq!(judge_account(Some("facts"), &acc), Ok("facts".to_string()), "S-rule-RULE-HOOK-DIRECT-3① — 사실 구독만 둔 계정도 붙는다");
     assert_eq!(judge_account(Some("x"), &acc).map_err(|r| r.reason()), Err("unknown account"));
     let syn = |v: u8, w: WhatAmI, res: Resolution, b: u16| InitSyn {

@@ -217,3 +217,34 @@ fn floor_facts_follow_the_state_machine_in_order() {
     }
     drive(ops::rooms::destroy_room(&r, "SV-IMPL-ROOM-LIFE", "l1"));
 }
+
+#[test]
+fn a_destroy_while_talking_closes_after_the_queued_floor_facts() {
+    let _g = serial();
+    router();
+    let id = tag("hm-talking");
+    let r = create(&id);
+    let (a, b) = (tag("hm-talker"), tag("hm-listener"));
+    join(&r, &a);
+    join(&r, &b);
+    let mut sub = listen(&id);
+    const ROUNDS: usize = 400;
+    for _ in 0..ROUNDS {
+        request(&r, &a);
+        release(&r, &a);
+    }
+    request(&r, &a);
+    floor::run(&r, Entry::of("ws_leave", &a).because("destroy"), |f, _| Some(f.ws_leave(&a)));
+    r.close();
+    for u in r.users() {
+        r.remove(&u);
+    }
+    drive(ops::rooms::destroy_room(&r, "OP-PATH-ADMIN-ROOMS-ROOM-ID-DESTROY", "destroy"));
+    let got = materials(&mut sub);
+    let names: Vec<&str> = got.iter().map(|m| m.name()).collect();
+    let count = |n: &str| names.iter().filter(|x| **x == n).count();
+    assert_eq!((count("floor_granted"), count("floor_released")), (ROUNDS + 1, ROUNDS + 1), "HK-FACT-ROOM-CLOSED⑤ the destroy loses no queued floor fact — every grant and release reaches the bus {names:?}");
+    assert_eq!(names.last().copied(), Some("room_closed"), "HK-FACT-ROOM-CLOSED⑤ room_closed comes after the queued floor facts — the destroy waits for the room's executor to drain");
+    assert_eq!(names[names.len() - 2], "floor_released", "HK-FACT-ROOM-CLOSED⑤ the talker sent out by the destroy is released before the room closes");
+    assert_eq!(count("room_closed"), 1, "HK-FACT-ROOM-CLOSED③ one room_closed");
+}

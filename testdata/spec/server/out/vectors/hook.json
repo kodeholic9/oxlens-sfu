@@ -1203,6 +1203,48 @@
    "verdict": {
     "kind": "outside"
    }
+  },
+  {
+   "tail": "facts/sub/*",
+   "cn": "k1",
+   "verdict": {
+    "kind": "other_account"
+   }
+  },
+  {
+   "tail": "chat/sub/**",
+   "cn": "k1",
+   "verdict": {
+    "kind": "other_account"
+   }
+  },
+  {
+   "tail": "facts/sub/k1*",
+   "cn": "k1",
+   "verdict": {
+    "kind": "other_account"
+   }
+  },
+  {
+   "tail": "chat/sub/k1/**",
+   "cn": "k1",
+   "verdict": {
+    "kind": "other_account"
+   }
+  },
+  {
+   "tail": "facts/**",
+   "cn": "k1",
+   "verdict": {
+    "kind": "outside"
+   }
+  },
+  {
+   "tail": "chat/**",
+   "cn": "k1",
+   "verdict": {
+    "kind": "outside"
+   }
   }
  ],
  "carry_step": [

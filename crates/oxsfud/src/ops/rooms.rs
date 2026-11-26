@@ -208,7 +208,10 @@ pub fn join(c: &Ctx, body: &Value) -> Result<Value, Failure> {
     let me = room.member(&c.user).ok_or_else(|| Code::InternalError.failure())?;
     let u = c.user.clone();
     let (fr, why) = super::permission::floor_perm(&me.permission, &super::permission::half_kinds(&room.id, &u));
-    super::floor::run(&room, super::floor::Entry::of("ws_join", &u).with("perm", fr.to_string()).with("why", why), |f, _| Some(f.ws_join(&u, fr)));
+    if !fr {
+        common::log::emit(common::log::Line::diag("SV-IMPL-ROOM-PERMISSION").key("room", &room.id).key("user", &u).key("session", &c.session).rec("floor_why", why).msg("join without the right to ask for the floor"));
+    }
+    super::floor::run(&room, super::floor::Entry::of("ws_join", &u).with("perm", fr.to_string()), |f, _| Some(f.ws_join(&u, fr)));
     let old_pub = crate::aff::pub_room(&peer);
     if select {
         match super::media::move_pub(&peer, Some(&room), claims.permission) {
@@ -403,7 +406,9 @@ pub async fn destroy_room(room: &Arc<Room>, spec: &str, why: &str) {
     if !s.rooms.remove(room) {
         return;
     }
-    super::floor::stop(room);
+    if super::floor::stop(room) {
+        super::floor::drained(room).await;
+    }
     for t in s.tables.map.lock().map(|g| g.values().cloned().collect::<Vec<_>>()).unwrap_or_default() {
         t.forget_room(&room.id);
     }

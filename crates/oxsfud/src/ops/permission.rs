@@ -108,10 +108,10 @@ fn revoke(room: &Arc<Room>, user: &str, old: &Permission, new: &Permission) -> (
     let u = user.to_string();
     match mv {
         FloorMove::Down => {
-            super::floor::run(room, super::floor::Entry::of("perm_down", &u).with("why", why), |f, _| Some(f.perm_down(&u)));
+            super::floor::run(room, super::floor::Entry::of("perm_down", &u), |f, _| Some(f.perm_down(&u)));
         }
         FloorMove::Up => {
-            super::floor::run(room, super::floor::Entry::of("perm_up", &u).with("why", why), |f, _| Some(f.perm_up(&u)));
+            super::floor::run(room, super::floor::Entry::of("perm_up", &u), |f, _| Some(f.perm_up(&u)));
         }
         FloorMove::Keep => {}
     }

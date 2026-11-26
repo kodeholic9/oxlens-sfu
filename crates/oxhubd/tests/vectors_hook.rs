@@ -106,7 +106,7 @@ fn judge_declare_vectors() {
             "other_account" => DeclareVerdict::OtherAccount(key.clone()),
             _ => DeclareVerdict::Outside(key.clone()),
         };
-        assert_eq!(judge_declare(&key, p, cn), want, "정:RULE-HOOK-DIRECT · 원천 HOOK.model.JudgeDeclare — 선언 키 판정 · {tail} · {cn}");
+        assert_eq!(judge_declare(&key, p, cn), want, "정:RULE-HOOK-DIRECT · S-rule-RULE-HOOK-FACTS-SUB-3④ · S-rule-RULE-HOOK-CHAT-SUB-4② · 원천 HOOK.model.JudgeDeclare — 선언 키 판정(깊은 키 · 와일드카드는 남의 몫) · {tail} · {cn}");
     }
 }
 
