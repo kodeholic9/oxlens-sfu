@@ -43,6 +43,11 @@ pub fn target(url: &str) -> Result<Target, &'static str> {
     Ok(Target { https, host, port, path })
 }
 
+pub fn host_header(t: &Target) -> String {
+    let host = if t.host.contains(':') { format!("[{}]", t.host) } else { t.host.clone() };
+    if (t.https && t.port == 443) || (!t.https && t.port == 80) { host } else { format!("{host}:{}", t.port) }
+}
+
 pub fn sign(key: &[u8], id: &str, ts: u64, body: &[u8]) -> String {
     let Ok(mut m) = <Hmac<Sha256> as Mac>::new_from_slice(key) else { return String::new() };
     m.update(id.as_bytes());
@@ -143,7 +148,7 @@ pub async fn post(t: &Target, tls: &TlsConnector, headers: &[(&str, String)], bo
 async fn post_once(t: &Target, tls: &TlsConnector, headers: &[(&str, String)], body: Bytes) -> Result<u16, String> {
     let tcp = TcpStream::connect((t.host.as_str(), t.port)).await.map_err(|e| format!("connect: {e}"))?;
     let mut req = hyper::Request::post(t.path.as_str())
-        .header(hyper::header::HOST, if (t.https && t.port == 443) || (!t.https && t.port == 80) { t.host.clone() } else { format!("{}:{}", t.host, t.port) })
+        .header(hyper::header::HOST, host_header(t))
         .header(hyper::header::CONTENT_TYPE, "application/json")
         .header(hyper::header::CONTENT_LENGTH, body.len());
     for (k, v) in headers {

@@ -1,18 +1,18 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-CHAT-EXT-SUB · model: claude-opus-5-5
-//! 열린 zenoh 세션 하나의 상태(입출력 없음 — 받은 전송 메시지를 넣으면 할 일을 낸다): 방향마다 받은 일련번호 · 조각 잇기 · 그 연결이 선언한 키 식 표(Sender 매핑) · 제 계정 키의 queryable 들(처음 하나 = 열림 · 마지막이 걷히면 = 닫힘) · Interest(지금 · 지금과 앞으로)에 DeclareFinal · Push 버림 · 3rd 의 Request 는 결과 없이 끝 · 우리가 보낸 질의(요청 번호 → 표) — 첫 Reply = ACK · 첫 Err = 거절 · 답 없이 끝 = 답 없음.
+// spec: v1.6 · 정:RULE-CHAT-EXT-SUB · 정:RULE-HOOK-DIRECT · 정:RULE-HOOK-FACTS-SUB · 정:RULE-HOOK-STATUS · 정:RULE-HOOK-PERMISSION · model: claude-opus-5-5
+//! 열린 zenoh 세션 하나의 상태(입출력 없음 — 받은 전송 메시지를 넣으면 할 일을 낸다): 방향마다 받은 일련번호 · 조각 잇기 · 그 연결이 선언한 키 식 표(Sender 매핑) · 제 계정 키의 queryable 들을 갈래(채팅 · 사실)마다(갈래의 처음 하나 = 열림 · 마지막이 걷히면 = 닫힘) · Interest(지금 · 지금과 앞으로)에 DeclareFinal · Push 버림 · 3rd 의 Request 는 열린 키(방 목록 · 방 상세 · 권한 제어)면 물음으로 내고 답(Reply · Err)을 지어 주며 그 밖은 결과 없이 끝 · 우리가 보낸 질의(요청 번호 → 표) — 첫 Reply = ACK · 첫 Err = 거절 · 답 없이 끝 = 답 없음.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 
 use zenoh_protocol::core::{Encoding, ExprId, Reliability, WireExpr};
 use zenoh_protocol::network::declare::{self, DeclareFinal, QueryableId};
 use zenoh_protocol::network::request::{self, RequestId};
-use zenoh_protocol::network::{Declare, DeclareBody, Mapping, NetworkBody, NetworkMessage, Request, ResponseFinal, response};
+use zenoh_protocol::network::{Declare, DeclareBody, Mapping, NetworkBody, NetworkMessage, Request, Response, ResponseFinal, response};
 use zenoh_protocol::transport::{BatchSize, TransportBody, TransportMessage, TransportSn};
 use zenoh_protocol::zenoh::query::ext::QueryBodyType;
-use zenoh_protocol::zenoh::{ConsolidationMode, Query, RequestBody, ResponseBody};
+use zenoh_protocol::zenoh::{ConsolidationMode, PushBody, Put, Query, Reply, RequestBody, ResponseBody};
 
-use super::judge::{DeclareVerdict, Refuse, judge_declare};
+use super::judge::{Ask, DeclareVerdict, Lane, Refuse, judge_declare, judge_request};
 use super::wire::{self, Defrag, Piece, RxSn, SnVerdict, TxSn};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,8 +26,9 @@ pub enum Answer {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     Send(Box<NetworkMessage>),
-    Open,
-    Shut,
+    Open(Lane),
+    Shut(Lane),
+    Ask { rid: RequestId, key: String, ask: Ask, payload: Vec<u8> },
     Answer { ticket: u64, answer: Answer },
     Ignored(String),
     PushDropped,
@@ -53,10 +54,9 @@ pub struct Rx {
 
 pub struct Session {
     pub cn: String,
-    own_key: String,
     prefix: String,
     exprs: HashMap<ExprId, String>,
-    own: BTreeSet<QueryableId>,
+    own: HashMap<QueryableId, Lane>,
     reliable: Rx,
     best_effort: Rx,
     pub tx: TxSn,
@@ -68,7 +68,6 @@ pub struct Session {
 
 pub struct Opened {
     pub cn: String,
-    pub own_key: String,
     pub prefix: String,
     pub rx_initial: TransportSn,
     pub tx_initial: TransportSn,
@@ -86,10 +85,9 @@ impl Session {
         let rx = || Rx { sn: RxSn::new(o.rx_initial, o.sn_mask), defrag: Defrag::default() };
         Session {
             cn: o.cn,
-            own_key: o.own_key,
             prefix: o.prefix,
             exprs: HashMap::new(),
-            own: BTreeSet::new(),
+            own: HashMap::new(),
             reliable: rx(),
             best_effort: rx(),
             tx: TxSn::new(o.tx_initial, o.sn_mask),
@@ -100,8 +98,12 @@ impl Session {
         }
     }
 
-    pub fn is_open(&self) -> bool {
-        !self.own.is_empty()
+    pub fn is_open(&self, lane: Lane) -> bool {
+        self.own.values().any(|l| *l == lane)
+    }
+
+    pub fn own_key(&self, lane: Lane) -> String {
+        format!("{}{}/sub/{}", self.prefix, lane.as_str(), self.cn)
     }
 
     pub fn on_transport(&mut self, m: TransportMessage) -> Result<Vec<Effect>, End> {
@@ -173,11 +175,18 @@ impl Session {
                 }
             }
             NetworkBody::Push(_) => out.push(Effect::PushDropped),
-            NetworkBody::Request(r) => out.push(Effect::Send(Box::new(net(NetworkBody::ResponseFinal(ResponseFinal {
-                rid: r.id,
-                ext_qos: response::ext::QoSType::DEFAULT,
-                ext_tstamp: None,
-            }))))),
+            NetworkBody::Request(r) => {
+                let key = self.resolve(&r.wire_expr).unwrap_or_default();
+                match judge_request(&key, &self.prefix) {
+                    Ask::Outside => out.push(Effect::Send(Box::new(Self::final_of(r.id)))),
+                    ask => {
+                        let payload = match r.payload {
+                            RequestBody::Query(q) => q.ext_body.map(|b| wire::zbuf_bytes(&b.payload)).unwrap_or_default(),
+                        };
+                        out.push(Effect::Ask { rid: r.id, key, ask, payload });
+                    }
+                }
+            }
             NetworkBody::Response(r) => {
                 if let Some(a) = self.asked.get_mut(&r.rid)
                     && !a.decided
@@ -215,11 +224,11 @@ impl Session {
             DeclareBody::DeclareQueryable(q) => {
                 let key = self.resolve(&q.wire_expr).unwrap_or_else(|| format!("?{}:{}", q.wire_expr.scope, q.wire_expr.suffix));
                 match judge_declare(&key, &self.prefix, &self.cn) {
-                    DeclareVerdict::Own => {
-                        let first = self.own.is_empty();
-                        self.own.insert(q.id);
+                    DeclareVerdict::Own(lane) => {
+                        let first = !self.is_open(lane);
+                        self.own.insert(q.id, lane);
                         if first {
-                            out.push(Effect::Open);
+                            out.push(Effect::Open(lane));
                         }
                     }
                     DeclareVerdict::OtherAccount(k) => return Err(End::Refused(Refuse::OtherKey(k))),
@@ -227,8 +236,10 @@ impl Session {
                 }
             }
             DeclareBody::UndeclareQueryable(q) => {
-                if self.own.remove(&q.id) && self.own.is_empty() {
-                    out.push(Effect::Shut);
+                if let Some(lane) = self.own.remove(&q.id)
+                    && !self.is_open(lane)
+                {
+                    out.push(Effect::Shut(lane));
                 }
             }
             DeclareBody::DeclareSubscriber(s) => out.push(Effect::Ignored(self.resolve(&s.wire_expr).unwrap_or_default())),
@@ -238,13 +249,40 @@ impl Session {
         Ok(())
     }
 
-    pub fn query(&mut self, ticket: u64, body: Vec<u8>) -> NetworkMessage {
+    fn final_of(rid: RequestId) -> NetworkMessage {
+        net(NetworkBody::ResponseFinal(ResponseFinal { rid, ext_qos: response::ext::QoSType::DEFAULT, ext_tstamp: None }))
+    }
+
+    pub fn answer(rid: RequestId, key: &str, result: Result<Vec<u8>, Vec<u8>>) -> Vec<NetworkMessage> {
+        let payload = match result {
+            Ok(body) => ResponseBody::Reply(Reply {
+                consolidation: ConsolidationMode::None,
+                ext_unknown: Vec::new(),
+                payload: PushBody::Put(Put { encoding: Encoding::empty(), payload: wire::zbuf(body), ..Put::default() }),
+            }),
+            Err(body) => ResponseBody::Err(wire::err_body(body)),
+        };
+        vec![
+            net(NetworkBody::Response(Response {
+                rid,
+                wire_expr: WireExpr::from(key.to_string()),
+                payload,
+                ext_qos: response::ext::QoSType::DEFAULT,
+                ext_tstamp: None,
+                ext_respid: None,
+                ext_ts_stack: None,
+            })),
+            Self::final_of(rid),
+        ]
+    }
+
+    pub fn query(&mut self, lane: Lane, ticket: u64, body: Vec<u8>) -> NetworkMessage {
         let rid = self.next_rid & self.rid_mask;
         self.next_rid = self.next_rid.wrapping_add(1) & self.rid_mask;
         self.asked.insert(rid, Asked { ticket, decided: false });
         net(NetworkBody::Request(Request {
             id: rid,
-            wire_expr: WireExpr::from(self.own_key.clone()),
+            wire_expr: WireExpr::from(self.own_key(lane)),
             ext_qos: request::ext::QoSType::REQUEST,
             ext_tstamp: None,
             ext_nodeid: request::ext::NodeIdType::DEFAULT,
@@ -274,10 +312,12 @@ impl Session {
     pub fn end(&mut self) -> Vec<Effect> {
         let mut out: Vec<Effect> =
             self.asked.drain().filter(|(_, a)| !a.decided).map(|(_, a)| Effect::Answer { ticket: a.ticket, answer: Answer::Closed }).collect();
-        if !self.own.is_empty() {
-            self.own.clear();
-            out.push(Effect::Shut);
+        for lane in [Lane::Chat, Lane::Facts] {
+            if self.is_open(lane) {
+                out.push(Effect::Shut(lane));
+            }
         }
+        self.own.clear();
         out
     }
 }

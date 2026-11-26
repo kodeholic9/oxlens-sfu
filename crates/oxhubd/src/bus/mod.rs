@@ -588,8 +588,12 @@ impl Bus {
     }
 
     pub async fn query(&self, node: &str, what: &str, payload: Vec<u8>) -> Result<Vec<u8>, Code> {
+        self.query_for(node, what, payload, NODE_CALL_TIMEOUT).await
+    }
+
+    pub async fn query_for(&self, node: &str, what: &str, payload: Vec<u8>, timeout: Duration) -> Result<Vec<u8>, Code> {
         let key = self.keys.q_node(node, what);
-        let mut replies = self.session.get(&key, payload, NODE_CALL_TIMEOUT).map_err(|_| Code::SfuError)?;
+        let mut replies = self.session.get(&key, payload, timeout).map_err(|_| Code::SfuError)?;
         match replies.recv().await {
             Some(r) => r.result.map_err(|_| Code::SfuError),
             None => Err(Code::SfuError),

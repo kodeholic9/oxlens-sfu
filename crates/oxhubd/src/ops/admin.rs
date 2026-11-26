@@ -107,7 +107,7 @@ pub fn snapshot(hub: &Hub) -> Value {
 
 pub async fn drops(hub: &Hub) -> Value {
     let c = &hub.sender.counters;
-    let gate = hub.ses.chat.get().and_then(|ch| ch.zgate.get());
+    let gate = hub.hook.zgate.get();
     let mut mine = json!({
         "unit": "hub",
         "notice_no_socket": hub.ses.counters.notice_no_socket.load(Ordering::Relaxed),

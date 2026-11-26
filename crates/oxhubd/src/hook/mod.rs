@@ -1,7 +1,8 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.6 · 정:RULE-HOOK-SCOPE · 정:RULE-HOOK-DIRECT · 정:RULE-HOOK-TRANSPORT · 정:RULE-HOOK-FACTS · 정:RULE-BUS-PUBLIC · 정:RULE-HOOK-FACTS-SUB · 정:RULE-OPS-DROPS · 정:RULE-DOC-CODE-MIRROR · model: claude-opus-5-5
-//! 대외 연동(HOOK) — 가로지르는 것: 방을 맡은 hub 의 사실 짓기(도장 주인 · 사실 봉투) · 3rd 계정마다 계정 큐(`facts` 고르기 · 상한 · 버림 표지 · 계수 `fact_queue_full` · `fact_given_up`) · 현황 조회 · 제어 답(`query`) · zenoh 입구(`zgate` — 채팅 구독 · 사실 구독 · 현황 조회 · 제어가 같은 입구 하나를 쓴다). 개념(채팅)은 이것을 부르고, 이것은 채팅 넘기기 판단(`crate::chat::ext::plan`)을 직접 부른다 — 콜백 주입 없음.
+//! 대외 연동(HOOK) — 가로지르는 것: 방을 맡은 hub 의 사실 짓기(도장 주인 · 사실 봉투) · 3rd 계정마다 계정 큐(`facts` 고르기 · 상한 · 버림 표지 · 계수 `fact_queue_full` · `fact_given_up`) · 현황 조회 · 제어 답(`query`) · 운반 — webhook(`webhook`) · zenoh 사실 구독(`carry` — webhook 이 붙은 계정은 뺀다) · zenoh 입구(`zgate` — 채팅 구독 · 사실 구독 · 현황 조회 · 제어가 같은 입구 하나를 쓴다). 개념(채팅)은 이것을 부르고, 이것은 채팅 넘기기 판단(`crate::chat::ext::plan`)을 직접 부른다 — 콜백 주입 없음.
 
+pub mod carry;
 pub mod facts;
 pub mod query;
 pub mod queue;
@@ -28,6 +29,7 @@ pub struct Hook {
     pub queue_full: AtomicU64,
     pub given_up: AtomicU64,
     pub wake: tokio::sync::Notify,
+    pub zgate: std::sync::OnceLock<std::sync::Arc<zgate::Gate>>,
 }
 
 impl Hook {
@@ -41,7 +43,12 @@ impl Hook {
             queue_full: AtomicU64::new(0),
             given_up: AtomicU64::new(0),
             wake: tokio::sync::Notify::new(),
+            zgate: std::sync::OnceLock::new(),
         }
+    }
+
+    pub fn zenoh_accounts(&self, sys: &System) -> Vec<String> {
+        self.accounts.iter().map(|(k, _)| k.clone()).filter(|k| sys.hook.as_ref().is_none_or(|h| h.webhook_of(k).is_none())).collect()
     }
 
     pub fn mint(&self, now: u64) -> String {

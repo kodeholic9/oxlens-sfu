@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:RULE-CHAT-EXT-SUB · 정:IMPL-CFG-SYSTEM-FILE · 정:RULE-HOOK-DIRECT · 정:RULE-HOOK-CREDENTIAL · model: claude-opus-5-5
-//! zenoh 입구의 판단 — 순수 함수 + 사유: 인증서 계정이 붙을 수 있나(연동 허용이면 붙는다 — 채팅 구독 · 사실 칸이 비어도) · InitSyn(판 0x09 · client 만)을 받나와 합의 값(해상도 · 배치 크기는 둘 중 작은 것) · queryable 선언 키가 제 계정 키인가(다른 계정 키 = 세션 닫기 · 허용 키 밖 = 무시).
+// spec: v1.6 · 정:RULE-CHAT-EXT-SUB · 정:IMPL-CFG-SYSTEM-FILE · 정:RULE-HOOK-DIRECT · 정:RULE-HOOK-CREDENTIAL · 정:RULE-HOOK-KEYSPACE · 정:RULE-HOOK-STATUS · 정:RULE-HOOK-PERMISSION · 정:RULE-HOOK-FACTS-SUB · model: claude-opus-5-5
+//! zenoh 입구의 판단 — 순수 함수 + 사유(키 판단은 원천 `server/areas/hook/behavior/judge.ts` 의 거울 · 벡터 `hook.json`): 선언 키 → 제 계정의 갈래(채팅 · 사실) · 다른 계정 · 허용 키 밖 · get 키 → 방 목록 · 방 상세 · 권한 제어 · 그 밖(답 없이 끝) · 인증서 계정이 붙을 수 있나(연동 허용이면 붙는다 — 채팅 구독 · 사실 칸이 비어도) · InitSyn(판 0x09 · client 만)을 받나와 합의 값(해상도 · 배치 크기는 둘 중 작은 것) · queryable 선언 키가 제 계정 키인가(다른 계정 키 = 세션 닫기 · 허용 키 밖 = 무시).
 
 use std::collections::HashMap;
 
@@ -113,17 +113,76 @@ pub fn judge_init(syn: &InitSyn, mine: Resolution, mine_batch: BatchSize) -> Res
     Ok(Agreed { resolution, batch })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Lane {
+    Chat,
+    Facts,
+}
+
+impl Lane {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Lane::Chat => "chat",
+            Lane::Facts => "facts",
+        }
+    }
+
+    pub fn of(s: &str) -> Option<Lane> {
+        match s {
+            "chat" => Some(Lane::Chat),
+            "facts" => Some(Lane::Facts),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeclareVerdict {
-    Own,
+    Own(Lane),
     OtherAccount(String),
     Outside(String),
 }
 
 pub fn judge_declare(key: &str, prefix: &str, cn: &str) -> DeclareVerdict {
-    match key.strip_prefix(prefix) {
-        Some(k) if k == cn => DeclareVerdict::Own,
-        Some(_) => DeclareVerdict::OtherAccount(key.to_string()),
-        None => DeclareVerdict::Outside(key.to_string()),
+    let Some(tail) = key.strip_prefix(prefix) else { return DeclareVerdict::Outside(key.to_string()) };
+    let p: Vec<&str> = tail.split('/').collect();
+    let Some(lane) = p.first().and_then(|l| Lane::of(l)).filter(|_| p.len() >= 3 && p[1] == "sub") else {
+        return DeclareVerdict::Outside(key.to_string());
+    };
+    if p.len() == 3 && p[2] == cn { DeclareVerdict::Own(lane) } else { DeclareVerdict::OtherAccount(key.to_string()) }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ask {
+    List,
+    Detail(String),
+    Ctl(String),
+    Outside,
+}
+
+impl Ask {
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Ask::List => "list",
+            Ask::Detail(_) => "detail",
+            Ask::Ctl(_) => "ctl",
+            Ask::Outside => "outside",
+        }
+    }
+}
+
+fn room_piece(s: &str) -> bool {
+    !s.is_empty() && !s.contains(['*', '$'])
+}
+
+pub fn judge_request(key: &str, prefix: &str) -> Ask {
+    let Some(tail) = key.strip_prefix(prefix) else { return Ask::Outside };
+    if tail == "q/rooms" {
+        return Ask::List;
+    }
+    match tail.split('/').collect::<Vec<_>>().as_slice() {
+        ["q", "room", r] if room_piece(r) => Ask::Detail(r.to_string()),
+        ["ctl", "room", r, "permission"] if room_piece(r) => Ask::Ctl(r.to_string()),
+        _ => Ask::Outside,
     }
 }

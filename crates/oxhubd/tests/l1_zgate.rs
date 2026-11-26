@@ -8,7 +8,8 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use oxhubd::bus::{Bus, BusCfg};
-use oxhubd::hook::zgate::judge::{Accounts, Standing};
+use oxhubd::chat::ext::{ChatExt, ChatKnobs};
+use oxhubd::hook::zgate::judge::{Accounts, Lane, Standing};
 use oxhubd::hook::zgate::session::Answer;
 use oxhubd::hook::zgate::send::{GateDeps, GateKnobs};
 use oxhubd::hook::zgate::{Gate, GateCfg, link, wire};
@@ -93,8 +94,21 @@ async fn rig() -> Rig {
     rig_with(knobs()).await
 }
 
-fn knobs() -> GateKnobs {
-    GateKnobs {
+#[derive(Debug, Clone, Copy)]
+struct TestKnobs {
+    window: usize,
+    reply_timeout: Duration,
+    close_at: u32,
+    max_tries: u32,
+    sweep: Duration,
+    live_max: usize,
+    cap: usize,
+    bundle_msgs: usize,
+    bundle_bytes: usize,
+}
+
+fn knobs() -> TestKnobs {
+    TestKnobs {
         window: 4,
         reply_timeout: Duration::from_millis(400),
         close_at: 2,
@@ -107,11 +121,16 @@ fn knobs() -> GateKnobs {
     }
 }
 
-async fn rig_with(k: GateKnobs) -> Rig {
+async fn rig_with(k: TestKnobs) -> Rig {
+    rig_full(k, true).await
+}
+
+async fn rig_full(k: TestKnobs, with_chat: bool) -> Rig {
     let _ = tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).with_test_writer().try_init();
     let pki = Pki::new();
     let (bus, events) = Bus::open("n1", "e1", 1_000, BusCfg { listen: vec!["127.0.0.1:0".into()], advertise: vec![], connect: vec![], namespace: NS.into() }).await.expect("bus");
     bus.follow_ext().await.expect("follow ext");
+    bus.follow_facts().await.expect("follow facts");
     let accounts = Accounts::new(vec![
         ("acme".into(), Standing::Ok),
         ("other".into(), Standing::Ok),
@@ -124,10 +143,15 @@ async fn rig_with(k: GateKnobs) -> Rig {
     chat.store.create_space("S", None).expect("space");
     chat.store.join("S", "u1", None, Some(1)).expect("join");
     let cfg = GateCfg { listen: "tls/127.0.0.1:0".into(), cert: pki.path("hub.pem"), key: pki.path("hub.key"), ca: pki.path("ca.pem") };
-    let deps = GateDeps { accounts, bus: bus.clone(), store: chat.store.clone(), acks: chat.acks(), keys: vec!["acme".into()], knobs: k };
+    let ck = ChatKnobs { live_max: k.live_max, cap: k.cap, bundle_msgs: k.bundle_msgs, bundle_bytes: k.bundle_bytes, sweep: k.sweep, max_tries: k.max_tries };
+    let ext = Arc::new(ChatExt::new(chat.store.clone(), chat.acks(), vec!["acme".into()], ck));
+    let gk = GateKnobs { window: k.window, reply_timeout: k.reply_timeout, close_at: k.close_at, facts_cap: k.bundle_bytes * 4 };
+    let deps = GateDeps { accounts, bus: bus.clone(), chat: with_chat.then(|| ext.clone()), knobs: gk };
     let gate = Gate::bind(&cfg, deps).await.expect("gate");
     tokio::spawn(gate.clone().serve());
-    tokio::spawn(gate.clone().drains());
+    if with_chat {
+        tokio::spawn(ext.drains(gate.clone(), bus.clone()));
+    }
     Rig { pki, bus, gate, chat, _events: events }
 }
 
@@ -229,7 +253,7 @@ async fn a_zenoh_client_receives_queries_and_its_answers_come_back() {
     let big: Vec<u8> = (0..512 * 1024).map(|i| (i % 251) as u8).collect();
     let mut answers = Vec::new();
     for body in [b"one".to_vec(), b"two".to_vec(), b"three".to_vec(), big.clone()] {
-        let p = r.gate.query(&cid, body).expect("query");
+        let p = r.gate.query(&cid, Lane::Chat, body).expect("query");
         answers.push(tokio::time::timeout(Duration::from_secs(10), p.answer()).await.expect("answer in time"));
     }
     let (_q, seen) = tokio::time::timeout(Duration::from_secs(10), replier).await.expect("replier in time").expect("replier");
@@ -258,7 +282,7 @@ async fn a_reply_on_another_key_is_no_ack() {
         drop(query);
         (q, blocked)
     });
-    let a = tokio::time::timeout(Duration::from_secs(10), r.gate.query(&cid, b"x".to_vec()).expect("query").answer()).await.expect("answer");
+    let a = tokio::time::timeout(Duration::from_secs(10), r.gate.query(&cid, Lane::Chat, b"x".to_vec()).expect("query").answer()).await.expect("answer");
     let (_q, blocked) = tokio::time::timeout(Duration::from_secs(10), replier).await.expect("replier in time").expect("replier");
     assert!(blocked, "S-sym-RULE-HOOK-CHAT-SUB-2 — 클라이언트가 다른 키의 답을 막는다");
     assert_eq!(a, Answer::NoReply, "S-sym-RULE-HOOK-CHAT-SUB-2 — ACK 0 · 그 묶음은 다시 온다(답 없음)");
@@ -519,8 +543,8 @@ fn judgments_are_pure_with_reasons() {
     assert_eq!((a.resolution.get(Field::FrameSN), a.resolution.get(Field::RequestID), a.batch), (Bits::U16, Bits::U32, 1_000), "정:RULE-CHAT-EXT-SUB 3 — 해상도 · 배치 크기는 둘 중 작은 것");
     assert_eq!(judge_init(&syn(0x08, WhatAmI::Client, Resolution::default(), 100), Resolution::default(), u16::MAX).map_err(|r| r.detail()), Err("got=0x08 want=0x09".to_string()), "판 · 사유");
     assert_eq!(judge_init(&syn(zenoh_protocol::VERSION, WhatAmI::Router, Resolution::default(), 100), Resolution::default(), u16::MAX).map_err(|r| r.reason()), Err("not a client"));
-    let p = format!("ox/{NS}/pub/v1/chat/sub/");
-    assert_eq!(judge_declare(&sub_key("acme"), &p, "acme"), DeclareVerdict::Own);
+    let p = format!("ox/{NS}/pub/v1/");
+    assert_eq!(judge_declare(&sub_key("acme"), &p, "acme"), DeclareVerdict::Own(Lane::Chat));
     assert_eq!(judge_declare(&sub_key("other"), &p, "acme"), DeclareVerdict::OtherAccount(sub_key("other")));
     assert_eq!(judge_declare(&sub_key("**"), &p, "acme"), DeclareVerdict::OtherAccount(sub_key("**")), "와일드카드로 남의 몫을 덮는 선언도 닫는다");
     assert_eq!(judge_declare("a/b", &p, "acme"), DeclareVerdict::Outside("a/b".into()));
@@ -960,4 +984,112 @@ fn send_plan_vectors() {
         let conns: Vec<(String, String)> = c["conns"].as_array().expect("conns").iter().map(|p| (p[0].as_str().expect("node").to_string(), p[1].as_str().expect("cid").to_string())).collect();
         assert_eq!(drain_owner(&conns), c["owner"].as_u64().map(|i| i as usize), "S-sym-RULE-CHAT-EXT-SUB-10① · 정:RULE-CHAT-EXT-SUB 3 — drain 주인 = 가장 오래 붙어 있는 연결 · {}", c["name"]);
     }
+}
+
+fn facts_key(k: &str) -> String {
+    format!("ox/{NS}/pub/v1/facts/sub/{k}")
+}
+
+fn bundle(id: &str) -> oxhubd::hook::zgate::send::FactsBundle {
+    let f = oxhubd::hook::facts::Fact { fact_id: id.into(), kind: "room_created".into(), t: 1, room_id: "r1".into(), body: serde_json::json!({ "room_id": "r1" }) };
+    oxhubd::hook::zgate::send::FactsBundle { facts: vec![f], dropped: None }
+}
+
+async fn get_one(s: &zenoh::Session, key: String, payload: Option<Vec<u8>>) -> Option<Result<Vec<u8>, Vec<u8>>> {
+    let g = s.get(key);
+    let replies = match payload {
+        Some(p) => g.payload(p).await,
+        None => g.await,
+    }
+    .expect("get");
+    let r = tokio::time::timeout(Duration::from_secs(10), replies.recv_async()).await.expect("get ended in time").ok()?;
+    Some(match r.result() {
+        Ok(sample) => Ok(sample.payload().to_bytes().to_vec()),
+        Err(e) => Err(e.payload().to_bytes().to_vec()),
+    })
+}
+
+fn failure_code(b: &[u8]) -> u16 {
+    serde_json::from_slice::<oxsig::Failure>(b).expect("Failure body").code
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_facts_lane_has_its_own_token_and_carries_bundles() {
+    let r = rig().await;
+    let s = open(&r, "acme").await;
+    let q = s.declare_queryable(facts_key("acme")).await.expect("facts queryable");
+    let cid = open_cid(&r).await;
+    assert!(wait(3_000, || r.bus.facts_list("acme").len() == 1).await, "S-rule-RULE-HOOK-DIRECT-2② — 사실 구독 선언 → int/facts/{{key}}/{{node}}/{{cid}} 하나");
+    assert!(r.gate.lane_open(&cid, Lane::Facts) && !r.gate.lane_open(&cid, Lane::Chat), "정:RULE-CHAT-EXT-SUB 5 — 키 갈래마다 따로 열린다");
+    let got = tokio::spawn(async move {
+        let mut seen = Vec::new();
+        for i in 0..2 {
+            let query = q.recv_async().await.expect("query");
+            seen.push((query.key_expr().to_string(), body_of(&query)));
+            if i == 0 {
+                let _ = query.reply(query.key_expr().clone(), b"ok".to_vec()).await;
+            } else {
+                let _ = query.reply_err(b"no".to_vec()).await;
+            }
+        }
+        (q, seen)
+    });
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    assert!(r.gate.deliver_facts(&cid, &bundle("f1"), Some(tx)).expect("deliver").accepted());
+    assert_eq!(tokio::time::timeout(Duration::from_secs(5), rx).await.expect("ended").expect("outcome"), oxhubd::chat::ext::plan::Outcome::Ack, "S-rule-RULE-HOOK-FACTS-SUB-6① — reply = 묶음 전부 ACK");
+    let payload = serde_json::to_vec(&oxhubd::hook::zgate::send::ExtDeliver::Facts { key: "acme".into(), cid: cid.clone(), bundle: bundle("f2") }).expect("encode");
+    let reply = common::envelope::Reply::decode(&oxhubd::hook::zgate::send::serve_ext(Some(&r.gate), &payload).await).expect("reply");
+    assert_eq!(reply, common::envelope::Reply::ok(serde_json::json!({ "end": "fail" })), "정:RULE-BUS-REQUEST 사실 넘기기 — 받는 hub 는 묶음의 끝(reply_err = ACK 아님)까지 기다려 답한다");
+    let (q, seen) = tokio::time::timeout(Duration::from_secs(5), got).await.expect("3rd saw both").expect("join");
+    assert_eq!(seen[0].0, facts_key("acme"), "HK-KEY-PUB-V1-FACTS-SUB-KEY① · S-rule-RULE-HOOK-FACTS-SUB-3① — hub 가 facts/sub/{{key}} 로 묻는다");
+    assert_eq!(seen[0].1, serde_json::to_value(bundle("f1")).expect("v"), "S-rule-RULE-HOOK-FACTS-SUB-5① — query 하나 = 묶음 하나 · 몸 {{facts, dropped?}}");
+    assert!(seen[0].1.get("live").is_none(), "S-rule-RULE-HOOK-FACTS-SUB-5② — live 칸 0");
+    drop(q);
+    assert!(wait(3_000, || r.bus.facts_list("acme").is_empty()).await, "정:RULE-BUS-PRESENCE — 사실 queryable 이 걷히면 토큰을 놓는다");
+    drop(s);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn another_accounts_facts_key_closes_the_session() {
+    let r = rig().await;
+    let s = open(&r, "acme").await;
+    assert!(wait(3_000, || r.gate.conns().len() == 1).await, "형상 — 붙었다");
+    let _q = s.declare_queryable(facts_key("other")).await;
+    assert!(wait(5_000, || r.gate.conns().is_empty()).await, "S-rule-RULE-HOOK-FACTS-SUB-3② — 인증서 계정과 다른 facts/sub 키를 선언하면 세션이 닫힌다");
+    drop(s);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn open_keys_answer_one_response_each() {
+    let r = rig().await;
+    let s = open(&r, "acme").await;
+    assert!(wait(3_000, || r.gate.conns().len() == 1).await, "형상 — 붙었다");
+    let list = get_one(&s, format!("ox/{NS}/pub/v1/q/rooms"), None).await.expect("one reply").expect("list ok");
+    let l: oxsig::msg::ListRoomsRes = serde_json::from_slice(&list).expect("LIST_ROOMS body");
+    assert_eq!(l.total, 0, "HK-KEY-PUB-V1-Q-ROOMS② — q/rooms 에 방 목록 Response 하나(몸은 LIST_ROOMS)");
+    let none = get_one(&s, format!("ox/{NS}/pub/v1/q/room/nowhere"), None).await.expect("one reply").expect_err("no room");
+    assert_eq!(failure_code(&none), oxsig::Code::RoomNotFound.num(), "S-rule-RULE-HOOK-STATUS-5② — 없는 방은 reply_err 하나 · 몸 Failure ROOM_NOT_FOUND");
+    let ctl = format!("ox/{NS}/pub/v1/ctl/room/nowhere/permission");
+    let bad = get_one(&s, ctl.clone(), Some(b"{}".to_vec())).await.expect("one reply").expect_err("bad payload");
+    assert_eq!(failure_code(&bad), oxsig::Code::InvalidPayload.num(), "정:RULE-HOOK-PERMISSION zenoh 입구의 꼴 — payload {{user_id, permission}} 을 못 읽으면 INVALID_PAYLOAD");
+    let body = serde_json::to_vec(&serde_json::json!({ "user_id": "u1", "permission": oxsig::msg::Permission::ALL })).expect("encode");
+    let gone = get_one(&s, ctl, Some(body)).await.expect("one reply").expect_err("no room");
+    assert_eq!(failure_code(&gone), oxsig::Code::RoomNotFound.num(), "S-rule-RULE-HOOK-PERMISSION-15② — 실패는 reply_err 하나 · 없는 방 ROOM_NOT_FOUND");
+    assert!(get_one(&s, format!("ox/{NS}/pub/v1/q/elsewhere"), None).await.is_none(), "정:RULE-CHAT-EXT-SUB 7 — 열린 키 밖의 get 은 답 없이 끝");
+    drop(s);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hub_without_chat_ignores_chat_sub_and_still_opens_facts() {
+    let r = rig_full(knobs(), false).await;
+    let s = open(&r, "acme").await;
+    assert!(wait(3_000, || r.gate.conns().len() == 1).await, "정:RULE-HOOK-DIRECT — [chat] 없이 입구가 선다");
+    let refused0 = r.gate.drops.refused.load(Ordering::Relaxed);
+    let _chat = s.declare_queryable(sub_key("acme")).await.expect("chat queryable");
+    assert!(wait(3_000, || r.gate.drops.refused.load(Ordering::Relaxed) > refused0).await, "정:RULE-CHAT-EXT-SUB 7 — [chat] 없는 hub 의 chat/sub 선언은 허용 키 밖처럼 무시하고 ext_refused 를 센다");
+    assert_eq!(r.gate.conns().len(), 1, "정:RULE-CHAT-EXT-SUB 7 — 세션은 닫지 않는다");
+    assert!(tokens(&r).await.is_empty(), "형상 — 채팅 토큰이 서지 않는다");
+    let _facts = s.declare_queryable(facts_key("acme")).await.expect("facts queryable");
+    assert!(wait(3_000, || r.bus.facts_list("acme").len() == 1).await, "S-rule-RULE-HOOK-DIRECT-2② — 사실 구독은 [chat] 없이 연다");
+    drop(s);
 }

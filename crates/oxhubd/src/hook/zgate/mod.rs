@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.6 · 정:RULE-CHAT-EXT-SUB · 정:IMPL-CFG-SYSTEM-FILE · 정:RULE-BUS-KEYSPACE · 정:RULE-BUS-PRESENCE · 정:RULE-HOOK-DIRECT ·정:RULE-OPS-DROPS · model: claude-opus-5-5
-//! zenoh 입구(zgate) — hub 의 바깥 포트 하나(`[hook] zenoh_listen` · `tls/` 만): 3rd 의 zenoh 1.x 클라이언트를 직접 받는다(zenohd 없음 · 버스 그물에 안 들인다) · TLS 인증서 첫 CN = 계정 · InitSyn → InitAck(쿠키) → OpenSyn → OpenAck · 판 0x09 · client 만 · 확장은 되돌리지 않는다 · 연결마다 hub 가 짓는 이름(`{기동 신원}{세션 번호 hex}`) · 제 계정 키 queryable 이 서면 버스 토큰 `int/ext/{key}/{node}/{cid}` 를 내고 걷히거나 닫히면 거둔다 · lease 넘김 · KeepAlive · 연결표 · 연결에 묶음 질의를 보내고 결과(ACK · 거절 · 답 없음 · 닫힘)를 돌려받는 경계(창 · 줄 · drain 은 그 위) · 연결마다 보낼 줄(창 · 줄 · 시간 넘김 — `send`) · drain · 버림 계수 다섯(거절 · Push · 시간 넘김 · 줄 넘침 · 시도 수 포기)의 주인 · 토큰 선언이 실패하면 세션을 닫는다(3rd 가 다시 붙는다).
+//! zenoh 입구(zgate) — hub 의 바깥 포트 하나(`[hook] zenoh_listen` · `tls/` 만): 3rd 의 zenoh 1.x 클라이언트를 직접 받는다(zenohd 없음 · 버스 그물에 안 들인다) · TLS 인증서 첫 CN = 계정 · InitSyn → InitAck(쿠키) → OpenSyn → OpenAck · 판 0x09 · client 만 · 확장은 되돌리지 않는다 · 연결마다 hub 가 짓는 이름(`{기동 신원}{세션 번호 hex}`) · 제 계정 키 queryable 이 서면 버스 토큰 `int/ext/{key}/{node}/{cid}` 를 내고 걷히거나 닫히면 거둔다 · lease 넘김 · KeepAlive · 연결표 · 연결에 묶음 질의를 보내고 결과(ACK · 거절 · 답 없음 · 닫힘)를 돌려받는 경계(창 · 줄 · drain 은 그 위) · 연결의 키 갈래(채팅 · 사실)마다 보낼 줄(창 · 줄 · 시간 넘김 — `send` · 갈래마다 따로) · 갈래마다 토큰(채팅 `int/ext` · 사실 `int/facts`) · ★`[chat]` 없는 hub 의 채팅 구독 선언은 허용 키 밖처럼 무시하고 센다 · 열린 get 키(방 목록 · 방 상세 · 권한 제어)는 `crate::hook::query::answer` 로 답(Reply · Err)을 지어 보낸다 · 채팅 갈래의 끝처리 · drain 은 채팅 몫(`crate::chat::ext::ChatExt`)이 맡는다 · 버림 계수 다섯(거절 · Push · 시간 넘김 · 줄 넘침 · 시도 수 포기)의 주인 · 토큰 선언이 실패하면 세션을 닫는다(3rd 가 다시 붙는다).
 
 pub mod judge;
 pub mod link;
@@ -30,7 +30,7 @@ use zenoh_protocol::transport::{BatchSize, Close, InitAck, KeepAlive, OpenAck, T
 
 use crate::bus::Bus;
 use crate::chat::ext::plan;
-use judge::{Accounts, Agreed, Refuse, judge_account, judge_init};
+use judge::{Accounts, Agreed, Ask, Lane, Refuse, judge_account, judge_init};
 use session::{Answer, Effect, End, Opened, Session};
 
 pub const LEASE: Duration = Duration::from_secs(10);
@@ -70,18 +70,23 @@ pub enum QueryError {
 }
 
 enum Cmd {
-    Query { ticket: u64, body: Vec<u8>, tx: oneshot::Sender<Answer> },
+    Query { lane: Lane, ticket: u64, body: Vec<u8>, tx: oneshot::Sender<Answer> },
     Forget(u64),
     Close(&'static str),
     Kick,
+    Reply { rid: zenoh_protocol::network::request::RequestId, key: String, result: Result<Vec<u8>, Vec<u8>> },
+}
+
+struct LaneQ {
+    open: bool,
+    outbox: plan::Outbox<serde_json::Value, send::Waiter>,
+    released: bool,
 }
 
 struct Handle {
     key: String,
-    open: bool,
     cmd: mpsc::UnboundedSender<Cmd>,
-    outbox: plan::Outbox<serde_json::Value, send::Waiter>,
-    released: bool,
+    lanes: HashMap<Lane, LaneQ>,
 }
 
 pub struct Pending {
@@ -120,11 +125,8 @@ pub struct Gate {
     ticket: AtomicU64,
     conns: Mutex<HashMap<String, Handle>>,
     seen: Mutex<HashMap<&'static str, u64>>,
-    store: Arc<crate::chat::store::Store>,
-    acks: Arc<crate::chat::acks::AckLanes>,
+    chat: Option<Arc<crate::chat::ext::ChatExt>>,
     knobs: send::GateKnobs,
-    keys_sub: Vec<String>,
-    drain_st: Mutex<send::DrainStates>,
     pub drops: Arc<Drops>,
 }
 
@@ -180,7 +182,7 @@ struct Applied {
 
 impl Gate {
     pub async fn bind(cfg: &GateCfg, deps: send::GateDeps) -> Result<Arc<Gate>, String> {
-        let send::GateDeps { accounts, bus, store, acks, keys, knobs } = deps;
+        let send::GateDeps { accounts, bus, chat, knobs } = deps;
         let at = cfg.listen.strip_prefix(SCHEME).ok_or_else(|| format!("hook.zenoh_listen {:?} — tls/ 꼴만", cfg.listen))?;
         let at = at.split(['#', '?']).next().unwrap_or(at);
         let acceptor = link::acceptor(&cfg.cert, &cfg.key, &cfg.ca)?;
@@ -199,11 +201,8 @@ impl Gate {
             ticket: AtomicU64::new(0),
             conns: Mutex::new(HashMap::new()),
             seen: Mutex::new(HashMap::new()),
-            store,
-            acks,
+            chat,
             knobs,
-            keys_sub: keys,
-            drain_st: Mutex::new(HashMap::new()),
             drops: Arc::new(Drops::default()),
         }))
     }
@@ -229,21 +228,21 @@ impl Gate {
         let mut v: Vec<ConnInfo> = self
             .conns
             .lock()
-            .map(|g| g.iter().map(|(cid, h)| ConnInfo { cid: cid.clone(), key: h.key.clone(), open: h.open }).collect())
+            .map(|g| g.iter().map(|(cid, h)| ConnInfo { cid: cid.clone(), key: h.key.clone(), open: h.lanes.values().any(|q| q.open) }).collect())
             .unwrap_or_default();
         v.sort_by(|a, b| a.cid.cmp(&b.cid));
         v
     }
 
-    pub fn query(&self, cid: &str, body: Vec<u8>) -> Result<Pending, QueryError> {
+    pub fn query(&self, cid: &str, lane: Lane, body: Vec<u8>) -> Result<Pending, QueryError> {
         let g = self.conns.lock().map_err(|_| QueryError::NoConn)?;
         let h = g.get(cid).ok_or(QueryError::NoConn)?;
-        if !h.open {
+        if !h.lanes.get(&lane).is_some_and(|q| q.open) {
             return Err(QueryError::NotOpen);
         }
         let ticket = self.ticket.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        h.cmd.send(Cmd::Query { ticket, body, tx }).map_err(|_| QueryError::NoConn)?;
+        h.cmd.send(Cmd::Query { lane, ticket, body, tx }).map_err(|_| QueryError::NoConn)?;
         Ok(Pending { ticket, rx, cmd: h.cmd.clone(), done: false })
     }
 
@@ -292,13 +291,22 @@ impl Gate {
         let cid = format!("{:012x}{}{:x}", common::now_ms(), self.boot, self.seq.fetch_add(1, Ordering::Relaxed));
         let key = est.session.cn.clone();
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let chat_knobs = match &self.chat {
+            Some(c) => c.knobs.outbox(self.knobs.window, self.knobs.close_at),
+            None => self.knobs.facts_outbox(),
+        };
+        let lanes = HashMap::from([
+            (Lane::Chat, LaneQ { open: false, outbox: plan::Outbox::new(chat_knobs), released: false }),
+            (Lane::Facts, LaneQ { open: false, outbox: plan::Outbox::new(self.knobs.facts_outbox()), released: false }),
+        ]);
         if let Ok(mut g) = self.conns.lock() {
-            g.insert(cid.clone(), Handle { key: key.clone(), open: false, cmd: cmd_tx, outbox: plan::Outbox::new(self.knobs.outbox()), released: false });
+            g.insert(cid.clone(), Handle { key: key.clone(), cmd: cmd_tx, lanes });
         }
         tracing::info!(kind = "diag", spec = "SV-RULE-CHAT-EXT-SUB", key = %key, cid = %cid, peer = %peer, "ext conn open");
         let (why, refused) = self.run(&cid, est, rd, &mut wr, cmd_rx).await;
         let _ = wr.shutdown().await;
         self.bus.undeclare_ext(&cid);
+        self.bus.undeclare_facts(&cid);
         if let Ok(mut g) = self.conns.lock() {
             g.remove(&cid);
         }
@@ -354,8 +362,7 @@ impl Gate {
         });
         send_msgs(wr, &[oack]).await.map_err(|_| (Refuse::Protocol("link closed in handshake"), false))?;
         let session = Session::new(Opened {
-            own_key: self.keys.chat_sub(&cn),
-            prefix: self.keys.chat_sub_prefix(),
+            prefix: self.keys.pub_prefix(),
             cn,
             rx_initial: open.initial_sn,
             tx_initial,
@@ -366,12 +373,21 @@ impl Gate {
         Ok(Est { session, lease: open.lease })
     }
 
-    fn set_open(&self, cid: &str, open: bool) {
+    fn set_open(&self, cid: &str, lane: Lane, open: bool) {
         if let Ok(mut g) = self.conns.lock()
-            && let Some(h) = g.get_mut(cid)
+            && let Some(q) = g.get_mut(cid).and_then(|h| h.lanes.get_mut(&lane))
         {
-            h.open = open;
+            q.open = open;
         }
+    }
+
+    fn ask(&self, cid: &str, rid: zenoh_protocol::network::request::RequestId, key: String, ask: Ask, payload: Vec<u8>) {
+        let Some(tx) = self.conns.lock().ok().and_then(|g| g.get(cid).map(|h| h.cmd.clone())) else { return };
+        let bus = self.bus.clone();
+        tokio::spawn(async move {
+            let result = crate::hook::query::answer(&bus, &ask, &payload).await;
+            let _ = tx.send(Cmd::Reply { rid, key, result });
+        });
     }
 
     async fn apply(&self, cid: &str, session: &mut Session, effects: Vec<Effect>, waiting: &mut HashMap<u64, oneshot::Sender<Answer>>, out: &mut Applied) {
@@ -381,20 +397,34 @@ impl Gate {
                     Ok(p) => out.parts.extend(p),
                     Err(w) => self.sparse("send did not encode", &format!("{w:?}")),
                 },
-                Effect::Open => match self.bus.declare_ext(&session.cn, cid).await {
-                    Ok(()) => {
-                        self.set_open(cid, true);
-                        tracing::info!(kind = "diag", spec = "SV-RULE-CHAT-EXT-SUB", key = %session.cn, cid = %cid, "ext queryable declared — token up");
-                    }
-                    Err(e) => {
-                        tracing::warn!(kind = "diag", spec = "SV-RULE-CHAT-EXT-SUB", key = %session.cn, cid = %cid, "ext token not declared: {e} — session closed, the client connects again");
-                        out.close = true;
-                    }
-                },
-                Effect::Shut => {
-                    self.bus.undeclare_ext(cid);
-                    self.set_open(cid, false);
+                Effect::Open(Lane::Chat) if self.chat.is_none() => {
+                    self.drops.refused.fetch_add(1, Ordering::Relaxed);
+                    self.sparse("chat/sub declared on a hub without [chat]", &session.cn);
                 }
+                Effect::Open(lane) => {
+                    let declared = match lane {
+                        Lane::Chat => self.bus.declare_ext(&session.cn, cid).await,
+                        Lane::Facts => self.bus.declare_facts(&session.cn, cid).await,
+                    };
+                    match declared {
+                        Ok(()) => {
+                            self.set_open(cid, lane, true);
+                            tracing::info!(kind = "diag", spec = "SV-RULE-CHAT-EXT-SUB", key = %session.cn, cid = %cid, lane = lane.as_str(), "ext queryable declared — token up");
+                        }
+                        Err(e) => {
+                            tracing::warn!(kind = "diag", spec = "SV-RULE-CHAT-EXT-SUB", key = %session.cn, cid = %cid, lane = lane.as_str(), "ext token not declared: {e} — session closed, the client connects again");
+                            out.close = true;
+                        }
+                    }
+                }
+                Effect::Shut(lane) => {
+                    match lane {
+                        Lane::Chat => self.bus.undeclare_ext(cid),
+                        Lane::Facts => self.bus.undeclare_facts(cid),
+                    }
+                    self.set_open(cid, lane, false);
+                }
+                Effect::Ask { rid, key, ask, payload } => self.ask(cid, rid, key, ask, payload),
                 Effect::Answer { ticket, answer } => match waiting.remove(&ticket) {
                     Some(tx) => {
                         let _ = tx.send(answer);
@@ -460,9 +490,12 @@ impl Gate {
                     _ => ending = Some(("link closed", None, None)),
                 },
                 c = cmd.recv() => match c {
-                    Some(Cmd::Query { ticket, body, tx }) => {
+                    Some(Cmd::Query { lane, ticket, body, tx }) => {
                         waiting.insert(ticket, tx);
-                        effects.push(Effect::Send(Box::new(session.query(ticket, body))));
+                        effects.push(Effect::Send(Box::new(session.query(lane, ticket, body))));
+                    }
+                    Some(Cmd::Reply { rid, key, result }) => {
+                        effects.extend(Session::answer(rid, &key, result).into_iter().map(|m| Effect::Send(Box::new(m))));
                     }
                     Some(Cmd::Forget(t)) => {
                         session.forget(t);
@@ -512,11 +545,14 @@ impl Gate {
                 }
             }
             if ending.is_none() {
-                for it in self.pull(cid) {
+                for (lane, it) in self.pull(cid) {
                     let ticket = self.ticket.fetch_add(1, Ordering::Relaxed);
-                    let body = serde_json::to_vec(&serde_json::json!({ "live": it.live, "messages": it.msgs })).unwrap_or_default();
-                    let q = session.query(ticket, body);
-                    flights.insert(ticket, send::Flight { ids: it.ids, deadline: Instant::now() + self.knobs.reply_timeout, waiter: it.waiter });
+                    let body = match lane {
+                        Lane::Chat => serde_json::to_vec(&serde_json::json!({ "live": it.live, "messages": it.msgs })).unwrap_or_default(),
+                        Lane::Facts => it.msgs.first().and_then(|b| serde_json::to_vec(b).ok()).unwrap_or_default(),
+                    };
+                    let q = session.query(lane, ticket, body);
+                    flights.insert(ticket, send::Flight { lane, ids: it.ids, deadline: Instant::now() + self.knobs.reply_timeout, waiter: it.waiter });
                     match wire::parts(&q, &mut session.tx, session.batch) {
                         Ok(p) => applied.parts.extend(p),
                         Err(w) => self.sparse("send did not encode", &format!("{w:?}")),

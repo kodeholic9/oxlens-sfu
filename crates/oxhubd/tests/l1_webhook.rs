@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.6 · 정:RULE-HOOK-WEBHOOK · 정:RULE-BUS-PUBLIC · 정:RULE-HOOK-FACTS-SUB · 정:RULE-OPS-DROPS · model: claude-opus-5-5
-//! 1층 — webhook 운반을 가짜 수신기(평문 HTTP/1.1 · 시험이 응답 상태를 정한다)에 붙여 본다: 서명(Standard Webhooks 1.0.0 공개 시험 벡터) · 머리 셋 · `POST` · 몸 = 묶음 몸 · 다시 보내기에 같은 `webhook-id` · 시도마다 새 `webhook-timestamp` · 2xx 만 성공(3xx · 4xx · 5xx · 410 · 429 는 실패 · 따라가지 않음) · 시한 · 연결 거절 · 재시도 상한에서 버리고 `fact_given_up` 과 되돌려 세기 · 큐에 사실이 들면 깨어 보낸다.
+//! 1층 — webhook 운반을 가짜 수신기(평문 HTTP/1.1 · 시험이 응답 상태를 정한다 · https 는 자가 서명 수신기)에 붙여 본다: 서명(Standard Webhooks 참조 라이브러리 python `libraries/python/tests/test_webhooks.py` 의 시험 값 — 표준 본문의 예가 아니다) · 머리 셋 · `POST` · 몸 = 묶음 몸 · 다시 보내기에 같은 `webhook-id` · 시도마다 새 `webhook-timestamp` · 2xx 만 성공(3xx · 4xx · 5xx · 410 · 429 는 실패 · 따라가지 않음) · 시한 · 연결 거절 · 재시도 상한에서 버리고 `fact_given_up` 과 되돌려 세기 · 큐에 사실이 들면 깨어 보낸다.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -97,7 +97,7 @@ fn signature_matches_the_standard_vector() {
     assert_eq!(
         sign(&key, "msg_p5jXN8AQM9LWM0D4loKWxJek", 1_614_265_330, br#"{"test": 2432232314}"#),
         "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE=",
-        "S-rule-RULE-HOOK-WEBHOOK-3①② — base64(HMAC-SHA256(whsec_ 뒤를 푼 키, id.timestamp.몸)) · Standard Webhooks 1.0.0 공개 시험 벡터"
+        "S-rule-RULE-HOOK-WEBHOOK-3①② — base64(HMAC-SHA256(whsec_ 뒤를 푼 키, id.timestamp.몸)) · Standard Webhooks 참조 라이브러리(python tests/test_webhooks.py) 시험 값"
     );
 }
 
@@ -130,6 +130,43 @@ fn urls() {
     assert_eq!(target("https://h.example/in?x=1"), Ok(Target { https: true, host: "h.example".into(), port: 443, path: "/in?x=1".into() }));
     assert_eq!(target("http://127.0.0.1:8080"), Ok(Target { https: false, host: "127.0.0.1".into(), port: 8080, path: "/".into() }));
     assert!(target("ftp://h/in").is_err());
+    let v6 = target("http://[::1]:8080/in").expect("v6");
+    assert_eq!(v6.host, "::1");
+    assert_eq!(oxhubd::hook::webhook::host_header(&v6), "[::1]:8080", "정:RULE-HOOK-WEBHOOK 꼴 — IPv6 Host 머리는 대괄호(RFC 9110 §7.2 · RFC 3986 IP-literal)");
+    assert_eq!(oxhubd::hook::webhook::host_header(&target("https://[::1]/in").expect("v6")), "[::1]");
+    assert_eq!(oxhubd::hook::webhook::host_header(&target("http://h:8080/").expect("h")), "h:8080");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn https_checks_the_system_trust_store() {
+    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+    let k = rcgen::KeyPair::generate().expect("key");
+    let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()]).expect("params").self_signed(&k).expect("self signed");
+    let cfg = tokio_rustls::rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert.der().clone()], tokio_rustls::rustls::pki_types::PrivateKeyDer::try_from(k.serialize_der()).expect("key der"))
+        .expect("server cfg");
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(cfg));
+    let l = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = l.local_addr().expect("addr").port();
+    let tries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let t2 = tries.clone();
+    tokio::spawn(async move {
+        while let Ok((c, _)) = l.accept().await {
+            t2.fetch_add(1, Ordering::Relaxed);
+            let a = acceptor.clone();
+            tokio::spawn(async move {
+                let _ = a.accept(c).await;
+            });
+        }
+    });
+    let h = hook();
+    let b = bundle(&h, 1);
+    let w = Webhook::of(&common::system::Webhook { url: format!("https://localhost:{port}/in"), secret: SECRET.into(), key: "acme".into() }).expect("webhook");
+    let ok = deliver(&h, &w, &knobs(1, 2_000), &tls(), b).await;
+    assert!(!ok, "S-rule-RULE-HOOK-WEBHOOK-11② — 시스템 신뢰 저장소에 없는 CA(자가 서명)는 TLS 검증 실패 = 실패");
+    assert_eq!(tries.load(Ordering::Relaxed), 2, "S-rule-RULE-HOOK-WEBHOOK-11② — 같은 재시도를 탄다(처음 하나 + retry_max 1)");
+    assert_eq!(h.given_up.load(Ordering::Relaxed), 1, "형상 — 상한에서 버리고 센다");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -75,6 +75,42 @@ fn wants_vectors() {
 }
 
 #[test]
+fn judge_request_vectors() {
+    use oxhubd::hook::zgate::judge::{Ask, judge_request};
+    let v = load();
+    let p = "ox/c/pub/v1/";
+    for c in cases(&v, "judge_request") {
+        let tail = c["tail"].as_str().expect("tail");
+        let want = match c["ask"]["kind"].as_str().expect("kind") {
+            "list" => Ask::List,
+            "detail" => Ask::Detail(c["ask"]["room"].as_str().expect("room").to_string()),
+            "ctl" => Ask::Ctl(c["ask"]["room"].as_str().expect("room").to_string()),
+            _ => Ask::Outside,
+        };
+        assert_eq!(judge_request(&format!("{p}{tail}"), p), want, "정:RULE-HOOK-DIRECT · 원천 HOOK.model.JudgeRequest — 열린 키 셋만 답한다 · {tail}");
+    }
+    assert_eq!(judge_request("ox/c/int/q/rooms", p), Ask::Outside, "S-sym-RULE-BUS-PUBLIC-3① — pub/v1 밖은 답하지 않는다");
+}
+
+#[test]
+fn judge_declare_vectors() {
+    use oxhubd::hook::zgate::judge::{DeclareVerdict, Lane, judge_declare};
+    let v = load();
+    let p = "ox/c/pub/v1/";
+    for c in cases(&v, "judge_declare") {
+        let tail = c["tail"].as_str().expect("tail");
+        let cn = c["cn"].as_str().expect("cn");
+        let key = format!("{p}{tail}");
+        let want = match c["verdict"]["kind"].as_str().expect("kind") {
+            "own" => DeclareVerdict::Own(Lane::of(c["verdict"]["lane"].as_str().expect("lane")).expect("lane")),
+            "other_account" => DeclareVerdict::OtherAccount(key.clone()),
+            _ => DeclareVerdict::Outside(key.clone()),
+        };
+        assert_eq!(judge_declare(&key, p, cn), want, "정:RULE-HOOK-DIRECT · 원천 HOOK.model.JudgeDeclare — 선언 키 판정 · {tail} · {cn}");
+    }
+}
+
+#[test]
 fn queue_vectors() {
     let v = load();
     for c in cases(&v, "queue") {

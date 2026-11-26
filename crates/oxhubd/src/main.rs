@@ -166,6 +166,7 @@ async fn run(cfg: HubCfg) -> i32 {
             }
         }
     }
+    let chat_ext: std::sync::OnceLock<Arc<oxhubd::chat::ext::ChatExt>> = std::sync::OnceLock::new();
     if let Some(c) = &cfg.system.chat {
         match oxhubd::chat::store::Store::open_pool(&c.db, c.pool(), c.history_visibility) {
             Ok(st) => {
@@ -184,33 +185,10 @@ async fn run(cfg: HubCfg) -> i32 {
                     eprintln!("oxhubd: {e}");
                     return 2;
                 }
-                if let Some(listen) = cfg.system.zenoh_listen() {
-                    let hk = cfg.system.hook.clone().unwrap_or_default();
-                    let gc = oxhubd::hook::zgate::GateCfg {
-                        listen: listen.to_string(),
-                        cert: hk.zenoh_cert.unwrap_or_default(),
-                        key: hk.zenoh_key.unwrap_or_default(),
-                        ca: hk.zenoh_ca.unwrap_or_default(),
-                    };
-                    let deps = oxhubd::hook::zgate::send::GateDeps {
-                        accounts: oxhubd::hook::zgate::judge::Accounts::of(&cfg.system),
-                        bus: bus.clone(),
-                        store: chat.store.clone(),
-                        acks: chat.acks(),
-                        keys: chat.store.subs().keys().map(str::to_string).collect(),
-                        knobs: oxhubd::hook::zgate::send::GateKnobs::of(&cfg.policy.hook, c.live_bundle_max_bytes, c.catchup_bundle_max_msgs, c.catchup_bundle_max_bytes),
-                    };
-                    match oxhubd::hook::zgate::Gate::bind(&gc, deps).await {
-                        Ok(g) => {
-                            tokio::spawn(g.clone().serve());
-                            tokio::spawn(g.clone().drains());
-                            let _ = chat.zgate.set(g);
-                        }
-                        Err(e) => {
-                            eprintln!("oxhubd: {e}");
-                            return 2;
-                        }
-                    }
+                if cfg.system.zenoh_listen().is_some() {
+                    let knobs = oxhubd::chat::ext::ChatKnobs::of(&cfg.policy.hook, c.live_bundle_max_bytes, c.catchup_bundle_max_msgs, c.catchup_bundle_max_bytes);
+                    let keys = chat.store.subs().keys().map(str::to_string).collect();
+                    let _ = chat_ext.set(Arc::new(oxhubd::chat::ext::ChatExt::new(chat.store.clone(), chat.acks(), keys, knobs)));
                 }
                 let _ = ctx.chat.set(chat);
             }
@@ -219,6 +197,43 @@ async fn run(cfg: HubCfg) -> i32 {
                 return 2;
             }
         }
+    }
+    let bundle_max = cfg.system.hook.as_ref().map_or(common::system::FACTS_BUNDLE_MAX_BYTES_DEFAULT, |h| h.facts_bundle_max_bytes());
+    if let Some(listen) = cfg.system.zenoh_listen() {
+        let hk = cfg.system.hook.clone().unwrap_or_default();
+        let gc = oxhubd::hook::zgate::GateCfg {
+            listen: listen.to_string(),
+            cert: hk.zenoh_cert.unwrap_or_default(),
+            key: hk.zenoh_key.unwrap_or_default(),
+            ca: hk.zenoh_ca.unwrap_or_default(),
+        };
+        let chat = chat_ext.get().cloned();
+        let deps = oxhubd::hook::zgate::send::GateDeps {
+            accounts: oxhubd::hook::zgate::judge::Accounts::of(&cfg.system),
+            bus: bus.clone(),
+            chat: chat.clone(),
+            knobs: oxhubd::hook::zgate::send::GateKnobs::of(&cfg.policy.hook, bundle_max),
+        };
+        match oxhubd::hook::zgate::Gate::bind(&gc, deps).await {
+            Ok(g) => {
+                tokio::spawn(g.clone().serve());
+                if let Some(c) = chat {
+                    tokio::spawn(c.drains(g.clone(), bus.clone()));
+                }
+                if let Some(ch) = ctx.chat.get() {
+                    let _ = ch.zgate.set(g.clone());
+                }
+                let _ = hook.zgate.set(g);
+            }
+            Err(e) => {
+                eprintln!("oxhubd: {e}");
+                return 2;
+            }
+        }
+    }
+    let carry = oxhubd::hook::carry::Knobs::of(&cfg.policy.hook, bundle_max);
+    for key in hook.zenoh_accounts(&cfg.system) {
+        tokio::spawn(oxhubd::hook::carry::run(hook.clone(), bus.clone(), key, carry));
     }
     let (shut_tx, mut shut_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let hub = Arc::new(Hub {

@@ -217,3 +217,7 @@ pub fn zbuf(bytes: Vec<u8>) -> ZBuf {
 pub fn zbuf_bytes(z: &ZBuf) -> Vec<u8> {
     z.contiguous().to_vec()
 }
+
+pub fn err_body(bytes: Vec<u8>) -> zenoh_protocol::zenoh::Err {
+    zenoh_protocol::zenoh::Err { encoding: zenoh_protocol::core::Encoding::empty(), ext_sinfo: None, ext_unknown: Vec::new(), payload: zbuf(bytes) }
+}
