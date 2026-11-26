@@ -385,7 +385,16 @@ pub(crate) fn talk_merged(prev: TalkInfo, r: &Report) -> TalkInfo {
     v
 }
 
-pub(crate) fn talk_missing(r: &Report) -> Code {
+pub(crate) fn rec_space(r: &Report) -> Option<&str> {
+    let Report::Rec { path, .. } = r else { return None };
+    path.strip_prefix("rec/")?.split('/').next().filter(|s| !s.is_empty())
+}
+
+pub(crate) fn talk_missing(r: &Report, space_gone: bool) -> Code {
+    if space_gone {
+        tracing::warn!(kind = "diag", spec = "SV-IMPL-CHAT-TALK", talk = %r.talk_id(), report = r.name(), "talk record absent and its space does not exist — refused for good");
+        return Code::SpaceNotFound;
+    }
     tracing::warn!(kind = "diag", spec = "SV-IMPL-CHAT-TALK", talk = %r.talk_id(), report = r.name(), "talk record not yet stored — passing failure, the caller sends again");
     Code::InternalError
 }
@@ -785,7 +794,7 @@ impl Store {
                     params![space, n(t)],
                 ))?;
                 db(tx.execute(
-                    "INSERT INTO reads (space_id, user_id, read) SELECT ?1, ?2, total FROM spaces WHERE space_id = ?1 ON CONFLICT(space_id, user_id) DO UPDATE SET read = excluded.read",
+                    "INSERT INTO reads (space_id, user_id, read) SELECT ?1, ?2, total FROM spaces WHERE space_id = ?1 AND EXISTS(SELECT 1 FROM members WHERE space_id = ?1 AND user_id = ?2 AND leave_t IS NULL) ON CONFLICT(space_id, user_id) DO UPDATE SET read = excluded.read",
                     params![space, user],
                 ))?;
                 record(&tx, &msg, "")?;
@@ -797,7 +806,13 @@ impl Store {
             if let Some(m) = stored(&id)? {
                 return Ok(Sent::Again { msg: m });
             }
-            let Some(orig) = stored(r.talk_id())? else { return Err(talk_missing(r)) };
+            let Some(orig) = stored(r.talk_id())? else {
+                let gone = match rec_space(r) {
+                    Some(s) => space_ver(&tx, s)?.is_none(),
+                    None => false,
+                };
+                return Err(talk_missing(r, gone));
+            };
             talk_update_ok(&orig, r)?;
             let ver = space_ver(&tx, &orig.space_id)?.ok_or(Code::SpaceNotFound)?;
             let last = db(tx

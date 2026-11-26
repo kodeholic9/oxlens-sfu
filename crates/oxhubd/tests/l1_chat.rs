@@ -1471,6 +1471,18 @@ fn sent_msg(r: Result<Sent, Code>) -> (bool, ChatMessage) {
     }
 }
 
+all_forms!(a_talk_by_a_non_member_leaves_no_read_row |db| {
+    let s = store(db, Visibility::Shared);
+    join(&s, "S", "a", 1);
+    sent_msg(s.talk(&talk_start(&talk_id(21), "S", "z"), Some(2_000)));
+    join(&s, "S", "z", 3_000);
+    let e = s.list("z").expect("list").into_iter().find(|e| e.space_id == "S").expect("entry");
+    assert_eq!((e.total, e.read), (1, 0), "정:IMPL-CHAT-TALK 1 — a speaker who is not a member gets no read; joining later starts at read 0");
+    sent_msg(s.talk(&talk_start(&talk_id(22), "S", "a"), Some(4_000)));
+    let a = s.list("a").expect("list").into_iter().find(|e| e.space_id == "S").expect("entry");
+    assert_eq!((a.total, a.read), (2, 2), "정:IMPL-CHAT-TALK 1 — a member speaker's read = the total");
+});
+
 all_forms!(a_talk_is_a_message_by_the_speaker_for_everyone |db| {
     let s = store(db, Visibility::Shared);
     join(&s, "S", "a", 1);
@@ -1523,6 +1535,8 @@ all_forms!(a_talk_update_carries_the_whole_state |db| {
     assert_eq!(ups[0].msg_id, e.msg_id, "the last by (t, msg_id)");
     assert_eq!(s.talk(&talk_end(&talk_id(11), TalkState::Ok, None, 1), None), Err(Code::InternalError), "정:IMPL-CHAT-TALK 2 — no talk yet is a passing failure (5003 · not permanent)");
     assert_eq!(common::talk::judge(Some(&common::envelope::Reply::fail(Code::InternalError).encode())), None, "정:IMPL-FLR-TALK-REPORT 4 — the caller sends it again");
+    assert_eq!(s.talk(&talk_rec(&talk_id(13), "rec/S/x.ogg"), None), Err(Code::InternalError), "정:IMPL-CHAT-TALK 2 — a rec before its start, space there = passing failure");
+    assert_eq!(s.talk(&talk_rec(&talk_id(14), "rec/NOPE/x.ogg"), None), Err(Code::SpaceNotFound), "정:IMPL-CHAT-TALK 2 — a rec with no record and no space is refused for good (3012 · the unit does not send again)");
     let other = talk_id(12);
     sent_msg(s.talk(&talk_start(&other, "S", "a"), Some(2_000)));
     assert_eq!(s.talk(&talk_rec(&other, "rec/T/x.ogg"), None), Err(Code::InvalidPayload), "정:IMPL-CHAT-TALK 2 — a path outside rec/{{space}}/ is refused");

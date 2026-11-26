@@ -410,6 +410,16 @@ fn nack_up_skips_large_gaps() {
         let got = nacked_union(&[(a, 0), (a.wrapping_add(jump), 20)], 2_000);
         assert!(got.is_empty(), "S-sym-RULE-RTCP-NACK-UP-1 gap of {jump} after {a} must not be NACKed: {got:?}");
     }
+    for (a, jump) in [(1_000u16, 128u16), (65_530, 2_000)] {
+        let mut n = NackUp::default();
+        n.on_packet(a, 0);
+        let got = n.on_packet(a.wrapping_add(jump), 20);
+        assert_eq!(got, oxsfud::r#pub::Arrival::Jump, "S-sym-RULE-RTCP-NACK-UP-1 a jump of {jump} is told apart — the ingress asks the source for a key (PLI_JUMP)");
+        assert!(got.repair_passes(), "a jump is a new packet — it passes");
+    }
+    let mut n = NackUp::default();
+    n.on_packet(1_000, 0);
+    assert_eq!(n.on_packet(1_127, 20), oxsfud::r#pub::Arrival::Newer, "a gap of 127 is not a jump");
     let got = nacked_union(&[(1_000, 0), (1_127, 20)], 2_000);
     assert!(got.contains(&1_001) && got.contains(&1_126), "S-sym-RULE-RTCP-NACK-UP-1 gap of 127 is NACKed (diff < 128)");
     assert!(!got.contains(&1_000) && !got.contains(&1_127), "S-sym-RULE-RTCP-NACK-UP-1 received seqs are not NACKed");

@@ -336,9 +336,10 @@ pub const PLI_AWAIT_KEY: u16 = 1 << 5;
 pub const PLI_READY: u16 = 1 << 6;
 pub const PLI_NACK: u16 = 1 << 7;
 pub const PLI_BURST: u16 = 1 << 8;
-pub const PLI_INFRA: u16 = PLI_LAYER | PLI_ADOPT | PLI_RETRY | PLI_HERE | PLI_AWAIT_KEY | PLI_READY | PLI_NACK | PLI_BURST;
+pub const PLI_JUMP: u16 = 1 << 9;
+pub const PLI_INFRA: u16 = PLI_LAYER | PLI_ADOPT | PLI_RETRY | PLI_HERE | PLI_AWAIT_KEY | PLI_READY | PLI_NACK | PLI_BURST | PLI_JUMP;
 
-const PLI_WHY: [(u16, &str); 9] = [
+const PLI_WHY: [(u16, &str); 10] = [
     (PLI_USER, "subscriber"),
     (PLI_LAYER, "layer"),
     (PLI_ADOPT, "adopt"),
@@ -348,6 +349,7 @@ const PLI_WHY: [(u16, &str); 9] = [
     (PLI_READY, "ready"),
     (PLI_NACK, "nack"),
     (PLI_BURST, "burst"),
+    (PLI_JUMP, "jump"),
 ];
 
 pub fn pli_why(want: u16) -> String {

@@ -201,6 +201,7 @@ pub enum Arrival {
     Newer,
     Filled,
     Seen,
+    Jump,
 }
 
 impl Arrival {
@@ -210,6 +211,7 @@ impl Arrival {
             Arrival::Newer => "newer",
             Arrival::Filled => "filled",
             Arrival::Seen => "seen",
+            Arrival::Jump => "jump",
         }
     }
 
@@ -267,7 +269,7 @@ impl NackUp {
         }
         self.last = Some(seq);
         self.base = u;
-        Arrival::Newer
+        if diff >= NACK_JUMP { Arrival::Jump } else { Arrival::Newer }
     }
 
     pub fn holes(&self) -> Vec<u16> {
@@ -375,8 +377,9 @@ impl PubTrack {
         }
         if self.stream.kind == Kind::Video
             && let Ok(mut n) = self.nack.lock()
+            && n.on_packet(rtp.seq, now_ms) == Arrival::Jump
         {
-            n.on_packet(rtp.seq, now_ms);
+            self.pli_want.fetch_or(crate::rtcp::PLI_JUMP, Ordering::AcqRel);
         }
         if let Ok(mut c) = self.cache.lock() {
             c.put(rtp.seq, Bytes::copy_from_slice(rtp.raw));

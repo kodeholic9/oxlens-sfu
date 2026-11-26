@@ -1314,7 +1314,7 @@
     {
      "seq": 1128,
      "at_ms": 10,
-     "arrival": "newer",
+     "arrival": "jump",
      "passes": true,
      "holes": []
     },

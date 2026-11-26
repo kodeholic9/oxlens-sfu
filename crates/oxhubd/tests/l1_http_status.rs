@@ -10,7 +10,6 @@ fn want(c: Code) -> u16 {
     match c {
         Code::ClaimNotAllowed => 400,
         Code::SessionNotFound => 401,
-        Code::NotAuthorized => 403,
         Code::RoomNotFound => 404,
         Code::PreconditionFailed => 409,
         Code::SfuUnavailable => 503,

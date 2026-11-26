@@ -20,7 +20,7 @@ use tokio_postgres::{Config, NoTls, Row};
 use common::talk::Report;
 
 use super::{
-    Ack, COLS, ExtRow, Lane, ext_keys, Cursor, Dir, Interval, Outgoing, Page, RELATION_KINDS, Roster, Sent, VISIBLE, again, fold_relations, fresh, member_msg, n, now_or, probe_of, ref_ok, since_floor, talk_merged, talk_missing, talk_msg,
+    Ack, COLS, ExtRow, Lane, ext_keys, Cursor, Dir, Interval, Outgoing, Page, RELATION_KINDS, Roster, Sent, VISIBLE, again, fold_relations, fresh, member_msg, n, now_or, probe_of, ref_ok, since_floor, talk_merged, rec_space, talk_missing, talk_msg,
     talk_started, talk_update_ok, u, within,
 };
 
@@ -550,7 +550,7 @@ impl Pg {
                 exec(&tx, "UPDATE spaces SET last_t = GREATEST(COALESCE(last_t, $2), $2), total = total + 1 WHERE space_id = $1", &[&space, &tn]).await?;
                 exec(
                     &tx,
-                    "INSERT INTO reads (space_id, user_id, read) SELECT $1::text, $2::text, total FROM spaces WHERE space_id = $1 ON CONFLICT (space_id, user_id) DO UPDATE SET read = excluded.read",
+                    "INSERT INTO reads (space_id, user_id, read) SELECT $1::text, $2::text, total FROM spaces WHERE space_id = $1 AND EXISTS(SELECT 1 FROM members WHERE space_id = $1 AND user_id = $2 AND leave_t IS NULL) ON CONFLICT (space_id, user_id) DO UPDATE SET read = excluded.read",
                     &[&space, &user],
                 )
                 .await?;
@@ -565,7 +565,13 @@ impl Pg {
             }
             let lock = format!("SELECT {COLS} FROM messages x WHERE x.msg_id = $1 FOR UPDATE");
             let talk_id = r.talk_id().to_string();
-            let Some(row) = one(&tx, &lock, &[&talk_id]).await? else { return Err(talk_missing(&r)) };
+            let Some(row) = one(&tx, &lock, &[&talk_id]).await? else {
+                let gone = match rec_space(&r) {
+                    Some(s) => one(&tx, "SELECT 1 FROM spaces WHERE space_id = $1", &[&s]).await?.is_none(),
+                    None => false,
+                };
+                return Err(talk_missing(&r, gone));
+            };
             let orig = pg(msg_of(&row))?;
             talk_update_ok(&orig, &r)?;
             if let Some(m) = stored(&tx, &id).await? {
