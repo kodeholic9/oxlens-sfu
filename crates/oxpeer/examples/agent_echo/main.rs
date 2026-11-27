@@ -11,10 +11,12 @@
 //! `reconnect` — 전이중 표지 · `--reconnect-at N` 초에 `close()` 한 뒤 ★같은 객체로 `connect()` · 다시 들어 다시 발행(SDK:ses.md `close()`).
 //! `churn` — 전이중 표지 오디오만 내다가 3s 영상 발행 · 6s 영상 내림 — 받는 줄이 흐르는 동안 내 발행을 더하고 뺀다(SDK:RULE-PLAT-PC-MODE oxpeer 판정 술어 ④′ · 1pc 는 같은 전송).
 //!   걸음마다 `req_wall_ms`(요청 직전) · `wall_ms`(돌아온 뒤 — 발행은 `published` · 내림은 응답을 기다리지 않는다)를 적는다.
+//! `cycle` — `churn` 과 같이 오디오만 내다가 1s 부터 0.4s 마다 영상 발행 · 0.2s 뒤 내림을 `--cycles N`(기본 33) 번 — 한 세션에서 발행 mid 가 0~31 안에서 되쓰이나(연:EX-LINK-SDP-LISTEN-ONLY).
+//!   걸음은 요약 `steps`(VideoOn · VideoOff 쌍) · 발행 mid 는 운영 로그 진단 줄 `publish seated`(`in.mid` · `in.server` · `in.kind`)에 있다. `--secs` 는 1 + 0.4·N 초보다 길게.
 //! `--raw DIR` — 녹음 원시 기록(`Config.record` · SDK:RULE-PLAT-REC-TAP)을 켠다. 받는 줄 전부의 정리층 출구 RTP · `gap` · `ctl/track` 을 `DIR/<user>-NNNN.mcap` 에 적는다(기능 `record` 로 지은 것만).
 //! `file` — 진짜 코덱 표본을 되풀이해 전이중으로 낸다(`--opus a.ogg` · `--h264 v.h264` 또는 `--vp8 v.ivf` · 영상 30fps) · 키프레임 요청이 오면 다음 키프레임으로 건너뛴다(3층 — 브라우저가 실제로 디코드하나).
 //!
-//!   cargo run -p oxpeer --example agent_echo -- --base http://127.0.0.1:1974/media --room ch-1 [--secs 30] [--user agent-1] [--mode echo|beacon|duplex|move|reconnect|churn] [--video [--simulcast]] [--room2 ch-2] [--reconnect-at N] [--tls-root ca.pem] [--pc-mode auto|1pc|2pc] [--raw DIR]
+//!   cargo run -p oxpeer --example agent_echo -- --base http://127.0.0.1:1974/media --room ch-1 [--secs 30] [--user agent-1] [--mode echo|beacon|duplex|move|reconnect|churn|cycle] [--video [--simulcast]] [--room2 ch-2] [--reconnect-at N] [--cycles N] [--tls-root ca.pem] [--pc-mode auto|1pc|2pc] [--raw DIR]
 //!
 //! `--pc-mode` 는 BIND 에 싣는 연결 모드(기본 `auto` — SDK:RULE-PLAT-PC-MODE) · 요약 `session_pc_mode` 는 서버가 확정한 값이다.
 //! 끝나면 표준 출력에 한 줄 JSON(되울림마다 · 발언권 사건 · 키프레임 요청 · 보내는 쪽 계수)을 쓴다 — 2층 시험이 읽는다.
@@ -46,10 +48,11 @@ struct Args {
     api_secret: String,
     pc_mode: PcMode,
     raw: Option<String>,
+    cycles: u64,
 }
 
 fn args() -> Args {
-    let mut a = Args { base: String::new(), room: String::new(), secs: None, user: "oxpeer-agent".into(), mode: "echo".into(), video: false, simulcast: false, room2: String::new(), reconnect_at: 3, tls_root: None, opus: None, h264: None, vp8: None, api_key: "ox_k_demo".into(), api_secret: "ox_s_demo".into(), pc_mode: PcMode::Auto, raw: None };
+    let mut a = Args { base: String::new(), room: String::new(), secs: None, user: "oxpeer-agent".into(), mode: "echo".into(), video: false, simulcast: false, room2: String::new(), reconnect_at: 3, tls_root: None, opus: None, h264: None, vp8: None, api_key: "ox_k_demo".into(), api_secret: "ox_s_demo".into(), pc_mode: PcMode::Auto, raw: None, cycles: 33 };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
         let mut v = || it.next().unwrap_or_default();
@@ -77,11 +80,18 @@ fn args() -> Args {
                 });
             }
             "--raw" => a.raw = Some(v()),
+            "--cycles" => {
+                let n = v();
+                a.cycles = n.parse().unwrap_or_else(|_| {
+                    eprintln!("--cycles 는 횟수(받은 값 {n:?})");
+                    std::process::exit(2);
+                });
+            }
             other => eprintln!("모르는 인자 {other}"),
         }
     }
     if a.base.is_empty() || a.room.is_empty() {
-        eprintln!("사용: agent --base http://host:port/media --room <방> [--secs N] [--user id] [--mode echo|beacon|duplex|move|reconnect|churn] [--video [--simulcast]] [--room2 방] [--reconnect-at N] [--tls-root ca.pem] [--pc-mode auto|1pc|2pc] [--raw DIR]");
+        eprintln!("사용: agent --base http://host:port/media --room <방> [--secs N] [--user id] [--mode echo|beacon|duplex|move|reconnect|churn|cycle] [--video [--simulcast]] [--room2 방] [--reconnect-at N] [--cycles N] [--tls-root ca.pem] [--pc-mode auto|1pc|2pc] [--raw DIR]");
         std::process::exit(2);
     }
     if a.raw.is_some() && !cfg!(feature = "record") {
@@ -199,7 +209,7 @@ async fn main() {
         eprintln!("둘째 방 입장 실패: {e}");
         std::process::exit(1);
     }
-    let full = matches!(a.mode.as_str(), "beacon" | "duplex" | "reconnect" | "file" | "churn");
+    let full = matches!(a.mode.as_str(), "beacon" | "duplex" | "reconnect" | "file" | "churn" | "cycle");
     let (audio, video) = match publish_all(&client, &a, full).await {
         Ok(x) => x,
         Err(e) => {
@@ -244,7 +254,7 @@ async fn main() {
 async fn publish_all(client: &Client, a: &Args, full: bool) -> Result<(LocalTrack, Option<LocalTrack>), oxpeer::Error> {
     let duplex = if full { Duplex::Full } else { Duplex::Half };
     let audio = client.publish(&a.room, TrackSpec { kind: Kind::Audio, duplex, simulcast: false }).await?;
-    let video = if full && a.mode != "churn" && (a.video || a.h264.is_some() || a.vp8.is_some()) { Some(client.publish(&a.room, TrackSpec { kind: Kind::Video, duplex: Duplex::Full, simulcast: a.simulcast }).await?) } else { None };
+    let video = if full && !matches!(a.mode.as_str(), "churn" | "cycle") && (a.video || a.h264.is_some() || a.vp8.is_some()) { Some(client.publish(&a.room, TrackSpec { kind: Kind::Video, duplex: Duplex::Full, simulcast: a.simulcast }).await?) } else { None };
     Ok((audio, video))
 }
 
@@ -351,6 +361,9 @@ enum Step {
     VideoOff,
 }
 
+const CYCLE_AT: u64 = 1_000;
+const CYCLE_EVERY: u64 = 400;
+
 fn plan(a: &Args) -> Vec<(u64, Step)> {
     let (r, r2) = (a.room.clone(), a.room2.clone());
     match a.mode.as_str() {
@@ -358,6 +371,7 @@ fn plan(a: &Args) -> Vec<(u64, Step)> {
         "move" => vec![(2_000, Step::Speak(r2.clone())), (3_000, Step::Press(r2.clone())), (5_000, Step::Release(r2)), (6_000, Step::Speak(r.clone())), (7_000, Step::Press(r.clone())), (9_000, Step::Release(r))],
         "reconnect" => vec![(a.reconnect_at * 1_000, Step::Reconnect)],
         "churn" => vec![(3_000, Step::VideoOn), (6_000, Step::VideoOff)],
+        "cycle" => (0..a.cycles).flat_map(|i| [(CYCLE_AT + i * CYCLE_EVERY, Step::VideoOn), (CYCLE_AT + i * CYCLE_EVERY + CYCLE_EVERY / 2, Step::VideoOff)]).collect(),
         _ => Vec::new(),
     }
 }

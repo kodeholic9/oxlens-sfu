@@ -24,9 +24,11 @@ use crate::link::send::{ExtIds, OutFrame, SendTrack};
 use crate::link::transport::PubOut;
 use crate::sig::{Outcome, Purpose};
 
-use super::pcmode::{URI_AUDIO_LEVEL, URI_MID, URI_REPAIR_RID, URI_RID, URI_TWCC, ext_id, pt_row};
+use super::midpool::reseat;
+use super::pcmode::{Mode, URI_AUDIO_LEVEL, URI_MID, URI_REPAIR_RID, URI_RID, URI_TWCC, ext_id, pt_row};
 
 const SSRC_COLLISION: i64 = 3008;
+const MID_EXHAUSTED: &str = "MID_EXHAUSTED";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SsrcTry {
@@ -45,6 +47,18 @@ pub(crate) fn on_pub_fail(code: i64, tried: SsrcTry, simulcast: bool) -> OnPubFa
         (SSRC_COLLISION, SsrcTry::First, false) => OnPubFail::Reissue,
         _ => OnPubFail::Fail,
     }
+}
+
+pub(crate) fn address_room<'a>(own: &'a str, speaking: &'a str, joined_on_server: &[&'a str]) -> Option<&'a str> {
+    [own, speaking].into_iter().find(|r| !r.is_empty() && joined_on_server.contains(r)).or_else(|| joined_on_server.first().copied())
+}
+
+pub(crate) fn forgets(st: &pc::St, waiting: bool) -> bool {
+    st.ps == pc::PubSt::IDLE && !st.want && !waiting
+}
+
+pub(crate) fn mid_exhausted() -> Error {
+    Error::coded(0, MID_EXHAUSTED, Category::Bug, true)
 }
 
 pub(crate) fn publish_fault(wire: Error, tried: SsrcTry) -> Error {
@@ -95,12 +109,12 @@ pub(crate) struct PubTrack {
     pub(crate) ssrc: u32,
     pub(crate) ssrcs: Vec<u32>,
     pub(crate) simulcast: bool,
-    pub(crate) mid: String,
+    pub(crate) slot: Option<u8>,
     pub(crate) track_id: Option<String>,
     pub(crate) io: Arc<TrackIo>,
     waiters: Vec<PublishReply>,
     /// 마지막 거절 응답(앱에 실패 사유로 준다)
-    fault: Option<Value>,
+    fault: Option<Error>,
     dup_waiters: Vec<oneshot::Sender<Result<(), Error>>>,
     /// 층마다 송신 시계
     pacers: Vec<AbortHandle>,
@@ -244,9 +258,12 @@ impl Core {
         {
             o.set_twcc(ext.twcc);
         }
-        let n = self.pub_mids.entry(server.clone()).or_insert(0);
-        let mid = n.to_string();
-        *n += 1;
+        let Some(slot) = self.mid_seat(&server, spec.kind, spec.simulcast) else {
+            let _ = tx.send(Err(mid_exhausted()));
+            return;
+        };
+        let mid = slot.to_string();
+        self.log.emit(crate::log::Line::new(crate::log::Kind::Diag).spec("SD-IMPL-PUB-API").key("in.server", &server).key("in.kind", if video { "video" } else { "audio" }).key("in.mid", &mid).msg("publish seated"));
         self.pub_seq += 1;
         let id = self.pub_seq;
         let picks: Vec<u32> = (0..frames.len()).map(|_| self.pub_ssrc(&server, spec.simulcast)).collect();
@@ -284,7 +301,7 @@ impl Core {
             ssrc,
             ssrcs,
             simulcast: spec.simulcast,
-            mid,
+            slot: Some(slot),
             track_id: None,
             io,
             waiters: vec![tx],
@@ -300,7 +317,21 @@ impl Core {
 
     pub(super) fn unpublish(&mut self, id: u64) {
         self.pub_enter(id, "off", |s| Some(pc::off(s)), "unpublish");
-        self.pub_forget(id);
+    }
+
+    fn recv_mids(&self, server: &str) -> Vec<u8> {
+        self.links.get(server).filter(|l| l.mode == Mode::One).and_then(|l| l.table.as_ref()).map(|t| t.mlines.iter().filter_map(|m| m.mid.parse().ok()).collect()).unwrap_or_default()
+    }
+
+    fn mid_seat(&mut self, server: &str, kind: Kind, simulcast: bool) -> Option<u8> {
+        let recv = self.recv_mids(server);
+        reseat(&mut self.pub_mids, "", None, server, kind, simulcast, &recv)
+    }
+
+    fn mid_release(&mut self, server: &str, slot: Option<u8>) {
+        if let (Some(mid), Some(p)) = (slot, self.pub_mids.get_mut(server)) {
+            p.release(mid);
+        }
     }
 
     fn pub_ssrc(&mut self, server: &str, simulcast: bool) -> u32 {
@@ -352,13 +383,14 @@ impl Core {
 
     fn pub_forget(&mut self, id: u64) {
         // 기다리던 publish 는 통이 버려져 닫힘으로 끝난다
-        if let Some(t) = self.pubs.remove(&id)
-            && let Ok(mut g) = self.sink.senders.write()
-        {
+        let Some(t) = self.pubs.remove(&id) else { return };
+        if let Ok(mut g) = self.sink.senders.write() {
             for s in &t.ssrcs {
                 g.remove(s);
             }
         }
+        let server = t.io.server.lock().map(|s| s.clone()).unwrap_or_default();
+        self.mid_release(&server, t.slot);
     }
 
     pub(super) fn pub_enter(&mut self, id: u64, entry: &'static str, f: impl Fn(&pc::St) -> Option<pc::Step>, cause: &str) {
@@ -385,6 +417,7 @@ impl Core {
                 pc::Tx::PublishTracks { action: pc::PublishTracksAction::add, .. } => {
                     if let Some(t) = self.pubs.get_mut(&id) {
                         t.tried = SsrcTry::First;
+                        t.fault = None;
                     }
                     self.send_publish(id);
                 }
@@ -403,6 +436,7 @@ impl Core {
                 pbd::PubAction::TransceiverInactive => {}
             }
         }
+        let mut orphan = false;
         for e in &plan.events {
             let Some(t) = self.pubs.get_mut(&id) else { break };
             let (room, track_id) = (t.room.clone(), t.track_id.clone());
@@ -416,7 +450,8 @@ impl Core {
                     self.emit(Event::Published { room, track_id: tid });
                 }
                 pbd::PubEvent::PublishFailed => {
-                    let err = t.fault.as_ref().map(|b| publish_fault(Error::from_failure(b), t.tried)).unwrap_or_else(|| Error::sdk("PUBLISH_FAILED", Category::State));
+                    let err = t.fault.clone().map(|f| publish_fault(f, t.tried)).unwrap_or_else(|| Error::sdk("PUBLISH_FAILED", Category::State));
+                    orphan = !t.waiters.is_empty();
                     for w in t.waiters.drain(..) {
                         let _ = w.send(Err(err.clone()));
                     }
@@ -435,14 +470,18 @@ impl Core {
                 }
             }
         }
+        if orphan {
+            self.pub_forget(id);
+            return;
+        }
         // 협상 이음매 — SDP 가 없으니 성공으로 돌아온다(발행 m-line 은 PUBLISH_TRACKS 의 줄). ★단 그 방이 JOINED 일 때만 —
         //   웹은 협상이 연결 · 방이 선 뒤에 끝나지만 서버사이드는 곧바로라 재구축(새 세션이 방보다 먼저 선다)에서 방 밖 PUBLISH_TRACKS 가 나가 거절됐다(20261108d 실측).
         //   방이 아직이면 미뤘다가 그 방이 다시 서면(`pub_room_joined`) 그 방이 지금 붙은 서버를 다시 읽고(SDK:pub.md `LocalTrack.server`) 이음매를 끝낸다
         if plan.seams.iter().any(|s| s.fx == pc::SeamFx::sdp_rebuild) {
             let joined = self.pubs.get(&id).and_then(|t| self.rooms.get(&t.room)).is_some_and(|r| !r.closed && r.st.rs == crate::generated::room_client::RoomSt::JOINED);
             if joined {
-                self.pub_rebind(id);
-                self.pub_enter(id, "nego", |s| pc::nego(s, true), "no-sdp");
+                let seated = self.pub_seat(id);
+                self.pub_enter(id, "nego", |s| pc::nego(s, seated), "no-sdp");
             } else if let Some(t) = self.pubs.get_mut(&id) {
                 t.nego_wait = true;
             }
@@ -451,13 +490,7 @@ impl Core {
         if prev != pc::PubSt::REGISTERED && plan.state.ps == pc::PubSt::REGISTERED {
             self.pub_enter(id, "attach", |s| pc::attach(s, true), "pacer");
         }
-        if plan.state.ps == pc::PubSt::IDLE && !plan.state.want {
-            self.pub_forget_if_done(id);
-        }
-    }
-
-    fn pub_forget_if_done(&mut self, id: u64) {
-        if self.pubs.get(&id).is_some_and(|t| t.waiters.is_empty()) {
+        if self.pubs.get(&id).is_some_and(|t| forgets(&t.st, !t.waiters.is_empty())) {
             self.pub_forget(id);
         }
     }
@@ -472,7 +505,7 @@ impl Core {
         let track = PublishTrack {
             kind: t.kind,
             ssrc: t.ssrc,
-            mid: t.mid.clone(),
+            mid: t.slot.map(|m| m.to_string()).unwrap_or_default(),
             codec: Some(t.codec.clone()),
             fmtp: t.fmtp.clone(),
             pt: t.pt,
@@ -504,8 +537,12 @@ impl Core {
 
     fn send_unpublish(&mut self, id: u64) {
         let Some(t) = self.pubs.get(&id) else { return };
-        let (Some(tid), Some(join_id)) = (t.track_id.clone(), self.rooms.get(&t.room).and_then(|r| self.jids.str(r.st.jid)).map(str::to_string)) else { return };
-        let body = PublishTracksReq::Remove { action: PublishTracksReqRemoveAction::Remove, room_id: t.room.clone(), join_id, track_ids: vec![tid] };
+        let Some(tid) = t.track_id.clone() else { return };
+        let server = t.io.server.lock().map(|s| s.clone()).unwrap_or_default();
+        let joined: Vec<&str> = self.rooms.values().filter(|r| !r.closed && r.st.rs == crate::generated::room_client::RoomSt::JOINED && r.sfu.as_deref() == Some(server.as_str())).map(|r| r.id.as_str()).collect();
+        let Some(room) = address_room(&t.room, &self.aff.r#pub, &joined).map(str::to_string) else { return };
+        let Some(join_id) = self.rooms.get(&room).and_then(|r| self.jids.str(r.st.jid)).map(str::to_string) else { return };
+        let body = PublishTracksReq::Remove { action: PublishTracksReqRemoveAction::Remove, room_id: room, join_id, track_ids: vec![tid] };
         if let Ok(v) = serde_json::to_value(&body) {
             self.request(Op::PublishTracks, v, Purpose::Unpublish);
         }
@@ -523,7 +560,7 @@ impl Core {
         let m = match o {
             Outcome::Ok(b) => {
                 if let Some(t) = self.pubs.get_mut(&id) {
-                    let mid = t.mid.clone();
+                    let mid = t.slot.map(|m| m.to_string()).unwrap_or_default();
                     t.track_id = b.get("tracks").and_then(Value::as_array).and_then(|a| a.iter().find(|x| x.get("mid").and_then(Value::as_str) == Some(mid.as_str()))).and_then(|x| x.get("track_id")).and_then(Value::as_str).map(str::to_string);
                 }
                 pc::PubResMsg { action: Some(pc::PubAction::add), code: 0, part: pc::Part::res, pid }
@@ -536,7 +573,7 @@ impl Core {
                     return;
                 }
                 if let Some(t) = self.pubs.get_mut(&id) {
-                    t.fault = Some(b);
+                    t.fault = Some(Error::from_failure(&b));
                 }
                 pc::PubResMsg { action: None, code, part: pc::Part::fail, pid }
             }
@@ -621,41 +658,49 @@ impl Core {
             if let Some(t) = self.pubs.get_mut(&id) {
                 t.nego_wait = false;
             }
-            self.pub_rebind(id);
-            self.pub_enter(id, "nego", |s| pc::nego(s, true), "room_joined");
+            let seated = self.pub_seat(id);
+            self.pub_enter(id, "nego", |s| pc::nego(s, seated), "room_joined");
         }
     }
 
     /// 트랙의 서버를 그 발행 방이 지금 붙은 서버로 — 바뀌었으면 그 연결의 mid 를 새로 받고 송신 상태에 알린다(SDK:pub.md `LocalTrack.server` — `moveIn` 전 · 재구축의 다시 발행 전)
-    fn pub_rebind(&mut self, id: u64) {
-        let Some(t) = self.pubs.get(&id) else { return };
-        let Some(server) = self.rooms.get(&t.room).and_then(|r| r.sfu.clone()) else { return };
+    fn pub_seat(&mut self, id: u64) -> bool {
+        let Some(t) = self.pubs.get(&id) else { return false };
+        let Some(server) = self.rooms.get(&t.room).and_then(|r| r.sfu.clone()) else { return t.slot.is_some() };
         let old = t.io.server.lock().map(|s| s.clone()).unwrap_or_default();
-        if old == server {
-            return;
+        if old == server && t.slot.is_some() {
+            return true;
         }
-        let n = self.pub_mids.entry(server.clone()).or_insert(0);
-        let mid = n.to_string();
-        *n += 1;
-        let twcc = ext_id(URI_TWCC).unwrap_or(0);
-        if twcc != 0
-            && let Some(o) = self.pub_outs.read().ok().and_then(|g| g.get(&server).and_then(|s| s.get().cloned()))
-        {
-            o.set_twcc(twcc);
-        }
-        let Some(t) = self.pubs.get_mut(&id) else { return };
+        let (kind, simulcast, held) = (t.kind, t.simulcast, t.slot);
+        let recv = self.recv_mids(&server);
+        let slot = reseat(&mut self.pub_mids, &old, held, &server, kind, simulcast, &recv);
+        let Some(t) = self.pubs.get_mut(&id) else { return false };
+        t.slot = slot;
         if let Ok(mut g) = t.io.server.lock() {
-            *g = server.clone();
+            g.clone_from(&server);
         }
-        t.mid = mid.clone();
+        let Some(mid) = slot.map(|m| m.to_string()) else {
+            t.fault = Some(mid_exhausted());
+            return false;
+        };
         let senders = self.sink.senders.read().map(|g| t.ssrcs.iter().filter_map(|x| g.get(x).cloned()).collect::<Vec<_>>()).unwrap_or_default();
         for st in senders {
             if let Ok(mut st) = st.lock() {
                 st.rebind(mid.clone());
             }
         }
+        if old == server {
+            return true;
+        }
+        let twcc = ext_id(URI_TWCC).unwrap_or(0);
+        if twcc != 0
+            && let Some(o) = self.pub_outs.read().ok().and_then(|g| g.get(&server).and_then(|s| s.get().cloned()))
+        {
+            o.set_twcc(twcc);
+        }
         // 발행을 다른 서버로 옮김 — 발행 상태가 바뀐 걸음이 아니라 판단이다(전이 줄에 서버 ID 를 상태로 적지 않는다 · context 202611/20261109e 판정기가 짚음)
-        self.log.emit(crate::log::Line::new(crate::log::Kind::Diag).spec("SD-IMPL-PUB-API").key("in.publish", id).key("in.from_server", &old).key("in.to_server", &server).msg("publish rebound to another server"));
+        self.log.emit(crate::log::Line::new(crate::log::Kind::Diag).spec("SD-IMPL-PUB-API").key("in.publish", id).key("in.from_server", &old).key("in.to_server", &server).key("in.mid", &mid).msg("publish rebound to another server"));
+        true
     }
 
     /// 그 서버 연결이 닫혔다(drop) · 재구축으로 다시 섰다(reregister) — 위 이음매 pub.drop_server · pub.reregister_server
@@ -773,7 +818,7 @@ impl Core {
                         {
                             t.room = to.clone();
                         }
-                        self.pub_rebind(id);
+                        self.pub_seat(id);
                         self.pub_enter(id, "moveIn", |s| Some(pc::move_in(s)), "affiliation");
                     }
                 }
@@ -1102,5 +1147,77 @@ mod ssrc_collision_test {
         assert_eq!((a.mid, a.audio_level, a.rid, a.rrid, a.twcc), (1, 4, 0, 0, 6), "오디오 — 음량을 싣는다");
         let v = ext_ids(true, true);
         assert_eq!((v.mid, v.audio_level, v.rid, v.rrid, v.twcc), (1, 0, 10, 11, 6), "시뮬캐스트 영상 — 층 이름 둘");
+    }
+}
+
+#[cfg(test)]
+mod slot_life_test {
+    use super::*;
+
+    fn step(s: &pc::St, f: impl Fn(&pc::St) -> Option<pc::Step>) -> pc::Step {
+        f(s).unwrap_or_else(|| panic!("받는 상태 밖: {:?}", s.ps))
+    }
+
+    fn removes(st: &pc::Step) -> bool {
+        st.out.iter().any(|t| matches!(t, pc::Tx::PublishTracks { action: pc::PublishTracksAction::remove, .. }))
+    }
+
+    fn sending() -> pc::St {
+        let s = step(&pc::initial(), pc::on).s;
+        let s = step(&s, |s| pc::nego(s, true)).s;
+        step(&s, |s| Some(pc::pub_res(s, &pc::PubResMsg { action: Some(pc::PubAction::add), code: 0, part: pc::Part::res, pid: s.req }))).s
+    }
+
+    #[test]
+    fn off_after_registration_sends_remove_then_the_slot_returns() {
+        let s = sending();
+        assert_eq!(s.ps, pc::PubSt::REGISTERED);
+        assert!(!forgets(&s, false));
+        let off = step(&s, |s| Some(pc::off(s)));
+        assert!(removes(&off), "연:RULE-PUB-OFF remove 를 보낸다");
+        assert!(forgets(&off.s, false), "remove 를 보낸 걸음에서 자리를 돌려준다(웹 stop → releaseSlot 과 같은 때 · hub 가 한 연결의 요청을 차례로 처리해 서버는 remove 를 먼저 본다)");
+    }
+
+    #[test]
+    fn off_while_the_add_is_in_flight_holds_the_slot_until_the_reply_sends_remove() {
+        let s = step(&pc::initial(), pc::on).s;
+        let s = step(&s, |s| pc::nego(s, true)).s;
+        assert_eq!((s.ps, s.nego), (pc::PubSt::STAGED, false), "add 가 나갔다");
+        let off = step(&s, |s| Some(pc::off(s)));
+        assert!(!removes(&off), "track_id 가 없어 아직 remove 를 못 보낸다");
+        assert!(!forgets(&off.s, false), "서버가 곧 그 mid 로 스트림을 만든다 — 자리를 쥐고 있는다");
+        let reply = step(&off.s, |s| Some(pc::pub_res(s, &pc::PubResMsg { action: Some(pc::PubAction::add), code: 0, part: pc::Part::res, pid: s.req })));
+        assert_eq!(reply.label, "PUB.C.STAGED.pub_ok_unwanted");
+        assert!(removes(&reply), "응답 뒤 remove");
+        assert!(forgets(&reply.s, false), "그때 돌려준다");
+    }
+
+    #[test]
+    fn a_handle_still_held_keeps_its_slot() {
+        let s = sending();
+        let revoked = step(&s, |s| Some(pc::revoked(s, &pc::RevokedMsg {})));
+        assert!(!forgets(&revoked.s, false), "서버가 지웠어도 앱이 핸들을 쥐고 있다 — 재구축이면 같은 자리로 다시 낸다");
+        assert!(!forgets(&pc::initial(), true), "첫 발행을 기다리는 쪽이 있으면 쥔다");
+    }
+
+    #[test]
+    fn a_remove_addresses_a_room_the_user_is_still_in_on_that_server() {
+        assert_eq!(address_room("a", "s", &["a", "s"]), Some("a"), "연:RULE-PUB-REMOVE-FORM 트랙의 방에 들어가 있으면 그 방");
+        assert_eq!(address_room("a", "s", &["x", "s"]), Some("s"), "방을 잃고 남은 반이중 — 그 서버의 발언 방");
+        assert_eq!(address_room("a", "", &["x", "y"]), Some("x"), "발언 방이 없으면 그 서버에서 들어가 있는 방(웹 joinedOn)");
+        assert_eq!(address_room("a", "s", &[]), None, "그 서버에 들어가 있는 방이 없으면 서버 스트림도 그 서버의 마지막 방과 함께 없다");
+        assert_eq!(address_room("", "", &["x"]), Some("x"));
+    }
+
+    #[test]
+    fn running_out_of_slots_is_an_app_bug_refused_before_the_wire() {
+        let e = mid_exhausted();
+        assert_eq!((e.code, e.name.as_str(), e.category, e.permanent), (0, "MID_EXHAUSTED", Category::Bug, true), "SDK:IMPL-ERR-TYPE bug — 서버 상한(활성 16)이 맞으면 정상 사용으로는 32 칸이 차지 않는다");
+        let s = step(&pc::initial(), pc::on).s;
+        let failed = step(&s, |s| pc::nego(s, false));
+        assert_eq!(failed.label, "PUB.C.STAGED.nego_fail", "옮겨 간 서버에 자리가 없으면 add 를 보내지 않고 앱에");
+        assert!(failed.out.is_empty(), "요청이 나가지 않는다");
+        assert_eq!(publish_fault(e.clone(), SsrcTry::First), e);
+        assert_eq!(publish_fault(e.clone(), SsrcTry::Reissued), e);
     }
 }

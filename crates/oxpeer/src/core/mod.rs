@@ -5,6 +5,7 @@
 //! 바깥 입력은 넷 — 앱 명령 · 소켓 사건 · 연결 사실 · 재동기 응답. 걸음 뒤 요청의 끝(응답 · 버림)과 미룬 일(협상)을 차례대로 비운다.
 
 mod link;
+mod midpool;
 mod pcmode;
 mod pubs;
 mod room;
@@ -230,7 +231,7 @@ pub(crate) struct Core {
     /// 말하는 쪽 — 발행 트랙 · 서버마다 발행 mid 차례 · 내보내는 손잡이 자리 · 루프 자신의 명령 통(송신 시계가 쓴다)
     pub(crate) pubs: BTreeMap<u64, pubs::PubTrack>,
     pub(crate) pub_seq: u64,
-    pub(crate) pub_mids: HashMap<String, u32>,
+    pub(crate) pub_mids: HashMap<String, midpool::Pool>,
     pub(crate) pub_outs: Arc<std::sync::RwLock<HashMap<String, Arc<std::sync::OnceLock<PubOut>>>>>,
     /// 루프 자신의 명령 통(송신 시계가 쓴다) — 앱 통과 따로라 앱이 `Client` 를 다 놓으면 앱 통이 닫혀 루프가 끝난다
     pub(crate) cmd_tx: mpsc::UnboundedSender<Cmd>,
