@@ -46,29 +46,6 @@ const DCEP_PARTIAL_REXMIT_UNORDERED: u8 = 0x81;
 /// 수신 정리층 시계 — NACK 을 이만큼 안에 낸다
 const RECV_TICK: Duration = Duration::from_millis(10);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Role {
-    /// 발행용 연결 — DC 가 여기 붙는다(연:TRN.frame.DC 어디에 붙나)
-    Publish,
-    /// 구독용 연결 — 받는 미디어
-    Subscribe,
-    Both,
-}
-
-impl Role {
-    pub(crate) fn carries_dc(self) -> bool {
-        self != Role::Subscribe
-    }
-
-    pub(crate) fn name(self) -> &'static str {
-        match self {
-            Role::Publish => "publish",
-            Role::Subscribe => "subscribe",
-            Role::Both => "both",
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Creds {
     pub ufrag: String,
@@ -105,7 +82,6 @@ pub(crate) enum Fact {
 pub(crate) struct LinkFact {
     pub server: String,
     pub sgen: u64,
-    pub role: Role,
     pub fact: Fact,
 }
 
@@ -271,15 +247,15 @@ impl PubOut {
 
 impl Transport {
     /// 연다 — 곧바로 돌아오고 층마다의 사실은 `facts` 로 온다
-    pub(crate) fn open(server: SocketAddr, creds: Creds, cert: Certificate, role: Role, tag: (String, u64), facts: mpsc::UnboundedSender<LinkFact>, sink: MediaSink) -> Transport {
+    pub(crate) fn open(server: SocketAddr, creds: Creds, cert: Certificate, tag: (String, u64), facts: mpsc::UnboundedSender<LinkFact>, sink: MediaSink) -> Transport {
         let (name, sgen) = tag;
         let (ctl, ctl_rx) = mpsc::unbounded_channel();
         let tasks: Arc<Mutex<Vec<AbortHandle>>> = Arc::default();
         let out: Arc<OnceLock<PubOut>> = Arc::default();
         let (t2, o2) = (tasks.clone(), out.clone());
         let main = tokio::spawn(async move {
-            let say = Say { facts, server: name, sgen, role };
-            if let Err(why) = run(server, creds, cert, role, say.clone(), sink, ctl_rx, t2, o2).await {
+            let say = Say { facts, server: name, sgen };
+            if let Err(why) = run(server, creds, cert, say.clone(), sink, ctl_rx, t2, o2).await {
                 say.send(Fact::Dtls(false));
                 let _ = why;
             }
@@ -325,12 +301,11 @@ struct Say {
     facts: mpsc::UnboundedSender<LinkFact>,
     server: String,
     sgen: u64,
-    role: Role,
 }
 
 impl Say {
     fn send(&self, fact: Fact) {
-        let _ = self.facts.send(LinkFact { server: self.server.clone(), sgen: self.sgen, role: self.role, fact });
+        let _ = self.facts.send(LinkFact { server: self.server.clone(), sgen: self.sgen, fact });
     }
 }
 
@@ -349,10 +324,10 @@ enum Inner {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run(server: SocketAddr, mut creds: Creds, cert: Certificate, role: Role, say: Say, sink: MediaSink, mut ctl: mpsc::UnboundedReceiver<Ctl>, tasks: Arc<Mutex<Vec<AbortHandle>>>, out: Arc<OnceLock<PubOut>>) -> Result<(), String> {
+async fn run(server: SocketAddr, mut creds: Creds, cert: Certificate, say: Say, sink: MediaSink, mut ctl: mpsc::UnboundedReceiver<Ctl>, tasks: Arc<Mutex<Vec<AbortHandle>>>, out: Arc<OnceLock<PubOut>>) -> Result<(), String> {
     let sock = Arc::new(UdpSocket::bind("0.0.0.0:0").await.map_err(|e| format!("UDP bind: {e}"))?);
     LINKS_ALIVE.fetch_add(1, Ordering::Relaxed);
-    let _alive = LinkAlive { log: sink.log.clone(), server, role };
+    let _alive = LinkAlive { log: sink.log.clone(), server };
     let (inner_tx, mut inner_rx) = mpsc::unbounded_channel::<Inner>();
     let (dtls_tx, dtls_rx) = mpsc::channel::<Vec<u8>>(256);
     let rx_ctx: Arc<OnceLock<Mutex<Context>>> = Arc::default();
@@ -481,22 +456,12 @@ async fn run(server: SocketAddr, mut creds: Creds, cert: Certificate, role: Role
                     let _ = rx_ctx.set(Mutex::new(rx));
                     DTLS_OPEN.fetch_add(1, Ordering::Relaxed);
                     _dtls_guard = Some(DtlsGuard(conn.clone(), sink.log.clone()));
-                    sink.log.emit(crate::log::Line::new(crate::log::Kind::Diag).key("server", server).key("role", role.name()).msg("transport up"));
+                    sink.log.emit(crate::log::Line::new(crate::log::Kind::Diag).key("server", server).msg("transport up"));
                     say.send(Fact::Dtls(true));
-                    if role.carries_dc() {
-                        let (stx, srx) = mpsc::unbounded_channel();
-                        sctp = Some(stx);
-                        let h = tokio::spawn(sctp_client(conn, say.clone(), srx));
-                        keep(&tasks, h.abort_handle());
-                    } else {
-                        let say3 = say.clone();
-                        let h = tokio::spawn(async move {
-                            let mut buf = vec![0u8; 2048];
-                            while conn.read(&mut buf, None).await.is_ok() {}
-                            say3.send(Fact::Dtls(false));
-                        });
-                        keep(&tasks, h.abort_handle());
-                    }
+                    let (stx, srx) = mpsc::unbounded_channel();
+                    sctp = Some(stx);
+                    let h = tokio::spawn(sctp_client(conn, say.clone(), srx));
+                    keep(&tasks, h.abort_handle());
                 }
             },
             c = ctl.recv() => match c {
@@ -755,13 +720,12 @@ pub(crate) static DTLS_OPEN: AtomicU64 = AtomicU64::new(0);
 struct LinkAlive {
     log: Arc<crate::log::Logger>,
     server: SocketAddr,
-    role: Role,
 }
 
 impl Drop for LinkAlive {
     fn drop(&mut self) {
         LINKS_ALIVE.fetch_sub(1, Ordering::Relaxed);
-        self.log.emit(crate::log::Line::new(crate::log::Kind::Diag).key("server", self.server).key("role", self.role.name()).msg("transport down"));
+        self.log.emit(crate::log::Line::new(crate::log::Kind::Diag).key("server", self.server).msg("transport down"));
     }
 }
 

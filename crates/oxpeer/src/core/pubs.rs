@@ -25,7 +25,7 @@ use crate::link::transport::PubOut;
 use crate::sig::{Outcome, Purpose};
 
 use super::midpool::reseat;
-use super::pcmode::{Mode, URI_AUDIO_LEVEL, URI_MID, URI_REPAIR_RID, URI_RID, URI_TWCC, ext_id, pt_row};
+use super::pcmode::{URI_AUDIO_LEVEL, URI_MID, URI_REPAIR_RID, URI_RID, URI_TWCC, ext_id, pt_row};
 
 const SSRC_COLLISION: i64 = 3008;
 const MID_EXHAUSTED: &str = "MID_EXHAUSTED";
@@ -320,7 +320,7 @@ impl Core {
     }
 
     fn recv_mids(&self, server: &str) -> Vec<u8> {
-        self.links.get(server).filter(|l| l.mode == Mode::One).and_then(|l| l.table.as_ref()).map(|t| t.mlines.iter().filter_map(|m| m.mid.parse().ok()).collect()).unwrap_or_default()
+        self.links.get(server).and_then(|l| l.table.as_ref()).map(|t| t.mlines.iter().filter_map(|m| m.mid.parse().ok()).collect()).unwrap_or_default()
     }
 
     fn mid_seat(&mut self, server: &str, kind: Kind, simulcast: bool) -> Option<u8> {

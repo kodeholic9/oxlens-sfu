@@ -133,8 +133,8 @@ fn retry_wait(i: usize) -> u64 {
     w[(i + 1).min(w.len() - 1)] as u64
 }
 
-pub(crate) fn pc_mode_fault(res: crate::generated::ws_wire::PcMode, session: super::pcmode::Mode) -> Option<Error> {
-    (super::pcmode::Mode::of_wire(res) != session).then(|| Error::sdk("PC_MODE", Category::Negotiation))
+pub(crate) fn pc_mode_fault(res: crate::generated::ws_wire::PcMode) -> Option<Error> {
+    (res != crate::generated::ws_wire::PcMode::V1pc).then(|| Error::sdk("PC_MODE", Category::Negotiation))
 }
 
 /// 재시도 없이 앱에(연:ROOM.C.JOINING — ROOM_NOT_FOUND · ROOM_FULL · LISTEN_LIMIT · MID_LIMIT)
@@ -295,8 +295,8 @@ impl Core {
         if let Some(r) = self.rooms.get_mut(id) {
             r.join_sel = sel;
         }
-        let (extmap, codecs) = self.pc_mode().join_tags();
-        let req = RoomJoinReq { room_id: id.to_string(), role: None, select: Some(sel), extmap, codecs, join_id: self.jids.str(jid).map(str::to_string) };
+        let (extmap, codecs) = super::pcmode::join_tags();
+        let req = RoomJoinReq { room_id: id.to_string(), role: None, select: Some(sel), extmap: Some(extmap), codecs: Some(codecs), join_id: self.jids.str(jid).map(str::to_string) };
         let epoch = self.rooms[id].req_epoch;
         self.request(Op::RoomJoin, super::to_body(&req), Purpose::RoomJoin { room: id.to_string(), epoch, jid });
     }
@@ -315,12 +315,8 @@ impl Core {
         self.room_step(id, "retryDue", s, "clock");
     }
 
-    pub(super) fn pc_mode(&self) -> super::pcmode::Mode {
-        super::pcmode::Mode::of_session(self.ses.pcm)
-    }
-
     fn pcm(&self) -> rc::PcMode {
-        if self.pc_mode() == super::pcmode::Mode::One { rc::PcMode::V1pc } else { rc::PcMode::V2pc }
+        rc::PcMode::V1pc
     }
 
     fn fail_msg(&self, code: i64) -> rc::JoinResMsg {
@@ -363,7 +359,7 @@ impl Core {
                     },
                     version: rc::JoinResMsgVersion { epoch: self.epochs.id(&res.version.epoch), seq: res.version.seq as i64 },
                 };
-                if let Some(f) = pc_mode_fault(sc_.pc_mode, self.pc_mode())
+                if let Some(f) = pc_mode_fault(sc_.pc_mode)
                     && let Some(r) = self.rooms.get_mut(id) {
                         r.last_fault = Some(f);
                     }
@@ -1344,16 +1340,13 @@ mod rejoin_select_test {
 #[cfg(test)]
 mod pc_mode_guard_test {
     use super::pc_mode_fault;
-    use crate::core::pcmode::Mode;
     use crate::error::Category;
     use crate::generated::ws_wire::PcMode;
 
     #[test]
-    fn join_response_mode_must_equal_the_session_value() {
-        assert!(pc_mode_fault(PcMode::V1pc, Mode::One).is_none(), "1pc 세션의 1pc 응답은 정상");
-        assert!(pc_mode_fault(PcMode::V2pc, Mode::Two).is_none(), "2pc 세션의 2pc 응답은 정상");
-        let f = pc_mode_fault(PcMode::V2pc, Mode::One).expect("1pc 세션의 2pc 응답은 불일치");
+    fn join_response_mode_must_be_1pc() {
+        assert!(pc_mode_fault(PcMode::V1pc).is_none(), "SDK:RULE-PLAT-SERVER oxpeer 는 늘 1pc — 1pc 응답은 정상");
+        let f = pc_mode_fault(PcMode::V2pc).expect("2pc 응답은 규격 위반");
         assert_eq!((f.name.as_str(), f.category), ("PC_MODE", Category::Negotiation), "ROOM.C.JOINING.join_pc_mismatch 는 negotiation");
-        assert!(pc_mode_fault(PcMode::V1pc, Mode::Two).is_some(), "2pc 세션의 1pc 응답도 불일치");
     }
 }

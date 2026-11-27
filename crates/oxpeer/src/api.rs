@@ -34,26 +34,6 @@ pub struct Config {
     pub record: Option<crate::record::RecordConfig>,
     /// 운영 로그(SDK:RULE-PLAT-SERVER 「운영 로그」) — 기본은 켬 · 표준 출력 · 같은 장비면 `socket` 에 hub 로거 소켓
     pub log: crate::log::LogConfig,
-    pub pc_mode: PcMode,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum PcMode {
-    #[default]
-    Auto,
-    One,
-    Two,
-}
-
-impl PcMode {
-    pub fn parse(s: &str) -> Option<PcMode> {
-        match s {
-            "auto" => Some(PcMode::Auto),
-            "1pc" => Some(PcMode::One),
-            "2pc" => Some(PcMode::Two),
-            _ => None,
-        }
-    }
 }
 
 impl Config {
@@ -69,7 +49,6 @@ impl Config {
             #[cfg(feature = "record")]
             record: None,
             log: crate::log::LogConfig::default(),
-            pc_mode: PcMode::Auto,
         }
     }
 }

@@ -1,14 +1,10 @@
 // author: kodeholic (powered by Claude)
-//! 연결 모드(SDK:RULE-PLAT-PC-MODE · SDK:RULE-PLAT-SERVER `pc_mode`) — 앱이 고른 값을 BIND 에 실을 값으로 · 세션 확정값이 가르는 것 둘을 한 곳에서 낸다:
-//! 서버마다 전송(역할 목록) · `ROOM_JOIN` 에 번호표를 싣나(1pc 만).
+//! 연결 모드(SDK:RULE-PLAT-PC-MODE · SDK:RULE-PLAT-SERVER `pc_mode`) — oxpeer 는 늘 `1pc` 다(앱 설정 없음 · 능력표 밖). 서버마다 전송 하나 · BIND 에 늘 `1pc` · `ROOM_JOIN` 에 늘 번호표.
 //! 번호표는 oxpeer 의 고정 표다(SDK:RULE-PLAT-SERVER 번호표 — 확장은 연:LINK.fact.ServerExtMap 전량 그 번호 · PT 는 opus 111 · VP8 96/97 · H264 102/103).
-//! 발행 PT · 확장 번호는 두 모드 다 이 표에서 읽는다(표는 여기 하나).
+//! 발행 PT · 확장 번호도 이 표에서 읽는다(표는 여기 하나).
 
-use crate::api::PcMode;
-use crate::generated::session_client as sc;
-use crate::generated::ws_wire::{self as w, ExtMap, Kind, RoomJoinReqCodecs};
+use crate::generated::ws_wire::{ExtMap, Kind, RoomJoinReqCodecs};
 use crate::link::depack::Codec;
-use crate::link::transport::Role;
 
 pub(crate) const URI_MID: &str = "urn:ietf:params:rtp-hdrext:sdes:mid";
 pub(crate) const URI_AUDIO_LEVEL: &str = "urn:ietf:params:rtp-hdrext:ssrc-audio-level";
@@ -44,65 +40,11 @@ pub(crate) fn pt_row(codec: Codec) -> Option<&'static PtRow> {
     CODECS.iter().find(|r| r.codec == codec)
 }
 
-pub(crate) const CAPABILITY_ROW: Option<Mode> = Some(Mode::One);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Mode {
-    One,
-    Two,
-}
-
-pub(crate) fn ask(p: PcMode) -> Mode {
-    resolve(p, CAPABILITY_ROW)
-}
-
-pub(crate) fn resolve(p: PcMode, row: Option<Mode>) -> Mode {
-    match p {
-        PcMode::Auto => row.unwrap_or(Mode::Two),
-        PcMode::One => Mode::One,
-        PcMode::Two => Mode::Two,
-    }
-}
-
-impl Mode {
-    pub(crate) fn of_session(p: sc::PcMode) -> Mode {
-        if p == sc::PcMode::V1pc { Mode::One } else { Mode::Two }
-    }
-
-    pub(crate) fn of_wire(p: w::PcMode) -> Mode {
-        if p == w::PcMode::V1pc { Mode::One } else { Mode::Two }
-    }
-
-    pub(crate) fn session(self) -> sc::PcMode {
-        match self {
-            Mode::One => sc::PcMode::V1pc,
-            Mode::Two => sc::PcMode::V2pc,
-        }
-    }
-
-    pub(crate) fn wire(self) -> w::PcMode {
-        match self {
-            Mode::One => w::PcMode::V1pc,
-            Mode::Two => w::PcMode::V2pc,
-        }
-    }
-
-    pub(crate) fn roles(self) -> &'static [Role] {
-        match self {
-            Mode::One => &[Role::Both],
-            Mode::Two => &[Role::Publish, Role::Subscribe],
-        }
-    }
-
-    pub(crate) fn join_tags(self) -> (Option<Vec<ExtMap>>, Option<Vec<RoomJoinReqCodecs>>) {
-        match self {
-            Mode::One => (
-                Some(EXTMAP.iter().map(|(id, uri)| ExtMap { id: *id, uri: (*uri).to_string() }).collect()),
-                Some(CODECS.iter().map(|r| RoomJoinReqCodecs { kind: r.kind, pt: r.pt, name: r.name.to_string(), fmtp: r.fmtp.map(str::to_string), rtx_pt: r.rtx_pt }).collect()),
-            ),
-            Mode::Two => (None, None),
-        }
-    }
+pub(crate) fn join_tags() -> (Vec<ExtMap>, Vec<RoomJoinReqCodecs>) {
+    (
+        EXTMAP.iter().map(|(id, uri)| ExtMap { id: *id, uri: (*uri).to_string() }).collect(),
+        CODECS.iter().map(|r| RoomJoinReqCodecs { kind: r.kind, pt: r.pt, name: r.name.to_string(), fmtp: r.fmtp.map(str::to_string), rtx_pt: r.rtx_pt }).collect(),
+    )
 }
 
 #[cfg(test)]
@@ -110,40 +52,8 @@ mod pc_mode_test {
     use super::*;
 
     #[test]
-    fn auto_follows_the_capability_row_which_is_1pc() {
-        assert_eq!(CAPABILITY_ROW, Some(Mode::One), "SDK:RULE-PLAT-PC-MODE 능력표 oxpeer 행 = 1pc");
-        assert_eq!(ask(PcMode::Auto), Mode::One, "auto 는 능력표 행을 따른다");
-        assert_eq!(ask(PcMode::One), Mode::One);
-        assert_eq!(ask(PcMode::Two), Mode::Two, "앱이 2pc 를 강제할 수 있다");
-        assert_eq!(PcMode::default(), PcMode::Auto, "Config 기본은 auto");
-        assert_eq!(resolve(PcMode::Auto, None), Mode::Two, "SDK:RULE-PLAT-PC-MODE 표에 없으면 2pc");
-        assert_eq!(resolve(PcMode::One, None), Mode::One, "앱이 1pc 를 지정하면 표에 없어도 1pc");
-        assert_eq!(resolve(PcMode::Two, Some(Mode::One)), Mode::Two);
-    }
-
-    #[test]
-    fn mode_names_parse() {
-        assert_eq!(PcMode::parse("auto"), Some(PcMode::Auto));
-        assert_eq!(PcMode::parse("1pc"), Some(PcMode::One));
-        assert_eq!(PcMode::parse("2pc"), Some(PcMode::Two));
-        assert_eq!(PcMode::parse("3pc"), None);
-        assert_eq!(PcMode::parse("1PC"), None);
-    }
-
-    #[test]
-    fn transports_per_server_by_mode() {
-        assert_eq!(Mode::One.roles(), &[Role::Both], "1pc 서버마다 전송 하나");
-        assert_eq!(Mode::Two.roles(), &[Role::Publish, Role::Subscribe], "2pc 서버마다 전송 둘");
-        assert_eq!(Mode::One.roles().iter().filter(|r| r.carries_dc()).count(), 1, "DC 는 전송 하나에");
-        assert_eq!(Mode::Two.roles().iter().filter(|r| r.carries_dc()).count(), 1, "DC 는 발행 전송에만");
-    }
-
-    #[test]
-    fn number_tags_only_in_1pc_and_publish_pts_come_from_the_same_table() {
-        assert_eq!(Mode::Two.join_tags(), (None, None), "2pc ROOM_JOIN 에 번호표를 실으면 hub 가 거절한다");
-        let (ext, codecs) = Mode::One.join_tags();
-        let ext = ext.expect("1pc extmap");
-        let codecs = codecs.expect("1pc codecs");
+    fn number_tags_and_publish_pts_come_from_the_same_table() {
+        let (ext, codecs) = join_tags();
         let ext: Vec<(u8, &str)> = ext.iter().map(|e| (e.id, e.uri.as_str())).collect();
         assert_eq!(ext, vec![(1, URI_MID), (4, URI_AUDIO_LEVEL), (5, URI_ABS_SEND_TIME), (6, URI_TWCC), (10, URI_RID), (11, URI_REPAIR_RID), (12, URI_DD)], "SDK:RULE-PLAT-SERVER 번호표 = 연:LINK.fact.ServerExtMap 전량 그 번호 그대로");
         let rows: Vec<(Kind, &str, u8, Option<u8>)> = codecs.iter().map(|c| (c.kind, c.name.as_str(), c.pt, c.rtx_pt)).collect();
@@ -154,26 +64,19 @@ mod pc_mode_test {
             assert!(codecs.iter().any(|x| x.pt == r.pt && x.rtx_pt == r.rtx_pt && x.name == r.name), "발행 PT 와 번호표가 한 표");
         }
         assert!(pt_row(Codec::Other).is_none());
-        let body = serde_json::to_value(crate::generated::ws_wire::RoomJoinReq { room_id: "r".into(), role: None, select: Some(false), extmap: Some(Mode::One.join_tags().0.unwrap_or_default()), codecs: Mode::One.join_tags().1, join_id: None }).unwrap_or_default();
+        let (extmap, codecs) = join_tags();
+        let body = serde_json::to_value(crate::generated::ws_wire::RoomJoinReq { room_id: "r".into(), role: None, select: Some(false), extmap: Some(extmap), codecs: Some(codecs), join_id: None }).unwrap_or_default();
         assert_eq!(body["codecs"][0]["kind"], "audio", "코덱 줄은 kind 를 싣는다(CAND-ROOM-JOIN-CODEC-KIND)");
         assert_eq!(body["extmap"][0]["id"], 1);
     }
 
     #[test]
-    fn publish_extension_ids_come_from_the_tags_in_both_modes() {
-        assert_eq!(ext_id(URI_MID), Some(1), "SDK:RULE-PLAT-SERVER 발행은 두 모드 다 번호표 번호");
+    fn publish_extension_ids_come_from_the_tags() {
+        assert_eq!(ext_id(URI_MID), Some(1), "SDK:RULE-PLAT-SERVER 발행은 번호표 번호");
         assert_eq!(ext_id(URI_AUDIO_LEVEL), Some(4));
         assert_eq!(ext_id(URI_TWCC), Some(6));
         assert_eq!(ext_id(URI_RID), Some(10));
         assert_eq!(ext_id(URI_REPAIR_RID), Some(11));
         assert_eq!(ext_id("urn:x"), None);
-    }
-
-    #[test]
-    fn session_and_wire_values_round_trip() {
-        for m in [Mode::One, Mode::Two] {
-            assert_eq!(Mode::of_session(m.session()), m);
-            assert_eq!(Mode::of_wire(m.wire()), m);
-        }
     }
 }

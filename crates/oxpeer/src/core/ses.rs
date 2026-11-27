@@ -28,7 +28,7 @@ impl Core {
             self.failure = None;
             self.resume_on_token = false;
             let token = if self.token.is_empty() || self.ses.token == sc::Token::NONE { sc::Token::NONE } else { self.ses.token };
-            self.ses = sc::St { pc_ask: self.pc_ask.session(), token, ..self.ses.clone() };
+            self.ses = sc::St { pc_ask: sc::PcMode::V1pc, token, ..self.ses.clone() };
             let s = sc::connect(&self.ses);
             self.ses_step("connect", s, "app");
         }
@@ -156,13 +156,13 @@ impl Core {
 
     fn ses_send(&mut self, tx: &sc::Tx) {
         match tx {
-            sc::Tx::Bind { pc_mode, session_id, .. } => {
+            sc::Tx::Bind { session_id, .. } => {
                 // 출처 표지는 늘 켠다 — 패킷마다 발행 신원(SDK:RULE-PLAT-SERVER 「출처 표지」 · 연:RULE-SES-SOURCE-TAG-SESSION)
                 let req = BindReq {
                     token: Some(self.token.clone()),
                     session_id: session_id.and_then(|id| self.sids.str(id).map(str::to_string)),
                     client_ver: None,
-                    pc_mode: Some(super::pcmode::Mode::of_session(*pc_mode).wire()),
+                    pc_mode: Some(crate::generated::ws_wire::PcMode::V1pc),
                     source_tag: Some(true),
                 };
                 self.request(Op::Bind, super::to_body(&req), Purpose::Bind);

@@ -16,9 +16,9 @@
 //! `--raw DIR` — 녹음 원시 기록(`Config.record` · SDK:RULE-PLAT-REC-TAP)을 켠다. 받는 줄 전부의 정리층 출구 RTP · `gap` · `ctl/track` 을 `DIR/<user>-NNNN.mcap` 에 적는다(기능 `record` 로 지은 것만).
 //! `file` — 진짜 코덱 표본을 되풀이해 전이중으로 낸다(`--opus a.ogg` · `--h264 v.h264` 또는 `--vp8 v.ivf` · 영상 30fps) · 키프레임 요청이 오면 다음 키프레임으로 건너뛴다(3층 — 브라우저가 실제로 디코드하나).
 //!
-//!   cargo run -p oxpeer --example agent_echo -- --base http://127.0.0.1:1974/media --room ch-1 [--secs 30] [--user agent-1] [--mode echo|beacon|duplex|move|reconnect|churn|cycle] [--video [--simulcast]] [--room2 ch-2] [--reconnect-at N] [--cycles N] [--tls-root ca.pem] [--pc-mode auto|1pc|2pc] [--raw DIR]
+//!   cargo run -p oxpeer --example agent_echo -- --base http://127.0.0.1:1974/media --room ch-1 [--secs 30] [--user agent-1] [--mode echo|beacon|duplex|move|reconnect|churn|cycle] [--video [--simulcast]] [--room2 ch-2] [--reconnect-at N] [--cycles N] [--tls-root ca.pem] [--raw DIR]
 //!
-//! `--pc-mode` 는 BIND 에 싣는 연결 모드(기본 `auto` — SDK:RULE-PLAT-PC-MODE) · 요약 `session_pc_mode` 는 서버가 확정한 값이다.
+//! ★모르는 인자는 종료 코드 2 로 거절한다(틀린 값과 같은 길 — 조용히 무시하면 판이 뜻과 다른 꼴로 돈다). 연결 모드는 늘 `1pc` 다(SDK:RULE-PLAT-SERVER `pc_mode` · 앱 설정 없음) · 요약 `session_pc_mode` 는 서버가 확정한 값이다.
 //! 끝나면 표준 출력에 한 줄 JSON(되울림마다 · 발언권 사건 · 키프레임 요청 · 보내는 쪽 계수)을 쓴다 — 2층 시험이 읽는다.
 //! 실패 모양 fault = `{code, name, category, permanent, details, cause}`(cause 는 SDK 가 감싼 원 wire 실패 · 같은 꼴) — 첫 발행 실패는 표준 오류 한 줄 `발행 실패: <code> <name> <fault>` 뒤 종료 코드 1 · 걸음 실패는 요약 `steps[].fault`.
 
@@ -27,7 +27,7 @@ mod media;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use oxpeer::{Client, Config, Duplex, Event, Kind, LocalTrack, OutFrame, PcMode, TokenReq, TrackSpec};
+use oxpeer::{Client, Config, Duplex, Event, Kind, LocalTrack, OutFrame, TokenReq, TrackSpec};
 use serde_json::{Value, json};
 
 struct Args {
@@ -46,14 +46,22 @@ struct Args {
     vp8: Option<String>,
     api_key: String,
     api_secret: String,
-    pc_mode: PcMode,
     raw: Option<String>,
     cycles: u64,
 }
 
+const USAGE: &str = "사용: agent --base http://host:port/media --room <방> [--secs N] [--user id] [--mode echo|beacon|duplex|move|reconnect|churn|cycle] [--video [--simulcast]] [--room2 방] [--reconnect-at N] [--cycles N] [--tls-root ca.pem] [--api-key K] [--api-secret S] [--opus a.ogg] [--h264 v.h264 | --vp8 v.ivf] [--raw DIR]";
+
 fn args() -> Args {
-    let mut a = Args { base: String::new(), room: String::new(), secs: None, user: "oxpeer-agent".into(), mode: "echo".into(), video: false, simulcast: false, room2: String::new(), reconnect_at: 3, tls_root: None, opus: None, h264: None, vp8: None, api_key: "ox_k_demo".into(), api_secret: "ox_s_demo".into(), pc_mode: PcMode::Auto, raw: None, cycles: 33 };
-    let mut it = std::env::args().skip(1);
+    parse(std::env::args().skip(1)).unwrap_or_else(|why| {
+        eprintln!("{why}");
+        std::process::exit(2);
+    })
+}
+
+fn parse(argv: impl IntoIterator<Item = String>) -> Result<Args, String> {
+    let mut a = Args { base: String::new(), room: String::new(), secs: None, user: "oxpeer-agent".into(), mode: "echo".into(), video: false, simulcast: false, room2: String::new(), reconnect_at: 3, tls_root: None, opus: None, h264: None, vp8: None, api_key: "ox_k_demo".into(), api_secret: "ox_s_demo".into(), raw: None, cycles: 33 };
+    let mut it = argv.into_iter();
     while let Some(k) = it.next() {
         let mut v = || it.next().unwrap_or_default();
         match k.as_str() {
@@ -72,33 +80,21 @@ fn args() -> Args {
             "--vp8" => a.vp8 = Some(v()),
             "--api-key" => a.api_key = v(),
             "--api-secret" => a.api_secret = v(),
-            "--pc-mode" => {
-                let m = v();
-                a.pc_mode = PcMode::parse(&m).unwrap_or_else(|| {
-                    eprintln!("--pc-mode 는 auto|1pc|2pc (받은 값 {m:?})");
-                    std::process::exit(2);
-                });
-            }
             "--raw" => a.raw = Some(v()),
             "--cycles" => {
                 let n = v();
-                a.cycles = n.parse().unwrap_or_else(|_| {
-                    eprintln!("--cycles 는 횟수(받은 값 {n:?})");
-                    std::process::exit(2);
-                });
+                a.cycles = n.parse().map_err(|_| format!("--cycles 는 횟수(받은 값 {n:?})"))?;
             }
-            other => eprintln!("모르는 인자 {other}"),
+            other => return Err(format!("모르는 인자 {other}\n{USAGE}")),
         }
     }
     if a.base.is_empty() || a.room.is_empty() {
-        eprintln!("사용: agent --base http://host:port/media --room <방> [--secs N] [--user id] [--mode echo|beacon|duplex|move|reconnect|churn|cycle] [--video [--simulcast]] [--room2 방] [--reconnect-at N] [--cycles N] [--tls-root ca.pem] [--pc-mode auto|1pc|2pc] [--raw DIR]");
-        std::process::exit(2);
+        return Err(USAGE.to_string());
     }
     if a.raw.is_some() && !cfg!(feature = "record") {
-        eprintln!("--raw 는 기능 record 로 지은 것만(cargo build --example agent_echo --features record)");
-        std::process::exit(2);
+        return Err("--raw 는 기능 record 로 지은 것만(cargo build --example agent_echo --features record)".to_string());
     }
-    a
+    Ok(a)
 }
 
 const OPUS_20MS: Duration = Duration::from_millis(20);
@@ -169,7 +165,6 @@ async fn main() {
     };
     let mut cfg = Config::new(&a.base, token);
     cfg.tls_root_pem = root;
-    cfg.pc_mode = a.pc_mode;
     raw_config(&mut cfg, &a);
     let (client, mut events, mut media, _frames) = match Client::create(cfg) {
         Ok(x) => x,
@@ -580,4 +575,23 @@ fn ptt_json(event: &str, p: &oxpeer::PttInfo, mut base: Value) -> Value {
         o.insert("queue_position".into(), json!(p.queue_position));
     }
     base
+}
+
+#[cfg(test)]
+mod args_test {
+    use super::parse;
+
+    fn argv(s: &str) -> Vec<String> {
+        s.split_whitespace().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn unknown_arguments_are_refused_like_wrong_values() {
+        let ok = parse(argv("--base http://h/media --room r --mode cycle --cycles 40")).expect("아는 인자만");
+        assert_eq!((ok.mode.as_str(), ok.cycles), ("cycle", 40));
+        let e = parse(argv("--base http://h/media --room r --pc-mode 1pc")).err().expect("걷은 --pc-mode 는 모르는 인자");
+        assert!(e.starts_with("모르는 인자 --pc-mode"), "{e}");
+        assert!(parse(argv("--base http://h/media --room r --cycles x")).is_err(), "틀린 값");
+        assert!(parse(argv("--room r")).is_err(), "--base 없음");
+    }
 }

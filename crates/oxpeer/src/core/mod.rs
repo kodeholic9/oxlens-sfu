@@ -242,7 +242,6 @@ pub(crate) struct Core {
     pub(crate) msg_seq: u64,
     /// 다음 입장의 모양 — (방, select:true 로) · 아니면 (방, 들어간 뒤 소속 전환)
     pub(crate) join_mode: Option<(String, bool)>,
-    pub(crate) pc_ask: pcmode::Mode,
     pub(crate) qa_collide: u32,
 }
 
@@ -338,7 +337,6 @@ pub(crate) fn spawn(cfg: Config, ev: mpsc::UnboundedSender<Event>, media: mpsc::
         msg_waiters: HashMap::new(),
         msg_seq: 0,
         join_mode: None,
-        pc_ask: pcmode::ask(cfg.pc_mode),
         qa_collide: std::env::var("OXPEER_QA_SSRC_COLLIDE").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
     };
     let mut core = core;

@@ -65,6 +65,7 @@ unused_must_use = "deny"
 [[example]]
 name = "agent_echo"
 path = "examples/agent_echo/main.rs"
+test = true
 
 [[example]]
 name = "mkvcheck"

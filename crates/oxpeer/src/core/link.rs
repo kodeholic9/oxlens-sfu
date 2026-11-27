@@ -1,7 +1,7 @@
 // author: kodeholic (powered by Claude)
 //! 서버마다 연결 하나 — 복구 러너(SDK:IMPL-MOD-TABLE PeerLink · SDK:IMPL-LINK-PROJECTION · SDK:RULE-LINK-LAYERS · SDK:RULE-LINK-REBUILD).
 //! 절차는 위 연결 클라 상태기(generated/link_client)가 정한다 — 여기는 층별 사실 → 입구 · 효과 · 이음매 · 위가 값을 두지 않은 손잡이(기다림 · 적용 시한 · 안정 관찰 · DC 다시 열기 · WS 점검 사다리).
-//! 서버마다 전송은 세션 확정 모드가 정한다(core/pcmode — 1pc 하나 · 2pc 발행 · 구독 둘 · SDK:RULE-PLAT-SERVER pc_mode). ICE 는 전송 전부가 서야 선 것 · DC 는 발행을 싣는 전송에.
+//! 서버마다 전송 하나다(oxpeer 는 늘 1pc — SDK:RULE-PLAT-SERVER `pc_mode`) · 발행 자격으로 서고 · ICE 는 그 전송의 값 · DC 도 그 전송에.
 //! ★협상 = 배정표를 받는 경로표(ssrc → 트랙)에 싣는 것이다(SDP 가 없다) — 늘 성공한다 · 결과는 입구 negoRes 로 넣는다.
 
 use std::net::SocketAddr;
@@ -9,12 +9,11 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use super::pcmode::Mode;
 use super::{Core, Job, Tk};
 use crate::api::{Event, LinkInfo, LinkState};
 use crate::generated::ws_wire::{IceRestartReq, IceRestartRes, MlineTable, Op, ServerConfig, ServerConfigIce, TrackEntryType};
 use crate::generated::{link_binding as lb, link_client as lc, room_client as rc, sdk_defaults as dflt, session_client as sc, sub_client as uc};
-use crate::link::transport::{Creds, Fact, IceState, LinkFact, Role, Route, Routes, Source, Transport};
+use crate::link::transport::{Creds, Fact, IceState, LinkFact, Route, Routes, Source, Transport};
 use crate::sig::{Outcome, Purpose};
 
 /// 연결 한 걸음 안에서 다시 들어온 재협상 요청을 그 걸음 끝에 하나로 — 배정표 통지 하나가 그 서버의 방마다 낸 sdp_rebuild(표는 연결 단위 — 연:C-sym-R-ROOM-DETAIL-SYMPTOMS-3) · 떠 있는 협상이 있으면 위 상태기가 큐에 적는다
@@ -57,8 +56,7 @@ pub(crate) struct Link {
     pub(crate) st: lc::St,
     pub(crate) sc: ServerConfig,
     sgen: u64,
-    pub(crate) mode: Mode,
-    wires: Vec<Wire>,
+    wire: Option<Transport>,
     ice: Option<IceState>,
     dc_open: bool,
     sctp_up: bool,
@@ -67,7 +65,7 @@ pub(crate) struct Link {
     pub(crate) sdp_arev: u64,
     pub(crate) pending_table: Option<Value>,
     incoming: Option<MlineTable>,
-    restart_creds: Option<(Creds, Option<Creds>)>,
+    restart_creds: Option<Creds>,
     reopen_tries: i64,
     dc_down_at: Instant,
     pub(crate) blocked: bool,
@@ -84,36 +82,13 @@ pub(crate) struct Link {
     last_info: Option<LinkInfo>,
 }
 
-pub(crate) struct Wire {
-    role: Role,
-    t: Transport,
-    ice: Option<IceState>,
-}
-
-pub(crate) fn creds_for(role: Role, ice: &ServerConfigIce) -> Creds {
-    match role {
-        Role::Subscribe => Creds { ufrag: ice.subscribe_ufrag.clone(), pwd: ice.subscribe_pwd.clone() },
-        Role::Publish | Role::Both => Creds { ufrag: ice.publish_ufrag.clone(), pwd: ice.publish_pwd.clone() },
-    }
-}
-
-pub(crate) fn combine(ices: &[Option<IceState>]) -> Option<IceState> {
-    if ices.is_empty() {
-        None
-    } else if ices.contains(&Some(IceState::Failed)) {
-        Some(IceState::Failed)
-    } else if ices.contains(&Some(IceState::Disconnected)) {
-        Some(IceState::Disconnected)
-    } else if ices.iter().all(|x| *x == Some(IceState::Connected)) {
-        Some(IceState::Connected)
-    } else {
-        None
-    }
+pub(crate) fn publish_creds(ice: &ServerConfigIce) -> Creds {
+    Creds { ufrag: ice.publish_ufrag.clone(), pwd: ice.publish_pwd.clone() }
 }
 
 impl Link {
     fn main(&self) -> Option<&Transport> {
-        self.wires.iter().find(|w| w.role.carries_dc()).map(|w| &w.t)
+        self.wire.as_ref()
     }
 
     pub(crate) fn out_slot(&self) -> Option<std::sync::Arc<std::sync::OnceLock<crate::link::transport::PubOut>>> {
@@ -172,35 +147,28 @@ impl Core {
         rs.contains(&rc::RoomSt::LEAVING) && rs.iter().all(|x| matches!(x, rc::RoomSt::LEAVING | rc::RoomSt::NONE))
     }
 
-    fn open_transports(&mut self, mode: Mode, sc_: &ServerConfig) -> Option<(u64, Vec<Wire>)> {
+    fn open_transport(&mut self, sc_: &ServerConfig) -> Option<(u64, Transport)> {
         let addr: SocketAddr = format!("{}:{}", sc_.ice.ip, sc_.ice.port).parse().ok()?;
         self.link_gen += 1;
         let g = self.link_gen;
-        let wires = mode
-            .roles()
-            .iter()
-            .map(|role| Wire { role: *role, t: Transport::open(addr, creds_for(*role, &sc_.ice), self.cert.clone(), *role, (sc_.sfu_id.clone(), g), self.fact_tx.clone(), self.sink.clone()), ice: None })
-            .collect();
-        Some((g, wires))
+        Some((g, Transport::open(addr, publish_creds(&sc_.ice), self.cert.clone(), (sc_.sfu_id.clone(), g), self.fact_tx.clone(), self.sink.clone())))
     }
 
     /// 입장 응답 — 처음 붙는 서버면 연결을 세우고 · 이미 붙은 서버면 그대로 · 자격이 바뀌었거나 연결이 닫혔으면 새 전송으로 갈아 끼운다
     pub(super) fn link_adopt(&mut self, sc_: ServerConfig) {
         let server = sc_.sfu_id.clone();
-        let live = |l: &Link| !l.wires.is_empty();
+        let live = |l: &Link| l.wire.is_some();
         let stale = self.links.get(&server).is_some_and(|l| live(l) && l.sc.ice.publish_ufrag != sc_.ice.publish_ufrag);
         if self.links.get(&server).is_some_and(live) && !stale {
             return;
         }
-        let mode = self.pc_mode();
-        let Some((g, wires)) = self.open_transports(mode, &sc_) else {
+        let Some((g, wire)) = self.open_transport(&sc_) else {
             self.emit(Event::Error { room: None, error: crate::error::Error::transport(format!("ICE 주소를 못 읽었다: {}:{}", sc_.ice.ip, sc_.ice.port)) });
             return;
         };
         let ug = self.ufrag_gen(&sc_.ice.publish_ufrag);
         if let Some(l) = self.links.get_mut(&server) {
-            l.wires = wires;
-            l.mode = mode;
+            l.wire = Some(wire);
             l.sgen = g;
             l.sc = sc_;
             l.ice = None;
@@ -221,8 +189,7 @@ impl Core {
             st,
             sc: sc_,
             sgen: g,
-            mode,
-            wires,
+            wire: Some(wire),
             ice: None,
             dc_open: false,
             sctp_up: false,
@@ -264,16 +231,11 @@ impl Core {
             Fact::Pli(ssrc) => self.pli_in(ssrc),
             Fact::Bwe(bps) => self.emit(Event::TargetBitrate { server: server.clone(), bps }),
             Fact::Ice(s) => {
-                if let Some(w) = l.wires.iter_mut().find(|w| w.role == f.role) {
-                    w.ice = Some(s);
-                }
-                let ices: Vec<Option<IceState>> = l.wires.iter().map(|w| w.ice).collect();
-                let combined = combine(&ices);
-                if combined == l.ice || combined.is_none() {
+                if l.ice == Some(s) {
                     return;
                 }
-                l.ice = combined;
-                self.ice_fact(&server, combined.unwrap_or(IceState::Failed));
+                l.ice = Some(s);
+                self.ice_fact(&server, s);
             }
             Fact::Dtls(true) => {}
             Fact::Dtls(false) => {
@@ -491,10 +453,9 @@ impl Core {
         }
     }
 
-    /// LINK_EVENT{suspect} — ufrag 가 그 연결의 지금 자격 둘 중 하나면 지금 세대, 아니면 옛 세대
     pub(super) fn link_event(&mut self, server: &str, ufrag: &str) {
         let Some(l) = self.links.get(server) else { return };
-        let current = l.mode.roles().iter().any(|r| creds_for(*r, &l.sc.ice).ufrag == ufrag);
+        let current = l.sc.ice.publish_ufrag == ufrag;
         let m = lc::LinkEventMsg { ufrag: if current { l.st.r#gen } else { -1 } };
         let s = lc::link_event(&l.st, &m);
         self.link_step(server, "linkEvent", Some(s), "LINK_EVENT");
@@ -541,7 +502,7 @@ impl Core {
             match a {
                 lb::LinkAction::PeerClose => {
                     if let Some(l) = self.links.get_mut(server) {
-                        l.wires.clear();
+                        l.wire = None;
                         l.negotiating = false;
                         l.dc_open = false;
                         l.sctp_up = false;
@@ -709,13 +670,8 @@ impl Core {
     /// 새 ICE 자격을 전송에 넘긴다(지문 · setup 은 그대로)
     fn load_creds(&mut self, server: &str) {
         let Some(l) = self.links.get(server) else { return };
-        let Some((p, s)) = l.restart_creds.clone() else { return };
-        for w in &l.wires {
-            match (w.role, &s) {
-                (Role::Subscribe, Some(s)) => w.t.set_creds(s.clone()),
-                (Role::Subscribe, None) => {}
-                (Role::Publish | Role::Both, _) => w.t.set_creds(p.clone()),
-            }
+        if let (Some(p), Some(t)) = (l.restart_creds.clone(), &l.wire) {
+            t.set_creds(p);
         }
     }
 
@@ -728,14 +684,9 @@ impl Core {
                 let Ok(res) = serde_json::from_value::<IceRestartRes>(b) else { return };
                 let ug = self.ufrag_gen(&res.publish.ufrag);
                 let Some(l) = self.links.get_mut(server) else { return };
-                let sub = res.subscribe.as_ref().map(|s| Creds { ufrag: s.ufrag.clone(), pwd: s.pwd.clone() });
-                l.restart_creds = Some((Creds { ufrag: res.publish.ufrag.clone(), pwd: res.publish.pwd.clone() }, sub));
+                l.restart_creds = Some(Creds { ufrag: res.publish.ufrag.clone(), pwd: res.publish.pwd.clone() });
                 l.sc.ice.publish_ufrag = res.publish.ufrag.clone();
                 l.sc.ice.publish_pwd = res.publish.pwd.clone();
-                if let Some(s) = &res.subscribe {
-                    l.sc.ice.subscribe_ufrag = s.ufrag.clone();
-                    l.sc.ice.subscribe_pwd = s.pwd.clone();
-                }
                 lc::RestartResMsg { code: 0, part: lc::Part::res, pid: req, publish: lc::RestartResMsgPublish { ufrag: ug } }
             }
             Outcome::Fail(b) => {
@@ -972,37 +923,13 @@ mod renego_gate_test {
 
 #[cfg(test)]
 mod wire_test {
-    use super::{combine, creds_for};
-    use crate::core::pcmode::Mode;
+    use super::publish_creds;
     use crate::generated::ws_wire::ServerConfigIce;
-    use crate::link::transport::{IceState, Role};
-
-    fn ice() -> ServerConfigIce {
-        serde_json::from_value(serde_json::json!({ "ip": "127.0.0.1", "port": 19750, "publish_ufrag": "pubA", "publish_pwd": "pwA", "subscribe_ufrag": "subB", "subscribe_pwd": "pwB", "tcp_port": 0 })).expect("ice")
-    }
 
     #[test]
-    fn one_transport_in_1pc_takes_the_publish_creds() {
-        let i = ice();
-        let one: Vec<String> = Mode::One.roles().iter().map(|r| creds_for(*r, &i).ufrag).collect();
-        assert_eq!(one, vec!["pubA"], "1pc 서버마다 전송 하나 · 발행 자격");
-        let two: Vec<String> = Mode::Two.roles().iter().map(|r| creds_for(*r, &i).ufrag).collect();
-        assert_eq!(two, vec!["pubA", "subB"], "2pc 발행 · 구독 자격 둘");
-        assert!(!Mode::One.roles().iter().any(|r| creds_for(*r, &i).ufrag == "subB"), "1pc 는 구독 자격을 지금 세대로 보지 않는다(ICE_RESTART 응답에 구독 자격이 없다)");
-    }
-
-    #[test]
-    fn ice_of_one_transport_is_the_link_ice() {
-        use IceState::*;
-        assert_eq!(combine(&[]), None);
-        assert_eq!(combine(&[None]), None);
-        assert_eq!(combine(&[Some(Connected)]), Some(Connected), "1pc 는 합치기 없이 그 전송의 ICE");
-        assert_eq!(combine(&[Some(Disconnected)]), Some(Disconnected));
-        assert_eq!(combine(&[Some(Failed)]), Some(Failed));
-        assert_eq!(combine(&[Some(Connected), None]), None, "2pc 는 둘 다 서야 선 것");
-        assert_eq!(combine(&[Some(Connected), Some(Connected)]), Some(Connected));
-        assert_eq!(combine(&[Some(Connected), Some(Disconnected)]), Some(Disconnected), "2pc 나쁜 쪽");
-        assert_eq!(combine(&[Some(Disconnected), Some(Failed)]), Some(Failed));
-        assert_eq!(Role::Both.name(), "both");
+    fn the_one_transport_takes_the_publish_creds() {
+        let i: ServerConfigIce = serde_json::from_value(serde_json::json!({ "ip": "127.0.0.1", "port": 19750, "publish_ufrag": "pubA", "publish_pwd": "pwA", "subscribe_ufrag": "subB", "subscribe_pwd": "pwB", "tcp_port": 0 })).expect("ice");
+        let c = publish_creds(&i);
+        assert_eq!((c.ufrag.as_str(), c.pwd.as_str()), ("pubA", "pwA"), "SDK:RULE-PLAT-SERVER 1pc 서버마다 전송 하나 · 발행 자격(구독 자격은 쓰지 않는다 — ICE_RESTART 응답에도 없다)");
     }
 }
