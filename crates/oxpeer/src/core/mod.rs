@@ -242,6 +242,7 @@ pub(crate) struct Core {
     /// 다음 입장의 모양 — (방, select:true 로) · 아니면 (방, 들어간 뒤 소속 전환)
     pub(crate) join_mode: Option<(String, bool)>,
     pub(crate) pc_ask: pcmode::Mode,
+    pub(crate) qa_collide: u32,
 }
 
 pub(crate) fn spawn(cfg: Config, ev: mpsc::UnboundedSender<Event>, media: mpsc::Sender<MediaPacket>, frames: mpsc::Sender<MediaFrame>) -> Result<mpsc::UnboundedSender<Cmd>, Error> {
@@ -337,6 +338,7 @@ pub(crate) fn spawn(cfg: Config, ev: mpsc::UnboundedSender<Event>, media: mpsc::
         msg_seq: 0,
         join_mode: None,
         pc_ask: pcmode::ask(cfg.pc_mode),
+        qa_collide: std::env::var("OXPEER_QA_SSRC_COLLIDE").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
     };
     let mut core = core;
     let every = core.log.config().stat_interval;

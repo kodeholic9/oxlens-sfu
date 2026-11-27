@@ -242,12 +242,13 @@ impl Core {
         *n += 1;
         self.pub_seq += 1;
         let id = self.pub_seq;
+        let picks: Vec<u32> = (0..frames.len()).map(|_| self.pub_ssrc(&server, spec.simulcast)).collect();
         let io = Arc::new(TrackIo { gate: AtomicBool::new(false), fresh: AtomicBool::new(false), gated: AtomicU64::new(0), sent: AtomicU64::new(0), qa_dropped: AtomicU64::new(0), server: Mutex::new(server) });
         let mut ssrcs = Vec::new();
         let mut pacers = Vec::new();
         let mut rtx = None;
         for (k, rx) in frames.into_iter().enumerate() {
-            let ssrc = rand_u32();
+            let ssrc = picks.get(k).copied().unwrap_or_else(rand_u32);
             let r = rtx_pt.map(|p| (rand_u32(), p));
             rtx = rtx.or(r);
             let mut t = SendTrack::new(ssrc, pt, r, c, video, mid.clone(), ext);
@@ -295,14 +296,35 @@ impl Core {
         self.pub_forget(id);
     }
 
+    fn pub_ssrc(&mut self, server: &str, simulcast: bool) -> u32 {
+        if self.qa_collide == 0 || simulcast {
+            return rand_u32();
+        }
+        let down = self.links.get(server).and_then(|l| l.table.as_ref()).and_then(|t| t.mlines.first()).map(|m| m.ssrc);
+        let line = crate::log::Line::new(crate::log::Kind::Diag).spec("SD-RULE-PLAT-PC-MODE").key("in.server", server).key("in.left", self.qa_collide);
+        match down {
+            Some(ssrc) => {
+                self.qa_collide -= 1;
+                self.log.emit(line.key("in.ssrc", ssrc).msg("qa publish ssrc set to a downlink ssrc"));
+                ssrc
+            }
+            None => {
+                self.log.emit(line.msg("qa publish ssrc collide skipped - no downlink row"));
+                rand_u32()
+            }
+        }
+    }
+
     fn pub_reissue(&mut self, id: u64) -> bool {
+        let Some(t) = self.pubs.get(&id) else { return false };
+        let (n, simulcast, server) = (t.ssrcs.len(), t.simulcast, t.io.server.lock().map(|s| s.clone()).unwrap_or_default());
+        let fresh: Vec<u32> = (0..n).map(|_| self.pub_ssrc(&server, simulcast)).collect();
         let Some(t) = self.pubs.get_mut(&id) else { return false };
         let Ok(mut senders) = self.sink.senders.write() else { return false };
         t.tried = SsrcTry::Reissued;
         let mut ssrcs = Vec::with_capacity(t.ssrcs.len());
         let mut rtx = None;
-        for old in &t.ssrcs {
-            let ssrc = rand_u32();
+        for (old, ssrc) in t.ssrcs.iter().zip(fresh) {
             if let Some(st) = senders.remove(old) {
                 if let Ok(mut s) = st.lock() {
                     s.reissue(ssrc, rand_u32());
