@@ -24,12 +24,40 @@ use crate::link::send::{ExtIds, OutFrame, SendTrack};
 use crate::link::transport::PubOut;
 use crate::sig::{Outcome, Purpose};
 
-/// 서버 선언 확장의 이름(연:LINK.type.ServerConfig) — 번호는 그 선언에서 찾는다
-const URI_MID: &str = "urn:ietf:params:rtp-hdrext:sdes:mid";
-const URI_AUDIO_LEVEL: &str = "urn:ietf:params:rtp-hdrext:ssrc-audio-level";
-const URI_RID: &str = "urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id";
-const URI_REPAIR_RID: &str = "urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id";
-const URI_TWCC: &str = "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01";
+use super::pcmode::{URI_AUDIO_LEVEL, URI_MID, URI_REPAIR_RID, URI_RID, URI_TWCC, ext_id, pt_row};
+
+const SSRC_COLLISION: i64 = 3008;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SsrcTry {
+    First,
+    Reissued,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OnPubFail {
+    Reissue,
+    Fail,
+}
+
+pub(crate) fn on_pub_fail(code: i64, tried: SsrcTry, simulcast: bool) -> OnPubFail {
+    match (code, tried, simulcast) {
+        (SSRC_COLLISION, SsrcTry::First, false) => OnPubFail::Reissue,
+        _ => OnPubFail::Fail,
+    }
+}
+
+pub(crate) fn ext_ids(video: bool, simulcast: bool) -> ExtIds {
+    let id = |u: &str| ext_id(u).unwrap_or(0);
+    ExtIds {
+        mid: id(URI_MID),
+        audio_level: if video { 0 } else { id(URI_AUDIO_LEVEL) },
+        rid: if simulcast { id(URI_RID) } else { 0 },
+        rrid: if simulcast { id(URI_REPAIR_RID) } else { 0 },
+        twcc: id(URI_TWCC),
+    }
+}
+
 /// 시뮬캐스트 업링크 층 이름 — 낮은 화질부터(연:RULE-PUB-RID-TO-SPATIAL · l=0 · h=1)
 const SIM_RIDS: [&str; 2] = ["l", "h"];
 /// 송신 통 — 앱이 실시간보다 빨리 넣으면 이만큼 앞서 쌓이고 그 뒤 `write` 가 기다린다(역압)
@@ -71,6 +99,7 @@ pub(crate) struct PubTrack {
     pacers: Vec<AbortHandle>,
     /// 협상 이음매를 그 방이 다시 설 때까지 미뤘다(재구축 — 새 세션은 방보다 먼저 선다 · 20261108d)
     nego_wait: bool,
+    tried: SsrcTry,
 }
 
 impl Drop for PubTrack {
@@ -192,26 +221,12 @@ impl Core {
         }
         let codec = if video { r.media.as_ref().and_then(|m| m.video.clone()).unwrap_or_else(|| "H264".into()) } else { r.media.as_ref().and_then(|m| m.audio.clone()).unwrap_or_else(|| "opus".into()) };
         let c = Codec::of(&codec);
-        let (pt, rtx_pt, fmtp) = match c {
-            Codec::Opus => (111, None, None),
-            Codec::Vp8 => (96, Some(97), None),
-            Codec::H264 => (102, Some(103), Some("level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f".to_string())),
-            Codec::Other => {
-                let _ = tx.send(Err(Error::sdk("CODEC_UNSUPPORTED", Category::Negotiation)));
-                return;
-            }
+        let Some(row) = pt_row(c) else {
+            let _ = tx.send(Err(Error::sdk("CODEC_UNSUPPORTED", Category::Negotiation)));
+            return;
         };
-        let ext = self.links.get(&server).map(|l| {
-            let id = |u: &str| l.sc.extmap.iter().find(|e| e.uri == u).map(|e| e.id).unwrap_or(0);
-            ExtIds {
-                mid: id(URI_MID),
-                audio_level: if video { 0 } else { id(URI_AUDIO_LEVEL) },
-                rid: if spec.simulcast { id(URI_RID) } else { 0 },
-                rrid: if spec.simulcast { id(URI_REPAIR_RID) } else { 0 },
-                twcc: id(URI_TWCC),
-            }
-        });
-        let ext = ext.unwrap_or_default();
+        let (pt, rtx_pt, fmtp) = (row.pt, row.rtx_pt, row.fmtp.map(str::to_string));
+        let ext = ext_ids(video, spec.simulcast);
         if spec.simulcast && (ext.rid == 0 || ext.rrid == 0) {
             let _ = tx.send(Err(Error::sdk("SIMULCAST_UNSUPPORTED", Category::Negotiation)));
             return;
@@ -269,6 +284,7 @@ impl Core {
             dup_waiters: Vec::new(),
             pacers,
             nego_wait: false,
+            tried: SsrcTry::First,
         };
         self.pubs.insert(id, t);
         self.pub_enter(id, "on", pc::on, "publish");
@@ -277,6 +293,32 @@ impl Core {
     pub(super) fn unpublish(&mut self, id: u64) {
         self.pub_enter(id, "off", |s| Some(pc::off(s)), "unpublish");
         self.pub_forget(id);
+    }
+
+    fn pub_reissue(&mut self, id: u64) -> bool {
+        let Some(t) = self.pubs.get_mut(&id) else { return false };
+        let Ok(mut senders) = self.sink.senders.write() else { return false };
+        t.tried = SsrcTry::Reissued;
+        let mut ssrcs = Vec::with_capacity(t.ssrcs.len());
+        let mut rtx = None;
+        for old in &t.ssrcs {
+            let ssrc = rand_u32();
+            if let Some(st) = senders.remove(old) {
+                if let Ok(mut s) = st.lock() {
+                    s.reissue(ssrc, rand_u32());
+                    rtx = rtx.or(s.rtx);
+                }
+                senders.insert(ssrc, st);
+            }
+            ssrcs.push(ssrc);
+        }
+        drop(senders);
+        t.ssrc = if t.simulcast { 0 } else { ssrcs.first().copied().unwrap_or(0) };
+        t.ssrcs = ssrcs;
+        t.rtx = rtx;
+        self.log.emit(crate::log::Line::new(crate::log::Kind::Diag).spec("SD-RULE-PLAT-SERVER").key("in.publish", id).key("in.code", SSRC_COLLISION).msg("publish ssrc collision - reissued with new ssrc"));
+        self.send_publish(id);
+        true
     }
 
     fn pub_forget(&mut self, id: u64) {
@@ -311,7 +353,12 @@ impl Core {
         self.record("PUB", &id.to_string(), prev.as_str(), plan.state.ps.as_str(), label, cause);
         for tx in &plan.send {
             match tx {
-                pc::Tx::PublishTracks { action: pc::PublishTracksAction::add, .. } => self.send_publish(id),
+                pc::Tx::PublishTracks { action: pc::PublishTracksAction::add, .. } => {
+                    if let Some(t) = self.pubs.get_mut(&id) {
+                        t.tried = SsrcTry::First;
+                    }
+                    self.send_publish(id);
+                }
                 pc::Tx::PublishTracks { action: pc::PublishTracksAction::remove, .. } => self.send_unpublish(id),
                 pc::Tx::TrackSet { duplex } => self.send_track_set(id, *duplex),
             }
@@ -390,11 +437,9 @@ impl Core {
         let Some(t) = self.pubs.get(&id) else { return };
         let Some(join_id) = self.rooms.get(&t.room).and_then(|r| self.jids.str(r.st.jid)).map(str::to_string) else { return };
         let video = t.kind == Kind::Video;
-        let (mid_ext, level_ext, rid_ext, rrid_ext, twcc_ext) = t.io.server.lock().ok().and_then(|s| self.links.get(&*s).map(|l| {
-            let id = |u: &str| l.sc.extmap.iter().find(|e| e.uri == u).map(|e| e.id);
-            let sim = |u: &str| if t.simulcast { id(u) } else { None };
-            (id(URI_MID), if video { None } else { id(URI_AUDIO_LEVEL) }, sim(URI_RID), sim(URI_REPAIR_RID), id(URI_TWCC))
-        })).unwrap_or((None, None, None, None, None));
+        let x = ext_ids(video, t.simulcast);
+        let some = |id: u8| (id != 0).then_some(id);
+        let (mid_ext, level_ext, rid_ext, rrid_ext, twcc_ext) = (some(x.mid), some(x.audio_level), some(x.rid), some(x.rrid), some(x.twcc));
         let track = PublishTrack {
             kind: t.kind,
             ssrc: t.ssrc,
@@ -456,6 +501,11 @@ impl Core {
             }
             Outcome::Fail(b) => {
                 let code = b.get("code").and_then(Value::as_i64).unwrap_or(5003);
+                let Some(t) = self.pubs.get_mut(&id) else { return };
+                let current = t.st.ps == pc::PubSt::STAGED && !t.st.nego && t.st.req == pid;
+                if current && on_pub_fail(code, t.tried, t.simulcast) == OnPubFail::Reissue && self.pub_reissue(id) {
+                    return;
+                }
                 if let Some(t) = self.pubs.get_mut(&id) {
                     t.fault = Some(b);
                 }
@@ -558,7 +608,7 @@ impl Core {
         let n = self.pub_mids.entry(server.clone()).or_insert(0);
         let mid = n.to_string();
         *n += 1;
-        let twcc = self.links.get(&server).and_then(|l| l.sc.extmap.iter().find(|e| e.uri == URI_TWCC).map(|e| e.id)).unwrap_or(0);
+        let twcc = ext_id(URI_TWCC).unwrap_or(0);
         if twcc != 0
             && let Some(o) = self.pub_outs.read().ok().and_then(|g| g.get(&server).and_then(|s| s.get().cloned()))
         {
@@ -973,5 +1023,35 @@ mod chat_source_test {
         odd["kind"] = json!("poll");
         let es = bundle_events(json!({ "live": true, "messages": [odd, msg("g", 7)] }));
         assert_eq!(sources(&es).len(), 2, "모르는 종류도 사건으로 · 묶음은 그대로");
+    }
+}
+
+#[cfg(test)]
+mod ssrc_collision_test {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn first_3008_reissues_and_the_second_fails() {
+        assert_eq!(on_pub_fail(3008, SsrcTry::First, false), OnPubFail::Reissue, "SDK:RULE-PLAT-SERVER 3008 이면 새 SSRC 로 한 번 다시 낸다");
+        assert_eq!(on_pub_fail(3008, SsrcTry::Reissued, false), OnPubFail::Fail, "다시 낸 것도 3008 이면 앱에");
+        assert_eq!(on_pub_fail(3008, SsrcTry::First, true), OnPubFail::Fail, "시뮬캐스트 발행은 ssrc:0 이라 이 갈래가 없다");
+        for code in [1003, 1005, 2006, 3002, 4002] {
+            assert_eq!(on_pub_fail(code, SsrcTry::First, false), OnPubFail::Fail, "{code} 는 다시 내지 않는다");
+        }
+    }
+
+    #[test]
+    fn the_second_3008_reaches_the_app_with_its_wire_code() {
+        let e = Error::from_failure(&json!({ "code": 3008, "name": "SSRC_COLLISION", "permanent": true, "details": { "ssrc": 7 } }));
+        assert_eq!((e.code, e.name.as_str(), e.category), (3008, "SSRC_COLLISION", Category::State), "SDK:RULE-PLAT-SERVER 코드 그대로 · state");
+    }
+
+    #[test]
+    fn publish_extension_ids_are_the_table_numbers() {
+        let a = ext_ids(false, false);
+        assert_eq!((a.mid, a.audio_level, a.rid, a.rrid, a.twcc), (1, 4, 0, 0, 6), "오디오 — 음량을 싣는다");
+        let v = ext_ids(true, true);
+        assert_eq!((v.mid, v.audio_level, v.rid, v.rrid, v.twcc), (1, 0, 10, 11, 6), "시뮬캐스트 영상 — 층 이름 둘");
     }
 }

@@ -11,8 +11,9 @@
 //! `reconnect` — 전이중 표지 · `--reconnect-at N` 초에 `close()` 한 뒤 ★같은 객체로 `connect()` · 다시 들어 다시 발행(SDK:ses.md `close()`).
 //! `file` — 진짜 코덱 표본을 되풀이해 전이중으로 낸다(`--opus a.ogg` · `--h264 v.h264` 또는 `--vp8 v.ivf` · 영상 30fps) · 키프레임 요청이 오면 다음 키프레임으로 건너뛴다(3층 — 브라우저가 실제로 디코드하나).
 //!
-//!   cargo run -p oxpeer --example agent_echo -- --base http://127.0.0.1:1974/media --room ch-1 [--secs 30] [--user agent-1] [--mode echo|beacon|duplex|move|reconnect] [--video [--simulcast]] [--room2 ch-2] [--reconnect-at N] [--tls-root ca.pem]
+//!   cargo run -p oxpeer --example agent_echo -- --base http://127.0.0.1:1974/media --room ch-1 [--secs 30] [--user agent-1] [--mode echo|beacon|duplex|move|reconnect] [--video [--simulcast]] [--room2 ch-2] [--reconnect-at N] [--tls-root ca.pem] [--pc-mode auto|1pc|2pc]
 //!
+//! `--pc-mode` 는 BIND 에 싣는 연결 모드(기본 `auto` — SDK:RULE-PLAT-PC-MODE) · 요약 `session_pc_mode` 는 서버가 확정한 값이다.
 //! 끝나면 표준 출력에 한 줄 JSON(되울림마다 · 발언권 사건 · 키프레임 요청 · 보내는 쪽 계수)을 쓴다 — 2층 시험이 읽는다.
 
 mod media;
@@ -20,7 +21,7 @@ mod media;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use oxpeer::{Client, Config, Duplex, Event, Kind, LocalTrack, OutFrame, TokenReq, TrackSpec};
+use oxpeer::{Client, Config, Duplex, Event, Kind, LocalTrack, OutFrame, PcMode, TokenReq, TrackSpec};
 use serde_json::{Value, json};
 
 struct Args {
@@ -39,10 +40,11 @@ struct Args {
     vp8: Option<String>,
     api_key: String,
     api_secret: String,
+    pc_mode: PcMode,
 }
 
 fn args() -> Args {
-    let mut a = Args { base: String::new(), room: String::new(), secs: None, user: "oxpeer-agent".into(), mode: "echo".into(), video: false, simulcast: false, room2: String::new(), reconnect_at: 3, tls_root: None, opus: None, h264: None, vp8: None, api_key: "ox_k_demo".into(), api_secret: "ox_s_demo".into() };
+    let mut a = Args { base: String::new(), room: String::new(), secs: None, user: "oxpeer-agent".into(), mode: "echo".into(), video: false, simulcast: false, room2: String::new(), reconnect_at: 3, tls_root: None, opus: None, h264: None, vp8: None, api_key: "ox_k_demo".into(), api_secret: "ox_s_demo".into(), pc_mode: PcMode::Auto };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
         let mut v = || it.next().unwrap_or_default();
@@ -62,11 +64,18 @@ fn args() -> Args {
             "--vp8" => a.vp8 = Some(v()),
             "--api-key" => a.api_key = v(),
             "--api-secret" => a.api_secret = v(),
+            "--pc-mode" => {
+                let m = v();
+                a.pc_mode = PcMode::parse(&m).unwrap_or_else(|| {
+                    eprintln!("--pc-mode 는 auto|1pc|2pc (받은 값 {m:?})");
+                    std::process::exit(2);
+                });
+            }
             other => eprintln!("모르는 인자 {other}"),
         }
     }
     if a.base.is_empty() || a.room.is_empty() {
-        eprintln!("사용: agent --base http://host:port/media --room <방> [--secs N] [--user id] [--mode echo|beacon|duplex|move|reconnect] [--video [--simulcast]] [--room2 방] [--reconnect-at N] [--tls-root ca.pem]");
+        eprintln!("사용: agent --base http://host:port/media --room <방> [--secs N] [--user id] [--mode echo|beacon|duplex|move|reconnect] [--video [--simulcast]] [--room2 방] [--reconnect-at N] [--tls-root ca.pem] [--pc-mode auto|1pc|2pc]");
         std::process::exit(2);
     }
     a
@@ -130,6 +139,7 @@ async fn main() {
     };
     let mut cfg = Config::new(&a.base, token);
     cfg.tls_root_pem = root;
+    cfg.pc_mode = a.pc_mode;
     let (client, mut events, mut media, _frames) = match Client::create(cfg) {
         Ok(x) => x,
         Err(e) => {
@@ -176,7 +186,9 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let me = client.snapshot().await.ok().and_then(|s| s.session.and_then(|x| x.user_id)).unwrap_or_default();
+    let session = client.snapshot().await.ok().and_then(|s| s.session);
+    let me = session.as_ref().and_then(|x| x.user_id.clone()).unwrap_or_default();
+    let session_pc_mode = session.and_then(|x| x.pc_mode);
     eprintln!("[agent_echo] {} 에 들어왔다({}) — 발행 {}", a.room, a.mode, audio.track_id);
     let secs = a.secs;
     let stop = async {
@@ -188,7 +200,7 @@ async fn main() {
         }
     };
     tokio::pin!(stop);
-    let mut out = json!({ "room": a.room, "room2": a.room2, "mode": a.mode, "user": me, "audio_track": audio.track_id, "video_track": video.as_ref().map(|v| v.track_id.clone()), "simulcast": a.simulcast, "start_wall_ms": wall_ms() });
+    let mut out = json!({ "room": a.room, "room2": a.room2, "mode": a.mode, "user": me, "audio_track": audio.track_id, "video_track": video.as_ref().map(|v| v.track_id.clone()), "simulcast": a.simulcast, "session_pc_mode": session_pc_mode, "start_wall_ms": wall_ms() });
     if a.mode == "echo" {
         echo(&client, &mut events, &mut media, audio, &me, &a.room, &mut stop, &mut out).await;
     } else if a.mode == "file" {

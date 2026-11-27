@@ -179,6 +179,16 @@ impl SendTrack {
         self.sent_n = 0;
     }
 
+    pub(crate) fn reissue(&mut self, ssrc: u32, rtx_ssrc: u32) {
+        self.ssrc = ssrc;
+        self.rtx = self.rtx.map(|(_, pt)| (rtx_ssrc, pt));
+        self.sent_n = 0;
+        self.packets = 0;
+        self.octets = 0;
+        self.last = None;
+        self.history.clear();
+    }
+
     /// 송신 시계가 정한 때 `media` 의 RTP 시각
     pub(crate) fn ts_at(&self, media: std::time::Duration) -> u32 {
         self.ts_base.wrapping_add((media.as_secs_f64() * f64::from(self.clock)).round() as u32)
@@ -375,6 +385,23 @@ mod tests {
         assert!(!first[6][16..20].windows(2).any(|w| w == [0x10, b'0']));
         assert_eq!(&first[6][first[6].len() - 2..], &[0xf8, 6]);
         assert_eq!(t.packets, 7);
+    }
+
+    #[test]
+    fn reissue_sends_on_the_new_ssrc_and_rtx_ssrc() {
+        let mut t = SendTrack::new(0xC1, 96, Some((0xC2, 97)), Codec::Vp8, true, "1".into(), ExtIds { mid: 1, ..Default::default() });
+        let now = Instant::now();
+        let before = t.frame(&of(&[0x10, 1, 2, 3], true), 0, now, false);
+        assert_eq!(rtp_header(&before[0]).map(|h| h.ssrc), Some(0xC1));
+        t.reissue(0xD1, 0xD2);
+        assert_eq!((t.ssrc, t.rtx), (0xD1, Some((0xD2, 97))), "새 SSRC · 새 rtx_ssrc · RTX PT 그대로");
+        assert_eq!(t.packets, 0, "SR 계수는 새 SSRC 의 것");
+        let after = t.frame(&of(&[0x10, 4, 5, 6], true), 3000, now, false);
+        assert_eq!(rtp_header(&after[0]).map(|h| h.ssrc), Some(0xD1));
+        assert!(t.retransmit(&[rtp_header(&before[0]).map(|h| h.seq).unwrap_or(0)]).is_empty(), "옛 SSRC 로 보낸 것은 다시 보내지 않는다");
+        let mut a = SendTrack::new(0xE1, 111, None, Codec::Opus, false, "0".into(), ExtIds::default());
+        a.reissue(0xE5, 0xE6);
+        assert_eq!((a.ssrc, a.rtx), (0xE5, None), "RTX 없는 트랙은 RTX 를 새로 만들지 않는다");
     }
 
     #[test]

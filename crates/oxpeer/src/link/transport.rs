@@ -52,6 +52,21 @@ pub(crate) enum Role {
     Publish,
     /// 구독용 연결 — 받는 미디어
     Subscribe,
+    Both,
+}
+
+impl Role {
+    pub(crate) fn carries_dc(self) -> bool {
+        self != Role::Subscribe
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Role::Publish => "publish",
+            Role::Subscribe => "subscribe",
+            Role::Both => "both",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -466,9 +481,9 @@ async fn run(server: SocketAddr, mut creds: Creds, cert: Certificate, role: Role
                     let _ = rx_ctx.set(Mutex::new(rx));
                     DTLS_OPEN.fetch_add(1, Ordering::Relaxed);
                     _dtls_guard = Some(DtlsGuard(conn.clone(), sink.log.clone()));
-                    sink.log.emit(crate::log::Line::new(crate::log::Kind::Diag).key("server", server).key("role", role_name(role)).msg("transport up"));
+                    sink.log.emit(crate::log::Line::new(crate::log::Kind::Diag).key("server", server).key("role", role.name()).msg("transport up"));
                     say.send(Fact::Dtls(true));
-                    if role == Role::Publish {
+                    if role.carries_dc() {
                         let (stx, srx) = mpsc::unbounded_channel();
                         sctp = Some(stx);
                         let h = tokio::spawn(sctp_client(conn, say.clone(), srx));
@@ -746,13 +761,10 @@ struct LinkAlive {
 impl Drop for LinkAlive {
     fn drop(&mut self) {
         LINKS_ALIVE.fetch_sub(1, Ordering::Relaxed);
-        self.log.emit(crate::log::Line::new(crate::log::Kind::Diag).key("server", self.server).key("role", role_name(self.role)).msg("transport down"));
+        self.log.emit(crate::log::Line::new(crate::log::Kind::Diag).key("server", self.server).key("role", self.role.name()).msg("transport down"));
     }
 }
 
-fn role_name(r: Role) -> &'static str {
-    if r == Role::Publish { "publish" } else { "subscribe" }
-}
 
 /// 전송로 수명에 묶인 DTLS 닫기 — 놓일 때(전송로 끝 · abort) `close()` 를 띄운다(Drop 은 기다릴 수 없다) · 닫히면 `dtls_open` 을 줄인다
 struct DtlsGuard(Arc<DTLSConn>, Arc<crate::log::Logger>);

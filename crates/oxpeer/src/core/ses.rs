@@ -10,7 +10,7 @@ use tokio::sync::oneshot;
 use super::{Core, Tk};
 use crate::api::{Event, Health, LinkState, SessionInfo, SessionState};
 use crate::error::{Category, Error};
-use crate::generated::ws_wire::{BindReq, Op, PcMode, ResumeReq};
+use crate::generated::ws_wire::{BindReq, Op, ResumeReq};
 use crate::generated::{room_client as rc, session_binding as sb, session_client as sc};
 use crate::sig::{Outcome, Purpose};
 
@@ -27,9 +27,8 @@ impl Core {
         if self.ses.cs == sc::Conn::DISCONNECTED {
             self.failure = None;
             self.resume_on_token = false;
-            // BIND 에 싣는 연결 모드 — 서버사이드는 능력표에 행이 없어 2pc(SDK:RULE-PLAT-SERVER pc_mode) · 앱이 준 토큰의 유무
             let token = if self.token.is_empty() || self.ses.token == sc::Token::NONE { sc::Token::NONE } else { self.ses.token };
-            self.ses = sc::St { pc_ask: sc::PcMode::V2pc, token, ..self.ses.clone() };
+            self.ses = sc::St { pc_ask: self.pc_ask.session(), token, ..self.ses.clone() };
             let s = sc::connect(&self.ses);
             self.ses_step("connect", s, "app");
         }
@@ -163,7 +162,7 @@ impl Core {
                     token: Some(self.token.clone()),
                     session_id: session_id.and_then(|id| self.sids.str(id).map(str::to_string)),
                     client_ver: None,
-                    pc_mode: Some(if *pc_mode == sc::PcMode::V1pc { PcMode::V1pc } else { PcMode::V2pc }),
+                    pc_mode: Some(super::pcmode::Mode::of_session(*pc_mode).wire()),
                     source_tag: Some(true),
                 };
                 self.request(Op::Bind, super::to_body(&req), Purpose::Bind);

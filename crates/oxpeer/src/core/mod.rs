@@ -5,6 +5,7 @@
 //! 바깥 입력은 넷 — 앱 명령 · 소켓 사건 · 연결 사실 · 재동기 응답. 걸음 뒤 요청의 끝(응답 · 버림)과 미룬 일(협상)을 차례대로 비운다.
 
 mod link;
+mod pcmode;
 mod pubs;
 mod room;
 
@@ -240,6 +241,7 @@ pub(crate) struct Core {
     pub(crate) msg_seq: u64,
     /// 다음 입장의 모양 — (방, select:true 로) · 아니면 (방, 들어간 뒤 소속 전환)
     pub(crate) join_mode: Option<(String, bool)>,
+    pub(crate) pc_ask: pcmode::Mode,
 }
 
 pub(crate) fn spawn(cfg: Config, ev: mpsc::UnboundedSender<Event>, media: mpsc::Sender<MediaPacket>, frames: mpsc::Sender<MediaFrame>) -> Result<mpsc::UnboundedSender<Cmd>, Error> {
@@ -334,6 +336,7 @@ pub(crate) fn spawn(cfg: Config, ev: mpsc::UnboundedSender<Event>, media: mpsc::
         msg_waiters: HashMap::new(),
         msg_seq: 0,
         join_mode: None,
+        pc_ask: pcmode::ask(cfg.pc_mode),
     };
     let mut core = core;
     let every = core.log.config().stat_interval;
