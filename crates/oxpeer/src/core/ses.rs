@@ -204,7 +204,7 @@ impl Core {
         let code = leave.as_ref().and_then(|b| b.get("code")).and_then(Value::as_u64).unwrap_or(0) as u16;
         let name = leave.as_ref().and_then(|b| b.get("name")).and_then(Value::as_str).unwrap_or("TRANSPORT").to_string();
         self.reason = Some((code, name.clone()));
-        self.failure = Some(if leave.is_some() { Error { code, name, category: Category::Closed, permanent: false, message: None } } else { Error::closed("TRANSPORT") });
+        self.failure = Some(if leave.is_some() { Error::coded(code, &name, Category::Closed, false) } else { Error::closed("TRANSPORT") });
         // 읽는 값 carry = 들어가 있는 방이나 발행이 있다(발행은 첫 단계에 없다)
         let carry = self.rooms.values().any(|r| r.st.rs != rc::RoomSt::NONE);
         let s = sc::drop(&self.ses, i64::from(code), carry);
@@ -374,7 +374,7 @@ impl Core {
             }
             // 최초 접속 — 이벤트 대신 기다리던 connect() 를 reject(auth)
             sc::Fx::app_need_token if !self.connect_waiters.is_empty() => {
-                let fault = self.failure.clone().unwrap_or(Error { code: 2003, name: "TOKEN_EXPIRED".into(), category: Category::Auth, permanent: false, message: None });
+                let fault = self.failure.clone().unwrap_or(Error::coded(2003, "TOKEN_EXPIRED", Category::Auth, false));
                 for tx in self.connect_waiters.drain(..) {
                     let _ = tx.send(Err(fault.clone()));
                 }
@@ -383,14 +383,14 @@ impl Core {
             sc::Fx::app_need_token => self.resume_on_token = true,
             // 최초 접속의 BIND 거절(위조 · 손상 토큰) — 이벤트 대신 reject
             sc::Fx::app_disconnected if entry == "bindRes" && !self.connect_waiters.is_empty() => {
-                let fault = self.failure.clone().unwrap_or(Error { code: 2002, name: "TOKEN_INVALID".into(), category: Category::Auth, permanent: true, message: None });
+                let fault = self.failure.clone().unwrap_or(Error::coded(2002, "TOKEN_INVALID", Category::Auth, true));
                 for tx in self.connect_waiters.drain(..) {
                     let _ = tx.send(Err(fault.clone()));
                 }
                 return;
             }
             sc::Fx::app_bug => {
-                let fault = self.failure.clone().unwrap_or(Error { code: 1002, name: "INVALID_PAYLOAD".into(), category: Category::Bug, permanent: true, message: None });
+                let fault = self.failure.clone().unwrap_or(Error::coded(1002, "INVALID_PAYLOAD", Category::Bug, true));
                 for tx in self.connect_waiters.drain(..) {
                     let _ = tx.send(Err(fault.clone()));
                 }

@@ -343,7 +343,7 @@ impl Core {
             Outcome::Ok(b) => {
                 let parsed: Result<crate::generated::ws_wire::RoomJoinRes, _> = serde_json::from_value(b.clone());
                 let Ok(res) = parsed else {
-                    let e = Error { code: 1002, name: "INVALID_PAYLOAD".into(), category: Category::Bug, permanent: true, message: parsed.err().map(|e| e.to_string()) };
+                    let e = Error { message: parsed.err().map(|e| e.to_string()), ..Error::coded(1002, "INVALID_PAYLOAD", Category::Bug, true) };
                     if let Some(r) = self.rooms.get_mut(id) {
                         r.last_fault = Some(e);
                     }
@@ -557,7 +557,7 @@ impl Core {
         }
         let res = result.and_then(|rep| {
             if rep.status == 401 {
-                return Err(Error { code: 2003, name: "TOKEN_EXPIRED".into(), category: Category::Auth, permanent: false, message: None });
+                return Err(Error::coded(2003, "TOKEN_EXPIRED", Category::Auth, false));
             }
             if rep.status >= 400 {
                 return Err(Error::from_failure(&rep.body));

@@ -18,6 +18,7 @@
 //!
 //! `--pc-mode` 는 BIND 에 싣는 연결 모드(기본 `auto` — SDK:RULE-PLAT-PC-MODE) · 요약 `session_pc_mode` 는 서버가 확정한 값이다.
 //! 끝나면 표준 출력에 한 줄 JSON(되울림마다 · 발언권 사건 · 키프레임 요청 · 보내는 쪽 계수)을 쓴다 — 2층 시험이 읽는다.
+//! 실패 모양 fault = `{code, name, category, permanent, details, cause}`(cause 는 SDK 가 감싼 원 wire 실패 · 같은 꼴) — 첫 발행 실패는 표준 오류 한 줄 `발행 실패: <code> <name> <fault>` 뒤 종료 코드 1 · 걸음 실패는 요약 `steps[].fault`.
 
 mod media;
 
@@ -202,7 +203,7 @@ async fn main() {
     let (audio, video) = match publish_all(&client, &a, full).await {
         Ok(x) => x,
         Err(e) => {
-            eprintln!("발행 실패: {e}");
+            eprintln!("발행 실패: {e} {}", fault_json(&e));
             std::process::exit(1);
         }
     };
@@ -404,7 +405,7 @@ async fn beacon(client: &Client, a: &Args, events: &mut oxpeer::Events, audio: L
                 while let Some((at, _)) = todo.last() && t0.elapsed().as_millis() as u64 >= *at {
                     let Some((_, step)) = todo.pop() else { break };
                     let req = wall_ms();
-                    let (ok, why) = match &step {
+                    let (ok, fault) = match &step {
                         Step::VideoOn => match client.publish(&a.room, TrackSpec { kind: Kind::Video, duplex: Duplex::Full, simulcast: a.simulcast }).await {
                             Ok(v) => {
                                 layers = v.layers();
@@ -413,7 +414,7 @@ async fn beacon(client: &Client, a: &Args, events: &mut oxpeer::Events, audio: L
                                 video = Some(v);
                                 (true, None)
                             }
-                            Err(e) => (false, Some(e.to_string())),
+                            Err(e) => (false, Some(fault_json(&e))),
                         },
                         Step::VideoOff => match video.take() {
                             Some(v) => {
@@ -421,7 +422,7 @@ async fn beacon(client: &Client, a: &Args, events: &mut oxpeer::Events, audio: L
                                 layers = 0;
                                 (true, None)
                             }
-                            None => (false, Some("NO_VIDEO".to_string())),
+                            None => (false, Some(json!({ "code": 0, "name": "NO_VIDEO", "category": "state", "permanent": false, "details": null, "cause": null }))),
                         },
                         Step::Half => res(audio.set_duplex(Duplex::Half).await),
                         Step::Full => res(audio.set_duplex(Duplex::Full).await),
@@ -446,11 +447,11 @@ async fn beacon(client: &Client, a: &Args, events: &mut oxpeer::Events, audio: L
                                     video = vi;
                                     (true, None)
                                 }
-                                Err(e) => (false, Some(e.to_string())),
+                                Err(e) => (false, Some(fault_json(&e))),
                             }
                         }
                     };
-                    steps.push(json!({ "step": format!("{step:?}"), "ok": ok, "why": why, "req_wall_ms": req, "wall_ms": wall_ms() }));
+                    steps.push(json!({ "step": format!("{step:?}"), "ok": ok, "fault": fault, "req_wall_ms": req, "wall_ms": wall_ms() }));
                 }
             }
             e = events.next() => match e {
@@ -489,11 +490,15 @@ async fn beacon(client: &Client, a: &Args, events: &mut oxpeer::Events, audio: L
     }
 }
 
-fn res(r: Result<(), oxpeer::Error>) -> (bool, Option<String>) {
+fn res(r: Result<(), oxpeer::Error>) -> (bool, Option<Value>) {
     match r {
         Ok(()) => (true, None),
-        Err(e) => (false, Some(e.to_string())),
+        Err(e) => (false, Some(fault_json(&e))),
     }
+}
+
+fn fault_json(e: &oxpeer::Error) -> Value {
+    json!({ "code": e.code, "name": e.name, "category": e.category.as_str(), "permanent": e.permanent, "details": e.details, "cause": e.cause.as_deref().map(fault_json) })
 }
 
 /// 진짜 코덱 표본 — 오디오 20ms · 영상 33ms 로 되풀이(끝나면 처음부터 — 첫 프레임이 키프레임) · 키프레임 요청이 오면 다음 키프레임으로

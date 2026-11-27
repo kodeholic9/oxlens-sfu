@@ -47,6 +47,13 @@ pub(crate) fn on_pub_fail(code: i64, tried: SsrcTry, simulcast: bool) -> OnPubFa
     }
 }
 
+pub(crate) fn publish_fault(wire: Error, tried: SsrcTry) -> Error {
+    match (i64::from(wire.code), tried) {
+        (SSRC_COLLISION, SsrcTry::Reissued) => Error::negotiation("SSRC_COLLISION", wire),
+        _ => wire,
+    }
+}
+
 pub(crate) fn ext_ids(video: bool, simulcast: bool) -> ExtIds {
     let id = |u: &str| ext_id(u).unwrap_or(0);
     ExtIds {
@@ -409,7 +416,7 @@ impl Core {
                     self.emit(Event::Published { room, track_id: tid });
                 }
                 pbd::PubEvent::PublishFailed => {
-                    let err = t.fault.as_ref().map(Error::from_failure).unwrap_or_else(|| Error::sdk("PUBLISH_FAILED", Category::State));
+                    let err = t.fault.as_ref().map(|b| publish_fault(Error::from_failure(b), t.tried)).unwrap_or_else(|| Error::sdk("PUBLISH_FAILED", Category::State));
                     for w in t.waiters.drain(..) {
                         let _ = w.send(Err(err.clone()));
                     }
@@ -1064,9 +1071,29 @@ mod ssrc_collision_test {
     }
 
     #[test]
-    fn the_second_3008_reaches_the_app_with_its_wire_code() {
-        let e = Error::from_failure(&json!({ "code": 3008, "name": "SSRC_COLLISION", "permanent": true, "details": { "ssrc": 7 } }));
-        assert_eq!((e.code, e.name.as_str(), e.category), (3008, "SSRC_COLLISION", Category::State), "SDK:RULE-PLAT-SERVER 코드 그대로 · state");
+    fn the_second_3008_reaches_the_app_as_negotiation_with_the_wire_failure_kept() {
+        let wire = Error::from_failure(&json!({ "code": 3008, "name": "SSRC_COLLISION", "permanent": true, "details": { "ssrc": 7 } }));
+        let e = publish_fault(wire.clone(), SsrcTry::Reissued);
+        assert_eq!((e.code, e.name.as_str(), e.category, e.permanent), (0, "NEGOTIATION_SSRC_COLLISION", Category::Negotiation, true), "SDK:RULE-PLAT-SERVER 두 번째 3008 은 negotiation 으로 앱에(웹 local.ts 와 같은 모양)");
+        let c = e.cause.as_deref().expect("원 3008 실패를 cause 로 보존");
+        assert_eq!(c, &wire);
+        assert_eq!((c.code, c.name.as_str(), c.category), (3008, "SSRC_COLLISION", Category::State));
+        assert_eq!(c.details.as_ref().and_then(|d| d.get("ssrc")).and_then(Value::as_u64), Some(7), "details.ssrc 보존");
+        assert!(e.details.is_none());
+    }
+
+    #[test]
+    fn a_3008_without_reissue_and_other_failures_reach_the_app_unchanged() {
+        let first = Error::from_failure(&json!({ "code": 3008, "name": "SSRC_COLLISION", "permanent": true, "details": { "ssrc": 7 } }));
+        assert_eq!(publish_fault(first.clone(), SsrcTry::First), first, "SDK:IMPL-ERR-TYPE 다시 내지 않고 진 3008 은 wire 코드 그대로");
+        for tried in [SsrcTry::First, SsrcTry::Reissued] {
+            for (code, name) in [(1003, "MISSING_FIELD"), (3002, "NOT_IN_ROOM"), (4002, "LIMIT_EXCEEDED"), (5003, "INTERNAL_ERROR")] {
+                let wire = Error::from_failure(&json!({ "code": code, "name": name }));
+                assert_eq!(publish_fault(wire.clone(), tried), wire, "{code} 는 wire 그대로");
+            }
+            let sdk = Error::sdk("PUBLISH_FAILED", Category::State);
+            assert_eq!(publish_fault(sdk.clone(), tried), sdk);
+        }
     }
 
     #[test]
