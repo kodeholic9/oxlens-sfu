@@ -22,7 +22,7 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tonic = "0.12"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
-oxpeer = { path = "../../../oxlens-sdk-peer/crates/oxpeer", features = ["record"] }
+oxpeer = { path = "../oxpeer", features = ["record"] }
 
 [dev-dependencies]
 oxmesh = { path = "../oxmesh" }

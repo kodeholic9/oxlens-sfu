@@ -1,0 +1,82 @@
+# author: kodeholic (powered by Claude)
+# 서버사이드 SDK — 녹음 · 녹화 · AI 에이전트 같은 서버 쪽 프로그램이 방에 peer 로 들어가는 Rust 라이브러리(SDK:RULE-PLAT-SERVER).
+# 서버 크레이트를 물지 않는다 — wire · 영역 상태기는 규격 원천의 Rust 생성본(src/generated · context/spec 의 npm run sync:peer)이고,
+# 미디어 스택만 서버와 같은 webrtc-rs 계열 · 같은 판이다(dtls · webrtc-srtp · webrtc-util 0.17 · sctp-proto 0.9).
+[package]
+name = "oxpeer"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "OxLens server-side SDK — recorders and agents join rooms as peers"
+publish = false
+
+[features]
+default = ["serde"]
+# 생성 상태기(src/gen/*_client.rs)의 serde 파생 — 1층 벡터 시험이 TS 판이 낸 호출을 Rust 판에 넣어 맞댄다
+serde = []
+# 녹음 원시 기록(SDK:RULE-PLAT-REC-RAW — MCAP) — 녹음 없는 에이전트는 MCAP 을 물지 않는다(context 202611/20261109c K2)
+record = ["dep:mcap", "dep:rustix"]
+# 청크 압축 실측(M9) — 기본은 압축 없음
+record-lz4 = ["record", "mcap/lz4"]
+record-zstd = ["record", "mcap/zstd"]
+# 조립 대조군(설계 D15) — webrtc-media SampleBuilder + 디패킷타이저 · 예제 rawtool --ref 몫
+record-ref = ["record", "dep:webrtc-media", "dep:rtp"]
+
+[dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "sync", "time", "io-util"] }
+tokio-tungstenite = "0.24"
+# https · wss(20261108d E2) — hub 와 같은 rustls(ring · tls12) 계열 · 기본 뿌리는 webpki · 사설 CA 는 Config.tls_root_pem
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls-pemfile = "2"
+webpki-roots = "1"
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bytes = "1"
+async-trait = "0.1"
+dtls = "0.17.1"
+webrtc-srtp = "0.17.1"
+webrtc-util = "0.17.1"
+sctp-proto = "0.9"
+hmac = "0.12"
+sha1 = "0.10"
+crc32fast = "1"
+getrandom = { version = "0.3", features = ["std"] }
+# 운영 로그(SDK:RULE-PLAT-SERVER 운영 로그 · context 202611/20261109e) — 세션 지문(sha256) · 프로세스 자원(getrusage 안전 래퍼)
+sha2 = "0.10"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+nix = { version = "0.29", default-features = false, features = ["resource"] }
+mcap = { version = "0.26", default-features = false, optional = true }
+# 디스크 하한(SDK:RULE-PLAT-REC-PART) — statvfs 를 unsafe 없이
+rustix = { version = "1.1", default-features = false, features = ["std", "fs"], optional = true }
+webrtc-media = { version = "0.17", optional = true }
+rtp = { version = "0.17", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+# 1층 https · wss 시험의 자가 서명 인증서(context 202611/20261108d E2)
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[[example]]
+name = "agent_echo"
+path = "examples/agent_echo/main.rs"
+
+[[example]]
+name = "mkvcheck"
+path = "examples/mkvcheck.rs"
+required-features = ["record"]
+
+[[example]]
+name = "rawtool"
+path = "examples/rawtool.rs"
+required-features = ["record"]
+
+[[example]]
+name = "rawbench"
+path = "examples/rawbench.rs"
+required-features = ["record"]

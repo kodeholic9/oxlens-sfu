@@ -48,7 +48,7 @@ fn tapd_mirrors_the_root_workspace() {
         for (name, v) in t[sec].as_table().expect("의존 표").iter() {
             let (ver, path, dflt, feats) = spec_of(v);
             if name == "oxpeer" {
-                assert_eq!(path.as_deref(), Some("../../../oxlens-sdk-peer/crates/oxpeer"), "oxpeer 는 옆 저장소 경로");
+                assert_eq!(path.as_deref(), Some("../oxpeer"), "oxpeer 는 같은 저장소 crates/oxpeer(20261127 옮김)");
                 continue;
             }
             let w = wdeps.get(name).unwrap_or_else(|| panic!("{sec}.{name} 이 루트 [workspace.dependencies] 에 없다 — 루트에 먼저 둔다"));
