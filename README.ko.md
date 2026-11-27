@@ -2,7 +2,7 @@
 
 **무전(PTT)과 화상회의를 한 서버에서 처리하는 Rust WebRTC SFU — 기계가 검사하는 규격을 정본으로 두고, AI 가 그 규격만 보고 다시 짓는다.**
 
-[English README](README.md) · 라이선스: AGPL-3.0-only(`v1.12` 까지는 Apache-2.0) · 첫 공개: 2026-10-28 (`v1.4`) · 최신 태그: `v1.12`
+[English README](README.md) · 라이선스: AGPL-3.0-only(`v1.13` 까지는 Apache-2.0) · 첫 공개: 2026-10-28 (`v1.4`) · 최신 태그: `v1.13`
 
 ---
 
@@ -17,7 +17,7 @@
 | 영역 | 상태 |
 |---|---|
 | 무전 발언권 — 요청 · 허가 · 대기 · 반환 · 회수 · 선점 · 타이머(MCPTT 꼴 바이너리 메시지 over DataChannel) | ✅ |
-| 여러 방 동시 청취 · 세션당 말하는 방 하나(전환 가능) | ✅ |
+| 여러 방 동시 청취(세션당 20 방까지) · 세션당 말하는 방 하나(전환 가능) | ✅ |
 | 전이중 음성 · 영상 회의 | ✅ |
 | 시뮬캐스트 — 공간 층 셋(l / m / h)과 층마다 시간 층(VP8 은 payload 에서 · H264 는 dependency descriptor 에서 읽음) · 수동 층 선택 · 자동 층 조절(v1 RR 손실 · 반복 NACK · 버림 · v2 TWCC 위 송신측 추정 — 코드 기본은 꺼짐, 예시 `policy.toml` 은 켬) · 층 전략 셋(`media.layer_strategy`) | ✅ |
 | 세션당 PeerConnection 하나 또는 둘(`1pc` / `2pc`) | ✅ |
@@ -31,7 +31,7 @@
 | 녹음 유닛 `oxtapd` — hub 가 띄우고 지키는 프로세스 · 녹음하기로 한 방에 들어가 발언마다 파일 하나(영상이 있으면 Matroska · 음성만이면 Ogg) | ✅ |
 | 운영 — `oxadmin` CLI · `/admin/*` 읽기와 제어 · `/healthz/live` · `/healthz/ready` · node 마다 logfmt 로그 파일 하나 · 해석된 설정 전량을 남기는 기동 배너 | ✅ |
 | 영상 무전(영상 발언권) | ⏸ 보류 — 브라우저 송신 pacer 를 이쪽에서 쥘 수 없다 |
-| 대외 연동(hook) — 방 사실(생성 · 닫힘 · 입퇴장 · 발언권 · 녹음)을 계정마다 ACK 창으로 zenoh 또는 Standard Webhooks 로 전달 · 방 현황 조회 · 권한 제어 · 상호 TLS 계정 | ✅ |
+| 대외 연동(hook) — 방 사실(생성 · 닫힘 · 입퇴장 · 발언권 · 녹음)을 계정마다 ACK 창으로 zenoh 또는 Standard Webhooks 로 전달 · 방 현황 조회 · 권한 제어 · 상호 TLS 계정([방 연동](#방-연동hook) 참고) | ✅ |
 | 서버사이드 SDK `oxpeer`(Rust) — 녹음기 · AI 에이전트 · 게이트웨이가 보통 참가자로 방에 든다(WebRTC 미디어 · 발언권 · 녹음) | ✅ |
 | AI 음성 에이전트 — `oxpeer` 위 브리지가 발언권을 잡고 화자의 음성을 AI 서비스로 보내 답을 무전 그룹에 다시 말한다(브리지는 상용으로 제공 · 이 저장소에는 없음) | ✅ |
 | 외부 장치 · 시스템 연동 확장 — 공개 연동규격 · `oxpeer` · hook 입구 중 하나를 쓰면 방에 들거나 지켜볼 수 있다(무전기 게이트웨이 · 관제 콘솔 · 센서 · 녹음기) | ✅ |
@@ -42,7 +42,7 @@
 
 ```mermaid
 flowchart LR
-  C["브라우저 / 앱<br/>(oxlens-sdk-web)"]
+  C["브라우저 / 앱<br/>(oxlens-sdk-web)<br/>서버사이드 peer(oxpeer)"]
   subgraph N1["node"]
     H["oxhubd — 게이트웨이<br/>세션 · 라우팅 · HTTP/WS<br/>채팅 · /admin · supervisor · 로거"]
     S["oxsfud — 미디어 서버<br/>방 · Peer · 발언권<br/>RTP / RTCP · 시뮬캐스트"]
@@ -52,20 +52,23 @@ flowchart LR
   end
   N2["다른 node"]
   X["외부 서비스<br/>(zenoh 클라이언트)"]
+  W["webhook 수신처<br/>(HTTP 서버)"]
   C -- "WebSocket / HTTP<br/>시그널링 · 채팅" --> H
   C -- "ICE · DTLS-SRTP · DataChannel<br/>UDP 또는 TCP" --> S
   H <-- "oxmesh 버스" --> N2
-  X -- "TLS · 채팅 구독" --> H
+  X -- "상호 TLS · 채팅 · 사실<br/>방 조회 · 권한 제어" --> H
+  H -- "Standard Webhooks<br/>방 사실" --> W
 ```
 
 | 크레이트 | 역할 |
 |---|---|
 | `oxsig` | 클라 프로토콜의 wire 형 — 프레임 · op · 오류 코드 · DataChannel 과 발언권 메시지 |
 | `common` | 엄격한 설정(시스템 파일 · 정책 · CLI) · JWT · 버스 배선 · 로그 보내는 쪽 · 빌드 신원 · 기동 배너 |
-| `oxhubd` | 게이트웨이 — 세션 · 방 배치와 라우팅 · HTTP / WebSocket · 채팅(저장 · 멤버가 붙은 node 로 뿌리기 · 외부 서비스 입구) · `/admin` · 프로세스 supervisor · 프로세스 안 로거 |
+| `oxhubd` | 게이트웨이 — 세션 · 방 배치와 라우팅 · HTTP / WebSocket · 채팅(저장 · 멤버가 붙은 node 로 뿌리기) · 대외 연동(zenoh 입구 — 채팅 · 사실 구독 · 방 조회 · 권한 제어 · 밖으로 나가는 webhook) · `/admin` · 프로세스 supervisor · 프로세스 안 로거 |
 | `oxsfud` | 미디어 서버 — 방 · Peer · 발행 / 구독 · 발언권 · 전달 · RTCP · 시뮬캐스트 |
 | `oxmesh` | node 버스 — router 직접 그물 한 홉 · 세션 신원(세대) · 레인 넷 · 토큰 · 구독 · 질의(hub 가 router · 미디어 서버가 client) |
-| `oxtapd` | 녹음 유닛 — 녹음하기로 한 방에 참가자로 들어가 파일을 씀 |
+| `oxtapd` | 녹음 유닛 — 녹음하기로 한 방에 참가자로 들어가 파일을 씀(`oxpeer` 위) |
+| `oxpeer` | 서버사이드 SDK — 보통 참가자로 방에 드는 Rust 라이브러리(시그널링 · ICE · DTLS-SRTP · DataChannel 발언권 · 녹음) · 녹음기 · AI 에이전트 · 게이트웨이용 |
 | `oxadmin` | `/admin/*` 를 부르는 운영 CLI |
 
 ## 빠른 시작
@@ -112,7 +115,7 @@ cargo build --manifest-path crates/oxtapd/Cargo.toml --target-dir target
 
 | 자리 | 무엇 |
 |---|---|
-| 시스템 파일(`system.toml`) | 접속 주소 · 로그 디렉터리와 소켓 · 계정 · 유닛 목록 · 버스(`[bus]`) · supervisor · 채팅(`[chat]`) · 외부 서비스 입구(`[hook]`) · 녹음 파일 뿌리(`[data]`) |
+| 시스템 파일(`system.toml`) | 접속 주소 · 로그 디렉터리와 소켓 · 계정 · 유닛 목록 · 버스(`[bus]`) · supervisor · 채팅(`[chat]`) · 대외 연동(`[hook]` — zenoh 입구 · 밖으로 나가는 webhook) · 녹음 파일 뿌리(`[data]`) |
 | 정책 파일(`policy.toml`) | 게이트웨이와 미디어 서버가 함께 읽는 손잡이 — 로깅 · 미디어(비트레이트 · 시뮬캐스트 · PLI 스로틀) · 발언권. 키마다 범위가 있고, 모르는 키는 기동 실패입니다 |
 | CLI 인자 | 프로세스별 값(node id · 포트 · 공인 IP). 공유해야 하는 값(로그 경로 · 버스 주소)은 hub 가 유닛을 띄울 때 덧붙입니다 |
 
@@ -132,6 +135,18 @@ cargo build --manifest-path crates/oxtapd/Cargo.toml --target-dir target
 
 **바꾸지 않고 덧붙인다.** 원문은 언제나 먼저 멤버에게 갑니다. 서비스는 그 옆에 메시지를 덧붙이기만 합니다. 그래서 서비스가 내려가거나 늦어도 대화는 계속되고, 코어는 서비스가 실패했는지 알 필요가 없습니다.
 
+## 방 연동(hook)
+
+관제 콘솔 · 녹음기 · AI 서비스 · 무전기 게이트웨이 같은 외부 시스템이 클라가 되지 않고도 방을 지켜보고 다룰 수 있습니다.
+
+- **계정.** 시스템 파일에 `hook_allowed = true` 와 `facts`(받을 사실 종류, 또는 `"*"`)로 계정을 둡니다. 계정마다 운반은 하나입니다 — zenoh 입구 또는 webhook.
+- **방 사실.** 방을 맡은 hub 가 그 방에서 일어난 일(방 생성 · 닫힘, 입퇴장, 발언권 허가 · 반환 · 회수, 녹음 시작 · 끝, …)을 사실 `{fact_id, type, t, room_id, body}` 로 지어 계정마다 줄에 넣습니다.
+  - zenoh 로 받을 때는 CN 이 계정 키인 클라이언트 인증서로 붙어 `ox/<[bus] namespace>/pub/v1/facts/sub/<계정 키>` 에 queryable 을 선언합니다. 묶음 하나가 질의 하나이고, 답이 ACK 입니다. 계정마다 ACK 안 된 묶음의 창이 있고, 간격을 늘려 가며 다시 보냅니다.
+  - webhook 으로 받을 때는 `[[hook.webhooks]]` 에 계정 `key` · 수신처 `url` · `whsec_` 비밀값을 둡니다. 묶음은 Standard Webhooks v1 대로 서명하고, 2xx 답만 전달로 칩니다.
+- **조회와 제어**(zenoh 입구). `…/pub/v1/q/rooms` 는 방 목록, `…/pub/v1/q/room/<방>` 은 방 하나(멤버 · 발언권), `…/pub/v1/ctl/room/<방>/permission` 은 그 방 멤버의 권한을 바꿉니다.
+
+`pub/v1/` 아래 키 모양이 공개 계약이고, 버스의 나머지는 내부라 바뀔 수 있습니다.
+
 ## 시험과 검증
 
 | 층 | 무엇 | 어디 |
@@ -139,7 +154,7 @@ cargo build --manifest-path crates/oxtapd/Cargo.toml --target-dir target
 | 1 — 단위 | `cargo test --workspace` — 규격이 낸 벡터(출처 전환 재기록 · RTCP · 발언권 미디어 결합 · 시뮬캐스트)와 맹검 독립 시험 포함 · 벡터는 `testdata/spec/` 에 실린 규격 산출 사본이라 이 저장소만 받아도 돈다 | 이 저장소 |
 | 2 — 헤드리스 | 봇 하네스가 실서버를 몬다 — 프로토콜 계약 실증 · 시나리오 120 여 개 · 스모크 · 패킷 덤프 위 등식 | 별도 저장소(아직 비공개) |
 | 3 — 브라우저 | Playwright(크로뮴)로 실서버와 웹 SDK 를 함께 | [oxlens-sdk-web](https://github.com/kodeholic9/oxlens-sdk-web) `qa/live` |
-| 모형 검사 | TLA+ / TLC — 프로토콜 상태기(세션 · 방 · 연결 · 발행 · 구독 · 트랙 · 소속 · 발언권 · 다서버) 판 93 · 서버(node 버스 · 메시 · 소유 · 실행 · 미디어 경로 · 권위) 판 99(그중 보류 7) | 규격 저장소 |
+| 모형 검사 | TLA+ / TLC — 프로토콜 상태기(세션 · 방 · 연결 · 발행 · 구독 · 트랙 · 소속 · 발언권 · 다서버) 판 98 · 서버(node 버스 · 메시 · 소유 · 실행 · 미디어 경로 · 권위) 판 100(그중 보류 7) | 규격 저장소 |
 | 대조 | 같은 브라우저 한 쌍에 같은 망 조건(대역 · 손실 · 끊김)을 걸어 LiveKit 1.13.11 · mediasoup 3.32.2 와 견줌 — 기능 시험 여섯(대역 조임 · 패킷 손실 · 입장 · 층 전환 · 끊김 · 음성 손실). 서버를 라즈베리파이 4 에 올린 판도 돌림 | 별도 저장소(비공개) |
 
 ## 어떻게 짓나
@@ -175,7 +190,7 @@ cargo build --manifest-path crates/oxtapd/Cargo.toml --target-dir target
 ## 현황과 한계
 
 - `v1.4` 는 첫 공개판입니다. `v1.5`(7회차)부터 용량 회귀 게이트(정해진 형상 — 생중계 1,000 · 1,500명 · 회의 128명)가 완료 조건에 들어갔습니다. 실망(손실 · 지연이 있는 망) 부하는 아직 재지 않았습니다. 그런 망에서의 기능 동작은 위 대조 시험에서 견줍니다.
-- `v1.6` 부터는 손으로 만든 판입니다. `v1.6` 에서 node 버스를 `oxmesh` 로 바꿨습니다. `v1.7` ~ `v1.12` 에는 발언권 일련번호를 TS 24.380 대로 맞춘 것, 출처 표지(CSRC), 판단과 적용 시점이 갈리는 자리의 수리가 들어 있습니다. 채팅 · 채팅 확장 · 발언 기록 · 녹음 유닛 · 공간 층 셋과 시간 층 · 층 전략 · 송신측 추정 개편 · 하향 재전송 나눠 보내기는 `v1.12` 뒤 `main` 에 들어갔고 아직 태그가 없습니다.
+- `v1.6` 부터는 손으로 만든 판입니다. `v1.6` 에서 node 버스를 `oxmesh` 로 바꿨습니다. `v1.7` ~ `v1.12` 에는 발언권 일련번호를 TS 24.380 대로 맞춘 것, 출처 표지(CSRC), 판단과 적용 시점이 갈리는 자리의 수리가 들어 있습니다. `v1.13` 에 채팅 · 채팅 확장 · 발언 기록 · 녹음 유닛 · 공간 층 셋과 시간 층 · 층 전략 · 송신측 추정 개편 · 하향 재전송 나눠 보내기가 들어갔습니다. `v1.13` 뒤 `main` 에 들어갔고 아직 태그가 없는 것: 대외 연동(zenoh 또는 webhook 으로 방 사실 · 방 조회 · 권한 제어) · 서버사이드 SDK `oxpeer` 를 이 저장소로 옮김 · 듣는 방 한도 20 · AGPL-3.0-only 로 라이선스 바꿈.
 - 규격은 정했는데 코드가 아직 따라오지 않은 것이 있습니다. 서버 정의서의 이행 대장에 번호 행으로 적혀 있고, 행마다 코드 자리와 그것을 닫을 시험이 있습니다.
 - 웹 SDK 는 서버보다 어리고, 아직 재생성 회차를 거치지 않았습니다.
 
@@ -196,7 +211,7 @@ cargo build --manifest-path crates/oxtapd/Cargo.toml --target-dir target
 
 ## 라이선스
 
-GNU Affero General Public License v3.0 only(`AGPL-3.0-only`) — [LICENSE](LICENSE). 서버와 서버사이드 SDK(`crates/oxpeer`)에 적용됩니다. `v1.12` 까지(포함) 낸 판은 Apache License 2.0 으로 공개되었고 그대로 남습니다.
+GNU Affero General Public License v3.0 only(`AGPL-3.0-only`) — [LICENSE](LICENSE). 서버와 서버사이드 SDK(`crates/oxpeer`)에 적용됩니다. `v1.13` 까지(포함) 낸 판은 Apache License 2.0 으로 공개되었고 그대로 남습니다.
 
 **상용 라이선스.** AGPL 이 맞지 않는 쓰임(예: 고친 서버를 변경 공개 없이 서비스로 운영)에는 상용 라이선스를 드립니다 — 예: AGPL 의무 없는 폐쇄망 · 온프레미스 납품, SLA 와 기술 지원, 상용 애드온(AI 음성 브리지 · 준비 중인 네이티브 모바일 SDK). 조건과 단가는 관리자에게 메일로 문의해 주십시오(`Cargo.toml` 의 `authors`).
 

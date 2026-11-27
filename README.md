@@ -2,7 +2,7 @@
 
 **A WebRTC SFU in Rust for push-to-talk (PTT) and video conferencing — built from a machine-checked specification, and regenerated from that spec by AI.**
 
-[한국어 README](README.ko.md) · License: AGPL-3.0-only (Apache-2.0 up to `v1.12`) · First public release: 2026-10-28 (`v1.4`) · Latest tag: `v1.12`
+[한국어 README](README.ko.md) · License: AGPL-3.0-only (Apache-2.0 up to `v1.13`) · First public release: 2026-10-28 (`v1.4`) · Latest tag: `v1.13`
 
 ---
 
@@ -17,7 +17,7 @@
 | Area | Status |
 |---|---|
 | PTT floor control — request · grant · queue · release · revoke · preemption · timers (MCPTT-style binary messages over a DataChannel) | ✅ |
-| Multi-room listening · one talk room per session (switchable) | ✅ |
+| Multi-room listening (up to 20 rooms per session) · one talk room per session (switchable) | ✅ |
 | Full-duplex audio / video conferencing | ✅ |
 | Simulcast — three spatial layers (l / m / h), each with temporal layers (VP8 from the payload, H264 from the dependency descriptor) · manual layer selection · automatic layer control (v1 RR loss · repeated NACKs · drops, v2 send-side estimation over TWCC — off by default in code, turned on in the sample `policy.toml`) · three layer strategies (`media.layer_strategy`) | ✅ |
 | One or two PeerConnections per session (`1pc` / `2pc`) | ✅ |
@@ -31,7 +31,7 @@
 | Recording unit `oxtapd` — a process the hub supervises; joins rooms marked for recording and writes one file per utterance (Matroska when it has video, Ogg for audio only) | ✅ |
 | Operations — `oxadmin` CLI · `/admin/*` read and control · `/healthz/live` · `/healthz/ready` · logfmt logging to one file per node · boot banner with every resolved setting | ✅ |
 | Video PTT (video floor) | ⏸ shelved — the browser send pacer cannot be controlled from here |
-| Third-party integration (hook) — room facts (created · closed · joins · floor · recording) delivered per account with ACK windows over zenoh or Standard Webhooks; room status queries and permission control; mutual-TLS accounts | ✅ |
+| Third-party integration (hook) — room facts (created · closed · joins · floor · recording) delivered per account with ACK windows over zenoh or Standard Webhooks; room status queries and permission control; mutual-TLS accounts (see [Integrating with rooms](#integrating-with-rooms-hook)) | ✅ |
 | Server-side SDK `oxpeer` (Rust) — recorders, AI agents and gateways join rooms as ordinary peers (WebRTC media, floor control, recording) | ✅ |
 | AI voice agents — a bridge built on `oxpeer` takes the floor, streams the speaker's voice to an AI service and speaks the answer back into the talk group (bridges are offered commercially, not in this repository) | ✅ |
 | Extensibility for external devices and systems — anything that speaks the published client protocol, `oxpeer`, or the hook interface can join or observe rooms (radio gateways, dispatch consoles, sensors, recorders) | ✅ |
@@ -42,7 +42,7 @@
 
 ```mermaid
 flowchart LR
-  C["Browser / app<br/>(oxlens-sdk-web)"]
+  C["Browser / app<br/>(oxlens-sdk-web)<br/>server-side peer (oxpeer)"]
   subgraph N1["node"]
     H["oxhubd — gateway<br/>sessions · routing · HTTP/WS<br/>chat · /admin · supervisor · logger"]
     S["oxsfud — media server<br/>rooms · peers · floor<br/>RTP / RTCP · simulcast"]
@@ -52,20 +52,23 @@ flowchart LR
   end
   N2["other nodes"]
   X["third-party service<br/>(zenoh client)"]
+  W["webhook receiver<br/>(HTTP server)"]
   C -- "WebSocket / HTTP<br/>signaling · chat" --> H
   C -- "ICE · DTLS-SRTP · DataChannel<br/>UDP or TCP" --> S
   H <-- "oxmesh bus" --> N2
-  X -- "TLS · chat subscription" --> H
+  X -- "mutual TLS · chat · facts<br/>room queries · permission control" --> H
+  H -- "Standard Webhooks<br/>room facts" --> W
 ```
 
 | Crate | Role |
 |---|---|
 | `oxsig` | Wire types of the client protocol — frames, ops, error codes, DataChannel and floor messages |
 | `common` | Strict configuration (system file · policy · CLI), JWT, the bus wiring, the log sender, build identity, the boot banner |
-| `oxhubd` | Gateway: sessions, room placement and routing, HTTP / WebSocket, chat (store, fan-out to the nodes where members are connected, the entry for third-party services), `/admin`, the process supervisor, the in-process logger |
+| `oxhubd` | Gateway: sessions, room placement and routing, HTTP / WebSocket, chat (store, fan-out to the nodes where members are connected), third-party integration (the zenoh entry: chat and fact subscriptions, room queries, permission control; outbound webhooks), `/admin`, the process supervisor, the in-process logger |
 | `oxsfud` | Media server: rooms, peers, publish / subscribe, floor control, forwarding, RTCP, simulcast |
 | `oxmesh` | The node bus — routers in a direct one-hop mesh, session identity (generation), four lanes, tokens · subscriptions · queries (the hub is a router, the media server a client) |
-| `oxtapd` | Recording unit — joins rooms marked for recording as a participant and writes the files |
+| `oxtapd` | Recording unit — joins rooms marked for recording as a participant and writes the files (built on `oxpeer`) |
+| `oxpeer` | Server-side SDK — a Rust library that joins rooms as an ordinary peer (signaling, ICE · DTLS-SRTP, DataChannel floor control, recording), for recorders, AI agents and gateways |
 | `oxadmin` | Operator CLI over `/admin/*` |
 
 ## Quick start
@@ -114,7 +117,7 @@ Every value lives in exactly one of three places, and the boot banner prints the
 
 | Place | What goes there |
 |---|---|
-| System file (`system.toml`) | Listen addresses, log directory and socket, accounts, the unit list, the bus (`[bus]`), the supervisor, chat (`[chat]`), the entry for third-party services (`[hook]`), the data root for recordings (`[data]`) |
+| System file (`system.toml`) | Listen addresses, log directory and socket, accounts, the unit list, the bus (`[bus]`), the supervisor, chat (`[chat]`), third-party integration (`[hook]` — the zenoh entry and outbound webhooks), the data root for recordings (`[data]`) |
 | Policy file (`policy.toml`) | Tunables shared by gateway and media server — logging, media (bitrate · simulcast · PLI throttle), floor. Every key has a range. Unknown keys fail the boot |
 | CLI arguments | Per-process values (node id · ports · public IP). The hub adds the shared ones (log paths · bus address) when it starts a unit |
 
@@ -134,6 +137,18 @@ The core stores and delivers messages. Anything more attaches in one of two ways
 
 **Append, never replace.** The original message always goes to the members first. A service only adds messages next to it. If a service is down or slow, the conversation goes on, and the core never has to know that a service failed.
 
+## Integrating with rooms (hook)
+
+A third-party system — a dispatch console, a recorder, an AI service, a radio gateway — can follow and steer rooms without becoming a client.
+
+- **Account.** The system file declares the account with `hook_allowed = true` and `facts` (the fact kinds it wants, or `"*"`). Each account uses one transport: the zenoh entry or a webhook.
+- **Room facts.** The hub that owns a room turns what happens in it (room created · closed, joins and leaves, floor granted · released · revoked, recording started · ended, …) into facts `{fact_id, type, t, room_id, body}` and queues them per account.
+  - Over zenoh, the service connects with a client certificate whose CN is the account key and declares a queryable on `ox/<[bus] namespace>/pub/v1/facts/sub/<account key>`. Each batch is a query; the reply is the acknowledgement. Each account has a window of unacknowledged batches and retries with backoff.
+  - Over a webhook, `[[hook.webhooks]]` gives the account `key`, the receiver `url` and a `whsec_` secret. Batches are signed as in Standard Webhooks v1; only a 2xx reply counts as delivered.
+- **Queries and control** (zenoh entry). `…/pub/v1/q/rooms` lists rooms, `…/pub/v1/q/room/<room>` returns one room with its members and floor, and `…/pub/v1/ctl/room/<room>/permission` changes a member's permissions in that room.
+
+The key layout under `pub/v1/` is the public contract; everything else on the bus is internal and may change.
+
 ## Testing and verification
 
 | Layer | What | Where |
@@ -141,7 +156,7 @@ The core stores and delivers messages. Anything more attaches in one of two ways
 | 1 — unit | `cargo test --workspace`, including spec-generated vectors (source-switch rewriting · RTCP · floor/media binding · simulcast) and blind independent tests; the vectors are a copy of the spec output kept in `testdata/spec/`, so a fresh clone runs them on its own | this repository |
 | 2 — headless | A bot harness drives the real server: protocol contract checks, over 120 scenarios, smoke tests, equations over packet dumps | separate repository (not public yet) |
 | 3 — browser | Playwright with Chromium against the real server and the web SDK | [oxlens-sdk-web](https://github.com/kodeholic9/oxlens-sdk-web) `qa/live` |
-| Model checking | TLA+ / TLC — 93 configurations over the protocol state machines (session · room · link · publish · subscribe · tracks · affiliation · floor · multi-server) and 99 over the server (node bus · mesh · ownership · execution · media path · authority — 7 of them on hold) | specification repository |
+| Model checking | TLA+ / TLC — 98 configurations over the protocol state machines (session · room · link · publish · subscribe · tracks · affiliation · floor · multi-server) and 100 over the server (node bus · mesh · ownership · execution · media path · authority — 7 of them on hold) | specification repository |
 | Comparison | The same browser pair and the same network shaping against LiveKit 1.13.11 and mediasoup 3.32.2 — six feature tests: bandwidth squeeze, packet loss, joining, layer switch, outage, audio loss. Also run with the servers on a Raspberry Pi 4 | separate repository (not public) |
 
 ## How it is built
@@ -170,7 +185,7 @@ In round 6, blind independent tests caught 50 of 52 planted symptoms (96 %). Tes
 ## Status and limits
 
 - `v1.4` is the first public release. From `v1.5` (round 7) a capacity regression gate on fixed shapes (broadcast to 1,000 and 1,500 listeners, a 128-person meeting) is part of the completion criteria. Load on impaired networks (loss, delay) has not been measured yet. Behaviour on impaired networks is compared in the comparison rig above.
-- From `v1.6` on, releases are made by hand. `v1.6` replaced the node bus with `oxmesh`. `v1.7` to `v1.12` include floor sequence numbers as in TS 24.380, contributing-source tagging, and fixes where a decision and its application happen at different times. Chat, chat extensions, the talk record, the recording unit, three spatial layers with temporal layers, the layer strategies, the reworked send-side estimation and paced retransmission are on `main` after `v1.12` and are not tagged yet.
+- From `v1.6` on, releases are made by hand. `v1.6` replaced the node bus with `oxmesh`. `v1.7` to `v1.12` include floor sequence numbers as in TS 24.380, contributing-source tagging, and fixes where a decision and its application happen at different times. `v1.13` adds chat, chat extensions, the talk record, the recording unit, three spatial layers with temporal layers, the layer strategies, the reworked send-side estimation and paced retransmission. On `main` after `v1.13` and not tagged yet: third-party integration (room facts over zenoh or webhooks, room queries, permission control), the server-side SDK `oxpeer` moved into this repository, the listening limit set to 20 rooms, and the license change to AGPL-3.0-only.
 - Some things are specified but not yet followed by the code. They are tracked as numbered rows in the server spec's implementation ledger, and each one names the code location and the test that will close it.
 - The web SDK is younger than the server and has not yet gone through regeneration rounds.
 
@@ -191,7 +206,7 @@ The documents are in Korean. The published documents are rebuilt for every versi
 
 ## License
 
-GNU Affero General Public License v3.0 only (`AGPL-3.0-only`) — see [LICENSE](LICENSE). This covers the servers and the server-side SDK (`crates/oxpeer`). Releases up to and including `v1.12` were published under the Apache License 2.0 and remain so.
+GNU Affero General Public License v3.0 only (`AGPL-3.0-only`) — see [LICENSE](LICENSE). This covers the servers and the server-side SDK (`crates/oxpeer`). Releases up to and including `v1.13` were published under the Apache License 2.0 and remain so.
 
 **Commercial license.** If the AGPL does not fit your use (for example, running a modified server as a service without publishing your changes), a commercial license is available — for example, closed-network or on-premise delivery without AGPL obligations, SLA and technical support, and commercial add-ons (AI voice bridges; native mobile SDKs in preparation). For terms and pricing, please contact the maintainer by email (see `authors` in `Cargo.toml`).
 
