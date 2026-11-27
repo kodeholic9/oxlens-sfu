@@ -34,7 +34,7 @@
 | Third-party integration (hook) — room facts (created · closed · joins · floor · recording) delivered per account with ACK windows over zenoh or Standard Webhooks; room status queries and permission control; mutual-TLS accounts | ✅ |
 | Server-side SDK `oxpeer` (Rust) — recorders, AI agents and gateways join rooms as ordinary peers (WebRTC media, floor control, recording) | ✅ |
 | AI voice agents — a bridge built on `oxpeer` takes the floor, streams the speaker's voice to an AI service and speaks the answer back into the talk group (bridges are offered commercially, not in this repository) | ✅ |
-| Extensibility for external devices and systems — anything that speaks the published client protocol, `oxpeer`, or the hook interface can join or observe rooms (radios gateways, dispatch consoles, sensors, recorders) | ✅ |
+| Extensibility for external devices and systems — anything that speaks the published client protocol, `oxpeer`, or the hook interface can join or observe rooms (radio gateways, dispatch consoles, sensors, recorders) | ✅ |
 | Single-authority multi-node placement | 🧪 design and model checking in progress |
 | Capacity measurement — connection ceiling · broadcast fan-out · capacity regression gate (`oxcap`, in a private test repository) | ✅ |
 
@@ -102,7 +102,7 @@ Chat is off in the default `system.toml`. Add `[chat]` with `db = "memory:"`, `"
 
 A three-node development layout is in `dev/`. `dev/gen_nodes.py` generates `dev/system.node-*.toml`, with chat, a recording unit and the extension entry turned on. The keys in `dev/pki` are a test PKI for local use only.
 
-The recording unit `oxtapd` is not part of the default build. It depends on the server-side SDK `oxlens-sdk-peer`, which must be checked out next to this repository. With it in place, build the unit into the same `target/` (the `dev/` layout needs it):
+The recording unit `oxtapd` is not part of the default build. It depends on the server-side SDK in this repository (`crates/oxpeer`); build the unit into the same `target/` (the `dev/` layout needs it):
 
 ```bash
 cargo build --manifest-path crates/oxtapd/Cargo.toml --target-dir target
@@ -193,7 +193,7 @@ The documents are in Korean. The published documents are rebuilt for every versi
 
 GNU Affero General Public License v3.0 only (`AGPL-3.0-only`) — see [LICENSE](LICENSE). This covers the servers and the server-side SDK (`crates/oxpeer`). Releases up to and including `v1.12` were published under the Apache License 2.0 and remain so.
 
-**Commercial license.** If the AGPL does not fit your use (for example, running a modified server as a service without publishing your changes), a commercial license is available. For terms and pricing, please contact the maintainer by email (see `authors` in `Cargo.toml`).
+**Commercial license.** If the AGPL does not fit your use (for example, running a modified server as a service without publishing your changes), a commercial license is available — for example, closed-network or on-premise delivery without AGPL obligations, SLA and technical support, and commercial add-ons (AI voice bridges; native mobile SDKs in preparation). For terms and pricing, please contact the maintainer by email (see `authors` in `Cargo.toml`).
 
 ## Contact
 

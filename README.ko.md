@@ -100,7 +100,7 @@ curl http://127.0.0.1:1974/healthz/ready
 - `system.toml` 의 시연 계정(`ox_k_demo` / `ox_s_demo`)과 `jwt_secret = "change-me-in-production"` 은 로컬 개발용입니다.
 - 기본 `system.toml` 에서는 채팅이 꺼져 있습니다. `[chat]` 에 `db = "memory:"` · `"sqlite:<경로>"` · `"postgres://…"` 중 하나를 주면 켜집니다.
 - 3-node 개발 형상은 `dev/` 에 있습니다. `dev/gen_nodes.py` 가 `dev/system.node-*.toml` 을 짓고, 채팅 · 녹음 유닛 · 확장 입구까지 켭니다. `dev/pki` 의 키는 로컬 시험용 PKI 입니다.
-- 녹음 유닛 `oxtapd` 는 기본 빌드에 들지 않습니다. 서버사이드 SDK `oxlens-sdk-peer` 를 쓰므로, 그 저장소가 이 저장소 옆에 있을 때 같은 `target/` 에 따로 짓습니다(`dev/` 형상은 녹음 유닛이 있어야 뜹니다).
+- 녹음 유닛 `oxtapd` 는 기본 빌드에 들지 않습니다. 같은 저장소의 서버사이드 SDK(`crates/oxpeer`)를 쓰며, 같은 `target/` 에 따로 짓습니다(`dev/` 형상은 녹음 유닛이 있어야 뜹니다).
 
 ```bash
 cargo build --manifest-path crates/oxtapd/Cargo.toml --target-dir target
@@ -198,7 +198,7 @@ cargo build --manifest-path crates/oxtapd/Cargo.toml --target-dir target
 
 GNU Affero General Public License v3.0 only(`AGPL-3.0-only`) — [LICENSE](LICENSE). 서버와 서버사이드 SDK(`crates/oxpeer`)에 적용됩니다. `v1.12` 까지(포함) 낸 판은 Apache License 2.0 으로 공개되었고 그대로 남습니다.
 
-**상용 라이선스.** AGPL 이 맞지 않는 쓰임(예: 고친 서버를 변경 공개 없이 서비스로 운영)에는 상용 라이선스를 드립니다. 조건과 단가는 관리자에게 메일로 문의해 주십시오(`Cargo.toml` 의 `authors`).
+**상용 라이선스.** AGPL 이 맞지 않는 쓰임(예: 고친 서버를 변경 공개 없이 서비스로 운영)에는 상용 라이선스를 드립니다 — 예: AGPL 의무 없는 폐쇄망 · 온프레미스 납품, SLA 와 기술 지원, 상용 애드온(AI 음성 브리지 · 준비 중인 네이티브 모바일 SDK). 조건과 단가는 관리자에게 메일로 문의해 주십시오(`Cargo.toml` 의 `authors`).
 
 ## 연락
 
