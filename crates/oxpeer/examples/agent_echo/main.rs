@@ -5,13 +5,16 @@
 //! `beacon` — 전이중 발행 시험판: 표지 프레임(오디오 20ms · 영상 30fps · 2층 봇과 같은 본문 꼴 — 보낸 표지 · 번호)을 낸다. 키프레임 요청(PLI)이 오면 다음 영상 프레임을 키프레임으로.
 //!   ★표지 프레임은 코덱 본문이 아니다(서버는 본문을 읽지 않는다) — 2층 시험이 「보낸 것 = 받은 것」을 견주는 재료다.
 //!   `--simulcast` 면 영상 업링크 둘(층 표지 `l` · `h` — 층마다 따로 센다) · 목표 비트레이트 사건(`TargetBitrate`)을 요약에 적는다.
-//! 아래 셋은 표지를 내며 정해진 때 한 걸음씩 밟는다(context 202611/20261108d — 짰지만 2층 형상이 없던 길) · 걸음마다 벽시계 ms 를 요약 `steps` 에 적는다.
+//! 아래 넷(`duplex` · `move` · `reconnect` · `churn`)은 표지를 내며 정해진 때 한 걸음씩 밟는다(context 202611/20261108d — 짰지만 2층 형상이 없던 길) · 걸음마다 벽시계 ms 를 요약 `steps` 에 적는다.
 //! `duplex` — 전이중으로 내다가 2s 반이중 · 3s 누름 · 5s 놓음 · 6s 전이중(`LocalTrack::set_duplex`).
 //! `move` — `--room`(발언 방 · 반이중) + `--room2`(듣기)로 들어 2s 발언 방을 room2 로(서버를 건너면 옛 서버 내림 · 새 서버 발행) · 3s 누름 · 5s 놓음 · 6s room 으로 되돌림 · 7s 누름 · 9s 놓음.
 //! `reconnect` — 전이중 표지 · `--reconnect-at N` 초에 `close()` 한 뒤 ★같은 객체로 `connect()` · 다시 들어 다시 발행(SDK:ses.md `close()`).
+//! `churn` — 전이중 표지 오디오만 내다가 3s 영상 발행 · 6s 영상 내림 — 받는 줄이 흐르는 동안 내 발행을 더하고 뺀다(SDK:RULE-PLAT-PC-MODE oxpeer 판정 술어 ④′ · 1pc 는 같은 전송).
+//!   걸음마다 `req_wall_ms`(요청 직전) · `wall_ms`(돌아온 뒤 — 발행은 `published` · 내림은 응답을 기다리지 않는다)를 적는다.
+//! `--raw DIR` — 녹음 원시 기록(`Config.record` · SDK:RULE-PLAT-REC-TAP)을 켠다. 받는 줄 전부의 정리층 출구 RTP · `gap` · `ctl/track` 을 `DIR/<user>-NNNN.mcap` 에 적는다(기능 `record` 로 지은 것만).
 //! `file` — 진짜 코덱 표본을 되풀이해 전이중으로 낸다(`--opus a.ogg` · `--h264 v.h264` 또는 `--vp8 v.ivf` · 영상 30fps) · 키프레임 요청이 오면 다음 키프레임으로 건너뛴다(3층 — 브라우저가 실제로 디코드하나).
 //!
-//!   cargo run -p oxpeer --example agent_echo -- --base http://127.0.0.1:1974/media --room ch-1 [--secs 30] [--user agent-1] [--mode echo|beacon|duplex|move|reconnect] [--video [--simulcast]] [--room2 ch-2] [--reconnect-at N] [--tls-root ca.pem] [--pc-mode auto|1pc|2pc]
+//!   cargo run -p oxpeer --example agent_echo -- --base http://127.0.0.1:1974/media --room ch-1 [--secs 30] [--user agent-1] [--mode echo|beacon|duplex|move|reconnect|churn] [--video [--simulcast]] [--room2 ch-2] [--reconnect-at N] [--tls-root ca.pem] [--pc-mode auto|1pc|2pc] [--raw DIR]
 //!
 //! `--pc-mode` 는 BIND 에 싣는 연결 모드(기본 `auto` — SDK:RULE-PLAT-PC-MODE) · 요약 `session_pc_mode` 는 서버가 확정한 값이다.
 //! 끝나면 표준 출력에 한 줄 JSON(되울림마다 · 발언권 사건 · 키프레임 요청 · 보내는 쪽 계수)을 쓴다 — 2층 시험이 읽는다.
@@ -41,10 +44,11 @@ struct Args {
     api_key: String,
     api_secret: String,
     pc_mode: PcMode,
+    raw: Option<String>,
 }
 
 fn args() -> Args {
-    let mut a = Args { base: String::new(), room: String::new(), secs: None, user: "oxpeer-agent".into(), mode: "echo".into(), video: false, simulcast: false, room2: String::new(), reconnect_at: 3, tls_root: None, opus: None, h264: None, vp8: None, api_key: "ox_k_demo".into(), api_secret: "ox_s_demo".into(), pc_mode: PcMode::Auto };
+    let mut a = Args { base: String::new(), room: String::new(), secs: None, user: "oxpeer-agent".into(), mode: "echo".into(), video: false, simulcast: false, room2: String::new(), reconnect_at: 3, tls_root: None, opus: None, h264: None, vp8: None, api_key: "ox_k_demo".into(), api_secret: "ox_s_demo".into(), pc_mode: PcMode::Auto, raw: None };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
         let mut v = || it.next().unwrap_or_default();
@@ -71,11 +75,16 @@ fn args() -> Args {
                     std::process::exit(2);
                 });
             }
+            "--raw" => a.raw = Some(v()),
             other => eprintln!("모르는 인자 {other}"),
         }
     }
     if a.base.is_empty() || a.room.is_empty() {
-        eprintln!("사용: agent --base http://host:port/media --room <방> [--secs N] [--user id] [--mode echo|beacon|duplex|move|reconnect] [--video [--simulcast]] [--room2 방] [--reconnect-at N] [--tls-root ca.pem] [--pc-mode auto|1pc|2pc]");
+        eprintln!("사용: agent --base http://host:port/media --room <방> [--secs N] [--user id] [--mode echo|beacon|duplex|move|reconnect|churn] [--video [--simulcast]] [--room2 방] [--reconnect-at N] [--tls-root ca.pem] [--pc-mode auto|1pc|2pc] [--raw DIR]");
+        std::process::exit(2);
+    }
+    if a.raw.is_some() && !cfg!(feature = "record") {
+        eprintln!("--raw 는 기능 record 로 지은 것만(cargo build --example agent_echo --features record)");
         std::process::exit(2);
     }
     a
@@ -121,6 +130,16 @@ fn beacon_video(n: u32, key: bool, layer: u8, codec: &str) -> Bytes {
     Bytes::from(b)
 }
 
+#[cfg(feature = "record")]
+fn raw_config(cfg: &mut Config, a: &Args) {
+    if let Some(dir) = &a.raw {
+        cfg.record = Some(oxpeer::record::RecordConfig::new(dir, &a.user));
+    }
+}
+
+#[cfg(not(feature = "record"))]
+fn raw_config(_cfg: &mut Config, _a: &Args) {}
+
 fn wall_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
@@ -140,6 +159,7 @@ async fn main() {
     let mut cfg = Config::new(&a.base, token);
     cfg.tls_root_pem = root;
     cfg.pc_mode = a.pc_mode;
+    raw_config(&mut cfg, &a);
     let (client, mut events, mut media, _frames) = match Client::create(cfg) {
         Ok(x) => x,
         Err(e) => {
@@ -178,7 +198,7 @@ async fn main() {
         eprintln!("둘째 방 입장 실패: {e}");
         std::process::exit(1);
     }
-    let full = matches!(a.mode.as_str(), "beacon" | "duplex" | "reconnect" | "file");
+    let full = matches!(a.mode.as_str(), "beacon" | "duplex" | "reconnect" | "file" | "churn");
     let (audio, video) = match publish_all(&client, &a, full).await {
         Ok(x) => x,
         Err(e) => {
@@ -200,7 +220,7 @@ async fn main() {
         }
     };
     tokio::pin!(stop);
-    let mut out = json!({ "room": a.room, "room2": a.room2, "mode": a.mode, "user": me, "audio_track": audio.track_id, "video_track": video.as_ref().map(|v| v.track_id.clone()), "simulcast": a.simulcast, "session_pc_mode": session_pc_mode, "start_wall_ms": wall_ms() });
+    let mut out = json!({ "room": a.room, "room2": a.room2, "mode": a.mode, "user": me, "audio_track": audio.track_id, "video_track": video.as_ref().map(|v| v.track_id.clone()), "simulcast": a.simulcast, "session_pc_mode": session_pc_mode, "raw": a.raw, "start_wall_ms": wall_ms() });
     if a.mode == "echo" {
         echo(&client, &mut events, &mut media, audio, &me, &a.room, &mut stop, &mut out).await;
     } else if a.mode == "file" {
@@ -223,7 +243,7 @@ async fn main() {
 async fn publish_all(client: &Client, a: &Args, full: bool) -> Result<(LocalTrack, Option<LocalTrack>), oxpeer::Error> {
     let duplex = if full { Duplex::Full } else { Duplex::Half };
     let audio = client.publish(&a.room, TrackSpec { kind: Kind::Audio, duplex, simulcast: false }).await?;
-    let video = if full && (a.video || a.h264.is_some() || a.vp8.is_some()) { Some(client.publish(&a.room, TrackSpec { kind: Kind::Video, duplex: Duplex::Full, simulcast: a.simulcast }).await?) } else { None };
+    let video = if full && a.mode != "churn" && (a.video || a.h264.is_some() || a.vp8.is_some()) { Some(client.publish(&a.room, TrackSpec { kind: Kind::Video, duplex: Duplex::Full, simulcast: a.simulcast }).await?) } else { None };
     Ok((audio, video))
 }
 
@@ -326,6 +346,8 @@ enum Step {
     Release(String),
     Speak(String),
     Reconnect,
+    VideoOn,
+    VideoOff,
 }
 
 fn plan(a: &Args) -> Vec<(u64, Step)> {
@@ -334,6 +356,7 @@ fn plan(a: &Args) -> Vec<(u64, Step)> {
         "duplex" => vec![(2_000, Step::Half), (3_000, Step::Press(r.clone())), (5_000, Step::Release(r)), (6_000, Step::Full)],
         "move" => vec![(2_000, Step::Speak(r2.clone())), (3_000, Step::Press(r2.clone())), (5_000, Step::Release(r2)), (6_000, Step::Speak(r.clone())), (7_000, Step::Press(r.clone())), (9_000, Step::Release(r))],
         "reconnect" => vec![(a.reconnect_at * 1_000, Step::Reconnect)],
+        "churn" => vec![(3_000, Step::VideoOn), (6_000, Step::VideoOff)],
         _ => Vec::new(),
     }
 }
@@ -341,7 +364,7 @@ fn plan(a: &Args) -> Vec<(u64, Step)> {
 /// 표지 — 오디오 20ms · 영상 33ms(30 장마다 키프레임 · 키프레임 요청이 오면 그 층 다음 장) · 걸음표대로 밟는다
 async fn beacon(client: &Client, a: &Args, events: &mut oxpeer::Events, audio: LocalTrack, video: Option<LocalTrack>, stop: &mut std::pin::Pin<&mut impl std::future::Future<Output = ()>>, out: &mut Value) {
     let (mut audio, mut video) = (audio, video);
-    let layers = video.as_ref().map(|v| v.layers()).unwrap_or(0);
+    let mut layers = video.as_ref().map(|v| v.layers()).unwrap_or(0);
     let (mut an, mut vn) = (0u32, vec![0u32; layers]);
     let mut want_key = vec![false; layers];
     let mut kreq: Vec<Value> = Vec::new();
@@ -380,7 +403,26 @@ async fn beacon(client: &Client, a: &Args, events: &mut oxpeer::Events, audio: L
             _ = tick.tick() => {
                 while let Some((at, _)) = todo.last() && t0.elapsed().as_millis() as u64 >= *at {
                     let Some((_, step)) = todo.pop() else { break };
+                    let req = wall_ms();
                     let (ok, why) = match &step {
+                        Step::VideoOn => match client.publish(&a.room, TrackSpec { kind: Kind::Video, duplex: Duplex::Full, simulcast: a.simulcast }).await {
+                            Ok(v) => {
+                                layers = v.layers();
+                                vn = vec![0; layers];
+                                want_key = vec![false; layers];
+                                video = Some(v);
+                                (true, None)
+                            }
+                            Err(e) => (false, Some(e.to_string())),
+                        },
+                        Step::VideoOff => match video.take() {
+                            Some(v) => {
+                                v.unpublish();
+                                layers = 0;
+                                (true, None)
+                            }
+                            None => (false, Some("NO_VIDEO".to_string())),
+                        },
                         Step::Half => res(audio.set_duplex(Duplex::Half).await),
                         Step::Full => res(audio.set_duplex(Duplex::Full).await),
                         Step::Press(r) => res(client.ptt_press(r, 0).await),
@@ -408,7 +450,7 @@ async fn beacon(client: &Client, a: &Args, events: &mut oxpeer::Events, audio: L
                             }
                         }
                     };
-                    steps.push(json!({ "step": format!("{step:?}"), "ok": ok, "why": why, "wall_ms": wall_ms() }));
+                    steps.push(json!({ "step": format!("{step:?}"), "ok": ok, "why": why, "req_wall_ms": req, "wall_ms": wall_ms() }));
                 }
             }
             e = events.next() => match e {
