@@ -31,7 +31,10 @@
 | Recording unit `oxtapd` — a process the hub supervises; joins rooms marked for recording and writes one file per utterance (Matroska when it has video, Ogg for audio only) | ✅ |
 | Operations — `oxadmin` CLI · `/admin/*` read and control · `/healthz/live` · `/healthz/ready` · logfmt logging to one file per node · boot banner with every resolved setting | ✅ |
 | Video PTT (video floor) | ⏸ shelved — the browser send pacer cannot be controlled from here |
-| Outbound hooks (webhooks / events to a third-party server) | ⏳ specified, not implemented |
+| Third-party integration (hook) — room facts (created · closed · joins · floor · recording) delivered per account with ACK windows over zenoh or Standard Webhooks; room status queries and permission control; mutual-TLS accounts | ✅ |
+| Server-side SDK `oxpeer` (Rust) — recorders, AI agents and gateways join rooms as ordinary peers (WebRTC media, floor control, recording) | ✅ |
+| AI voice agents — a bridge built on `oxpeer` takes the floor, streams the speaker's voice to an AI service and speaks the answer back into the talk group (bridges are offered commercially, not in this repository) | ✅ |
+| Extensibility for external devices and systems — anything that speaks the published client protocol, `oxpeer`, or the hook interface can join or observe rooms (radios gateways, dispatch consoles, sensors, recorders) | ✅ |
 | Single-authority multi-node placement | 🧪 design and model checking in progress |
 | Capacity measurement — connection ceiling · broadcast fan-out · capacity regression gate (`oxcap`, in a private test repository) | ✅ |
 
