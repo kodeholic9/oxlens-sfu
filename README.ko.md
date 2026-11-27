@@ -2,7 +2,7 @@
 
 **무전(PTT)과 화상회의를 한 서버에서 처리하는 Rust WebRTC SFU — 기계가 검사하는 규격을 정본으로 두고, AI 가 그 규격만 보고 다시 짓는다.**
 
-[English README](README.md) · 라이선스: Apache-2.0 · 첫 공개: 2026-10-28 (`v1.4`) · 최신 태그: `v1.12`
+[English README](README.md) · 라이선스: AGPL-3.0-only(`v1.12` 까지는 Apache-2.0) · 첫 공개: 2026-10-28 (`v1.4`) · 최신 태그: `v1.12`
 
 ---
 
@@ -193,8 +193,10 @@ cargo build --manifest-path crates/oxtapd/Cargo.toml --target-dir target
 
 ## 라이선스
 
-Apache License 2.0 — [LICENSE](LICENSE)
+GNU Affero General Public License v3.0 only(`AGPL-3.0-only`) — [LICENSE](LICENSE). 서버와 서버사이드 SDK(`crates/oxpeer`)에 적용됩니다. `v1.12` 까지(포함) 낸 판은 Apache License 2.0 으로 공개되었고 그대로 남습니다.
+
+**상용 라이선스.** AGPL 이 맞지 않는 쓰임(예: 고친 서버를 변경 공개 없이 서비스로 운영)에는 상용 라이선스를 드립니다. 조건과 단가는 관리자에게 메일로 문의해 주십시오(`Cargo.toml` 의 `authors`).
 
 ## 연락
 
-이슈와 풀 리퀘스트를 환영합니다. 보안 문제는 공개 이슈 대신 관리자에게 메일로 알려 주십시오(`Cargo.toml` 의 `authors`).
+이슈를 환영합니다. 코드 기여(풀 리퀘스트)는 받지 않습니다 — 한 사람이 개발해 AGPL 과 상용 라이선스로 함께 제공하기 위해서입니다. 보안 문제는 공개 이슈 대신 관리자에게 메일로 알려 주십시오(`Cargo.toml` 의 `authors`).

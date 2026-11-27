@@ -2,7 +2,7 @@
 
 **A WebRTC SFU in Rust for push-to-talk (PTT) and video conferencing — built from a machine-checked specification, and regenerated from that spec by AI.**
 
-[한국어 README](README.ko.md) · License: Apache-2.0 · First public release: 2026-10-28 (`v1.4`) · Latest tag: `v1.12`
+[한국어 README](README.ko.md) · License: AGPL-3.0-only (Apache-2.0 up to `v1.12`) · First public release: 2026-10-28 (`v1.4`) · Latest tag: `v1.12`
 
 ---
 
@@ -188,8 +188,10 @@ The documents are in Korean. The published documents are rebuilt for every versi
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE).
+GNU Affero General Public License v3.0 only (`AGPL-3.0-only`) — see [LICENSE](LICENSE). This covers the servers and the server-side SDK (`crates/oxpeer`). Releases up to and including `v1.12` were published under the Apache License 2.0 and remain so.
+
+**Commercial license.** If the AGPL does not fit your use (for example, running a modified server as a service without publishing your changes), a commercial license is available. For terms and pricing, please contact the maintainer by email (see `authors` in `Cargo.toml`).
 
 ## Contact
 
-Issues and pull requests are welcome. For security problems, please email the maintainer (see `authors` in `Cargo.toml`) instead of opening a public issue.
+Issues are welcome. Code contributions (pull requests) are not accepted — the project is developed by a single author so it can be offered under both the AGPL and a commercial license. For security problems, please email the maintainer (see `authors` in `Cargo.toml`) instead of opening a public issue.
