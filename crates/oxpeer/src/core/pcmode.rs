@@ -44,7 +44,7 @@ pub(crate) fn pt_row(codec: Codec) -> Option<&'static PtRow> {
     CODECS.iter().find(|r| r.codec == codec)
 }
 
-pub(crate) const CAPABILITY_ROW: Option<Mode> = None;
+pub(crate) const CAPABILITY_ROW: Option<Mode> = Some(Mode::One);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Mode {
@@ -53,8 +53,12 @@ pub(crate) enum Mode {
 }
 
 pub(crate) fn ask(p: PcMode) -> Mode {
+    resolve(p, CAPABILITY_ROW)
+}
+
+pub(crate) fn resolve(p: PcMode, row: Option<Mode>) -> Mode {
     match p {
-        PcMode::Auto => CAPABILITY_ROW.unwrap_or(Mode::Two),
+        PcMode::Auto => row.unwrap_or(Mode::Two),
         PcMode::One => Mode::One,
         PcMode::Two => Mode::Two,
     }
@@ -106,12 +110,24 @@ mod pc_mode_test {
     use super::*;
 
     #[test]
-    fn auto_follows_the_capability_row_and_the_row_is_absent() {
-        assert_eq!(CAPABILITY_ROW, None, "SDK:RULE-PLAT-PC-MODE oxpeer 행은 아직 미측정");
-        assert_eq!(ask(PcMode::Auto), Mode::Two, "SDK:RULE-PLAT-PC-MODE 표에 없으면 2pc");
+    fn auto_follows_the_capability_row_which_is_1pc() {
+        assert_eq!(CAPABILITY_ROW, Some(Mode::One), "SDK:RULE-PLAT-PC-MODE 능력표 oxpeer 행 = 1pc");
+        assert_eq!(ask(PcMode::Auto), Mode::One, "auto 는 능력표 행을 따른다");
         assert_eq!(ask(PcMode::One), Mode::One);
-        assert_eq!(ask(PcMode::Two), Mode::Two);
+        assert_eq!(ask(PcMode::Two), Mode::Two, "앱이 2pc 를 강제할 수 있다");
         assert_eq!(PcMode::default(), PcMode::Auto, "Config 기본은 auto");
+        assert_eq!(resolve(PcMode::Auto, None), Mode::Two, "SDK:RULE-PLAT-PC-MODE 표에 없으면 2pc");
+        assert_eq!(resolve(PcMode::One, None), Mode::One, "앱이 1pc 를 지정하면 표에 없어도 1pc");
+        assert_eq!(resolve(PcMode::Two, Some(Mode::One)), Mode::Two);
+    }
+
+    #[test]
+    fn mode_names_parse() {
+        assert_eq!(PcMode::parse("auto"), Some(PcMode::Auto));
+        assert_eq!(PcMode::parse("1pc"), Some(PcMode::One));
+        assert_eq!(PcMode::parse("2pc"), Some(PcMode::Two));
+        assert_eq!(PcMode::parse("3pc"), None);
+        assert_eq!(PcMode::parse("1PC"), None);
     }
 
     #[test]
