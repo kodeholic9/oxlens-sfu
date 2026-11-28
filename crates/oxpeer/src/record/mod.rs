@@ -24,6 +24,7 @@ pub use pipeline::{Frame, Output, Pipeline, Policy, Segment, SegmentKind};
 pub use cover::{Coverage, TrackCoverage};
 pub use mkv::recover_mkv;
 pub use ogg::{Recovered, recover_ogg};
+pub use ogg::OggConfig;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
@@ -90,7 +91,7 @@ impl RecordConfig {
             part_time: Duration::from_secs(3_600),
             flush: Duration::from_secs(2),
             tick: Duration::from_millis(500),
-            min_free_bytes: 512 << 20,
+            min_free_bytes: ogg::MIN_FREE_BYTES,
             fsync_on_flush: false,
             compression: Compression::None,
         }
@@ -207,6 +208,31 @@ pub(crate) fn open_failure(e: &std::io::Error) -> Stop {
         std::io::ErrorKind::AlreadyExists => Stop::NameTaken,
         std::io::ErrorKind::StorageFull => Stop::DiskLow,
         _ => Stop::Unwritable,
+    }
+}
+
+pub(crate) fn opens_part(parts_opened: u32, ch: &Channel, data: &[u8]) -> bool {
+    parts_opened > 0 || (matches!(ch, Channel::Rtp(_)) && rtp_has_payload(data))
+}
+
+pub(crate) fn rtp_has_payload(p: &[u8]) -> bool {
+    let Some(&b0) = p.first() else { return false };
+    let mut off = 12 + 4 * usize::from(b0 & 0x0f);
+    if b0 & 0x10 != 0 {
+        let Some(words) = p.get(off + 2..off + 4).map(|w| usize::from(u16::from_be_bytes([w[0], w[1]]))) else { return false };
+        off += 4 + 4 * words;
+    }
+    let pad = if b0 & 0x20 != 0 { p.last().map(|x| usize::from(*x)).unwrap_or(0) } else { 0 };
+    p.len() > off + pad
+}
+
+pub(crate) fn rotation(bytes: u64, age_ns: u64, part_bytes: u64, part_time_ns: u64) -> Option<&'static str> {
+    if bytes >= part_bytes {
+        Some("size")
+    } else if age_ns >= part_time_ns {
+        Some("time")
+    } else {
+        None
     }
 }
 
@@ -390,20 +416,17 @@ impl Inner {
         let t = self.now();
         if ch == Channel::Tick && self.stopped == Some(Stop::DiskLow) && resumes(self.stopped, self.cfg.dir.as_deref().and_then(free_bytes), self.cfg.min_free_bytes, self.cfg.part_bytes) {
             self.stopped = None;
-            self.out.line(crate::log::Line::new(crate::log::Kind::Diag).spec("SD-RULE-PLAT-REC-PART").key("in.min_free_bytes", self.cfg.min_free_bytes).key("in.part_bytes", self.cfg.part_bytes).msg("raw recording resumed - disk free again, next part opens at the next rtp record"));
+            self.out.line(crate::log::Line::new(crate::log::Kind::Diag).spec("SD-RULE-PLAT-REC-PART").key("in.min_free_bytes", self.cfg.min_free_bytes).key("in.part_bytes", self.cfg.part_bytes).msg("raw recording resumed - disk free again"));
         }
-        if self.cfg.dir.is_some() && self.stopped.is_none() {
-            if let Some(p) = &self.part
-                && (p.bytes >= self.cfg.part_bytes || t.saturating_sub(p.start) >= self.cfg.part_time.as_nanos() as u64)
-            {
-                let why = if p.bytes >= self.cfg.part_bytes { "size" } else { "time" };
-                self.close_part(why);
-            }
-            if self.part.is_none() && matches!(ch, Channel::Rtp(_)) {
-                self.open_part(t);
-            }
+        if self.cfg.dir.is_some() && self.stopped.is_none() && self.part.is_none() && opens_part(self.part_no, &ch, &data) {
+            self.open_part(t);
         }
         self.write(ch.clone(), data, t);
+        if let Some(p) = &self.part
+            && let Some(why) = rotation(p.bytes, t.saturating_sub(p.start), self.cfg.part_bytes, self.cfg.part_time.as_nanos() as u64)
+        {
+            self.close_part(why);
+        }
         // 청크 닫기는 tick 경계 — 문턱을 반 tick 앞당긴다(tick 이 조금 일찍 와도 한 주기 밀리지 않게 · 정:IMPL-ROOM-STALL 과 같은 꼴)
         let due = (self.cfg.flush.as_nanos() as u64).saturating_sub(self.cfg.tick.as_nanos() as u64 / 2);
         if ch == Channel::Tick && t.saturating_sub(self.last_flush) >= due {

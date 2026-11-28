@@ -5,8 +5,10 @@
 
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufWriter, Seek, SeekFrom, Write};
+use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::pipeline::{Frame, Output, SegmentKind};
 
@@ -38,7 +40,18 @@ struct Open {
     w: Option<OggOpus>,
     file: OggFile,
     name: PathBuf,
-    stalled: Option<u64>,
+    stalled: Option<Stall>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OggConfig {
+    pub min_free_bytes: u64,
+}
+
+impl Default for OggConfig {
+    fn default() -> OggConfig {
+        OggConfig { min_free_bytes: MIN_FREE_BYTES }
+    }
 }
 
 /// 세그먼트마다 Ogg Opus 하나(음성 · opus 세그먼트만 · 나머지는 지나친다)
@@ -47,16 +60,21 @@ pub struct OggSink {
     open: BTreeMap<u64, Open>,
     done: Vec<OggFile>,
     talks: std::collections::BTreeSet<String>,
-    faults: Faults,
+    cfg: OggConfig,
+    disk: Disk,
     dropped: u64,
     ended: bool,
 }
 
 impl OggSink {
     pub fn new(dir: impl Into<PathBuf>) -> io::Result<OggSink> {
+        OggSink::with(dir, OggConfig::default())
+    }
+
+    pub fn with(dir: impl Into<PathBuf>, cfg: OggConfig) -> io::Result<OggSink> {
         let dir = dir.into();
         std::fs::create_dir_all(&dir)?;
-        Ok(OggSink { dir, open: BTreeMap::new(), done: Vec::new(), talks: std::collections::BTreeSet::new(), faults: Faults::default(), dropped: 0, ended: false })
+        Ok(OggSink { dir, open: BTreeMap::new(), done: Vec::new(), talks: std::collections::BTreeSet::new(), cfg, disk: Disk::default(), dropped: 0, ended: false })
     }
 
     /// 파이프라인 출력 하나
@@ -86,60 +104,75 @@ impl OggSink {
                         x.file.user_id.clone_from(&s.user_id);
                     }
                     if let Some(w) = x.w.take() {
-                        self.done.push(close_ogg(w, x.file, s.reason));
+                        let (file, lost) = close_ogg(w, x.file, s.reason);
+                        self.dropped += lost;
+                        self.done.push(file);
                     }
                 }
             }
-            Output::Frame(f) => self.frame(f),
+            Output::Frame(f) => self.frame(f)?,
             Output::Orphan(_) => {}
         }
         Ok(())
     }
 
-    fn frame(&mut self, f: &Frame) {
-        let Some(id) = f.segment else { return };
-        let Some(x) = self.open.get_mut(&id) else { return };
+    fn frame(&mut self, f: &Frame) -> io::Result<()> {
+        let Some(id) = f.segment else { return Ok(()) };
+        let Some(x) = self.open.get_mut(&id) else { return Ok(()) };
         if x.w.is_none() {
-            if !retry_due(x.stalled, f.log_time) {
-                self.dropped += 1;
-                return;
+            match gate(x.stalled, f.log_time, || super::free_bytes(&self.dir), self.cfg.min_free_bytes) {
+                Gate::Open => {}
+                Gate::Wait => {
+                    self.dropped += 1;
+                    return Ok(());
+                }
+                Gate::Recheck => {
+                    x.stalled = Some(Stall { at: f.log_time, space: true });
+                    self.dropped += 1;
+                    return Ok(());
+                }
             }
-            match OggOpus::create(&x.name, id as u32, self.faults) {
+            match OggOpus::create(&x.name, id as u32, &mut self.disk) {
                 Ok((w, path)) => {
                     x.file = fresh(&x.file, path);
                     x.w = Some(w);
                     x.stalled = None;
                 }
-                Err(_) => {
-                    x.stalled = Some(f.log_time);
+                Err(e) => {
+                    let space = rotates(e.kind(), false);
+                    x.stalled = Some(Stall { at: f.log_time, space });
                     self.dropped += 1;
-                    return;
+                    return if space { Ok(()) } else { Err(e) };
                 }
             }
         }
-        let pushed = x.w.as_mut().map(|w| w.push(&f.data));
-        if let Some(Err(_)) = pushed {
-            if let Some(w) = x.w.take() {
-                self.done.push(close_ogg(w, x.file.clone(), Some("disk_low")));
+        let Some(w) = x.w.as_mut() else { return Ok(()) };
+        match w.push(&f.data, Meta::of(f)) {
+            Ok(written) => {
+                if let Some(m) = written {
+                    count(&mut x.file, m);
+                }
             }
-            x.stalled = Some(f.log_time);
-            return;
+            Err(e) => {
+                self.dropped += 1;
+                if let Some(w) = x.w.take() {
+                    let (file, lost) = close_ogg(w, x.file.clone(), Some("disk_low"));
+                    self.dropped += lost;
+                    self.done.push(file);
+                }
+                x.stalled = Some(Stall { at: f.log_time, space: rotates(e.kind(), false) });
+            }
         }
-        x.file.packets += 1;
-        x.file.filled += u64::from(f.filled);
-        if !f.filled {
-            x.file.first_seq.get_or_insert(f.seq_first);
-            x.file.last_seq = Some(f.seq_last);
-        }
-        x.file.first_ts.get_or_insert(f.rtp_ts);
-        x.file.end_ts = Some(f.rtp_ts.wrapping_add(opus_samples(&f.data) as u32));
+        Ok(())
     }
 
     pub fn close(&mut self, reason: Option<&str>) -> io::Result<()> {
         let reason = reason.unwrap_or("end");
         for (_, mut x) in std::mem::take(&mut self.open) {
             if let Some(w) = x.w.take() {
-                self.done.push(close_ogg(w, x.file, Some(reason)));
+                let (file, lost) = close_ogg(w, x.file, Some(reason));
+                self.dropped += lost;
+                self.done.push(file);
             }
         }
         self.ended = true;
@@ -160,19 +193,48 @@ fn fresh(base: &OggFile, path: PathBuf) -> OggFile {
     OggFile { path, segment: base.segment, track_id: base.track_id.clone(), user_id: base.user_id.clone(), source: base.source, packets: 0, samples: 0, first_seq: None, last_seq: None, first_ts: None, end_ts: None, filled: 0, reason: None, talk: base.talk.clone() }
 }
 
-fn close_ogg(mut w: OggOpus, mut file: OggFile, reason: Option<&str>) -> OggFile {
-    match w.finish() {
-        Ok(granule) => {
-            file.samples = granule;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Meta {
+    filled: bool,
+    seq_first: u16,
+    seq_last: u16,
+    ts: u32,
+    end_ts: u32,
+}
+
+impl Meta {
+    fn of(f: &Frame) -> Meta {
+        Meta { filled: f.filled, seq_first: f.seq_first, seq_last: f.seq_last, ts: f.rtp_ts, end_ts: f.rtp_ts.wrapping_add(opus_samples(&f.data) as u32) }
+    }
+}
+
+fn count(file: &mut OggFile, m: Meta) {
+    file.packets += 1;
+    file.filled += u64::from(m.filled);
+    if !m.filled {
+        file.first_seq.get_or_insert(m.seq_first);
+        file.last_seq = Some(m.seq_last);
+    }
+    file.first_ts.get_or_insert(m.ts);
+    file.end_ts = Some(m.end_ts);
+}
+
+fn close_ogg(mut w: OggOpus, mut file: OggFile, reason: Option<&str>) -> (OggFile, u64) {
+    let r = w.finish();
+    file.samples = w.granule;
+    match r {
+        Ok(last) => {
+            if let Some(m) = last {
+                count(&mut file, m);
+            }
             file.reason = reason.map(str::to_string);
+            (file, 0)
         }
         Err(_) => {
-            file.samples = w.granule;
             file.reason = Some("disk_low".into());
-            w.abandon();
+            (file, u64::from(w.pending.is_some()))
         }
     }
-    file
 }
 
 fn safe(s: &str) -> String {
@@ -181,17 +243,29 @@ fn safe(s: &str) -> String {
 
 /// Ogg Opus 파일 하나 — 한 쪽에 한 패킷 · 마지막 쪽에 EOS
 struct OggOpus {
-    f: BufWriter<Dest>,
+    f: Dest,
+    len: u64,
     serial: u32,
     seq: u32,
     granule: u64,
-    pending: Option<Vec<u8>>,
+    pending: Option<(Vec<u8>, Meta)>,
 }
 
 impl OggOpus {
-    fn create(path: &Path, serial: u32, faults: Faults) -> io::Result<(OggOpus, PathBuf)> {
-        let (dest, path) = open_dest(path, false, faults)?;
-        let mut w = OggOpus { f: BufWriter::new(dest), serial, seq: 0, granule: 0, pending: None };
+    fn create(path: &Path, serial: u32, disk: &mut Disk) -> io::Result<(OggOpus, PathBuf)> {
+        let (f, path) = open_dest(path, false, disk)?;
+        let mut w = OggOpus { f, len: 0, serial, seq: 0, granule: 0, pending: None };
+        match w.head() {
+            Ok(()) => Ok((w, path)),
+            Err(e) => {
+                drop(w);
+                let _ = std::fs::remove_file(&path);
+                Err(e)
+            }
+        }
+    }
+
+    fn head(&mut self) -> io::Result<()> {
         let mut head = b"OpusHead".to_vec();
         head.push(1); // version
         head.push(1); // channels
@@ -199,38 +273,46 @@ impl OggOpus {
         head.extend_from_slice(&48_000u32.to_le_bytes());
         head.extend_from_slice(&0i16.to_le_bytes()); // output gain
         head.push(0); // mapping family
-        w.page(&head, 0x02, 0)?;
+        self.page(&head, 0x02, 0)?;
         let mut tags = b"OpusTags".to_vec();
         let vendor = b"oxpeer recorder";
         tags.extend_from_slice(&(vendor.len() as u32).to_le_bytes());
         tags.extend_from_slice(vendor);
         tags.extend_from_slice(&0u32.to_le_bytes());
-        w.page(&tags, 0x00, 0)?;
-        Ok((w, path))
+        self.page(&tags, 0x00, 0)
     }
 
-    fn push(&mut self, packet: &[u8]) -> io::Result<()> {
-        if let Some(p) = self.pending.take()
-            && let Err(e) = self.emit(&p, 0x00)
-        {
-            self.pending = Some(p);
-            return Err(e);
-        }
-        self.pending = Some(packet.to_vec());
-        Ok(())
+    fn push(&mut self, packet: &[u8], m: Meta) -> io::Result<Option<Meta>> {
+        let written = match self.pending.take() {
+            Some((p, pm)) => {
+                if let Err(e) = self.emit(&p, 0x00) {
+                    self.pending = Some((p, pm));
+                    return Err(e);
+                }
+                Some(pm)
+            }
+            None => None,
+        };
+        self.pending = Some((packet.to_vec(), m));
+        Ok(written)
     }
 
-    fn finish(&mut self) -> io::Result<u64> {
-        match self.pending.take() {
-            Some(p) => self.emit(&p, 0x04)?,
-            None => self.page(&[], 0x04, self.granule)?,
-        }
+    fn finish(&mut self) -> io::Result<Option<Meta>> {
+        let last = match self.pending.take() {
+            Some((p, m)) => {
+                if let Err(e) = self.emit(&p, 0x04) {
+                    self.pending = Some((p, m));
+                    return Err(e);
+                }
+                Some(m)
+            }
+            None => {
+                self.page(&[], 0x04, self.granule)?;
+                None
+            }
+        };
         self.f.flush()?;
-        Ok(self.granule)
-    }
-
-    fn abandon(self) {
-        let _ = self.f.into_parts();
+        Ok(last)
     }
 
     fn emit(&mut self, p: &[u8], flags: u8) -> io::Result<()> {
@@ -242,7 +324,11 @@ impl OggOpus {
 
     fn page(&mut self, packet: &[u8], flags: u8, granule: u64) -> io::Result<()> {
         let h = page_bytes(packet, flags, granule, self.serial, self.seq);
-        self.f.write_all(&h)?;
+        if let Err(e) = self.f.write_all(&h) {
+            let _ = self.f.cut(self.len);
+            return Err(e);
+        }
+        self.len += h.len() as u64;
         self.seq += 1;
         Ok(())
     }
@@ -298,8 +384,38 @@ pub(super) fn crc(b: &[u8]) -> u32 {
 pub(super) const RETRY_NS: u64 = 1_000_000_000;
 const MAX_NUMBER: u32 = 9_999;
 
+pub(super) const MIN_FREE_BYTES: u64 = 512 << 20;
+
 pub(super) fn retry_due(stalled: Option<u64>, now: u64) -> bool {
     stalled.is_none_or(|at| now.saturating_sub(at) >= RETRY_NS)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Stall {
+    pub(super) at: u64,
+    pub(super) space: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Gate {
+    Open,
+    Wait,
+    Recheck,
+}
+
+pub(super) fn gate(stall: Option<Stall>, now: u64, free: impl FnOnce() -> Option<u64>, min_free: u64) -> Gate {
+    let Some(s) = stall else { return Gate::Open };
+    if !retry_due(Some(s.at), now) {
+        return Gate::Wait;
+    }
+    if !s.space || free().is_none_or(|f| f >= min_free) {
+        return Gate::Open;
+    }
+    Gate::Recheck
+}
+
+pub(super) fn rotates(kind: io::ErrorKind, on_open_file: bool) -> bool {
+    on_open_file || matches!(kind, io::ErrorKind::StorageFull | io::ErrorKind::WriteZero | io::ErrorKind::QuotaExceeded | io::ErrorKind::FileTooLarge)
 }
 
 pub(super) fn numbered(path: &Path, n: u32) -> PathBuf {
@@ -314,12 +430,12 @@ pub(super) fn numbered(path: &Path, n: u32) -> PathBuf {
     path.with_file_name(name)
 }
 
-pub(super) fn open_dest(path: &Path, read: bool, faults: Faults) -> io::Result<(Dest, PathBuf)> {
+pub(super) fn open_dest(path: &Path, read: bool, disk: &mut Disk) -> io::Result<(Dest, PathBuf)> {
     let mut n = 0u32;
     loop {
         let p = numbered(path, n);
         match OpenOptions::new().read(read).write(true).create_new(true).open(&p) {
-            Ok(f) => return Ok((Dest::new(f, faults), p)),
+            Ok(f) => return Ok((disk.dest(f), p)),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists && n < MAX_NUMBER => n += 1,
             Err(e) => return Err(e),
         }
@@ -407,9 +523,12 @@ pub(super) fn scan_ogg(b: &[u8]) -> OggScan {
 pub fn recover_ogg(path: &Path) -> io::Result<Recovered> {
     let b = std::fs::read(path)?;
     let s = scan_ogg(&b);
+    if s.pages == 0 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "no whole Ogg page"));
+    }
     let mut f = OpenOptions::new().write(true).open(path)?;
     f.set_len(s.cut)?;
-    if s.pages > 0 && !s.eos {
+    if !s.eos {
         f.seek(SeekFrom::Start(s.cut))?;
         f.write_all(&page_bytes(&[], 0x04, s.granule, s.serial, s.next_seq))?;
     }
@@ -417,46 +536,51 @@ pub fn recover_ogg(path: &Path) -> io::Result<Recovered> {
     Ok(Recovered { path: path.to_path_buf(), media_frames: s.frames, duration_ms: s.granule / 48, reason: "crash".into() })
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct Faults {
-    pub(super) after: Option<u64>,
-    pub(super) sticky: bool,
+#[derive(Clone, Debug, Default)]
+pub(super) struct Disk {
+    after: Option<u64>,
+    sticky: bool,
+    budget: Option<Arc<Budget>>,
 }
 
+impl Disk {
+    fn dest(&mut self, f: File) -> Dest {
+        let Some(left) = self.after else { return Dest::Plain(f) };
+        let sticky = self.sticky;
+        let budget = self.budget.get_or_insert_with(|| Arc::new(Budget { left: AtomicU64::new(left), sticky, tripped: AtomicBool::new(false) }));
+        Dest::Faulty(f, budget.clone())
+    }
+}
+
+#[derive(Debug)]
 pub(super) struct Budget {
-    left: u64,
+    left: AtomicU64,
     sticky: bool,
-    tripped: bool,
+    tripped: AtomicBool,
 }
 
 impl Budget {
-    fn take(&mut self, n: usize) -> io::Result<usize> {
-        if n == 0 || (self.tripped && !self.sticky) {
+    fn take(&self, n: usize) -> io::Result<usize> {
+        if n == 0 || (self.tripped.load(Ordering::Relaxed) && !self.sticky) {
             return Ok(n);
         }
-        if self.left == 0 {
-            self.tripped = true;
+        let left = self.left.load(Ordering::Relaxed);
+        if left == 0 {
+            self.tripped.store(true, Ordering::Relaxed);
             return Err(io::Error::new(io::ErrorKind::StorageFull, "write budget spent"));
         }
-        let k = n.min(usize::try_from(self.left).unwrap_or(usize::MAX));
-        self.left -= k as u64;
+        let k = n.min(usize::try_from(left).unwrap_or(usize::MAX));
+        self.left.store(left - k as u64, Ordering::Relaxed);
         Ok(k)
     }
 }
 
 pub(super) enum Dest {
     Plain(File),
-    Faulty(File, Budget),
+    Faulty(File, Arc<Budget>),
 }
 
 impl Dest {
-    fn new(f: File, faults: Faults) -> Dest {
-        match faults.after {
-            None => Dest::Plain(f),
-            Some(left) => Dest::Faulty(f, Budget { left, sticky: faults.sticky, tripped: false }),
-        }
-    }
-
     fn file(&mut self) -> &mut File {
         match self {
             Dest::Plain(f) | Dest::Faulty(f, _) => f,
@@ -493,8 +617,22 @@ impl Seek for Dest {
 }
 
 #[cfg(test)]
+impl Disk {
+    pub(super) fn full_after(bytes: u64, sticky: bool) -> Disk {
+        let budget = Arc::new(Budget { left: AtomicU64::new(bytes), sticky, tripped: AtomicBool::new(false) });
+        Disk { after: Some(bytes), sticky, budget: Some(budget) }
+    }
+
+    pub(super) fn fill(&self) {
+        if let Some(b) = &self.budget {
+            b.left.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
+#[cfg(test)]
 impl OggSink {
-    pub(super) fn inject(&mut self, faults: Faults) {
-        self.faults = faults;
+    pub(super) fn inject(&mut self, disk: Disk) {
+        self.disk = disk;
     }
 }
