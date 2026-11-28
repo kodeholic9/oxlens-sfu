@@ -48,6 +48,7 @@ bytes = "1"
 hmac = "0.12"
 sha1 = "0.10"
 crc32fast = "1"
+rustix = { version = "1.1", default-features = false, features = ["std", "fs"] }
 rtcp = "0.17"
 hyper = { version = "1", features = ["http1", "server", "client"] }
 http-body-util = "0.1"

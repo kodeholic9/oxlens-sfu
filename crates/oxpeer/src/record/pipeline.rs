@@ -619,7 +619,7 @@ impl Pipeline {
                     self.fill(&key, &f, t, hole as u64, out);
                 }
             }
-            let len = super::ogg::opus_samples(&f.data);
+            let len = opus_samples(&f.data);
             let carry = self.tails.get(&key).map(|t| t.carry).unwrap_or(0);
             self.tails.insert(key.clone(), Tail { end_ts: f.rtp_ts.wrapping_add(len as u32), toc: f.data[0], carry, utc_end: f.utc_ns.map(|u| u + len * 1_000_000_000 / 48_000) });
         }
@@ -642,7 +642,7 @@ impl Pipeline {
     /// 구멍 하나를 PLC 패킷으로(앞 TOC 의 config · code 0 · 빈 프레임) — 개수 = (구멍 + 넘긴 나머지) ÷ 앞 프레임 길이 · 나머지는 넘긴다
     fn fill(&mut self, key: &str, f: &Frame, t: Tail, hole: u64, out: &mut Vec<Output>) {
         let toc = t.toc & 0xFC;
-        let per = super::ogg::opus_samples(&[toc]).max(1);
+        let per = opus_samples(&[toc]).max(1);
         let total = hole + t.carry;
         let n = total / per;
         if let Some(x) = self.tails.get_mut(key) {
@@ -680,8 +680,6 @@ impl Pipeline {
     }
 }
 
-/// ★늦은 SR 맞춤(SDK:RULE-PLAT-REC-HLS 「늦은 SR 맞춤」 · Matroska 도 파일마다 같다) — `log_time` 기준에서 영상 · 음성이 둘 다 UTC 를 받으면 영상만 옮긴다.
-/// 목표(ns) = (두 트랙 UTC 시작 차) − (두 트랙 첫 프레임 `log_time` 차). UTC 시작 = 첫 UTC 프레임의 UTC − 그 프레임까지의 트랙 경과.
 /// 프레임의 트랙이 지금 어느 방 목록에든 있나 — 없으면 목록에서 빠진 트랙의 늦은 프레임(SDK:RULE-PLAT-REC-SPLIT).
 /// ★지금 스냅숏의 순수 함수다 — 앞 목록과의 차이(이력)로 가르면 파트 머리 스냅숏만으로 읽는 파트 k 가 같은 패킷을 프레임으로 낸다(202611/20261119c D17).
 /// 방을 가리지 않는다 — 출처 트랙(CSRC)이 다른 방 목록에 있는 청취방 화자는 늦지 않다.
@@ -689,15 +687,19 @@ pub(crate) fn listed_now(present: &HashMap<String, BTreeSet<String>>, track_id: 
     present.values().any(|s| s.contains(track_id))
 }
 
-pub(crate) fn late_sr_shift_ns(video: (u64, u64, u64, u64), audio: (u64, u64, u64, u64)) -> i128 {
-    let start = |(_, utc, at, clock): (u64, u64, u64, u64)| i128::from(utc) - i128::from(at) * 1_000_000_000 / i128::from(clock.max(1));
-    (start(video) - start(audio)) - (i128::from(video.0) - i128::from(audio.0))
-}
-
-/// 영상 견본마다 옮기는 상한 — LiveKit Egress 기본(`DefaultMaxDriftAdjustment` 5ms)과 같다
-pub(crate) const LATE_SR_STEP_NS: i128 = 5_000_000;
-
-/// 지금 옮긴 양에서 목표로 한 걸음(상한 `step`)
-pub(crate) fn late_sr_step(applied: i128, target: i128, step: i128) -> i128 {
-    applied + (target - applied).clamp(-step, step)
+/// Opus 패킷 하나의 길이(48kHz 표본) — TOC 의 config · 프레임 수(RFC 6716 §3.1)
+pub fn opus_samples(p: &[u8]) -> u64 {
+    let Some(&toc) = p.first() else { return 0 };
+    let config = toc >> 3;
+    let per = match config {
+        0..=11 => [480, 960, 1920, 2880][usize::from(config % 4)],
+        12..=15 => [480, 960][usize::from(config % 2)],
+        _ => [120, 240, 480, 960][usize::from(config % 4)],
+    };
+    let frames = match toc & 0x03 {
+        0 => 1,
+        1 | 2 => 2,
+        _ => p.get(1).map(|b| u64::from(b & 0x3f)).unwrap_or(0),
+    };
+    per * frames
 }

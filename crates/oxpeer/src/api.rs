@@ -538,7 +538,7 @@ impl Client {
         rx.await.map_err(|_| Error::closed("CLOSED"))?
     }
 
-    /// 녹화 조각 경계(HLS — SDK:RULE-PLAT-REC-HLS)처럼 주기 키프레임이 없는 발행자(브라우저)에게 쓴다. 오디오 · 모르는 트랙은 아무 일도 없다
+    /// 녹화 조각 경계처럼 주기 키프레임이 없는 발행자(브라우저)에게 쓴다. 오디오 · 모르는 트랙은 아무 일도 없다
     pub fn request_keyframe(&self, track_id: impl Into<String>) -> Result<(), Error> {
         self.send(Cmd::RequestKey(track_id.into()))
     }

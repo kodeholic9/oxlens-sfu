@@ -1,7 +1,7 @@
 // author: kodeholic (powered by Claude)
-//! 내장 결과물 — Ogg Opus(RFC 7845 · RFC 3533 · SDK:RULE-PLAT-REC-API 「내장 결과물도 지점 위에」).
-//! ★프레임(지점 ②)과 세그먼트 사건(지점 ③)만 쓴다 — 세그먼트 하나 = 파일 하나. 받은 Opus 패킷을 그대로 담는다(다시 인코딩하지 않는다).
-//! ★결정론(SDK:RULE-PLAT-REC-PIPE) — 파일 이름 · 일련번호는 세그먼트에서 셈하고 벽시계를 넣지 않는다. 그래뉼 위치는 TOC 가 말하는 길이(RFC 6716 §3.1).
+//! 녹음 유닛 결과물 — Ogg Opus(RFC 7845 · RFC 3533 · 정:IMPL-OPS-REC-UNIT 「결과물」 `talk`).
+//! ★oxpeer 녹음 파이프라인의 프레임(지점 ②)과 세그먼트 사건(지점 ③)만 쓴다 — 세그먼트 하나 = 파일 하나. 받은 Opus 패킷을 그대로 담는다(다시 인코딩하지 않는다).
+//! ★결정론(SDK:RULE-PLAT-REC-PIPE — 같은 레코드열이면 같은 출력열) — 파일 이름 · 일련번호는 세그먼트에서 셈하고 벽시계를 넣지 않는다. 그래뉼 위치는 TOC 가 말하는 길이(RFC 6716 §3.1).
 
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use super::pipeline::{Frame, Output, SegmentKind};
+use oxpeer::record::{Frame, Output, SegmentKind, opus_samples};
 
 /// 닫힌 Ogg 파일 하나
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -352,22 +352,6 @@ pub(super) fn page_bytes(packet: &[u8], flags: u8, granule: u64, serial: u32, se
     h
 }
 
-/// Opus 패킷 하나의 길이(48kHz 표본) — TOC 의 config · 프레임 수(RFC 6716 §3.1)
-pub fn opus_samples(p: &[u8]) -> u64 {
-    let Some(&toc) = p.first() else { return 0 };
-    let config = toc >> 3;
-    let per = match config {
-        0..=11 => [480, 960, 1920, 2880][usize::from(config % 4)],
-        12..=15 => [480, 960][usize::from(config % 2)],
-        _ => [120, 240, 480, 960][usize::from(config % 4)],
-    };
-    let frames = match toc & 0x03 {
-        0 => 1,
-        1 | 2 => 2,
-        _ => p.get(1).map(|b| u64::from(b & 0x3f)).unwrap_or(0),
-    };
-    per * frames
-}
 
 /// Ogg 의 CRC-32(다항 0x04C11DB7 · 반사 없음 · 초기값 0)
 pub(super) fn crc(b: &[u8]) -> u32 {
@@ -384,7 +368,7 @@ pub(super) fn crc(b: &[u8]) -> u32 {
 pub(super) const RETRY_NS: u64 = 1_000_000_000;
 const MAX_NUMBER: u32 = 9_999;
 
-pub(super) const MIN_FREE_BYTES: u64 = 512 << 20;
+pub(super) use oxpeer::record::MIN_FREE_BYTES;
 
 pub(super) fn retry_due(stalled: Option<u64>, now: u64) -> bool {
     stalled.is_none_or(|at| now.saturating_sub(at) >= RETRY_NS)

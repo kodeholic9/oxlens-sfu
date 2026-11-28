@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # author: kodeholic (powered by Claude)
 # 재생기 호환 실측(context 202611/20261107a 미결) — ffmpeg 가 진짜 VP8 · H264 · Opus 를 짓고(해상도가 바뀌는 판 포함 — 시뮬캐스트 층 바뀜 흉내)
-#   → lib 시험이 RTP 로 쪼개 수신 정리층에 넣어 원본과 바이트 대조 → 예제 mkvcheck 가 공개 결과물 MkvSink 로 파일을 짓고
+#   → oxpeer lib 시험이 RTP 로 쪼개 수신 정리층에 넣어 원본과 바이트 대조 → oxtapd 예제 mkvcheck 가 결과물 MkvSink 로 파일을 짓고
 #   → ffprobe(꼴 · 코덱 · 크기) · ffmpeg 전부 디코드(오류 0)로 판정한다. ffmpeg(libvpx · libx264 · libopus) 가 있어야 돈다.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -14,8 +14,8 @@ src 640x360 -c:v libx264 -profile:v baseline -tune zerolatency -g 30 -x264-param
 src 320x180 -c:v libx264 -profile:v baseline -tune zerolatency -g 30 -x264-params aud=1 -f h264 "$D/h264_b.h264"
 ffmpeg -v error -f lavfi -i "sine=frequency=440:sample_rate=48000" -t 2 -c:a libopus -frame_duration 20 -b:a 32k "$D/opus.ogg"
 
-OXPEER_MEDIA_DIR="$D" cargo test --offline -p oxpeer --lib media_fixture -- --ignored --nocapture --test-threads 1
-cargo run --offline -q -p oxpeer --features record --example mkvcheck -- "$D"
+OXPEER_MEDIA_DIR="$D" cargo test --offline --manifest-path ../oxpeer/Cargo.toml --lib media_fixture -- --ignored --nocapture --test-threads 1
+cargo run --offline -q --example mkvcheck -- "$D"
 
 fail=0
 for f in vp8 h264 opus; do

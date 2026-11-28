@@ -36,8 +36,6 @@ pub enum Report {
         size: u64,
         mime: String,
         duration_ms: u64,
-        #[serde(default)]
-        reason: String,
     },
 }
 

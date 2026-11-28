@@ -22,6 +22,7 @@ record-lz4 = ["record", "mcap/lz4"]
 record-zstd = ["record", "mcap/zstd"]
 # 조립 대조군(설계 D15) — webrtc-media SampleBuilder + 디패킷타이저 · 예제 rawtool --ref 몫
 record-ref = ["record", "dep:webrtc-media", "dep:rtp"]
+testkit = ["record"]
 
 [dependencies]
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "sync", "time", "io-util"] }
@@ -66,11 +67,6 @@ unused_must_use = "deny"
 name = "agent_echo"
 path = "examples/agent_echo/main.rs"
 test = true
-
-[[example]]
-name = "mkvcheck"
-path = "examples/mkvcheck.rs"
-required-features = ["record"]
 
 [[example]]
 name = "rawtool"

@@ -1,12 +1,13 @@
 // author: kodeholic (powered by Claude)
 //! 재생기 호환 실측 도구(context 202611/20261107a 미결) — 수신 정리층이 다시 이은 진짜 코덱 프레임(`frames_<코덱>.bin` · lib 시험 `media_fixture_*`)을
-//! ★공개 결과물 `MkvSink`(SDK:RULE-PLAT-REC-MKV · 지점 ② ③ — 202611/20261110a)로 파일에 쓴다. 판정은 `scripts/media_check.sh` 가 ffprobe · ffmpeg 로 한다.
+//! ★녹음 유닛 결과물 `MkvSink`(정:RULE-OPS-REC-MKV)로 파일에 쓴다. 판정은 `scripts/media_check.sh` 가 ffprobe · ffmpeg 로 한다.
 //!
 //!   cargo run -p oxpeer --example mkvcheck --features record -- <표본 폴더>
 
 use std::path::PathBuf;
 
-use oxpeer::record::{Frame, MkvSink, Output, Segment, SegmentKind};
+use oxpeer::record::{Frame, Output, Segment, SegmentKind};
+use oxtapd::sink::MkvSink;
 
 /// `frames_<코덱>.bin` → [(키, RTP 시각, 본문)]
 fn load(dir: &std::path::Path, name: &str) -> Vec<(bool, u32, Vec<u8>)> {
@@ -44,7 +45,7 @@ fn seg(id: u64, kind: &str, codec: &str, event: SegmentKind) -> Segment {
     }
 }
 
-/// H264 + Opus 를 RTP 시각(초) 순으로 섞어 한 사람의 결과물로 — Matroska 한 파일(`av.mkv` — SDK:RULE-PLAT-REC-MKV 사람마다 영상 · 음성 · 202611/20261110e)
+/// H264 + Opus 를 RTP 시각(초) 순으로 섞어 한 사람의 결과물로 — Matroska 한 파일(`av.mkv` — 정:RULE-OPS-REC-MKV 사람마다 영상 · 음성 · 202611/20261110e)
 fn av(dir: &std::path::Path) {
     let mut sink = MkvSink::new(dir.join("av")).expect("폴더");
     let tracks = [("h264", "video", 90_000u64, 1u64), ("opus", "audio", 48_000, 2)];

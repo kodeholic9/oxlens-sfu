@@ -2,6 +2,7 @@
 // spec: v1.14 · 정:IMPL-OPS-REC-UNIT · 정:IMPL-CHAT-TALK · 정:RULE-OPS-DROPS · 연:RULE-CHAT-REC-FILE · model: claude-opus-5-5
 //! 1층 녹음 유닛 — 쓰는 중은 `.rec-part/{node}/{시각}/` 아래 닫힐 경로 그대로 · 닫기는 덮어쓰지 않는 링크 걸기(겹치면 `-NNNN` · 경합에도 한쪽만) · 발언 파일 · 개인 트랙 녹화 · 기동 회수(마감 · 빈 조각 지움 · 실패 조각 `failed/` · 다른 node 는 안 건드림) · 보관 네 폴더 · 등록부 · 되살림 판정 · `rec` 알림 · Handle.
 
+use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,6 +15,8 @@ use oxpeer::record::{Channel, Output, Pipeline, Policy, Record};
 use oxtapd::consumer::{RecConsumer, TalkFiles, TrackFiles};
 use oxtapd::{Layout, RecoverCtx, Registry, RoomCtx};
 use tokio::sync::mpsc;
+use tracing::field::{Field, Visit};
+use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 
 const TALK: &str = "81330e4c0190a1b2c3d4e5f60718293a4b5c";
 
@@ -102,6 +105,7 @@ fn ctx_in(layout: &Layout, run: &str, room: &str) -> (RoomCtx, mpsc::UnboundedRe
 }
 
 fn crash_then_recover(l: &Layout, run: &str, room: &str, recs: &[Record]) -> Vec<(String, String, String, String)> {
+    let _log = closed_lines();
     let (c, mut live) = ctx_in(l, run, room);
     let mut t = TalkFiles::open(&c).expect("talk");
     feed(&mut t, recs, None);
@@ -217,11 +221,52 @@ fn feed(c: &mut dyn RecConsumer, recs: &[Record], finish: Option<&str>) {
     }
 }
 
+thread_local! {
+    static CLOSED: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
+}
+
+#[derive(Default)]
+struct Fields(Vec<(String, String)>);
+
+impl Visit for Fields {
+    fn record_str(&mut self, f: &Field, v: &str) {
+        self.0.push((f.name().to_string(), v.to_string()));
+    }
+    fn record_debug(&mut self, f: &Field, v: &dyn std::fmt::Debug) {
+        self.0.push((f.name().to_string(), format!("{v:?}").trim_matches('"').to_string()));
+    }
+}
+
+struct ClosedLines;
+
+impl<S: tracing::Subscriber> Layer<S> for ClosedLines {
+    fn on_event(&self, e: &tracing::Event<'_>, _: Context<'_, S>) {
+        let mut f = Fields::default();
+        e.record(&mut f);
+        let get = |k: &str| f.0.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()).unwrap_or_default();
+        if get("message") == "rec closed" {
+            CLOSED.with(|c| c.borrow_mut().push((get("path"), get("reason"))));
+        }
+    }
+}
+
+fn closed_lines() -> tracing::subscriber::DefaultGuard {
+    CLOSED.with(|c| c.borrow_mut().clear());
+    tracing::subscriber::set_default(tracing_subscriber::registry().with(ClosedLines))
+}
+
+fn closed_reason(path: &str) -> String {
+    CLOSED.with(|c| c.borrow().iter().filter(|(p, _)| p == path).map(|(_, r)| r.clone()).collect::<Vec<_>>().join("+"))
+}
+
 fn reports(rx: &mut mpsc::UnboundedReceiver<Report>) -> Vec<(String, String, String, String)> {
     let mut v = Vec::new();
     while let Ok(r) = rx.try_recv() {
         match r {
-            Report::Rec { talk_id, path, mime, reason, .. } => v.push((talk_id, path, mime, reason)),
+            Report::Rec { talk_id, path, mime, .. } => {
+                let why = closed_reason(&path);
+                v.push((talk_id, path, mime, why));
+            }
             other => panic!("{other:?}"),
         }
     }
@@ -282,13 +327,14 @@ fn names_are_derived_from_the_room_the_talk_and_the_run() {
 
 #[test]
 fn talk_files_close_under_rec_one_per_talk_with_the_reason() {
+    let _log = closed_lines();
     let l = Layout::new(root("talk"), "n1");
     let (c, mut rx) = ctx(&l, "100");
     let mut t = TalkFiles::open(&c).expect("talk");
     feed(&mut t, &talk_stream(), Some("end"));
     assert_eq!(names(&l.closed("rec", "r")), vec!["r-tA-A.mkv".to_string(), "r-tB-B.ogg".to_string()], "정:IMPL-OPS-REC-UNIT 파일 — 발언마다 하나 · 영상 트랙이 든 발언은 .mkv(음성도 그 안) · 아니면 .ogg");
     let got = reports(&mut rx);
-    assert!(got.iter().any(|x| x.0 == "tB" && x.3 == "end") && got.iter().all(|x| !x.3.is_empty()), "정:IMPL-OPS-REC-UNIT 알림 — reason 은 늘 싣는다 · 닫을 때 준 사유: {got:?}");
+    assert!(got.iter().any(|x| x.0 == "tB" && x.3 == "end") && got.iter().all(|x| !x.3.is_empty()), "정:IMPL-OPS-REC-UNIT 알림 — 닫힘 사유는 닫을 때 진단 줄 하나(rec closed)에 · 닫을 때 준 사유: {got:?}");
     let got: Vec<(&str, &str, &str)> = got.iter().map(|(t, p, m, _)| (t.as_str(), p.as_str(), m.as_str())).collect();
     assert_eq!(got, vec![("tA", "rec/r/r-tA-A.mkv", "video/x-matroska"), ("tB", "rec/r/r-tB-B.ogg", "audio/ogg")], "정:IMPL-CHAT-TALK 2 — rec 알림도 발언마다 하나");
     assert!(oxtapd::files::files_under(&l.run_dir("100")).is_empty(), "nothing half-written stays in the run folder");
@@ -315,6 +361,7 @@ fn ogg_cut(p: &Path, pages: usize) {
 
 #[test]
 fn startup_recovery_closes_each_fragment_and_leaves_other_nodes_alone() {
+    let _log = closed_lines();
     let l = Layout::new(root("recover"), "n1");
     let (c, _rx) = ctx(&l, "300");
     let mut t = TalkFiles::open(&c).expect("talk");
@@ -347,7 +394,7 @@ fn startup_recovery_closes_each_fragment_and_leaves_other_nodes_alone() {
     let last = o.windows(4).rposition(|w| w == b"OggS").expect("page");
     assert_eq!(o[last + 5] & 0x04, 0x04, "정:IMPL-OPS-REC-UNIT 기동 회수 — Ogg 는 끝 표지를 덧붙인다");
     let got = reports(&mut rx);
-    assert!(!got.is_empty() && got.iter().all(|(_, _, _, why)| why == "crash"), "정:IMPL-OPS-REC-UNIT 알림 — 회수 crash: {got:?}");
+    assert!(!got.is_empty() && got.iter().all(|(_, _, _, why)| why == "crash"), "정:IMPL-OPS-REC-UNIT 기동 회수 — 닫힘 진단 줄의 사유 crash: {got:?}");
     assert!(!empty.exists() && !closed.iter().any(|n| n.ends_with("-z.ogg")), "정:IMPL-OPS-REC-UNIT 기동 회수 — 미디어 프레임이 없는 조각은 지운다");
     assert!(oxtapd::files::files_under(&l.failed()).iter().any(|p| p.ends_with("r-tX-y.ogg")), "정:IMPL-OPS-REC-UNIT 기동 회수 — 마감에 실패한 조각은 .rec-part/failed/");
     assert!(stray.exists(), "a fragment no kind claims is left in place");
@@ -571,7 +618,7 @@ async fn a_closed_recording_is_reported_to_the_gateway_over_the_bus() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     let drops = AtomicU64::new(0);
     let (tx, rx) = mpsc::unbounded_channel();
-    let rec = Report::Rec { talk_id: TALK.into(), path: format!("rec/ch-1/ch-1-{TALK}-bot-a.ogg"), size: 9, mime: "audio/ogg".into(), duration_ms: 1_000, reason: "idle".into() };
+    let rec = Report::Rec { talk_id: TALK.into(), path: format!("rec/ch-1/ch-1-{TALK}-bot-a.ogg"), size: 9, mime: "audio/ogg".into(), duration_ms: 1_000 };
     tx.send(rec.clone()).expect("queue");
     drop(tx);
     let u2 = unit.clone();
@@ -586,11 +633,11 @@ async fn a_closed_recording_is_reported_to_the_gateway_over_the_bus() {
     )
     .await;
     let (k, r) = tokio::time::timeout(Duration::from_secs(5), got_rx.recv()).await.expect("in time").expect("arrived");
-    assert_eq!((k.as_str(), r), ("ox/t/int/q/node/n1/talk", rec), "정:IMPL-OPS-REC-UNIT 알림 — rec{{.., reason}} goes to q/node/{{node}}/talk");
+    assert_eq!((k.as_str(), r), ("ox/t/int/q/node/n1/talk", rec), "정:IMPL-OPS-REC-UNIT 알림 — rec{{talk_id, path, size, mime, duration_ms}} goes to q/node/{{node}}/talk");
     assert_eq!(drops.load(Ordering::Relaxed), 0);
     let dead = oxtapd::bus::Bus::open("n9", "t", &at).await.expect("client");
     let (tx, rx) = mpsc::unbounded_channel();
-    tx.send(Report::Rec { talk_id: TALK.into(), path: "rec/x/y".into(), size: 1, mime: "audio/ogg".into(), duration_ms: 1, reason: "end".into() }).expect("queue");
+    tx.send(Report::Rec { talk_id: TALK.into(), path: "rec/x/y".into(), size: 1, mime: "audio/ogg".into(), duration_ms: 1 }).expect("queue");
     drop(tx);
     oxtapd::report_line(
         rx,

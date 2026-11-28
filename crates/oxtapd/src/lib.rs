@@ -6,6 +6,7 @@ pub mod bus;
 pub mod consumer;
 pub mod files;
 pub mod job;
+pub mod sink;
 pub mod unit;
 
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -1,29 +1,21 @@
 // author: kodeholic (powered by Claude)
 //! 녹음 원시 기록(SDK:RULE-PLAT-REC-TAP · REC-RAW · REC-CLOCK · REC-PART · context 202611/20261109c) — 정리층 출구의 RTP 원본과 그 시점의 제어 사건을
 //! 받은 차례대로 MCAP 파트에 적고(켰으면) 라이브 통(지점 ①)에 나눈다. 그 위에 파이프라인(분기 · 조립 · 시간축 · 분할 — REC-PIPE · REC-SPLIT)이
-//! 프레임(지점 ②) · 세그먼트 사건(지점 ③)을 내고, 내장 결과물(`OggSink`)도 그 둘만 쓴다(REC-API).
+//! 프레임(지점 ②) · 세그먼트 사건(지점 ③)을 낸다. 결과물 파일은 앱 몫이다(REC-API).
 //!
 //! 채취는 직접 소유다 — 정리층이 `Out::Raw` · `Out::Gap` 을 내면 `deliver` 가 `MediaSink` 가 쥔 기록기를 부르고, core 는 사건을 낼 때 같은 기록기를 부른다.
 //! `sequence` · `log_time` 은 기록기 잠금 안 한 곳에서 매긴다(REC-CLOCK) — 그래서 파일 차례로 둘 다 오른다.
 
-mod cover;
 mod file;
 mod live;
-mod mkv;
-mod ogg;
 mod pipeline;
+#[cfg(any(test, feature = "testkit"))]
+pub mod testkit;
 
 pub use file::{FileSource, PartScan, scan_part};
 pub(crate) use live::Shared;
 pub use live::Records;
-pub use mkv::{MkvConfig, MkvFile, MkvSink, MkvTrack};
-pub use ogg::{OggFile, OggSink, opus_samples};
-pub use pipeline::{Frame, Output, Pipeline, Policy, Segment, SegmentKind};
-pub use cover::{Coverage, TrackCoverage};
-pub use mkv::recover_mkv;
-pub use ogg::safe as safe_name;
-pub use ogg::{Recovered, recover_ogg};
-pub use ogg::OggConfig;
+pub use pipeline::{Frame, Output, Pipeline, Policy, Segment, SegmentKind, opus_samples};
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
@@ -41,6 +33,8 @@ use crate::api::Event;
 
 /// 원시 포맷 판(SDK:RULE-PLAT-REC-RAW `oxlens.recording` `format`)
 pub const FORMAT: u32 = 1;
+
+pub const MIN_FREE_BYTES: u64 = 512 << 20;
 
 /// 청크 압축(실측 M9 — 기본은 없음)
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -90,7 +84,7 @@ impl RecordConfig {
             part_time: Duration::from_secs(3_600),
             flush: Duration::from_secs(2),
             tick: Duration::from_millis(500),
-            min_free_bytes: ogg::MIN_FREE_BYTES,
+            min_free_bytes: MIN_FREE_BYTES,
             fsync_on_flush: false,
             compression: Compression::None,
         }
@@ -237,21 +231,6 @@ pub(crate) fn rotation(bytes: u64, age_ns: u64, part_bytes: u64, part_time_ns: u
 
 pub(crate) fn resumes(stop: Option<Stop>, free: Option<u64>, min_free: u64, part_bytes: u64) -> bool {
     stop == Some(Stop::DiskLow) && free.is_some_and(|f| f > min_free.saturating_add(part_bytes))
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum KeyAsk {
-    #[default]
-    Idle,
-    Wanting,
-}
-
-pub(crate) fn key_request(st: KeyAsk, video_key: bool, elapsed: u128, target: u128, lead: u128) -> (bool, KeyAsk) {
-    match st {
-        KeyAsk::Idle if elapsed.saturating_add(lead) >= target => (true, KeyAsk::Wanting),
-        KeyAsk::Wanting if video_key && elapsed < target => (true, KeyAsk::Wanting),
-        s => (false, s),
-    }
 }
 
 struct Inner {

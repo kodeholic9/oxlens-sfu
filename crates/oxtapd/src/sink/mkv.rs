@@ -1,8 +1,8 @@
 // author: kodeholic (powered by Claude)
-//! 내장 결과물 — Matroska(SDK:RULE-PLAT-REC-MKV · 202611/20261110a 옮김 · ★20261110e 사람마다 영상 · 음성 한 파일 — 묶음 · 여는 보류 · 파일 경계 · 시각 기준).
-//! ★프레임(지점 ②)과 세그먼트 사건(지점 ③)만 쓴다(SDK:RULE-PLAT-REC-API). 받은 코덱 프레임을 그대로 담는다(다시 인코딩하지 않는다).
+//! 녹음 유닛 결과물 — Matroska(정:RULE-OPS-REC-MKV — 사람마다 영상 · 음성 한 파일 · 묶음 · 여는 보류 · 파일 경계 · 시각 기준).
+//! ★oxpeer 녹음 파이프라인의 프레임(지점 ②)과 세그먼트 사건(지점 ③)만 쓴다 · 레코드는 트랙 목록만 읽는다(덮음 요약). 받은 코덱 프레임을 그대로 담는다(다시 인코딩하지 않는다).
 //! VP8 은 그대로 · H264 는 Annex-B 를 길이 앞붙임(avcC)으로 바꾼다(Matroska `V_MPEG4/ISO/AVC`) · Opus 는 그대로(`A_OPUS`).
-//! 블록 시각 = 파일 원점에서 트랙 첫 프레임까지 + 트랙 RTP 경과 — 줄이 바뀌면 두 프레임의 `log_time` 차로 잇는다. 기준(UTC · `log_time`)은 묶음에서 한 번(HLS 와 같다).
+//! 블록 시각 = 파일 원점에서 트랙 첫 프레임까지 + 트랙 RTP 경과 — 줄이 바뀌면 두 프레임의 `log_time` 차로 잇는다. 기준(UTC · `log_time`)은 파일마다 한 번.
 //! 파일 시작 벽시계(DateUTC) = 파일 원점.
 //! ★결정론(SDK:RULE-PLAT-REC-PIPE) — 시스템 시계를 읽지 않는다 · 파일 이름 · 트랙 번호는 묶음 · 파일 차례에서 셈한다.
 //! Segment · Cluster 는 크기 모르는 꼴(라이브 Matroska)로 열어 쓰고 ★닫을 때 고쳐 쓴다 — 클러스터는 다음 클러스터를 열 때 크기를,
@@ -16,8 +16,7 @@ use std::path::{Path, PathBuf};
 
 use super::cover::{Cover, Coverage};
 use super::ogg::{Dest, Disk, Gate, MIN_FREE_BYTES, Recovered, Stall, gate, open_dest, rotates};
-use super::pipeline::{Output, Segment, SegmentKind};
-use super::{Channel, Record};
+use oxpeer::record::{Channel, Output, Record, Segment, SegmentKind};
 
 const ID_EBML: u32 = 0x1A45_DFA3;
 const ID_SEGMENT: u32 = 0x1853_8067;
@@ -566,7 +565,7 @@ pub struct MkvFile {
     pub date: &'static str,
     /// `log_time` 기준 파일의 DateUTC 를 UTC 로 고쳐 쓸 때 닻이 된 트랙(`audio` · 없으면 `video`) — 영상은 늦은 SR 맞춤으로 음성에 맞춘다. `utc` 기준 파일은 없음
     pub date_track: Option<&'static str>,
-    /// 늦은 SR 맞춤의 영상 목표(µs · SDK:RULE-PLAT-REC-HLS 「늦은 SR 맞춤」 — 파일마다) · 없으면 맞춤 없음
+    /// 늦은 SR 맞춤의 영상 목표(µs · 정:RULE-OPS-REC-MKV 「늦은 SR 맞춤」 — 파일마다) · 없으면 맞춤 없음
     pub video_shift_us: Option<i64>,
     pub duration_ms: u64,
     /// 닫힌 까닭 — `end` · `track`(트랙이 방에서 사라짐) · `source`(화자 바뀜) · `span` · `late_track`(연 뒤 새 종류가 듦) · `no_source` · `gap`
@@ -652,9 +651,9 @@ struct Group {
     pend_since: Option<u64>,
     pend_source: Option<u32>,
     pend_user: Option<String>,
-    /// 지금 파일(또는 모으는 더미)의 발언 번호 — 무전 슬롯은 이것이 바뀐 세그먼트에서 새 파일(SDK:RULE-PLAT-REC-MKV)
+    /// 지금 파일(또는 모으는 더미)의 발언 번호 — 무전 슬롯은 이것이 바뀐 세그먼트에서 새 파일(정:RULE-OPS-REC-MKV)
     utt: Option<u64>,
-    /// 지금 발언의 발언 id · 화자 — 무전 슬롯 파일 이름 `{방}-{발언 id}-{화자}.mkv`(SDK:RULE-PLAT-REC-MKV · 없으면 옛 꼴)
+    /// 지금 발언의 발언 id · 화자 — 무전 슬롯 파일 이름 `{방}-{발언 id}-{화자}.mkv`(정:RULE-OPS-REC-MKV · 없으면 옛 꼴)
     talk: Option<(String, String)>,
     /// 지금 발언 안에서 연 파일 수(같은 발언의 둘째 파일만 번호를 덧붙인다)
     talk_n: u64,
@@ -704,7 +703,7 @@ impl Group {
     }
 }
 
-/// 묶음마다 Matroska(사람마다 · 방 슬롯마다 영상 · 음성 한 파일 — SDK:RULE-PLAT-REC-MKV)
+/// 묶음마다 Matroska(사람마다 · 방 슬롯마다 영상 · 음성 한 파일 — 정:RULE-OPS-REC-MKV)
 pub struct MkvSink {
     cfg: MkvConfig,
     groups: BTreeMap<String, Group>,
@@ -860,7 +859,7 @@ impl MkvSink {
         let busy_now = g.file.is_some() || !g.pend.is_empty();
         let other_source = g.owner.is_none() && busy_now && g.utt != s.utterance;
         let new_kind = g.file.as_ref().is_some_and(|f| !f.tracks.iter().any(|(k, _)| *k == kind));
-        let r = if other_source || new_kind { cut(g, if other_source { "utterance" } else { "late_track" }, &mut self.fs) } else { Ok(()) };
+        let r = if other_source || new_kind { cut(g, if other_source { "taken" } else { "late_track" }, &mut self.fs) } else { Ok(()) };
         if let Err(b) = &r {
             settle(g, b, s.first_log_time, &mut self.fs);
         }
@@ -891,7 +890,7 @@ impl MkvSink {
         r
     }
 
-    fn closed(&mut self, s: &super::pipeline::Segment) -> Step {
+    fn closed(&mut self, s: &Segment) -> Step {
         let Some((key, kind)) = self.segs.remove(&s.id) else { return Ok(()) };
         let Some(g) = self.groups.get_mut(&key) else { return Ok(()) };
         if let Some(t) = g.trk(kind)
@@ -910,7 +909,7 @@ impl MkvSink {
         Ok(())
     }
 
-    fn frame(&mut self, f: &super::pipeline::Frame) -> Step {
+    fn frame(&mut self, f: &oxpeer::record::Frame) -> Step {
         let Some(id) = f.segment else { return Ok(()) };
         let Some((key, kind)) = self.segs.get(&id).cloned() else { return Ok(()) };
         let hold = self.cfg.hold.as_nanos() as u64;
@@ -1151,12 +1150,12 @@ fn write_one(g: &mut Group, p: Pend, fs: &mut Files) -> Step {
         None => return Ok(()),
     };
     let dur_ns: i128 = match p.kind {
-        Kind::Audio => i128::from(super::ogg::opus_samples(&p.data)) * 1_000_000_000 / 48_000,
+        Kind::Audio => i128::from(oxpeer::record::opus_samples(&p.data)) * 1_000_000_000 / 48_000,
         Kind::Video => 1_000_000_000 / 30,
     };
     let shift = match (g.video.as_ref(), g.audio.as_ref()) {
         (Some(v), Some(a)) => match (v.first_utc, a.first_utc) {
-            (Some((vu, vat)), Some((au, aat))) => Some(super::pipeline::late_sr_shift_ns((v.first_log, vu, vat, v.codec.clock()), (a.first_log, au, aat, a.codec.clock()))),
+            (Some((vu, vat)), Some((au, aat))) => Some(late_sr_shift_ns((v.first_log, vu, vat, v.codec.clock()), (a.first_log, au, aat, a.codec.clock()))),
             _ => None,
         },
         _ => None,
@@ -1180,7 +1179,7 @@ fn write_one(g: &mut Group, p: Pend, fs: &mut Files) -> Step {
     let abs = if p.kind == Kind::Video && !fl.utc {
         let now = fl.vshift_at;
         if let Some(target) = fl.vshift {
-            next_shift = super::pipeline::late_sr_step(now, target, super::pipeline::LATE_SR_STEP_NS);
+            next_shift = late_sr_step(now, target, LATE_SR_STEP_NS);
         }
         abs + now
     } else {
@@ -1496,6 +1495,21 @@ impl MkvSink {
     pub(super) fn inject(&mut self, disk: Disk) {
         self.fs.disk = disk;
     }
+}
+
+/// ★늦은 SR 맞춤(정:RULE-OPS-REC-MKV 「늦은 SR 맞춤」 · 파일마다) — `log_time` 기준에서 영상 · 음성이 둘 다 UTC 를 받으면 영상만 옮긴다.
+/// 목표(ns) = (두 트랙 UTC 시작 차) − (두 트랙 첫 프레임 `log_time` 차). UTC 시작 = 첫 UTC 프레임의 UTC − 그 프레임까지의 트랙 경과.
+fn late_sr_shift_ns(video: (u64, u64, u64, u64), audio: (u64, u64, u64, u64)) -> i128 {
+    let start = |(_, utc, at, clock): (u64, u64, u64, u64)| i128::from(utc) - i128::from(at) * 1_000_000_000 / i128::from(clock.max(1));
+    (start(video) - start(audio)) - (i128::from(video.0) - i128::from(audio.0))
+}
+
+/// 영상 견본마다 옮기는 상한 — LiveKit Egress 기본(`DefaultMaxDriftAdjustment` 5ms)과 같다
+const LATE_SR_STEP_NS: i128 = 5_000_000;
+
+/// 지금 옮긴 양에서 목표로 한 걸음(상한 `step`)
+fn late_sr_step(applied: i128, target: i128, step: i128) -> i128 {
+    applied + (target - applied).clamp(-step, step)
 }
 
 fn safe(s: &str) -> String {

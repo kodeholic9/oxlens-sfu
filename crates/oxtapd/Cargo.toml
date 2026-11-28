@@ -23,11 +23,18 @@ tracing = "0.1"
 tonic = "0.12"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 oxpeer = { path = "../oxpeer", features = ["record"] }
+rustix = { version = "1.1", default-features = false, features = ["std", "fs"] }
 
 [dev-dependencies]
+oxpeer = { path = "../oxpeer", features = ["record", "testkit"] }
 oxmesh = { path = "../oxmesh" }
 tokio = { version = "1", features = ["full", "test-util"] }
 rcgen = "0.13"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[example]]
+name = "mkvcheck"
+path = "examples/mkvcheck.rs"
 
 [profile.dev]
 split-debuginfo = "packed"

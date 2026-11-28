@@ -1457,11 +1457,13 @@ dependencies = [
  "oxpeer",
  "oxsig",
  "rcgen",
+ "rustix",
  "serde_json",
  "tokio",
  "tokio-rustls",
  "tonic",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

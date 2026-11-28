@@ -1,5 +1,5 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.14 · 정:IMPL-OPS-REC-UNIT · 정:IMPL-CHAT-TALK · SDK:RULE-PLAT-REC-API · SDK:RULE-PLAT-REC-MKV · model: claude-opus-5-5
+// spec: v1.14 · 정:IMPL-OPS-REC-UNIT · 정:IMPL-CHAT-TALK · SDK:RULE-PLAT-REC-API · 정:RULE-OPS-REC-MKV · model: claude-opus-5-5
 //! 결과물 소비자 — trait `RecConsumer`(지점 셋 `record` · `frame` · `segment` 의 형 그대로 · `finish` · `recover`) · 등록부 `Registry`(기본 셋 `talk` · `tracks` · `raw` 를 든 채 시작 · `Registry::register` 로 같은 이름은 바꾸고 새 이름은 더한다 · 빼지 못한다) · 기본 소비자 셋(발언 파일 · 개인 트랙 녹화 · 원시 기록) · 기동 회수(살아 있는 실행 폴더는 건너뜀 · 제 종류의 쓰는 중 조각만 마감해 닫힌 경로로 · 녹취를 지우지 않는다 — 미디어 0 조각만).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -8,10 +8,11 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
 use common::talk::Report;
-use oxpeer::record::{Frame, MkvFile, MkvSink, OggFile, OggSink, Output, Record, Recovered, Segment, SegmentKind};
+use oxpeer::record::{Frame, Output, Record, Segment, SegmentKind};
 use tokio::sync::mpsc;
 
 use crate::files::{self, LOCK_FILE, Layout};
+use crate::sink::{MkvFile, MkvSink, OggFile, OggSink, Recovered};
 
 pub const SPEC: &str = "SV-IMPL-OPS-REC-UNIT";
 pub const OGG_MIME: &str = "audio/ogg";
@@ -179,7 +180,7 @@ pub fn settle_talk(layout: &Layout, room: &str, path: &Path, name: &str, talk: O
         tracing::warn!(kind = "diag", spec = SPEC, room = %room, talk_id = %talk, path = %at, "rec second file of one talk — kept on disk only, the first is the talk's record");
         return Ok(None);
     }
-    Ok(Some(Report::Rec { talk_id: talk.to_string(), path: at, size, mime: mime.into(), duration_ms, reason: reason.into() }))
+    Ok(Some(Report::Rec { talk_id: talk.to_string(), path: at, size, mime: mime.into(), duration_ms }))
 }
 
 pub struct TalkFiles {
@@ -339,15 +340,15 @@ impl RecConsumer for TalkFiles {
                 }
                 let Some(room) = p.parent().and_then(|d| d.file_name()).map(|n| n.to_string_lossy().into_owned()) else { continue };
                 let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                let talk = files::talk_of(&oxpeer::record::safe_name(&room), &name);
+                let talk = files::talk_of(&crate::sink::safe_name(&room), &name);
                 groups.entry((room, talk)).or_default().push(p);
             }
             for ((room, talk), paths) in groups {
                 let mut done: Vec<(PathBuf, Recovered, u64)> = Vec::new();
                 for p in paths {
                     let r = match p.extension().and_then(|e| e.to_str()) {
-                        Some("ogg") => oxpeer::record::recover_ogg(&p),
-                        _ => oxpeer::record::recover_mkv(&p),
+                        Some("ogg") => crate::sink::recover_ogg(&p),
+                        _ => crate::sink::recover_mkv(&p),
                     };
                     if let Some((rec, size)) = recovered(&ctx.layout, &room, "talk", &p, r) {
                         done.push((p, rec, size));
@@ -485,7 +486,7 @@ impl RecConsumer for TrackFiles {
                     continue;
                 }
                 let Some(room) = p.parent().and_then(|d| d.file_name()).map(|n| n.to_string_lossy().into_owned()) else { continue };
-                if let Some((_, size)) = recovered(&ctx.layout, &room, "tracks", &p, oxpeer::record::recover_mkv(&p)) {
+                if let Some((_, size)) = recovered(&ctx.layout, &room, "tracks", &p, crate::sink::recover_mkv(&p)) {
                     match settle_track(&ctx.layout, &room, &stamp, &p, ctx.reason) {
                         Ok(_) => recovered_line(&ctx.layout, &room, "tracks", None, &p, size, ctx.reason),
                         Err(e) => tracing::warn!(kind = "diag", spec = SPEC, room = %room, path = %p.display(), "rec recover settle: {e}"),
