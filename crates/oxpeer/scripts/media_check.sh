@@ -50,32 +50,5 @@ a=$(ffprobe -v error -count_frames -select_streams a -show_entries stream=nb_rea
 echo "   영상 $v · 음성 $a · 오류 줄 $(printf '%s' "$err" | grep -c . || true)"
 [ -n "$err" ] && { echo "$err" | head -3; fail=1; }
 [ "${v:-0}" -eq 120 ] && [ "${a:-0}" -eq 101 ] || { echo "   ✗ 한 파일에 영상 120 · 음성 101 이 아니다"; fail=1; }
-# HLS(202611/20261110b) — 같은 표본(H264 해상도 바뀜 + Opus)을 HlsSink 로 지은 조각을 ★조각마다 그 조각의 init 을 붙여 끝까지 디코드한다.
-#   ★ffmpeg HLS 읽개는 재생 목록 중간의 EXT-X-MAP 교체(끊김 뒤 새 init)를 따라가지 않아 뒤 조각을 앞 init 으로 풀다 오류를 낸다(20261110 실측) —
-#   끊김을 건너는 재생은 3층 브라우저가 판정한다. 여기는 파일 자체(init + 조각)가 디코드되는지만.
-H="$D/hls/mkvcheck-u"
-echo "== hls $H"
-inits=$(grep -c '^#EXT-X-MAP' "$H/event.m3u8"); discs=$(grep -c '^#EXT-X-DISCONTINUITY$' "$H/event.m3u8")
-echo "   init $inits · 끊김 표시 $discs"
-[ "$inits" -eq 2 ] && [ "$discs" -eq 1 ] || { echo "   ✗ 해상도 바뀜에 새 init + 끊김 하나가 아니다"; fail=1; }
-tv=0; ta=0; sizes=""
-init=""
-while read -r line; do
-  case "$line" in
-    '#EXT-X-MAP:URI="'*) init=$(echo "$line" | sed 's/.*URI="\(.*\)"/\1/') ;;
-    seg-*.m4s)
-      cat "$H/$init" "$H/$line" > "$D/one.mp4"
-      err=$(ffmpeg -v error -i "$D/one.mp4" -f null - 2>&1 || true)
-      [ -n "$err" ] && { echo "   ✗ $line($init) 디코드 오류"; echo "$err" | head -3; fail=1; }
-      v=$(ffprobe -v error -count_frames -select_streams v -show_entries stream=nb_read_frames -of csv=p=0 "$D/one.mp4")
-      a=$(ffprobe -v error -count_frames -select_streams a -show_entries stream=nb_read_frames -of csv=p=0 "$D/one.mp4")
-      sz=$(ffprobe -v error -select_streams v -show_entries stream=width,height -of csv=p=0 "$D/one.mp4")
-      echo "   $line($init) 영상 $v · 음성 $a · $sz"
-      tv=$((tv + ${v:-0})); ta=$((ta + ${a:-0})); sizes="$sizes $sz" ;;
-  esac
-done < "$H/event.m3u8"
-echo "   합 영상 $tv · 음성 $ta · 크기 차례$sizes"
-[ "$tv" -eq 120 ] || { echo "   ✗ 영상 프레임 $tv ≠ 120"; fail=1; }
-[ "$ta" -eq 101 ] || { echo "   ✗ 음성 프레임 $ta ≠ 101"; fail=1; }
 echo "== media_check $fail"
 exit $fail

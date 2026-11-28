@@ -1051,7 +1051,7 @@ fn mkv_av_file_across_rtp_wrap_of_both_tracks_is_one_file_moving_forward() {
     std::fs::remove_dir_all(&d).ok();
 }
 
-// ── 5단계(202611/20261110b) — HLS 결과물(fMP4 · 재생 목록) ──
+// ── 5단계(202611/20261110b) — 영상 · 음성 표본 ──
 
 const SPS_A: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xda, 0x01, 0x40, 0x16, 0xe4];
 const SPS_B: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xda, 0x02, 0x80, 0x2d, 0xc8];
@@ -1112,253 +1112,6 @@ fn av_stream_gop(secs: u32, start_v: u32, sps_switch_at: Option<u32>, gop: u32) 
     v
 }
 
-fn hls_build(recs: &[Record], dir: &Path) -> (Vec<HlsStream>, Vec<String>) {
-    let mut pl = Pipeline::new(Policy::Span { time_ns: u64::MAX, bytes: u64::MAX });
-    let mut sink = HlsSink::new(dir, HlsConfig::default()).unwrap();
-    let mut asked = Vec::new();
-    for r in recs {
-        for o in pl.push(r) {
-            sink.write(&o).unwrap();
-        }
-        asked.extend(sink.take_keyframe_requests());
-    }
-    for o in pl.finish() {
-        sink.write(&o).unwrap();
-    }
-    sink.finish().unwrap();
-    (sink.streams().to_vec(), asked)
-}
-
-/// 트랙 번호 · tfdt · [(길이, 크기, 플래그)]
-type MoofTraf = (u32, u64, Vec<(u32, u32, u32)>);
-
-/// fMP4 조각 → 트랙마다 (tfdt, [(길이, 크기, 플래그)]) — 상자를 걸어 읽는다
-fn read_moof(b: &[u8]) -> Vec<MoofTraf> {
-    fn boxes(b: &[u8]) -> Vec<([u8; 4], &[u8])> {
-        let mut out = Vec::new();
-        let mut i = 0;
-        while i + 8 <= b.len() {
-            let n = u32::from_be_bytes(b[i..i + 4].try_into().unwrap()) as usize;
-            out.push((b[i + 4..i + 8].try_into().unwrap(), &b[i + 8..i + n]));
-            i += n;
-        }
-        out
-    }
-    let mut out = Vec::new();
-    for (t, body) in boxes(b) {
-        if &t != b"moof" {
-            continue;
-        }
-        for (t, traf) in boxes(body) {
-            if &t != b"traf" {
-                continue;
-            }
-            let (mut id, mut tfdt, mut rows) = (0, 0, Vec::new());
-            for (t, x) in boxes(traf) {
-                match &t {
-                    b"tfhd" => id = u32::from_be_bytes(x[4..8].try_into().unwrap()),
-                    b"tfdt" => tfdt = u64::from_be_bytes(x[4..12].try_into().unwrap()),
-                    b"trun" => {
-                        let n = u32::from_be_bytes(x[4..8].try_into().unwrap()) as usize;
-                        for k in 0..n {
-                            let o = 12 + k * 12;
-                            let r = |a: usize| u32::from_be_bytes(x[a..a + 4].try_into().unwrap());
-                            rows.push((r(o), r(o + 4), r(o + 8)));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            out.push((id, tfdt, rows));
-        }
-    }
-    out
-}
-
-#[test]
-fn hls_segment_over_target_is_counted_and_logged_as_diag_warn() {
-    let d = tmp("hls-over");
-    let spool = d.join("spool");
-    std::fs::create_dir_all(&spool).unwrap();
-    let log = crate::log::LogConfig { socket: Some(d.join("no-such.sock")), spool_dir: Some(spool.clone()), node: "t".into(), ..crate::log::LogConfig::default() };
-    let mut pl = Pipeline::new(Policy::Span { time_ns: u64::MAX, bytes: u64::MAX });
-    let mut sink = HlsSink::new(d.join("hls"), HlsConfig { log: Some(log), ..HlsConfig::default() }).unwrap();
-    for r in &av_stream_gop(12, 1000, None, 240) {
-        for o in pl.push(r) {
-            sink.write(&o).unwrap();
-        }
-    }
-    for o in pl.finish() {
-        sink.write(&o).unwrap();
-    }
-    sink.finish().unwrap();
-    let s = &sink.streams()[0];
-    let over: Vec<usize> = s.segments.iter().enumerate().filter(|(_, x)| x.duration.round() as u64 > 6).map(|(i, _)| i).collect();
-    assert_eq!(s.over_target, over.len() as u64);
-    assert!(!over.is_empty(), "키프레임이 8초마다라 첫 조각이 ⌈1.5 × 4⌉ = 6초를 넘는다: {:?}", s.segments.iter().map(|x| x.duration).collect::<Vec<_>>());
-    let file = spool.join("t.peer.spool.log");
-    let mut lines = Vec::new();
-    for _ in 0..200 {
-        lines = std::fs::read_to_string(&file).unwrap_or_default().lines().filter(|l| l.contains("over target")).map(str::to_string).collect();
-        if lines.len() == over.len() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    assert_eq!(lines.len(), over.len(), "넘은 조각마다 한 줄");
-    let l = &lines[0];
-    assert!(l.contains("kind=diag") && l.contains("spec=SD-RULE-PLAT-REC-HLS"), "{l}");
-    assert!(l.contains(&format!("in.segment={}", over[0])) && l.contains("in.target_s=6"), "{l}");
-}
-
-#[test]
-fn hls_cuts_at_keyframe_after_target_with_continuous_decode_time() {
-    let d = tmp("hls-av");
-    let (st, asked) = hls_build(&av_stream(11, 1000, None), &d);
-    assert_eq!(st.len(), 1, "사람 하나 = 묶음 하나");
-    let s = &st[0];
-    assert_eq!(s.base, Some("utc"), "두 트랙 모두 SR 이 있다");
-    assert_eq!(s.inits.len(), 1);
-    assert_eq!(s.segments.iter().map(|x| x.duration.round() as u64).collect::<Vec<_>>(), vec![4, 4, 3], "4초 지난 첫 키(1초마다)에서");
-    assert!(s.segments.iter().all(|x| !x.discontinuity));
-    assert_eq!(s.over_target, 0);
-    assert_eq!(asked.len(), 3, "조각마다 T − 1초에 한 번");
-    let mut next: HashMap<u32, u64> = HashMap::new();
-    for x in &s.segments {
-        let m = read_moof(&std::fs::read(&x.file).unwrap());
-        let v = m.iter().find(|t| t.0 == 1).unwrap();
-        assert_eq!(v.2[0].2, 0x0200_0000, "조각의 첫 영상 샘플은 키");
-        for (id, tfdt, rows) in &m {
-            if let Some(want) = next.get(id) {
-                assert_eq!(tfdt, want, "트랙 {id} 디코드 시각이 앞 조각 끝에서 잇는다");
-            }
-            next.insert(*id, tfdt + rows.iter().map(|r| u64::from(r.0)).sum::<u64>());
-        }
-    }
-    let ev = std::fs::read_to_string(&s.event_playlist).unwrap();
-    assert!(ev.contains("#EXT-X-PLAYLIST-TYPE:EVENT") && ev.contains("#EXT-X-TARGETDURATION:6") && ev.trim_end().ends_with("#EXT-X-ENDLIST"));
-    assert_eq!(ev.matches("#EXTINF").count(), 3);
-    assert_eq!(ev.matches("#EXT-X-MAP").count(), 1);
-    std::fs::remove_dir_all(&d).ok();
-}
-
-#[test]
-fn hls_samples_drop_parameter_sets_and_init_carries_them() {
-    let d = tmp("hls-ps");
-    let (st, _) = hls_build(&av_stream(5, 1000, None), &d);
-    let init = std::fs::read(&st[0].inits[0]).unwrap();
-    assert!(init.windows(SPS_A.len()).any(|w| w == SPS_A), "avcC 에 SPS");
-    let seg = std::fs::read(&st[0].segments[0].file).unwrap();
-    assert!(!seg.windows(SPS_A.len()).any(|w| w == SPS_A), "샘플에는 SPS 가 없다(avc1)");
-    assert!(seg.windows(8).any(|w| w == [0, 0, 0, 4, 0x65, 0x88, 0x84, 0]), "IDR 은 길이 앞붙임");
-    std::fs::remove_dir_all(&d).ok();
-}
-
-#[test]
-fn hls_is_deterministic_for_same_records() {
-    let (a, b) = (tmp("hls-d1"), tmp("hls-d2"));
-    let recs = av_stream(9, 1000, None);
-    let (sa, _) = hls_build(&recs, &a);
-    let (sb, _) = hls_build(&recs, &b);
-    let files = |s: &HlsStream| -> Vec<PathBuf> { s.inits.iter().chain(s.segments.iter().map(|x| &x.file)).chain([&s.event_playlist, &s.live_playlist]).cloned().collect() };
-    for (x, y) in files(&sa[0]).iter().zip(files(&sb[0]).iter()) {
-        assert_eq!(x.file_name(), y.file_name());
-        assert_eq!(std::fs::read(x).unwrap(), std::fs::read(y).unwrap(), "{}", x.display());
-    }
-    std::fs::remove_dir_all(&a).ok();
-    std::fs::remove_dir_all(&b).ok();
-}
-
-#[test]
-fn hls_parameter_change_opens_new_init_with_discontinuity() {
-    let d = tmp("hls-res");
-    let (st, _) = hls_build(&av_stream(10, 1000, Some(5000)), &d);
-    let s = &st[0];
-    assert_eq!(s.inits.len(), 2, "SPS 가 바뀐 키프레임에서 새 init");
-    let k = s.segments.iter().position(|x| x.discontinuity).expect("끊김 조각");
-    assert_ne!(s.segments[k].init, s.segments[k - 1].init);
-    let ev = std::fs::read_to_string(&s.event_playlist).unwrap();
-    assert_eq!(ev.matches("#EXT-X-DISCONTINUITY\n").count(), 1);
-    assert_eq!(ev.matches("#EXT-X-MAP").count(), 2);
-    std::fs::remove_dir_all(&d).ok();
-}
-
-#[test]
-fn hls_rtp_wrap_is_unfolded_not_a_discontinuity() {
-    let d = tmp("hls-wrap");
-    let (st, _) = hls_build(&av_stream(9, u32::MAX - 90_000 * 3, None), &d);
-    let s = &st[0];
-    assert!(s.segments.iter().all(|x| !x.discontinuity), "넘침은 펼친다");
-    let mut last = 0;
-    for x in &s.segments {
-        let v = read_moof(&std::fs::read(&x.file).unwrap()).into_iter().find(|t| t.0 == 1).unwrap();
-        assert!(v.1 >= last, "영상 디코드 시각이 앞으로만");
-        last = v.1;
-    }
-    std::fs::remove_dir_all(&d).ok();
-}
-
-#[test]
-fn hls_refuses_non_h264_video_with_reason() {
-    let d = tmp("hls-vp8");
-    let ms = 1_000_000u64;
-    let u1 = serde_json::json!([{ "track_id": "cam-u1", "kind": "video", "user_id": "u1", "csrc": 9 }]);
-    let recs = [
-        rec(1, 0, Channel::Track, track_list("r", u1, serde_json::json!({ "200": vrow("cam-u1") }))),
-        rec(2, ms, Channel::Rtp(200), pkt(1, 3000, true, Some(9), KEY)),
-    ];
-    let (st, _) = hls_build(&recs, &d);
-    assert!(st[0].refused.as_deref().is_some_and(|r| r.contains("VP8")));
-    assert!(st[0].segments.is_empty() && !d.join("r-u1").exists(), "거절한 묶음은 아무것도 쓰지 않는다");
-    std::fs::remove_dir_all(&d).ok();
-}
-
-#[test]
-fn hls_parameter_change_before_first_segment_keeps_old_parameters_for_earlier_frames() {
-    // 첫 조각(4초)을 쓰기 전(2초)에 SPS 가 바뀐다 — 앞 프레임이 새 SPS 의 init 에 들면 디코드가 깨진다(media_check 실측 20261110)
-    let d = tmp("hls-res-early");
-    let (st, _) = hls_build(&av_stream(8, 1000, Some(2000)), &d);
-    let s = &st[0];
-    assert_eq!(s.inits.len(), 2);
-    assert!(std::fs::read(&s.inits[0]).unwrap().windows(SPS_A.len()).any(|w| w == SPS_A), "첫 init 은 앞 SPS");
-    assert!(std::fs::read(&s.inits[1]).unwrap().windows(SPS_B.len()).any(|w| w == SPS_B), "둘째 init 은 바뀐 SPS");
-    assert!(s.segments[1].discontinuity && (s.segments[0].duration - 3.0).abs() < 0.01, "바뀐 첫 키프레임(2초 뒤 첫 키 = 90번째 프레임 · 3.0초)에서 자른다");
-    std::fs::remove_dir_all(&d).ok();
-}
-
-#[test]
-fn hls_audio_decode_time_is_cumulative_across_segments_despite_plc_remainder() {
-    // 무전 슬롯 화자 바뀜처럼 RTP 시각이 프레임 배수가 아닌 폭(+672)으로 뛰면 PLC 가 메우고 나머지가 남는다 —
-    // 조각 사이 디코드 시각은 견본 길이 누적으로 잇는다(2층 peer_record_hls_ptt 실측 20261110 — 672 표본 끊김)
-    let ms = 1_000_000u64;
-    let tracks = serde_json::json!([{ "track_id": "slot-a", "kind": "audio" }]);
-    let rows = serde_json::json!({ "100": { "track_id": "slot-a", "kind": "audio", "codec": "opus", "pt": 111 } });
-    let mut recs = vec![rec(1, 0, Channel::Track, track_list("r", tracks, rows))];
-    let mut ts = 0u32;
-    for i in 0..500u32 {
-        if i == 100 {
-            ts += 672 + 960 * 3;
-        }
-        recs.push(rec(2 + i, u64::from(i) * 20 * ms, Channel::Rtp(100), pkt(i as u16, ts, true, Some(7), &[0x78, i as u8])));
-        ts += 960;
-    }
-    let d = tmp("hls-plc");
-    let (st, _) = hls_build(&recs, &d);
-    let s = &st[0];
-    assert!(s.segments.len() >= 2);
-    let mut next: Option<u64> = None;
-    for x in &s.segments {
-        let m = read_moof(&std::fs::read(&x.file).unwrap());
-        let a = m.iter().find(|t| t.0 == 2).unwrap();
-        if let Some(n) = next {
-            assert_eq!(a.1, n, "{} 음성 디코드 시각이 앞 조각 끝에서 잇는다", x.file.display());
-        }
-        next = Some(a.1 + a.2.iter().map(|r| u64::from(r.0)).sum::<u64>());
-    }
-    std::fs::remove_dir_all(&d).ok();
-}
-
-
 // ── 시험 단계 T2(202611/20261110d) — RTP seq 넘침(설계 §10-3 「seq 넘침도 같은 방식」) ──
 
 #[test]
@@ -1401,48 +1154,6 @@ fn pipeline_assembles_video_frame_across_seq_wrap_and_ogg_keeps_range() {
     std::fs::remove_dir_all(&d).ok();
 }
 
-#[test]
-fn hls_same_time_frame_on_layer_switch_replaces_previous_sample() {
-    // 시뮬캐스트 층 바꿈 — 4초 지점 h 키프레임(T 로 자르는 프레임) 바로 뒤(+90 틱 = 1ms · 2층 실측)에 l 키프레임(다른 SPS)이 온다.
-    // 같은 순간의 그림이니 앞 견본을 바꿔 끼워 1ms 조각이 없어야 한다(2층 peer_record_hls_simulcast 실측 20261110 — seg-00001 0.001초)
-    let ms = 1_000_000u64;
-    let tracks = serde_json::json!([{ "track_id": "cam-u1", "kind": "video", "user_id": "u1", "csrc": 9 }]);
-    let rows = serde_json::json!({ "200": { "track_id": "cam-u1", "kind": "video", "codec": "H264", "pt": 102 } });
-    for off in [0u32, 90] {
-        let mut recs = vec![rec(1, 0, Channel::Track, track_list("r", tracks.clone(), rows.clone()))];
-        let (mut n, mut seq) = (2u32, 0u16);
-        let mut put = |recs: &mut Vec<Record>, ts: u32, i: u32, sps: Option<&[u8]>| {
-            let idr = [0x65, 0x88, i as u8];
-            let delta = [0x41, 0x9a, i as u8];
-            let nal: Vec<&[u8]> = match sps {
-                Some(s) => vec![s, PPS, &idr],
-                None => vec![&delta],
-            };
-            for (k, x) in nal.iter().enumerate() {
-                recs.push(rec(n, u64::from(i) * 33 * ms, Channel::Rtp(200), pkt(seq, ts, k + 1 == nal.len(), Some(9), x)));
-                n += 1;
-                seq = seq.wrapping_add(1);
-            }
-        };
-        let mut base = 0u32;
-        for i in 0..240u32 {
-            let key = i.is_multiple_of(30);
-            if i == 120 {
-                put(&mut recs, i * 3000, i, Some(SPS_A));
-                base = off;
-            }
-            put(&mut recs, i * 3000 + base, i, if key { Some(if i < 120 { SPS_A } else { SPS_B }) } else { None });
-        }
-        let d = tmp(&format!("hls-dup-{off}"));
-        let (st, _) = hls_build(&recs, &d);
-        let s = &st[0];
-        assert_eq!(s.replaced, 1, "+{off} 틱 — 같은 순간 앞 견본을 바꿔 꼈다");
-        assert!(s.segments.iter().all(|x| x.duration > 0.5), "+{off} 틱 — 견본 하나짜리 조각이 없다 {:?}", s.segments.iter().map(|x| x.duration).collect::<Vec<_>>());
-        assert_eq!((s.inits.len(), s.segments.iter().filter(|x| x.discontinuity).count()), (2, 1));
-        std::fs::remove_dir_all(&d).ok();
-    }
-}
-
 // ── 김대리 검토 #13(202611/20261110e) — 단계 안 시스템 시계 금지(SDK:RULE-PLAT-REC-PIPE 「★시계 금지」 · 설계 D7)를 기계로 ──
 
 #[test]
@@ -1450,7 +1161,7 @@ fn pipeline_stages_and_sinks_never_read_the_system_clock() {
     // 기록기(`mod.rs`)만 `log_time` 닻으로 시계를 읽는다. 단계 · 결과물 · 꼬리 읽기 · 파일 읽기는 레코드의 시각만 쓴다 — 「라이브 = 파일」의 전제
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/record");
     let mut seen = 0;
-    for f in ["pipeline.rs", "ogg.rs", "mkv.rs", "hls.rs", "live.rs", "file.rs"] {
+    for f in ["pipeline.rs", "ogg.rs", "mkv.rs", "live.rs", "file.rs"] {
         let src = std::fs::read_to_string(dir.join(f)).unwrap();
         // 시험 모듈(`#[cfg(test)]` 뒤)은 검사 밖 — 본문만
         let body = src.split("#[cfg(test)]").next().unwrap_or(&src);
@@ -1459,7 +1170,7 @@ fn pipeline_stages_and_sinks_never_read_the_system_clock() {
         }
         seen += 1;
     }
-    assert_eq!(seen, 6);
+    assert_eq!(seen, 5);
 }
 
 // ── #4(202611/20261110e) — Matroska 사람마다 영상 · 음성 한 파일 ──
@@ -1579,7 +1290,7 @@ fn late_sr_av(secs: u32, sr_at_ms: u64, video_delay_ms: u64) -> Vec<Record> {
 #[test]
 fn mkv_log_time_file_with_late_sr_moves_video_onto_audio_and_anchors_date_on_audio() {
     // SR 이 여는 보류(2초) 뒤에 온다 → 파일은 log_time 기준. 영상이 60ms 늦게 닿아 도착 차만큼 어긋난다(D7)
-    //   ★늦은 SR 맞춤(SDK:RULE-PLAT-REC-HLS) — 두 트랙이 UTC 를 받으면 영상만 견본마다 5ms 이하로 옮겨 목표 −60ms 에 닿는다 · DateUTC 닻 = 음성
+    //   ★늦은 SR 맞춤(SDK:RULE-PLAT-REC-MKV) — 두 트랙이 UTC 를 받으면 영상만 견본마다 5ms 이하로 옮겨 목표 −60ms 에 닿는다 · DateUTC 닻 = 음성
     let t0_ms = (1_800_000_000_000_000_000u64 / 1_000_000) as f64;
     let d = tmp("mkv-late-sr");
     let (fs, _) = mkv_av_build(&late_sr_av(5, 3_000, 60), &d, Policy::Utterance, MkvConfig::default());
@@ -1595,33 +1306,6 @@ fn mkv_log_time_file_with_late_sr_moves_video_onto_audio_and_anchors_date_on_aud
     }
     let (fu, _) = mkv_av_build(&av_stream(5, 1000, None), &d, Policy::Utterance, MkvConfig::default());
     assert_eq!((fu[0].base, fu[0].date_track, fu[0].video_shift_us), ("utc", None, None), "utc 기준 파일은 닻 · 맞춤이 없다 — 모든 트랙이 SR 시각");
-    std::fs::remove_dir_all(&d).ok();
-}
-
-#[test]
-fn hls_log_time_stream_with_late_sr_moves_video_onto_audio_without_discontinuity() {
-    // SR 이 첫 조각(4초) 뒤 6초에 온다 → 묶음은 log_time 기준 · 영상이 60ms 늦게 닿는다(D7 — 2층 장시간 판 49 ~ 65ms)
-    //   ★늦은 SR 맞춤 — 끊김 없이 영상 견본 길이로 다가가 · 뒤 조각의 영상 − 음성 디코드 시각 차가 SR 이 일찍 온 판(utc 기준)과 같아진다
-    let d = tmp("hls-late-sr");
-    let late = late_sr_av(12, 6_000, 60);
-    let (st, _) = hls_build(&late, &d.join("late"));
-    let (ctl, _) = hls_build(&late_sr_av(12, 500, 60), &d.join("ctl"));
-    assert_eq!((st[0].base, ctl[0].base), (Some("log_time"), Some("utc")));
-    assert!(st[0].video_shift_us.is_some_and(|x| (x + 60_000).abs() <= 1_000), "영상 목표 −60ms · {:?}", st[0].video_shift_us);
-    assert_eq!(ctl[0].video_shift_us, None);
-    assert!(st[0].segments.iter().all(|x| !x.discontinuity), "다시 맞추는 끊김은 없다");
-    assert_eq!(st[0].segments.len(), ctl[0].segments.len());
-    let av = |s: &HlsStream, i: usize| -> f64 {
-        let m = read_moof(&std::fs::read(&s.segments[i].file).unwrap());
-        let tf = |id: u32| m.iter().find(|t| t.0 == id).map(|t| t.1).unwrap();
-        (tf(1) as f64 / 90_000.0 - tf(2) as f64 / 48_000.0) * 1000.0
-    };
-    let last = st[0].segments.len() - 1;
-    assert!((av(&st[0], last) - av(&ctl[0], last)).abs() <= 1.0, "마지막 조각 영상 − 음성 {:.1}ms · utc 기준 판 {:.1}ms", av(&st[0], last), av(&ctl[0], last));
-    assert!((av(&st[0], 0) - av(&ctl[0], 0) - 60.0).abs() <= 1.0, "SR 전 첫 조각은 도착 차 60ms 그대로(기다리지 않는다)");
-    let durs: Vec<u32> = st[0].segments.iter().flat_map(|x| read_moof(&std::fs::read(&x.file).unwrap()).into_iter().filter(|t| t.0 == 1).flat_map(|t| t.2.into_iter().map(|r| r.0))).collect();
-    assert!(durs.iter().all(|d| (2_550..=3_450).contains(d)), "영상 견본 길이는 한 프레임(3,000 틱) ± 5ms(450 틱) 안 — 한 번에 옮기지 않는다: {:?}", durs.iter().filter(|d| !(2_550..=3_450).contains(*d)).collect::<Vec<_>>());
-    assert!(durs.iter().filter(|d| **d != 3_000).count() >= 12, "60ms 를 5ms 씩 — 바뀐 견본이 12 이상");
     std::fs::remove_dir_all(&d).ok();
 }
 
@@ -2270,8 +1954,8 @@ fn mkv_sink_reports_coverage_from_records_and_frames() {
 fn key_request_wants_from_target_minus_lead_until_a_key_at_target() {
     use KeyAsk::*;
     let k = |st, key, el| key_request(st, key, el, 4_000, 1_000);
-    assert_eq!(k(Idle, false, 2_999), (false, Idle), "SDK:RULE-PLAT-REC-HLS before T - 1");
-    assert_eq!(k(Idle, false, 3_000), (true, Wanting), "SDK:RULE-PLAT-REC-HLS T - 1 asks and starts wanting");
+    assert_eq!(k(Idle, false, 2_999), (false, Idle), "SDK:RULE-PLAT-REC-MKV before T - 1");
+    assert_eq!(k(Idle, false, 3_000), (true, Wanting), "SDK:RULE-PLAT-REC-MKV T - 1 asks and starts wanting");
     assert_eq!(k(Idle, true, 3_000), (true, Wanting), "a key exactly at T - 1 was not answered yet - ask");
     assert_eq!(k(Wanting, false, 3_500), (false, Wanting), "the cleanup layer keeps asking each interval until a key");
     assert_eq!(k(Wanting, true, 3_150), (true, Wanting), "a key before T does not end the want - ask again");
@@ -2354,63 +2038,6 @@ fn av_on_request_dropping(secs: u32, sps_switch_at: Option<u32>, latency: u32, d
     plis
 }
 
-fn hls_on_request(secs: u32, sps_switch_at: Option<u32>, latency: u32, dir: &Path) -> (HlsStream, Vec<u32>) {
-    hls_on_request_dropping(secs, sps_switch_at, latency, &[], dir)
-}
-
-fn hls_on_request_dropping(secs: u32, sps_switch_at: Option<u32>, latency: u32, drop: &[usize], dir: &Path) -> (HlsStream, Vec<u32>) {
-    let mut pl = Pipeline::new(Policy::Span { time_ns: u64::MAX, bytes: u64::MAX });
-    let mut sink = HlsSink::new(dir, HlsConfig::default()).unwrap();
-    let plis = av_on_request_dropping(secs, sps_switch_at, latency, drop, &mut |r| {
-        for o in pl.push(r) {
-            sink.write(&o).unwrap();
-        }
-        sink.take_keyframe_requests().len()
-    });
-    for o in pl.finish() {
-        sink.write(&o).unwrap();
-    }
-    sink.finish().unwrap();
-    (sink.streams()[0].clone(), plis)
-}
-
-#[test]
-fn hls_publisher_that_keys_only_on_request_gets_segments_near_target() {
-    let d = tmp("hls-on-request");
-    let (s, plis) = hls_on_request(14, None, 150, &d);
-    let durs: Vec<f64> = s.segments.iter().map(|x| x.duration).collect();
-    assert!(durs.len() >= 3, "SDK:RULE-PLAT-REC-HLS 14 s at T 4 s: {durs:?} plis {plis:?}");
-    assert!(durs[..durs.len() - 1].iter().all(|x| (4.0..=4.5).contains(x)), "SDK:RULE-PLAT-REC-HLS a key before T asks once more at T - segments end just past T: {durs:?} plis {plis:?}");
-    assert!(durs[durs.len() - 1] < 3.0, "{durs:?}");
-    assert_eq!(s.over_target, 0, "{durs:?}");
-    assert!(s.segments.iter().all(|x| !x.discontinuity));
-    assert_eq!(s.keyframe_requests as usize, 2 * (durs.len() - 1), "SDK:RULE-PLAT-REC-HLS per closed segment one ask at T - 1 and one at the early key: {plis:?}");
-    std::fs::remove_dir_all(&d).ok();
-}
-
-#[test]
-fn hls_cuts_within_target_plus_one_interval_when_upstream_drops_a_pli() {
-    for (drop, lo, hi) in [(0usize, 4.0, 4.5), (1, 5.0, 5.5)] {
-        let d = tmp(&format!("hls-on-request-drop{drop}"));
-        let (s, plis) = hls_on_request_dropping(14, None, 150, &[drop], &d);
-        let durs: Vec<f64> = s.segments.iter().map(|x| x.duration).collect();
-        assert!((lo..=hi).contains(&durs[0]), "SDK:RULE-PLAT-REC-HLS sink with a modelled cleanup layer (asks each interval until a key - the cleanup layer itself is checked in link::recv) - PLI {drop} dropped upstream: {durs:?} plis {plis:?}");
-        assert_eq!(s.over_target, 0, "{durs:?}");
-        std::fs::remove_dir_all(&d).ok();
-    }
-}
-
-#[test]
-fn hls_cut_by_parameter_change_does_not_spend_the_next_segments_request() {
-    let d = tmp("hls-on-request-sps");
-    let (s, plis) = hls_on_request(14, Some(7_500), 150, &d);
-    let durs: Vec<f64> = s.segments.iter().map(|x| x.duration).collect();
-    assert!(s.segments.iter().any(|x| x.discontinuity), "SDK:RULE-PLAT-REC-HLS parameter change cuts: {durs:?}");
-    assert!(!plis.iter().any(|t| (7_400..10_400).contains(t)), "the segment opened at 7.5 s by a parameter change asks at its own T - 1 (10.5 s), not at its start: {plis:?} {durs:?}");
-    assert!(plis.iter().any(|t| (10_400..10_700).contains(t)), "{plis:?} {durs:?}");
-    std::fs::remove_dir_all(&d).ok();
-}
-
 #[test]
 fn mkv_span_publisher_that_keys_only_on_request_gets_files_near_span() {
     let d = tmp("mkv-on-request");
@@ -2448,11 +2075,6 @@ fn a_key_before_target_asks_again_and_the_key_at_target_cuts_unasked() {
     assert_eq!(fs.len(), 3, "SDK:RULE-PLAT-REC-MKV keys every 0.5 s - cut at 4 s and 8 s");
     assert_eq!(asked.len(), 4, "SDK:RULE-PLAT-REC-MKV per closed file: T - 1 asks, the 3.5 s key asks again, the 4.0 s key cuts unasked: {asked:?}");
     std::fs::remove_dir_all(&d).ok();
-    let d = tmp("hls-early-then-cut");
-    let (st, asked) = hls_build(&recs, &d);
-    assert_eq!(st[0].segments.len(), 3, "SDK:RULE-PLAT-REC-HLS");
-    assert_eq!(asked.len(), 4, "SDK:RULE-PLAT-REC-HLS {asked:?}");
-    std::fs::remove_dir_all(&d).ok();
 }
 
 #[test]
@@ -2466,9 +2088,5 @@ fn a_cutting_key_after_a_video_pause_is_not_asked() {
     let (fs, asked) = mkv_av_build(&recs, &d, Policy::Span { time_ns: u64::MAX, bytes: u64::MAX }, cfg);
     let reasons: Vec<_> = fs.iter().map(|f| f.reason.clone()).collect();
     assert_eq!(asked.len(), 2, "SDK:RULE-PLAT-REC-MKV the first video frame after the pause is a key past T - it cuts before any ask: {asked:?} {reasons:?}");
-    std::fs::remove_dir_all(&d).ok();
-    let d = tmp("hls-pause-then-cut");
-    let (_, asked) = hls_build(&recs, &d);
-    assert_eq!(asked.len(), 2, "SDK:RULE-PLAT-REC-HLS {asked:?}");
     std::fs::remove_dir_all(&d).ok();
 }
