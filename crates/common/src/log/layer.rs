@@ -78,7 +78,7 @@ impl Visit for SpanVisit<'_> {
 }
 
 fn own_target(t: &str) -> bool {
-    t.starts_with("oxhubd") || t.starts_with("oxsfud") || t.starts_with("common") || t.starts_with("oxsig") || t.starts_with("oxadmin") || t == "ox"
+    t.starts_with("oxhubd") || t.starts_with("oxsfud") || t.starts_with("oxtapd") || t.starts_with("common") || t.starts_with("oxsig") || t.starts_with("oxadmin") || t == "ox"
 }
 
 fn level_rank(l: &Level) -> u8 {
@@ -135,5 +135,20 @@ where
             }
         }
         self.sender.emit(c.line);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::own_target;
+
+    #[test]
+    fn the_rec_unit_is_an_own_crate_and_its_info_diag_lines_are_kept() {
+        for t in ["oxtapd", "oxtapd::consumer", "oxtapd::job", "oxhubd::ops", "oxsfud", "ox"] {
+            assert!(own_target(t), "{t}");
+        }
+        for t in ["zenoh::net", "tonic::transport", "dtls::conn", "hyper"] {
+            assert!(!own_target(t), "{t}");
+        }
     }
 }

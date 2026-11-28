@@ -203,3 +203,47 @@ pub fn run_pipe(p: Policy, recs: &[Record]) -> Vec<Output> {
     out.extend(pl.finish());
     out
 }
+
+pub const CUT_TALK: &str = "81330e4c01a220abaefab7f877025b073845";
+
+pub fn cut_and_rejoin(as_recorded_before: bool) -> Vec<Record> {
+    let ms = 1_000_000u64;
+    let slot = |rows: serde_json::Value, listed: bool| {
+        let tracks = if listed { serde_json::json!([{ "kind": "audio", "track_id": "slot-a", "type": "slot" }]) } else { serde_json::json!([]) };
+        serde_json::json!({ "room": "r", "tracks": tracks, "rows": rows }).to_string().into_bytes()
+    };
+    let row = |ssrc: u32| serde_json::json!({ ssrc.to_string(): { "track_id": "slot-a", "kind": "audio", "codec": "opus", "pt": 111 } });
+    let taken = |seq: u32| format!(r#"{{"room":"r","event":"taken","user_id":"A","sources":[5],"seq":{seq},"talk":"{CUT_TALK}"}}"#).into_bytes();
+    let session = |b: &str| b.as_bytes().to_vec();
+    let mut v = Vec::new();
+    let mut n = 0u32;
+    let mut put = |v: &mut Vec<Record>, t: u64, ch: Channel, d: Vec<u8>| {
+        n += 1;
+        v.push(rec(n, t, ch, d));
+    };
+    put(&mut v, 0, Channel::Track, slot(row(100), true));
+    put(&mut v, 0, Channel::Floor, taken(4));
+    put(&mut v, 0, Channel::Session, session(r#"{"event":"joined","room":"r"}"#));
+    for i in 0..176u32 {
+        put(&mut v, u64::from(i) * 20 * ms, Channel::Rtp(100), pkt(i as u16, i * 960, true, Some(5), &[0x78, i as u8]));
+    }
+    if as_recorded_before {
+        put(&mut v, 3_506 * ms, Channel::Track, slot(row(100), false));
+    }
+    put(&mut v, 3_506 * ms, Channel::Session, session(r#"{"event":"session","state":"Connecting","recovering":true,"reason":[2009,"SESSION_REVOKED"]}"#));
+    if as_recorded_before {
+        put(&mut v, 3_506 * ms, Channel::Track, slot(serde_json::json!({}), false));
+    }
+    put(&mut v, 3_508 * ms, Channel::Session, session(r#"{"event":"rebuilt"}"#));
+    if as_recorded_before {
+        put(&mut v, 5_420 * ms, Channel::Track, slot(serde_json::json!({}), true));
+    }
+    put(&mut v, 5_421 * ms, Channel::Track, slot(row(200), true));
+    put(&mut v, 5_421 * ms, Channel::Session, session(r#"{"event":"joined","room":"r"}"#));
+    put(&mut v, 5_430 * ms, Channel::Floor, taken(5));
+    for i in 0..212u32 {
+        put(&mut v, (5_438 + u64::from(i) * 20) * ms, Channel::Rtp(200), pkt((272 + i) as u16, 7_000_000 + i * 960, true, Some(5), &[0x78, i as u8]));
+    }
+    put(&mut v, 12_254 * ms, Channel::Floor, br#"{"room":"r","event":"idle","prev":"A","user_id":null,"seq":6}"#.to_vec());
+    v
+}

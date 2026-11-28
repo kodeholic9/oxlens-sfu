@@ -801,3 +801,44 @@ fn slot_video_segment_opens_only_at_keyframe_of_new_source() {
     assert_eq!(first_of_1, Some((12000, true)), "새 화자의 첫 키프레임부터");
     assert_eq!(pl.counts().before_key, 1);
 }
+
+#[test]
+fn a_room_snapshot_is_a_fact_only_while_joined_with_its_lines_up() {
+    assert!(track_fact(true, 1, 1));
+    assert!(track_fact(true, 0, 0), "a joined room that really has no tracks");
+    assert!(!track_fact(false, 0, 1), "the session dropped the room: the list is unknown, not empty");
+    assert!(!track_fact(false, 0, 0));
+    assert!(!track_fact(true, 1, 0), "joined again but its lines are not up yet");
+}
+
+fn slot_segments(recs: &[Record]) -> Vec<(Option<String>, Option<&'static str>, u64, u64)> {
+    run_pipe(Policy::Utterance, recs)
+        .into_iter()
+        .filter_map(|o| if let Output::Segment(s) = o && s.event == SegmentKind::Closed && s.track_id == "slot-a" { Some((s.talk, s.reason, s.frames, s.filled)) } else { None })
+        .collect()
+}
+
+#[test]
+fn a_session_cut_and_rejoin_keeps_one_talk_in_one_segment_with_the_hole_filled() {
+    let now = slot_segments(&cut_and_rejoin(false));
+    assert_eq!(now.len(), 1, "SDK:RULE-PLAT-REC-API 주인 — 새 세션 · 새 줄로 이어져도 같은 발언은 한 세그먼트: {now:?}");
+    let (talk, reason, frames, filled) = now[0].clone();
+    assert_eq!((talk.as_deref(), reason), (Some(CUT_TALK), Some("idle")));
+    assert!((90..=100).contains(&filled), "SDK:RULE-PLAT-REC-GAP — 끊긴 1.94 s 는 log_time 차로 재어 PLC 로 메운다: {filled}");
+    assert_eq!(frames, 176 + 212 + filled);
+    let before = slot_segments(&cut_and_rejoin(true));
+    assert_eq!(before.iter().map(|s| s.1).collect::<Vec<_>>(), vec![Some("track"), Some("idle")], "as recorded before: the false empty snapshots split the talk: {before:?}");
+}
+
+#[test]
+fn a_taken_with_the_same_talk_id_is_the_same_talk_whatever_its_seq() {
+    let mut recs = cut_and_rejoin(false);
+    recs.retain(|r| r.channel != Channel::Track || r.log_time == 0);
+    for r in recs.iter_mut().filter(|r| matches!(r.channel, Channel::Rtp(200))) {
+        r.channel = Channel::Rtp(100);
+        let s = u16::from_be_bytes([r.data[2], r.data[3]]).wrapping_sub(96);
+        r.data[2..4].copy_from_slice(&s.to_be_bytes());
+    }
+    let segs = slot_segments(&recs);
+    assert_eq!(segs.len(), 1, "SDK:RULE-PLAT-REC-SPLIT 발언 — 발언 번호 = 발언 id · seq 가 달라도 같은 발언 id 의 taken 은 새 발언이 아니다: {segs:?}");
+}

@@ -180,6 +180,8 @@ struct Tail {
     toc: u8,
     carry: u64,
     utc_end: Option<u64>,
+    ssrc: u32,
+    end_log: u64,
 }
 
 /// 구멍 상한 기본(표본 — 5분 · Jitsi 기본과 같다)
@@ -368,7 +370,8 @@ impl Pipeline {
             return;
         }
         let seq = v["seq"].as_u64();
-        if opens && seq.is_some() && self.speaking.get(&room).is_some_and(|sp| sp.seq == seq) {
+        let talk = v["talk"].as_str().filter(|t| !t.is_empty());
+        if opens && self.speaking.get(&room).is_some_and(|sp| same_talk(sp, seq, talk)) {
             return;
         }
         if let Some(old) = self.speaking.remove(&room) {
@@ -610,7 +613,7 @@ impl Pipeline {
         // 음성 구멍 — 같은 세그먼트 안에서 앞 프레임 끝보다 늦게 시작하면 PLC 로 메운다 · 상한을 넘으면 세그먼트를 새로 연다(SDK:RULE-PLAT-REC-GAP)
         if f.kind == "audio" && f.codec.eq_ignore_ascii_case("opus") && !f.data.is_empty() {
             if let Some(t) = self.tails.get(&key).copied() {
-                let hole = f.rtp_ts.wrapping_sub(t.end_ts) as i32;
+                let hole = if t.ssrc == f.ssrc { i64::from(f.rtp_ts.wrapping_sub(t.end_ts) as i32) } else { moved_hole(t.end_log, f.log_time) as i64 };
                 if hole > 0 && hole as u64 > self.gap_max {
                     self.close(&key, "gap", out);
                     return self.split(f, out);
@@ -621,7 +624,7 @@ impl Pipeline {
             }
             let len = opus_samples(&f.data);
             let carry = self.tails.get(&key).map(|t| t.carry).unwrap_or(0);
-            self.tails.insert(key.clone(), Tail { end_ts: f.rtp_ts.wrapping_add(len as u32), toc: f.data[0], carry, utc_end: f.utc_ns.map(|u| u + len * 1_000_000_000 / 48_000) });
+            self.tails.insert(key.clone(), Tail { end_ts: f.rtp_ts.wrapping_add(len as u32), toc: f.data[0], carry, utc_end: f.utc_ns.map(|u| u + len * 1_000_000_000 / 48_000), ssrc: f.ssrc, end_log: f.log_time + len * 1_000_000_000 / 48_000 });
         }
         if let Some(s) = self.open.get_mut(&key) {
             s.frames += 1;
@@ -685,6 +688,14 @@ impl Pipeline {
 /// 방을 가리지 않는다 — 출처 트랙(CSRC)이 다른 방 목록에 있는 청취방 화자는 늦지 않다.
 pub(crate) fn listed_now(present: &HashMap<String, BTreeSet<String>>, track_id: &str) -> bool {
     present.values().any(|s| s.contains(track_id))
+}
+
+fn moved_hole(end_log: u64, at: u64) -> u64 {
+    (u128::from(at.saturating_sub(end_log)) * 48_000 / 1_000_000_000) as u64
+}
+
+fn same_talk(sp: &Speaker, seq: Option<u64>, talk: Option<&str>) -> bool {
+    (seq.is_some() && sp.seq == seq) || (talk.is_some() && sp.talk.as_deref() == talk)
 }
 
 /// Opus 패킷 하나의 길이(48kHz 표본) — TOC 의 config · 프레임 수(RFC 6716 §3.1)

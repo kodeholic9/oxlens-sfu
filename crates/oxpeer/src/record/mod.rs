@@ -233,6 +233,10 @@ pub(crate) fn resumes(stop: Option<Stop>, free: Option<u64>, min_free: u64, part
     stop == Some(Stop::DiskLow) && free.is_some_and(|f| f > min_free.saturating_add(part_bytes))
 }
 
+pub(crate) fn track_fact(joined: bool, listed: usize, rows: usize) -> bool {
+    joined && (listed == 0 || rows > 0)
+}
+
 struct Inner {
     cfg: RecordConfig,
     anchor_ns: u64,

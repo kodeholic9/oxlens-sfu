@@ -651,3 +651,20 @@ async fn a_closed_recording_is_reported_to_the_gateway_over_the_bus() {
     .await;
     assert_eq!(drops.load(Ordering::Relaxed), 1, "정:RULE-OPS-DROPS talk_drop — no answer past the retry limit is dropped and counted");
 }
+
+#[test]
+fn a_session_cut_and_rejoin_writes_the_same_talk_into_one_file() {
+    let _log = closed_lines();
+    let l = Layout::new(root("cut"), "n1");
+    let (c, mut rx) = ctx(&l, "900");
+    let mut t = TalkFiles::open(&c).expect("talk");
+    feed(&mut t, &oxpeer::record::testkit::cut_and_rejoin(false), Some("end"));
+    let talk = oxpeer::record::testkit::CUT_TALK;
+    assert_eq!(names(&l.closed("rec", "r")), vec![format!("r-{talk}-A.ogg")], "정:IMPL-OPS-REC-UNIT 방 작업 — 세션을 바꿔 끼워도 같은 파일에 이어 쓴다 · 새 파일 0");
+    let got = reports(&mut rx);
+    assert_eq!(got.iter().map(|x| (x.0.as_str(), x.3.as_str())).collect::<Vec<_>>(), vec![(talk, "idle")], "{got:?}");
+    let (c2, _rx2) = ctx(&l, "901");
+    let mut t2 = TalkFiles::open(&c2).expect("talk");
+    feed(&mut t2, &oxpeer::record::testkit::cut_and_rejoin(true), Some("end"));
+    assert_eq!(oxtapd::files::files_under(&l.closed("rec", "r")).len(), 3, "as recorded before the fix the cut split the talk into a second file");
+}
