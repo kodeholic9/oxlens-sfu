@@ -244,16 +244,13 @@ pub(crate) fn resumes(stop: Option<Stop>, free: Option<u64>, min_free: u64, part
 pub(crate) enum KeyAsk {
     #[default]
     Idle,
-    Asked,
-    Early,
-    Again,
+    Wanting,
 }
 
 pub(crate) fn key_request(st: KeyAsk, video_key: bool, elapsed: u128, target: u128, lead: u128) -> (bool, KeyAsk) {
     match st {
-        KeyAsk::Idle if elapsed.saturating_add(lead) >= target => (true, KeyAsk::Asked),
-        KeyAsk::Asked if video_key && elapsed < target => (false, KeyAsk::Early),
-        KeyAsk::Early if elapsed >= target => (true, KeyAsk::Again),
+        KeyAsk::Idle if elapsed.saturating_add(lead) >= target => (true, KeyAsk::Wanting),
+        KeyAsk::Wanting if video_key && elapsed < target => (true, KeyAsk::Wanting),
         s => (false, s),
     }
 }

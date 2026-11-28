@@ -2267,33 +2267,35 @@ fn mkv_sink_reports_coverage_from_records_and_frames() {
 }
 
 #[test]
-fn key_request_asks_at_target_minus_lead_and_once_more_at_target_after_an_early_key() {
+fn key_request_wants_from_target_minus_lead_until_a_key_at_target() {
     use KeyAsk::*;
     let k = |st, key, el| key_request(st, key, el, 4_000, 1_000);
     assert_eq!(k(Idle, false, 2_999), (false, Idle), "SDK:RULE-PLAT-REC-HLS before T - 1");
-    assert_eq!(k(Idle, false, 3_000), (true, Asked), "SDK:RULE-PLAT-REC-HLS T - 1 asks");
-    assert_eq!(k(Idle, true, 3_000), (true, Asked), "a key exactly at T - 1 was not answered yet - ask");
-    assert_eq!(k(Asked, false, 3_500), (false, Asked));
-    assert_eq!(k(Asked, true, 3_150), (false, Early), "a key before T cannot cut");
-    assert_eq!(k(Early, false, 3_900), (false, Early), "the second ask waits for T");
-    assert_eq!(k(Early, false, 4_000), (true, Again), "SDK:RULE-PLAT-REC-HLS ask once more at T");
-    assert_eq!(k(Again, true, 4_100), (false, Again), "at most two asks per segment");
-    assert_eq!(k(Again, false, 9_000), (false, Again), "a publisher that ignores both is counted over target, not asked again");
-    assert_eq!(k(Asked, true, 4_000), (false, Asked), "a key at T cuts - the sink resets");
+    assert_eq!(k(Idle, false, 3_000), (true, Wanting), "SDK:RULE-PLAT-REC-HLS T - 1 asks and starts wanting");
+    assert_eq!(k(Idle, true, 3_000), (true, Wanting), "a key exactly at T - 1 was not answered yet - ask");
+    assert_eq!(k(Wanting, false, 3_500), (false, Wanting), "the cleanup layer keeps asking each interval until a key");
+    assert_eq!(k(Wanting, true, 3_150), (true, Wanting), "a key before T does not end the want - ask again");
+    assert_eq!(k(Wanting, true, 3_900), (true, Wanting), "no cap on asks");
+    assert_eq!(k(Wanting, false, 9_000), (false, Wanting), "without a key the cleanup layer keeps the earlier ask alive");
+    assert_eq!(k(Wanting, true, 4_000), (false, Wanting), "a key at T cuts - the sink resets");
     assert_eq!(k(Idle, true, 0), (false, Idle), "the cutting key opens the next segment unasked");
-    assert_eq!(key_request(Idle, true, 0, 1_000, 1_000), (true, Asked), "T at or under the lead asks at once");
+    assert_eq!(key_request(Idle, true, 0, 1_000, 1_000), (true, Wanting), "T at or under the lead asks at once");
 }
 
-fn pli_step(now: u32, pending: bool, latency: u32, plis: &mut Vec<u32>, due: &mut Vec<u32>) -> bool {
-    if pending && plis.last().is_none_or(|t| now.saturating_sub(*t) >= 1_000) {
+fn pli_step(now: u32, want: bool, latency: u32, drop: &[usize], plis: &mut Vec<u32>, due: &mut Vec<u32>) {
+    if want && plis.last().is_none_or(|t| now.saturating_sub(*t) >= 1_000) {
+        if !drop.contains(&plis.len()) {
+            due.push(now + latency);
+        }
         plis.push(now);
-        due.push(now + latency);
-        return false;
     }
-    pending
 }
 
 fn av_on_request(secs: u32, sps_switch_at: Option<u32>, latency: u32, feed: &mut dyn FnMut(&Record) -> usize) -> Vec<u32> {
+    av_on_request_dropping(secs, sps_switch_at, latency, &[], feed)
+}
+
+fn av_on_request_dropping(secs: u32, sps_switch_at: Option<u32>, latency: u32, drop: &[usize], feed: &mut dyn FnMut(&Record) -> usize) -> Vec<u32> {
     let ms = 1_000_000u64;
     let t0 = 1_800_000_000_000_000_000u64;
     let tracks = serde_json::json!([
@@ -2303,8 +2305,8 @@ fn av_on_request(secs: u32, sps_switch_at: Option<u32>, latency: u32, feed: &mut
     let rows = serde_json::json!({ "200": { "track_id": "cam-u1", "kind": "video", "codec": "H264", "pt": 102 }, "100": { "track_id": "mic-u1", "kind": "audio", "codec": "opus", "pt": 111 } });
     let (mut plis, mut due) = (Vec::new(), Vec::new());
     let mut n = 1u32;
-    let asked = feed(&rec(n, t0, Channel::Track, track_list("r", tracks, rows)));
-    let mut pending = pli_step(0, asked > 0, latency, &mut plis, &mut due);
+    let mut want = feed(&rec(n, t0, Channel::Track, track_list("r", tracks, rows))) > 0;
+    pli_step(0, want, latency, drop, &mut plis, &mut due);
     n += 1;
     let (mut vseq, mut aseq) = (0u16, 0u16);
     let (mut tv, mut ta) = (0u32, 0u32);
@@ -2327,6 +2329,7 @@ fn av_on_request(secs: u32, sps_switch_at: Option<u32>, latency: u32, feed: &mut
             let answered = due.iter().any(|d| *d <= tv);
             due.retain(|d| *d > tv);
             let key = i == 0 || answered || switch;
+            want &= !key;
             let ts = 1000u32.wrapping_add(i * 3000);
             let sps = if switched { SPS_B } else { SPS_A };
             let (idr, delta) = ([0x65, 0x88, 0x84, i as u8], [0x41, 0x9a, i as u8]);
@@ -2344,17 +2347,21 @@ fn av_on_request(secs: u32, sps_switch_at: Option<u32>, latency: u32, feed: &mut
             ta += 20;
         }
         for r in &out {
-            let asked = feed(r);
-            pending = pli_step(now, pending || asked > 0, latency, &mut plis, &mut due);
+            want |= feed(r) > 0;
+            pli_step(now, want, latency, drop, &mut plis, &mut due);
         }
     }
     plis
 }
 
 fn hls_on_request(secs: u32, sps_switch_at: Option<u32>, latency: u32, dir: &Path) -> (HlsStream, Vec<u32>) {
+    hls_on_request_dropping(secs, sps_switch_at, latency, &[], dir)
+}
+
+fn hls_on_request_dropping(secs: u32, sps_switch_at: Option<u32>, latency: u32, drop: &[usize], dir: &Path) -> (HlsStream, Vec<u32>) {
     let mut pl = Pipeline::new(Policy::Span { time_ns: u64::MAX, bytes: u64::MAX });
     let mut sink = HlsSink::new(dir, HlsConfig::default()).unwrap();
-    let plis = av_on_request(secs, sps_switch_at, latency, &mut |r| {
+    let plis = av_on_request_dropping(secs, sps_switch_at, latency, drop, &mut |r| {
         for o in pl.push(r) {
             sink.write(&o).unwrap();
         }
@@ -2377,8 +2384,20 @@ fn hls_publisher_that_keys_only_on_request_gets_segments_near_target() {
     assert!(durs[durs.len() - 1] < 3.0, "{durs:?}");
     assert_eq!(s.over_target, 0, "{durs:?}");
     assert!(s.segments.iter().all(|x| !x.discontinuity));
-    assert_eq!(s.keyframe_requests as usize, 2 * (durs.len() - 1), "SDK:RULE-PLAT-REC-HLS two asks per closed segment (T - 1 and T): {plis:?}");
+    assert_eq!(s.keyframe_requests as usize, 2 * (durs.len() - 1), "SDK:RULE-PLAT-REC-HLS per closed segment one ask at T - 1 and one at the early key: {plis:?}");
     std::fs::remove_dir_all(&d).ok();
+}
+
+#[test]
+fn hls_cuts_within_target_plus_one_interval_when_upstream_drops_a_pli() {
+    for (drop, lo, hi) in [(0usize, 4.0, 4.5), (1, 5.0, 5.5)] {
+        let d = tmp(&format!("hls-on-request-drop{drop}"));
+        let (s, plis) = hls_on_request_dropping(14, None, 150, &[drop], &d);
+        let durs: Vec<f64> = s.segments.iter().map(|x| x.duration).collect();
+        assert!((lo..=hi).contains(&durs[0]), "SDK:RULE-PLAT-REC-HLS sink with a modelled cleanup layer (asks each interval until a key - the cleanup layer itself is checked in link::recv) - PLI {drop} dropped upstream: {durs:?} plis {plis:?}");
+        assert_eq!(s.over_target, 0, "{durs:?}");
+        std::fs::remove_dir_all(&d).ok();
+    }
 }
 
 #[test]
@@ -2416,22 +2435,40 @@ fn mkv_span_publisher_that_keys_only_on_request_gets_files_near_span() {
     assert!(fs.len() >= 3, "SDK:RULE-PLAT-REC-MKV span 4 s over 14 s: {frames:?} plis {plis:?}");
     assert!(fs[..fs.len() - 1].iter().all(|f| f.reason.as_deref() == Some("span")), "{frames:?}");
     assert!(frames[..frames.len() - 1].iter().all(|n| (120..=135).contains(n)), "SDK:RULE-PLAT-REC-MKV a key before T asks once more at T - files end just past T: {frames:?} plis {plis:?}");
-    assert_eq!(asks, 2 * (fs.len() - 1), "SDK:RULE-PLAT-REC-MKV two asks per closed file: {plis:?}");
+    assert_eq!(asks, 2 * (fs.len() - 1), "SDK:RULE-PLAT-REC-MKV per closed file one ask at T - 1 and one at the early key: {plis:?}");
     std::fs::remove_dir_all(&d).ok();
 }
 
 #[test]
-fn a_key_at_target_after_an_early_key_cuts_without_a_second_ask() {
+fn a_key_before_target_asks_again_and_the_key_at_target_cuts_unasked() {
     let recs = av_stream_gop(10, 1000, None, 15);
     let d = tmp("mkv-early-then-cut");
     let cfg = MkvConfig { span: Some(Duration::from_secs(4)), ..MkvConfig::default() };
     let (fs, asked) = mkv_av_build(&recs, &d, Policy::Span { time_ns: u64::MAX, bytes: u64::MAX }, cfg);
     assert_eq!(fs.len(), 3, "SDK:RULE-PLAT-REC-MKV keys every 0.5 s - cut at 4 s and 8 s");
-    assert_eq!(asked.len(), 2, "SDK:RULE-PLAT-REC-MKV T - 1 asks, the 3.5 s key is early, the 4.0 s key cuts before any second ask: {asked:?}");
+    assert_eq!(asked.len(), 4, "SDK:RULE-PLAT-REC-MKV per closed file: T - 1 asks, the 3.5 s key asks again, the 4.0 s key cuts unasked: {asked:?}");
     std::fs::remove_dir_all(&d).ok();
     let d = tmp("hls-early-then-cut");
     let (st, asked) = hls_build(&recs, &d);
     assert_eq!(st[0].segments.len(), 3, "SDK:RULE-PLAT-REC-HLS");
-    assert_eq!(asked.len(), 2, "SDK:RULE-PLAT-REC-HLS the cutting key at T is not asked again: {asked:?}");
+    assert_eq!(asked.len(), 4, "SDK:RULE-PLAT-REC-HLS {asked:?}");
+    std::fs::remove_dir_all(&d).ok();
+}
+
+#[test]
+fn a_cutting_key_after_a_video_pause_is_not_asked() {
+    let ms = 1_000_000u64;
+    let mut recs = av_stream_gop(10, 1000, None, 15);
+    let t0 = recs[0].log_time;
+    recs.retain(|r| !(r.channel == Channel::Rtp(200) && (t0 + 2_900 * ms..t0 + 4_455 * ms).contains(&r.log_time)));
+    let d = tmp("mkv-pause-then-cut");
+    let cfg = MkvConfig { span: Some(Duration::from_secs(4)), ..MkvConfig::default() };
+    let (fs, asked) = mkv_av_build(&recs, &d, Policy::Span { time_ns: u64::MAX, bytes: u64::MAX }, cfg);
+    let reasons: Vec<_> = fs.iter().map(|f| f.reason.clone()).collect();
+    assert_eq!(asked.len(), 2, "SDK:RULE-PLAT-REC-MKV the first video frame after the pause is a key past T - it cuts before any ask: {asked:?} {reasons:?}");
+    std::fs::remove_dir_all(&d).ok();
+    let d = tmp("hls-pause-then-cut");
+    let (_, asked) = hls_build(&recs, &d);
+    assert_eq!(asked.len(), 2, "SDK:RULE-PLAT-REC-HLS {asked:?}");
     std::fs::remove_dir_all(&d).ok();
 }

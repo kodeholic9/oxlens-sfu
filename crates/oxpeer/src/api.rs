@@ -538,7 +538,6 @@ impl Client {
         rx.await.map_err(|_| Error::closed("CLOSED"))?
     }
 
-    /// 받는 영상 트랙에 키프레임을 요청한다 — 수신 정리층이 다음 차례에 PLI 를 낸다(간격 1초 · 서버 스로틀 그대로 · SDK:RULE-PLAT-SERVER).
     /// 녹화 조각 경계(HLS — SDK:RULE-PLAT-REC-HLS)처럼 주기 키프레임이 없는 발행자(브라우저)에게 쓴다. 오디오 · 모르는 트랙은 아무 일도 없다
     pub fn request_keyframe(&self, track_id: impl Into<String>) -> Result<(), Error> {
         self.send(Cmd::RequestKey(track_id.into()))

@@ -394,6 +394,7 @@ impl Stream {
         }
         if a.key {
             self.lost = false;
+            self.ask_key = false;
             self.need_key = false;
             self.want_key = false;
             self.key_wait = None;
@@ -612,7 +613,6 @@ impl Recv {
                 if (s.want_key || late || s.ask_key) && s.pli_at.is_none_or(|t| now.duration_since(t) >= PLI_INTERVAL) {
                     let why = pli_why(s.lost, s.want_key, late, s.ask_key);
                     s.pli_at = Some(now);
-                    s.ask_key = false;
                     if late {
                         s.key_wait = None;
                     }
@@ -1004,9 +1004,32 @@ mod tests {
             }
         }
         let at: Vec<u128> = sent.iter().map(|(t, _)| *t).collect();
-        assert_eq!(at, vec![1_000, 2_000, 3_000, 4_000], "SDK:RULE-PLAT-SERVER every request goes out as one PLI - the one inside the 1 s interval waits for it");
+        assert_eq!(at, vec![1_000, 2_000, 3_000, 4_000], "SDK:RULE-PLAT-SERVER requests a second apart each go out - the one inside the 1 s interval waits for it");
         assert_eq!(c.pli_sent.load(Ordering::Relaxed), 4);
         assert!(sent.iter().all(|(_, p)| p.why == "app" && p.track_id == "t" && p.ssrc == 1111 && p.room == "r"), "{sent:?}");
+    }
+
+    #[test]
+    fn app_request_is_sent_again_each_interval_until_a_key_arrives() {
+        let c = Arc::new(Counters::default());
+        let mut r = Recv::new(9, c.clone());
+        let mut rt = route("video", "VP8", Unit::Frame);
+        let t0 = Instant::now();
+        let w = SystemTime::now();
+        r.on_rtp(&rt, rtp(1, 0, true, &[0x10, 0x00]), t0, w);
+        rt.key_gen = 1;
+        r.on_rtp(&rt, rtp(2, 3000, true, &VP8_DELTA), t0, w);
+        let plis = |o: Vec<Out>| o.into_iter().filter(|x| matches!(x, Out::Pli(p) if p.why == "app")).count();
+        let mut sent = Vec::new();
+        for n in 0..4u32 {
+            sent.push(plis(r.tick(t0 + PLI_INTERVAL * n).0));
+            sent.push(plis(r.tick(t0 + PLI_INTERVAL * n + Duration::from_millis(500)).0));
+        }
+        assert_eq!(sent, vec![1, 0, 1, 0, 1, 0, 1, 0], "SDK:RULE-PLAT-SERVER while the app wants a key the cleanup layer asks again each interval - a PLI dropped upstream is not the end");
+        let at = t0 + PLI_INTERVAL * 4;
+        r.on_rtp(&rt, rtp(3, 6000, true, &[0x10, 0x00]), at, w);
+        assert_eq!(plis(r.tick(at + PLI_INTERVAL).0), 0, "a key ends the want");
+        assert_eq!(plis(r.tick(at + PLI_INTERVAL * 3).0), 0);
     }
 
     #[test]
