@@ -6,6 +6,7 @@
 //! 채취는 직접 소유다 — 정리층이 `Out::Raw` · `Out::Gap` 을 내면 `deliver` 가 `MediaSink` 가 쥔 기록기를 부르고, core 는 사건을 낼 때 같은 기록기를 부른다.
 //! `sequence` · `log_time` 은 기록기 잠금 안 한 곳에서 매긴다(REC-CLOCK) — 그래서 파일 차례로 둘 다 오른다.
 
+mod cover;
 mod file;
 mod hls;
 mod live;
@@ -20,6 +21,9 @@ pub use hls::{HlsConfig, HlsSegment, HlsSink, HlsStream};
 pub use mkv::{MkvConfig, MkvFile, MkvSink, MkvTrack};
 pub use ogg::{OggFile, OggSink, opus_samples};
 pub use pipeline::{Frame, Output, Pipeline, Policy, Segment, SegmentKind};
+pub use cover::{Coverage, TrackCoverage};
+pub use mkv::recover_mkv;
+pub use ogg::{Recovered, recover_ogg};
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
@@ -56,6 +60,7 @@ pub struct RecordConfig {
     pub dir: Option<PathBuf>,
     /// 녹음 세션 ID — 파트 이름 `<recording_id>-<파트 4자리>.mcap`
     pub recording_id: String,
+    pub run: String,
     /// 파트 크기 S · 시간 T — 먼저 닿는 쪽에서 회전
     pub part_bytes: u64,
     pub part_time: Duration,
@@ -80,6 +85,7 @@ impl RecordConfig {
         RecordConfig {
             dir: None,
             recording_id: recording_id.into(),
+            run: SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis().to_string()).unwrap_or_default(),
             part_bytes: 1 << 30,
             part_time: Duration::from_secs(3_600),
             flush: Duration::from_secs(2),
@@ -88,6 +94,10 @@ impl RecordConfig {
             fsync_on_flush: false,
             compression: Compression::None,
         }
+    }
+
+    pub fn stem(&self) -> String {
+        format!("{}-{}", self.recording_id, self.run)
     }
 }
 
@@ -148,8 +158,60 @@ pub struct Record {
 }
 
 /// 기록기 — `MediaSink` · core 가 같이 쥔다
-pub(crate) struct Recorder {
+pub struct Recorder {
     inner: Mutex<Inner>,
+}
+
+impl std::fmt::Debug for Recorder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Recorder").field("stem", &self.stem()).finish()
+    }
+}
+
+#[derive(Clone, Default)]
+struct Out {
+    ev: Option<mpsc::UnboundedSender<Event>>,
+    log: Option<Arc<crate::log::Logger>>,
+}
+
+impl Out {
+    fn line(&self, l: crate::log::Line) {
+        if let Some(g) = &self.log {
+            g.emit(l);
+        }
+    }
+
+    fn event(&self, e: Event) {
+        if let Some(ev) = &self.ev {
+            let _ = ev.send(e);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Stop {
+    DiskLow,
+    Unwritable,
+    NameTaken,
+}
+
+pub(crate) fn stop_reason(s: Stop) -> &'static str {
+    match s {
+        Stop::DiskLow | Stop::Unwritable => "disk_low",
+        Stop::NameTaken => "name_taken",
+    }
+}
+
+pub(crate) fn open_failure(e: &std::io::Error) -> Stop {
+    match e.kind() {
+        std::io::ErrorKind::AlreadyExists => Stop::NameTaken,
+        std::io::ErrorKind::StorageFull => Stop::DiskLow,
+        _ => Stop::Unwritable,
+    }
+}
+
+pub(crate) fn resumes(stop: Option<Stop>, free: Option<u64>, min_free: u64, part_bytes: u64) -> bool {
+    stop == Some(Stop::DiskLow) && free.is_some_and(|f| f > min_free.saturating_add(part_bytes))
 }
 
 struct Inner {
@@ -162,7 +224,7 @@ struct Inner {
     part: Option<Part>,
     last_flush: u64,
     /// 원시 기록이 멈췄다(디스크 하한) — 라이브 통은 계속 받는다
-    stopped: bool,
+    stopped: Option<Stop>,
     /// 닫혔다 — 그 뒤 레코드는 받지 않는다(tick 이 새 파트를 열지 않게)
     closed: bool,
     snap: Snap,
@@ -171,8 +233,7 @@ struct Inner {
     tailing: Vec<Arc<Shared>>,
     /// 꼬리 읽기로 갈아탄 통 누계(운영 `stat` `record_degraded`)
     degraded: u64,
-    ev: mpsc::UnboundedSender<Event>,
-    log: Arc<crate::log::Logger>,
+    out: Out,
 }
 
 struct Part {
@@ -218,13 +279,13 @@ struct Sub {
 
 impl Recorder {
     /// 만들기 — 원시 기록을 켰으면 첫 파트는 첫 레코드에서 연다 · `tick` 태스크를 띄운다(기록기가 사라지면 끝난다)
-    pub(crate) fn start(cfg: RecordConfig, ev: mpsc::UnboundedSender<Event>, log: Arc<crate::log::Logger>) -> std::io::Result<Arc<Recorder>> {
+    pub fn open(cfg: RecordConfig) -> std::io::Result<Arc<Recorder>> {
         if let Some(d) = &cfg.dir {
             fs::create_dir_all(d)?;
         }
         let anchor_ns = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0);
         let tick = cfg.tick;
-        let r = Arc::new(Recorder { inner: Mutex::new(Inner { cfg, anchor_ns, mono0: Instant::now(), seq: 0, part_no: 0, prev_last: None, part: None, last_flush: anchor_ns, stopped: false, closed: false, snap: Snap::default(), subs: Vec::new(), tailing: Vec::new(), degraded: 0, ev, log }) });
+        let r = Arc::new(Recorder { inner: Mutex::new(Inner { cfg, anchor_ns, mono0: Instant::now(), seq: 0, part_no: 0, prev_last: None, part: None, last_flush: anchor_ns, stopped: None, closed: false, snap: Snap::default(), subs: Vec::new(), tailing: Vec::new(), degraded: 0, out: Out::default() }) });
         let weak: Weak<Recorder> = Arc::downgrade(&r);
         tokio::spawn(async move {
             let mut iv = tokio::time::interval(tick);
@@ -242,6 +303,26 @@ impl Recorder {
     pub(crate) fn push(&self, ch: Channel, data: Vec<u8>) {
         let Ok(mut g) = self.inner.lock() else { return };
         g.push(ch, data);
+    }
+
+    pub(crate) fn attach(&self, ev: mpsc::UnboundedSender<Event>, log: Arc<crate::log::Logger>) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.out = Out { ev: Some(ev), log: Some(log) };
+            if let Some(s) = g.stopped {
+                g.out.event(Event::RecordStopped { reason: stop_reason(s).into() });
+            }
+        }
+    }
+
+    pub fn stem(&self) -> String {
+        self.inner.lock().map(|g| g.cfg.stem()).unwrap_or_default()
+    }
+
+    pub fn records(&self, capacity: usize) -> Records {
+        let (tx, rx) = mpsc::channel(capacity.max(16));
+        let shared = Arc::new(Shared::default());
+        self.subscribe(tx, shared.clone());
+        Records::new(rx, shared)
     }
 
     /// 트랙 목록 — 방마다 앞과 같으면 적지 않는다(줄 재배정 · 목록 바뀜만 남긴다)
@@ -264,7 +345,7 @@ impl Recorder {
             let _ = tx.try_send(r);
         }
         if let Ok(mut st) = shared.state.lock() {
-            st.raw = g.cfg.dir.clone().map(|d| (d, g.cfg.recording_id.clone()));
+            st.raw = g.cfg.dir.clone().map(|d| (d, g.cfg.stem()));
             st.tick = g.cfg.tick;
         }
         g.subs.push(Sub { tx, shared });
@@ -273,10 +354,10 @@ impl Recorder {
     /// 운영 로그 프로세스 줄의 녹음 계수
     pub(crate) fn stat(&self) -> RecStat {
         let Ok(g) = self.inner.lock() else { return RecStat::default() };
-        RecStat { parts: g.part_no, subscribers: g.subs.len() + g.tailing.len(), degraded: g.degraded, stopped: g.stopped, disk_free: g.cfg.dir.as_deref().and_then(free_bytes) }
+        RecStat { parts: g.part_no, subscribers: g.subs.len() + g.tailing.len(), degraded: g.degraded, stopped: g.stopped.is_some(), disk_free: g.cfg.dir.as_deref().and_then(free_bytes) }
     }
 
-    pub(crate) fn close(&self) {
+    pub fn close(&self) {
         if let Ok(mut g) = self.inner.lock() {
             g.closed = true;
             g.close_part("close");
@@ -307,14 +388,18 @@ impl Inner {
             return;
         }
         let t = self.now();
-        if self.cfg.dir.is_some() && !self.stopped {
+        if ch == Channel::Tick && self.stopped == Some(Stop::DiskLow) && resumes(self.stopped, self.cfg.dir.as_deref().and_then(free_bytes), self.cfg.min_free_bytes, self.cfg.part_bytes) {
+            self.stopped = None;
+            self.out.line(crate::log::Line::new(crate::log::Kind::Diag).spec("SD-RULE-PLAT-REC-PART").key("in.min_free_bytes", self.cfg.min_free_bytes).key("in.part_bytes", self.cfg.part_bytes).msg("raw recording resumed - disk free again, next part opens at the next rtp record"));
+        }
+        if self.cfg.dir.is_some() && self.stopped.is_none() {
             if let Some(p) = &self.part
                 && (p.bytes >= self.cfg.part_bytes || t.saturating_sub(p.start) >= self.cfg.part_time.as_nanos() as u64)
             {
                 let why = if p.bytes >= self.cfg.part_bytes { "size" } else { "time" };
                 self.close_part(why);
             }
-            if self.part.is_none() {
+            if self.part.is_none() && matches!(ch, Channel::Rtp(_)) {
                 self.open_part(t);
             }
         }
@@ -388,10 +473,9 @@ impl Inner {
         if self.subs.is_empty() {
             return;
         }
-        let tail_ok = self.cfg.dir.is_some() && !self.stopped && self.part.is_some();
+        let tail_ok = self.cfg.dir.is_some() && self.stopped.is_none() && self.part.is_some();
         let part_now = self.part_no.saturating_sub(1);
-        let ev = self.ev.clone();
-        let log = self.log.clone();
+        let out = self.out.clone();
         let mut tailing = Vec::new();
         self.subs.retain(|s| match s.tx.try_send(r.clone()) {
             Ok(()) => true,
@@ -401,11 +485,11 @@ impl Inner {
                     if tail_ok {
                         st.degraded = Some((r.sequence, part_now));
                         tailing.push(s.shared.clone());
-                        log.emit(crate::log::Line::new(crate::log::Kind::Diag).spec("SD-RULE-PLAT-REC-API").key("in.from_sequence", r.sequence).key("in.part", part_now).msg("live record consumer overflowed - tail read from raw part"));
+                        out.line(crate::log::Line::new(crate::log::Kind::Diag).spec("SD-RULE-PLAT-REC-API").key("in.from_sequence", r.sequence).key("in.part", part_now).msg("live record consumer overflowed - tail read from raw part"));
                     } else {
                         st.stopped = true;
-                        let _ = ev.send(Event::RecordConsumerStopped { reason: "overflow".into() });
-                        log.emit(crate::log::Line::new(crate::log::Kind::Diag).spec("SD-RULE-PLAT-REC-API").key("in.from_sequence", r.sequence).msg("live record consumer overflowed without raw parts - stopped"));
+                        out.event(Event::RecordConsumerStopped { reason: "overflow".into() });
+                        out.line(crate::log::Line::new(crate::log::Kind::Diag).spec("SD-RULE-PLAT-REC-API").key("in.from_sequence", r.sequence).msg("live record consumer overflowed without raw parts - stopped"));
                     }
                 }
                 false
@@ -418,35 +502,48 @@ impl Inner {
     fn open_part(&mut self, t: u64) -> bool {
         let Some(dir) = self.cfg.dir.clone() else { return false };
         if free_bytes(&dir).is_some_and(|f| f < self.cfg.min_free_bytes) {
-            self.stop();
+            self.stop(Stop::DiskLow);
             return false;
         }
-        let path = dir.join(format!("{}-{:04}.mcap", self.cfg.recording_id, self.part_no));
-        let Some((f, file)) = File::create(&path).ok().and_then(|f| f.try_clone().ok().map(|c| (f, c))) else {
-            self.stop();
+        let path = dir.join(format!("{}-{:04}.mcap", self.cfg.stem(), self.part_no));
+        let f = match File::options().write(true).create_new(true).open(&path) {
+            Ok(f) => f,
+            Err(e) => {
+                let why = open_failure(&e);
+                if why == Stop::NameTaken {
+                    self.out.line(crate::log::Line::new(crate::log::Kind::Diag).level(crate::log::Level::Warn).spec("SD-RULE-PLAT-REC-PART").key("path", path.display()).key("reason", "name_taken").msg("rec part refused"));
+                }
+                self.stop(why);
+                return false;
+            }
+        };
+        let no = self.part_no;
+        self.part_no += 1;
+        let Ok(file) = f.try_clone() else {
+            self.stop(Stop::Unwritable);
             return false;
         };
         let opts = WriteOptions::new().use_chunks(true).chunk_size(None).compression(compression(self.cfg.compression)).profile("oxlens");
         let Ok(mut w) = opts.create(BufWriter::new(f)) else {
-            self.stop();
+            self.stop(Stop::Unwritable);
             return false;
         };
         let mut rec = BTreeMap::new();
         rec.insert("format".to_string(), FORMAT.to_string());
         rec.insert("recording_id".to_string(), self.cfg.recording_id.clone());
+        rec.insert("run".to_string(), self.cfg.run.clone());
         rec.insert("sdk".to_string(), format!("oxpeer {}", env!("CARGO_PKG_VERSION")));
         let mut part = BTreeMap::new();
-        part.insert("part".to_string(), self.part_no.to_string());
+        part.insert("part".to_string(), no.to_string());
         if let Some(l) = self.prev_last {
             part.insert("prev_last_sequence".to_string(), l.to_string());
         }
         if w.write_metadata(&Metadata { name: "oxlens.recording".into(), metadata: rec }).is_err() || w.write_metadata(&Metadata { name: "oxlens.part".into(), metadata: part }).is_err() {
-            self.stop();
+            self.stop(Stop::Unwritable);
             return false;
         }
         self.part = Some(Part { w, file, channels: HashMap::new(), start: t, bytes: 0, last_seq: None });
-        self.log.emit(crate::log::Line::new(crate::log::Kind::Diag).spec("SD-RULE-PLAT-REC-PART").key("in.part", self.part_no).key("in.prev_last_sequence", self.prev_last.map(|x| x.to_string()).unwrap_or_default()).msg("raw part opened"));
-        self.part_no += 1;
+        self.out.line(crate::log::Line::new(crate::log::Kind::Diag).spec("SD-RULE-PLAT-REC-PART").key("in.part", no).key("in.prev_last_sequence", self.prev_last.map(|x| x.to_string()).unwrap_or_default()).msg("raw part opened"));
         // 파트 머리 스냅숏(REC-PART) — 트랙 · 발언권 · 세션 · SR
         let head: Vec<(Channel, Vec<u8>)> = self.snap.all().into_iter().map(|r| (r.channel.clone(), r.data.clone())).collect();
         for (ch, d) in head {
@@ -462,15 +559,16 @@ impl Inner {
             let _ = p.file.sync_data();
         }
         if self.cfg.dir.as_deref().and_then(free_bytes).is_some_and(|f| f < self.cfg.min_free_bytes) {
-            self.stop();
+            self.stop(Stop::DiskLow);
         }
     }
 
-    fn stop(&mut self) {
-        self.close_part("disk_low");
-        self.stopped = true;
-        self.log.emit(crate::log::Line::new(crate::log::Kind::Diag).level(crate::log::Level::Warn).spec("SD-RULE-PLAT-REC-PART").key("in.min_free_bytes", self.cfg.min_free_bytes).msg("raw recording stopped - disk low or part not writable"));
-        let _ = self.ev.send(Event::RecordStopped { reason: "disk_low".into() });
+    fn stop(&mut self, why: Stop) {
+        let reason = stop_reason(why);
+        self.close_part(reason);
+        self.stopped = Some(why);
+        self.out.line(crate::log::Line::new(crate::log::Kind::Diag).level(crate::log::Level::Warn).spec("SD-RULE-PLAT-REC-PART").key("in.min_free_bytes", self.cfg.min_free_bytes).key("in.reason", reason).msg("raw recording stopped - disk low or part not writable"));
+        self.out.event(Event::RecordStopped { reason: reason.into() });
     }
 
     fn close_part(&mut self, reason: &str) {
@@ -486,7 +584,7 @@ impl Inner {
         let _ = bw.flush();
         let _ = bw.get_ref().sync_all();
         self.prev_last = p.last_seq.or(self.prev_last);
-        self.log.emit(crate::log::Line::new(crate::log::Kind::Diag).spec("SD-RULE-PLAT-REC-PART").key("in.reason", reason).key("in.last_sequence", p.last_seq.map(|x| x.to_string()).unwrap_or_default()).key("in.bytes", p.bytes).msg("raw part closed"));
+        self.out.line(crate::log::Line::new(crate::log::Kind::Diag).spec("SD-RULE-PLAT-REC-PART").key("in.reason", reason).key("in.last_sequence", p.last_seq.map(|x| x.to_string()).unwrap_or_default()).key("in.bytes", p.bytes).msg("raw part closed"));
     }
 }
 

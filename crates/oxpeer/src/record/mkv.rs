@@ -10,11 +10,14 @@
 //! (20261107 재생기 실측 — 크기 모르는 꼴만으로는 ffprobe 길이가 N/A 였다 · 시간 이동은 ffmpeg 가 파일을 훑어 됐다 — Cues 는 훑지 않는 재생기 몫.)
 
 use std::collections::BTreeMap;
-use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use super::pipeline::{Output, SegmentKind};
+use super::cover::{Cover, Coverage};
+use super::ogg::{Dest, Faults, Recovered, open_dest, retry_due};
+use super::pipeline::{Output, Segment, SegmentKind};
+use super::{Channel, Record};
 
 const ID_EBML: u32 = 0x1A45_DFA3;
 const ID_SEGMENT: u32 = 0x1853_8067;
@@ -312,7 +315,8 @@ struct TrackDef {
 
 /// Matroska 파일 하나(트랙 여럿) — 블록 시각은 파일 원점 기준 ms(묶음이 셈해 준다)
 struct Mkv {
-    f: File,
+    f: Dest,
+    path: PathBuf,
     date_at: u64,
     duration_at: u64,
     seg_size_at: u64,
@@ -364,8 +368,8 @@ fn track_entry(t: &TrackDef, uid: u64) -> Vec<u8> {
 
 impl Mkv {
     /// 연다 — 트랙 목록(머리)과 시작 벽시계(DateUTC · 유닉스 ns)를 쓴다
-    fn create(path: &Path, tracks: &[TrackDef], uid: u64, start_ns: u64) -> io::Result<Mkv> {
-        let mut f = File::create(path)?;
+    fn create(path: &Path, tracks: &[TrackDef], uid: u64, start_ns: u64, faults: Faults) -> io::Result<Mkv> {
+        let (mut f, path) = open_dest(path, true, faults)?;
         let ebml = [uint(0x4286, 1), uint(0x42F7, 1), uint(0x42F2, 4), uint(0x42F3, 8), text(0x4282, "matroska"), uint(0x4287, 4), uint(0x4285, 2)].concat();
         f.write_all(&el(ID_EBML, &ebml))?;
         let mut seg = id_bytes(ID_SEGMENT);
@@ -393,11 +397,23 @@ impl Mkv {
         let body: Vec<u8> = tracks.iter().flat_map(|t| track_entry(t, uid)).collect();
         f.write_all(&el(ID_TRACKS, &body))?;
         let video = tracks.iter().find(|t| t.codec != Codec::Opus).map(|t| t.num);
-        Ok(Mkv { f, date_at, duration_at, seg_size_at, seg_data, seekhead_at, info_at, tracks_at, cluster_open: None, cues: Vec::new(), cluster_at: None, video, end_ms: 0 })
+        Ok(Mkv { f, path, date_at, duration_at, seg_size_at, seg_data, seekhead_at, info_at, tracks_at, cluster_open: None, cues: Vec::new(), cluster_at: None, video, end_ms: 0 })
     }
 
     /// 블록 하나 — 트랙 번호 · 파일 원점 기준 ms · 키프레임 · 본문(H264 는 길이 앞붙임으로) · 이 블록이 끝나는 ms
     fn push(&mut self, num: u64, codec: Codec, ms: u64, key: bool, data: &[u8], end_ms: u64) -> io::Result<()> {
+        let at = self.f.stream_position()?;
+        let keep = (self.cluster_open, self.cues.len(), self.cluster_at, self.end_ms);
+        let r = self.put(num, codec, ms, key, data, end_ms);
+        if r.is_err() {
+            (self.cluster_open, self.cluster_at, self.end_ms) = (keep.0, keep.2, keep.3);
+            self.cues.truncate(keep.1);
+            let _ = self.f.cut(at);
+        }
+        r
+    }
+
+    fn put(&mut self, num: u64, codec: Codec, ms: u64, key: bool, data: &[u8], end_ms: u64) -> io::Result<()> {
         let video_key = self.video == Some(num) && key;
         let new_cluster = match self.cluster_at {
             None => true,
@@ -633,6 +649,7 @@ struct Group {
     /// 길이 정책으로 자른 뒤 모으는 중 — 다음에 여는 파일은 앞 파일을 잇는다
     cont: bool,
     n: u64,
+    stalled: Option<u64>,
 }
 
 impl Group {
@@ -654,6 +671,10 @@ pub struct MkvSink {
     unknown: u64,
     wants: Vec<String>,
     late_key: u64,
+    faults: Faults,
+    dropped: u64,
+    ended: bool,
+    cover: Cover,
 }
 
 impl MkvSink {
@@ -664,7 +685,29 @@ impl MkvSink {
     pub fn with(dir: impl Into<PathBuf>, cfg: MkvConfig) -> io::Result<MkvSink> {
         let dir = dir.into();
         std::fs::create_dir_all(&dir)?;
-        Ok(MkvSink { dir, cfg, groups: BTreeMap::new(), segs: std::collections::HashMap::new(), done: Vec::new(), unknown: 0, wants: Vec::new(), late_key: 0 })
+        Ok(MkvSink { dir, cfg, groups: BTreeMap::new(), segs: std::collections::HashMap::new(), done: Vec::new(), unknown: 0, wants: Vec::new(), late_key: 0, faults: Faults::default(), dropped: 0, ended: false, cover: Cover::default() })
+    }
+
+    pub fn record(&mut self, r: &Record) {
+        if r.channel == Channel::Track {
+            self.cover.listed(r.log_time, &r.data);
+        } else {
+            self.cover.seen(r.log_time);
+        }
+    }
+
+    pub fn coverage(&self) -> Coverage {
+        self.cover.summary()
+    }
+
+    pub fn dropped(&self) -> u64 {
+        self.dropped
+    }
+
+    pub fn close(&mut self, reason: Option<&str>) -> io::Result<()> {
+        self.close_all(reason.unwrap_or("end"));
+        self.ended = true;
+        Ok(())
     }
 
     /// 닫힌 파일(닫힌 차례)
@@ -699,25 +742,60 @@ impl MkvSink {
 
     /// 파이프라인 출력 하나
     pub fn write(&mut self, o: &Output) -> io::Result<()> {
-        match o {
+        if self.ended {
+            return Ok(());
+        }
+        let (key, now) = match o {
+            Output::Segment(s) if s.event == SegmentKind::Opened => (kind_of(s).map(|k| self.group_key(s, k)), s.first_log_time),
+            Output::Segment(s) => (self.segs.get(&s.id).map(|x| x.0.clone()), s.last_log_time),
+            Output::Frame(f) => {
+                self.cover.loaded(f.log_time, &f.track_id);
+                (f.segment.and_then(|id| self.segs.get(&id)).map(|x| x.0.clone()), f.log_time)
+            }
+            Output::Orphan(_) => (None, 0),
+        };
+        let r = match o {
             Output::Segment(s) if s.event == SegmentKind::Opened => self.opened(s),
             Output::Segment(s) => self.closed(s),
             Output::Frame(f) => self.frame(f),
             Output::Orphan(_) => Ok(()),
+        };
+        match (r, key) {
+            (Err(_), Some(k)) => {
+                self.fail(&k, now);
+                Ok(())
+            }
+            (r, _) => r,
         }
     }
 
-    fn opened(&mut self, s: &super::pipeline::Segment) -> io::Result<()> {
-        let (kind, ok) = match s.kind.as_str() {
-            "video" => (Kind::Video, matches!(Codec::of(&s.codec), Some(Codec::Vp8 | Codec::H264))),
-            "audio" => (Kind::Audio, Codec::of(&s.codec) == Some(Codec::Opus)),
-            _ => return Ok(()),
-        };
-        if !ok {
-            self.unknown += 1;
-            return Ok(());
+    fn fail(&mut self, key: &str, now: u64) {
+        let Some(g) = self.groups.get_mut(key) else { return };
+        let _ = close_file(&self.dir, g, "disk_low", &mut self.done);
+        self.dropped += g.pend.len() as u64;
+        g.pend.clear();
+        g.pend_since = None;
+        g.cont = false;
+        g.stalled = Some(now);
+    }
+
+    fn close_all(&mut self, reason: &str) {
+        let keys: Vec<String> = self.groups.keys().cloned().collect();
+        for k in keys {
+            let Some(g) = self.groups.get_mut(&k) else { continue };
+            let now = g.video.iter().chain(g.audio.iter()).map(|t| t.last_log).max().unwrap_or(0);
+            let opened = if g.pend.is_empty() { Ok(()) } else { open_file(&self.dir, g, &mut self.late_key, self.faults) };
+            let r = match opened {
+                Ok(()) => close_file(&self.dir, g, reason, &mut self.done),
+                e => e,
+            };
+            if r.is_err() {
+                self.fail(&k, now);
+            }
         }
-        let codec = Codec::of(&s.codec).unwrap_or(Codec::Opus);
+    }
+
+    fn group_key(&self, s: &Segment, kind: Kind) -> String {
         let base = match &s.owner {
             Some(o) => format!("{}-{}", s.room, o),
             None => format!("{}-slot", s.room),
@@ -726,7 +804,21 @@ impl MkvSink {
             Kind::Video => g.video.as_ref().is_some_and(|t| t.track_id != s.track_id && t.open),
             Kind::Audio => g.audio.as_ref().is_some_and(|t| t.track_id != s.track_id && t.open),
         });
-        let key = if busy { format!("{base}-{}", s.track_id) } else { base };
+        if busy { format!("{base}-{}", s.track_id) } else { base }
+    }
+
+    fn opened(&mut self, s: &Segment) -> io::Result<()> {
+        let Some(kind) = kind_of(s) else { return Ok(()) };
+        let ok = match kind {
+            Kind::Video => matches!(Codec::of(&s.codec), Some(Codec::Vp8 | Codec::H264)),
+            Kind::Audio => Codec::of(&s.codec) == Some(Codec::Opus),
+        };
+        if !ok {
+            self.unknown += 1;
+            return Ok(());
+        }
+        let codec = Codec::of(&s.codec).unwrap_or(Codec::Opus);
+        let key = self.group_key(s, kind);
         let g = self.groups.entry(key.clone()).or_insert_with(|| Group {
             key: key.clone(),
             room: s.room.clone(),
@@ -743,6 +835,7 @@ impl MkvSink {
             talk_n: 0,
             cont: false,
             n: 0,
+            stalled: None,
         });
         self.segs.insert(s.id, (key.clone(), kind));
         // 슬롯 — 발언 번호가 바뀌면 새 파일(발언 하나 = 파일 하나 · CSRC 로 견주지 않는다) · 열린 파일에 없는 종류가 들면 새 파일
@@ -752,7 +845,7 @@ impl MkvSink {
         let new_kind = g.file.as_ref().is_some_and(|f| !f.tracks.iter().any(|(k, _)| *k == kind));
         if other_source || new_kind {
             if g.file.is_none() && !g.pend.is_empty() {
-                open_file(&self.dir, g, &mut self.late_key)?;
+                open_file(&self.dir, g, &mut self.late_key, self.faults)?;
             }
             close_file(&self.dir, g, if other_source { "utterance" } else { "late_track" }, &mut self.done)?;
         }
@@ -794,7 +887,7 @@ impl MkvSink {
         let any_open = g.video.as_ref().is_some_and(|t| t.open) || g.audio.as_ref().is_some_and(|t| t.open);
         if !any_open {
             if !g.pend.is_empty() {
-                open_file(&self.dir, g, &mut self.late_key)?;
+                open_file(&self.dir, g, &mut self.late_key, self.faults)?;
             }
             close_file(&self.dir, g, s.reason.unwrap_or("end"), &mut self.done)?;
         }
@@ -833,6 +926,11 @@ impl MkvSink {
         }
         let p = Pend { kind, ticks: t.ticks, key: kind == Kind::Audio || f.keyframe, data: f.data.clone(), filled: f.filled, utc: f.utc_ns.is_some(), rtp: f.rtp_ts, rebased };
         let track_id = t.track_id.clone();
+        if !retry_due(g.stalled, f.log_time) {
+            self.dropped += 1;
+            return Ok(());
+        }
+        g.stalled = None;
         // 파일이 없으면 모은다 — 열린 트랙이 다 첫 프레임을 냈거나 보류가 지나면 연다
         if g.file.is_none() {
             if g.pend.is_empty() {
@@ -851,7 +949,7 @@ impl MkvSink {
             let ready = both && synced;
             let waited = f.log_time.saturating_sub(g.pend_since.unwrap_or(f.log_time)) >= hold;
             if ready || waited {
-                open_file(&self.dir, g, &mut self.late_key)?;
+                open_file(&self.dir, g, &mut self.late_key, self.faults)?;
             }
             return Ok(());
         }
@@ -893,21 +991,13 @@ impl MkvSink {
 
     /// 끝 — 아직 열린 파일 · 모으던 프레임을 닫는다(파이프라인 `finish` 의 세그먼트 닫힘을 먼저 넣는다)
     pub fn finish(&mut self) -> io::Result<()> {
-        let keys: Vec<String> = self.groups.keys().cloned().collect();
-        for k in keys {
-            if let Some(g) = self.groups.get_mut(&k) {
-                if !g.pend.is_empty() {
-                    open_file(&self.dir, g, &mut self.late_key)?;
-                }
-                close_file(&self.dir, g, "end", &mut self.done)?;
-            }
-        }
+        self.close_all("end");
         Ok(())
     }
 }
 
 /// 모은 프레임으로 파일을 연다 — 머리(트랙 목록)는 모은 프레임에 든 트랙(영상은 키프레임이 있을 때만) · 시각 기준은 묶음에서 처음 한 번(N4)
-fn open_file(dir: &Path, g: &mut Group, late_key: &mut u64) -> io::Result<()> {
+fn open_file(dir: &Path, g: &mut Group, late_key: &mut u64, faults: Faults) -> io::Result<()> {
     let cont = std::mem::take(&mut g.cont);
     let pend = std::mem::take(&mut g.pend);
     if pend.is_empty() {
@@ -971,7 +1061,14 @@ fn open_file(dir: &Path, g: &mut Group, late_key: &mut u64) -> io::Result<()> {
         _ => dir.join(format!("{}-{:04}.mkv", safe(&g.key), index)),
     };
     let start_ns = origin.max(0) as u64;
-    let m = Mkv::create(&path, &defs, index + 1, start_ns)?;
+    let m = match Mkv::create(&path, &defs, index + 1, start_ns, faults) {
+        Ok(m) => m,
+        Err(e) => {
+            g.pend = pend;
+            return Err(e);
+        }
+    };
+    let path = m.path.clone();
     let tracks = kinds
         .iter()
         .enumerate()
@@ -988,8 +1085,11 @@ fn open_file(dir: &Path, g: &mut Group, late_key: &mut u64) -> io::Result<()> {
     let start = pend.iter().find(|p| p.kind == lead).map(|p| (lead, p.ticks));
     g.file = Some(OpenFile { m, path, index, origin, utc, source: g.pend_source, user_id: g.pend_user.clone(), tracks, keyed: first_vkey.is_some(), start, asked: false, vshift: None, vshift_at: 0 });
     g.pend_since = None;
-    for p in pend {
-        write_one(g, p, late_key)?;
+    let mut rest = pend.into_iter();
+    let failed = rest.by_ref().map(|p| write_one(g, p, late_key)).find(Result::is_err);
+    if let Some(e) = failed.and_then(Result::err) {
+        g.pend = rest.collect();
+        return Err(e);
     }
     Ok(())
 }
@@ -1066,18 +1166,22 @@ fn close_file(_dir: &Path, g: &mut Group, reason: &str, done: &mut Vec<MkvFile>)
     let mut date_ns = fl.origin;
     let mut date = if fl.utc { "utc" } else { "log_time" };
     let mut date_track = None;
+    let mut r: io::Result<()> = Ok(());
     if !fl.utc {
         let pick = [Kind::Audio, Kind::Video].into_iter().find(|k| fl.tracks.iter().any(|(x, _)| x == k) && g.trk(*k).is_some_and(|t| t.first_utc.is_some()));
         if let Some(k) = pick
             && let Some(t) = g.trk(k)
         {
             date_ns = fl.origin + (t.abs(0, true) - t.abs(0, false));
-            fl.m.set_date(date_ns.max(0) as u64)?;
+            r = fl.m.set_date(date_ns.max(0) as u64);
             date = "utc";
             date_track = Some(if k == Kind::Video { "video" } else { "audio" });
         }
     }
-    fl.m.finish()?;
+    let r = match r {
+        Ok(()) => fl.m.finish(),
+        e => e,
+    };
     let utc = fl.utc;
     done.push(MkvFile {
         path: fl.path,
@@ -1094,10 +1198,250 @@ fn close_file(_dir: &Path, g: &mut Group, reason: &str, done: &mut Vec<MkvFile>)
         date_track,
         video_shift_us: fl.vshift.map(|x| (x / 1_000) as i64),
         duration_ms,
-        reason: Some(reason.to_string()),
+        reason: Some(if r.is_ok() { reason } else { "disk_low" }.to_string()),
         talk: if g.owner.is_none() { g.talk.as_ref().map(|t| t.0.clone()) } else { None },
     });
-    Ok(())
+    r
+}
+
+fn kind_of(s: &Segment) -> Option<Kind> {
+    match s.kind.as_str() {
+        "video" => Some(Kind::Video),
+        "audio" => Some(Kind::Audio),
+        _ => None,
+    }
+}
+
+pub(super) fn read_id(b: &[u8], at: usize) -> Option<(u32, usize)> {
+    let n = b.get(at)?.leading_zeros() as usize + 1;
+    if n > 4 {
+        return None;
+    }
+    let s = b.get(at..at + n)?;
+    Some((s.iter().fold(0u32, |a, x| (a << 8) | u32::from(*x)), n))
+}
+
+pub(super) fn read_size(b: &[u8], at: usize) -> Option<(Option<u64>, usize)> {
+    let n = b.get(at)?.leading_zeros() as usize + 1;
+    if n > 8 {
+        return None;
+    }
+    let s = b.get(at..at + n)?;
+    let mask = 0xFFu8.checked_shr(n as u32).unwrap_or(0);
+    let v = s[1..].iter().fold(u64::from(s[0] & mask), |a, x| (a << 8) | u64::from(*x));
+    let unknown = (1u64 << (7 * n)) - 1;
+    Some((if v == unknown { None } else { Some(v) }, n))
+}
+
+fn head(b: &[u8], at: usize) -> Option<(u32, Option<u64>, usize)> {
+    let (id, n) = read_id(b, at)?;
+    let (size, k) = read_size(b, at + n)?;
+    Some((id, size, at + n + k))
+}
+
+fn known_end(b: &[u8], body: usize, size: Option<u64>) -> Option<usize> {
+    let end = body.checked_add(usize::try_from(size?).ok()?)?;
+    (end <= b.len()).then_some(end)
+}
+
+fn rd_uint(b: &[u8]) -> u64 {
+    b.iter().fold(0, |a, x| (a << 8) | u64::from(*x))
+}
+
+fn children(b: &[u8], from: usize, to: usize) -> Vec<(u32, usize, usize)> {
+    let mut out = Vec::new();
+    let mut at = from;
+    while at < to {
+        let Some((id, size, body)) = head(b, at) else { break };
+        let Some(end) = known_end(b, body, size).filter(|e| *e <= to) else { break };
+        out.push((id, body, end));
+        at = end;
+    }
+    out
+}
+
+fn info_fields(b: &[u8], from: usize, to: usize) -> Option<(u64, u64)> {
+    let kids = children(b, from, to);
+    let at = |id: u32| kids.iter().find(|(x, body, end)| *x == id && end - body == 8).map(|(_, body, _)| *body as u64);
+    Some((at(0x4461)?, at(0x4489)?))
+}
+
+fn video_track(b: &[u8], from: usize, to: usize) -> Option<u64> {
+    children(b, from, to).into_iter().filter(|(id, _, _)| *id == 0xAE).find_map(|(_, body, end)| {
+        let kids = children(b, body, end);
+        let num = kids.iter().find(|(id, _, _)| *id == 0xD7).map(|(_, s, e)| rd_uint(&b[*s..*e]))?;
+        let kind = kids.iter().find(|(id, _, _)| *id == 0x83).map(|(_, s, e)| rd_uint(&b[*s..*e]))?;
+        (kind == 1).then_some(num)
+    })
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct MkvScan {
+    pub(super) cut: u64,
+    pub(super) seg_size_at: u64,
+    pub(super) seg_data: u64,
+    pub(super) info_at: u64,
+    pub(super) tracks_at: u64,
+    pub(super) date_at: u64,
+    pub(super) duration_at: u64,
+    pub(super) video: Option<u64>,
+    pub(super) cues: Vec<(u64, u64)>,
+    pub(super) cluster_open: Option<(u64, u64)>,
+    pub(super) cluster_at: Option<u64>,
+    pub(super) fixes: Vec<(u64, u64)>,
+    pub(super) end_ms: u64,
+    pub(super) blocks: u64,
+}
+
+struct ClusterScan {
+    tc: u64,
+    first: Option<(u64, bool)>,
+    blocks: u64,
+    max_ms: u64,
+    end: usize,
+    whole: bool,
+}
+
+fn scan_cluster(b: &[u8], body: usize, size: Option<u64>) -> ClusterScan {
+    let limit = size.and_then(|z| body.checked_add(usize::try_from(z).ok()?)).map_or(b.len(), |e| e.min(b.len()));
+    let mut c = ClusterScan { tc: 0, first: None, blocks: 0, max_ms: 0, end: body, whole: true };
+    let mut at = body;
+    while at < limit {
+        let Some((id, csize, cbody)) = head(b, at) else {
+            c.whole = false;
+            break;
+        };
+        if size.is_none() && id > 0x00FF_FFFF {
+            break;
+        }
+        let Some(cend) = known_end(b, cbody, csize).filter(|e| *e <= limit) else {
+            c.whole = false;
+            break;
+        };
+        match id {
+            0xE7 => c.tc = rd_uint(&b[cbody..cend]),
+            0xA3 => {
+                let Some((Some(track), n)) = read_size(b, cbody) else {
+                    c.whole = false;
+                    break;
+                };
+                let Some([hi, lo, flags]) = b.get(cbody + n..(cbody + n + 3).min(cend)).and_then(|x| <[u8; 3]>::try_from(x).ok()) else {
+                    c.whole = false;
+                    break;
+                };
+                let ms = (c.tc as i64 + i64::from(i16::from_be_bytes([hi, lo]))).max(0) as u64;
+                c.first.get_or_insert((track, flags & 0x80 != 0));
+                c.blocks += 1;
+                c.max_ms = c.max_ms.max(ms);
+            }
+            _ => {}
+        }
+        at = cend;
+        c.end = cend;
+    }
+    if size.is_some_and(|z| (body as u64).saturating_add(z) > b.len() as u64) {
+        c.whole = false;
+    }
+    c
+}
+
+pub(super) fn scan_mkv(b: &[u8]) -> Option<MkvScan> {
+    let (id, size, body) = head(b, 0)?;
+    if id != ID_EBML {
+        return None;
+    }
+    let seg_at = known_end(b, body, size)?;
+    let (id, n) = read_id(b, seg_at)?;
+    if id != ID_SEGMENT || b.get(seg_at + n) != Some(&0x01) || seg_at + n + 8 > b.len() {
+        return None;
+    }
+    let seg_size_at = seg_at + n;
+    let seg_data = seg_size_at + 8;
+    let mut s = MkvScan { seg_size_at: seg_size_at as u64, seg_data: seg_data as u64, ..MkvScan::default() };
+    let (mut info, mut tracks) = (None, None);
+    let mut at = seg_data;
+    while let Some((id, size, body)) = head(b, at) {
+        if ![ID_SEEKHEAD, ID_VOID, ID_INFO, ID_TRACKS].contains(&id) {
+            break;
+        }
+        let Some(end) = known_end(b, body, size) else { break };
+        if id == ID_INFO {
+            info = Some((at, info_fields(b, body, end)?));
+        }
+        if id == ID_TRACKS {
+            tracks = Some(at);
+            s.video = video_track(b, body, end);
+        }
+        at = end;
+    }
+    let (info_at, (date_at, duration_at)) = info?;
+    s.info_at = info_at as u64;
+    s.tracks_at = tracks? as u64;
+    s.date_at = date_at;
+    s.duration_at = duration_at;
+    let mut clusters: Vec<(u64, u64, u64, bool)> = Vec::new();
+    while let Some((id, size, body)) = head(b, at) {
+        if id != ID_CLUSTER {
+            break;
+        }
+        let c = scan_cluster(b, body, size);
+        let Some((track, key)) = c.first else { break };
+        if s.video.is_none() || (s.video == Some(track) && key) {
+            s.cues.push((c.tc, (at - seg_data) as u64));
+        }
+        s.cluster_at = Some(c.tc);
+        s.blocks += c.blocks;
+        s.end_ms = s.end_ms.max(c.max_ms);
+        let size_at = at + read_id(b, at).map_or(4, |x| x.1);
+        clusters.push((size_at as u64, body as u64, c.end as u64, size.is_some() && body - size_at == 8));
+        at = c.end;
+        if !c.whole {
+            break;
+        }
+    }
+    s.cut = at as u64;
+    if let Some((size_at, data_at, _, _)) = clusters.pop() {
+        s.cluster_open = Some((size_at, data_at));
+    }
+    s.fixes = clusters.into_iter().filter(|c| !c.3).map(|(size_at, data_at, end, _)| (size_at, end - data_at)).collect();
+    Some(s)
+}
+
+pub fn recover_mkv(path: &Path) -> io::Result<Recovered> {
+    let b = std::fs::read(path)?;
+    let s = scan_mkv(&b).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Matroska head is not readable"))?;
+    let mut f = OpenOptions::new().read(true).write(true).open(path)?;
+    f.set_len(s.cut)?;
+    for (at, len) in &s.fixes {
+        f.seek(SeekFrom::Start(*at))?;
+        f.write_all(&size8(*len))?;
+    }
+    f.seek(SeekFrom::Start(s.cut))?;
+    let m = Mkv {
+        f: Dest::Plain(f),
+        path: path.to_path_buf(),
+        date_at: s.date_at,
+        duration_at: s.duration_at,
+        seg_size_at: s.seg_size_at,
+        seg_data: s.seg_data,
+        seekhead_at: s.seg_data,
+        info_at: s.info_at,
+        tracks_at: s.tracks_at,
+        cluster_open: s.cluster_open,
+        cues: s.cues,
+        cluster_at: s.cluster_at,
+        video: s.video,
+        end_ms: s.end_ms,
+    };
+    m.finish()?;
+    Ok(Recovered { path: path.to_path_buf(), media_frames: s.blocks, duration_ms: s.end_ms, reason: "crash".into() })
+}
+
+#[cfg(test)]
+impl MkvSink {
+    pub(super) fn inject(&mut self, faults: Faults) {
+        self.faults = faults;
+    }
 }
 
 fn safe(s: &str) -> String {
@@ -1149,7 +1493,7 @@ mod tests {
         let key = [0x10, 0x02, 0x00, 0x9d, 0x01, 0x2a, 0x80, 0x02, 0xe0, 0x01];
         let t0 = 1_800_000_000_000_000_000u64;
         let defs = [TrackDef { num: 1, codec: Codec::Vp8, first: key.to_vec() }, TrackDef { num: 2, codec: Codec::Opus, first: vec![0xf8] }];
-        let mut m = Mkv::create(&p, &defs, 7, t0).unwrap();
+        let mut m = Mkv::create(&p, &defs, 7, t0, Faults::default()).unwrap();
         m.push(2, Codec::Opus, 0, true, &[0xf8, 1], 20).unwrap();
         m.push(1, Codec::Vp8, 5, true, &key, 38).unwrap();
         m.push(2, Codec::Opus, 20, true, &[0xf8, 2], 40).unwrap();
@@ -1186,7 +1530,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("v.mkv");
         let key = [0x10, 0x02, 0x00, 0x9d, 0x01, 0x2a, 0x80, 0x02, 0xe0, 0x01];
-        let mut m = Mkv::create(&p, &[TrackDef { num: 1, codec: Codec::Vp8, first: key.to_vec() }], 1, 0).unwrap();
+        let mut m = Mkv::create(&p, &[TrackDef { num: 1, codec: Codec::Vp8, first: key.to_vec() }], 1, 0, Faults::default()).unwrap();
         for i in 0..90u64 {
             let k = i % 30 == 0;
             let ms = i * 1000 / 30;
@@ -1248,6 +1592,68 @@ mod tests {
         assert_eq!(rd_id(&b, ca).0, ID_CUES);
         assert_eq!(cue_pos, clusters, "Cue 마다 클러스터 자리");
         assert_eq!(dur, Some(3_000.0), "Duration = (마지막 블록 + 한 간격) RTP 틱 → ms");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn recovery_of_a_header_only_file_says_zero_frames() {
+        let dir = std::env::temp_dir().join(format!("oxpeer-mkv-head-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = [0x10, 0x02, 0x00, 0x9d, 0x01, 0x2a, 0x80, 0x02, 0xe0, 0x01];
+        let m = Mkv::create(&dir.join("h.mkv"), &[TrackDef { num: 1, codec: Codec::Vp8, first: key.to_vec() }], 1, 0, Faults::default()).unwrap();
+        let p = m.path.clone();
+        drop(m);
+        let r = recover_mkv(&p).unwrap();
+        assert_eq!((r.media_frames, r.duration_ms, r.reason.as_str()), (0, 0, "crash"), "SDK:RULE-PLAT-REC-API 회수 — 미디어 프레임이 0 이면 그렇다고 돌려준다");
+        let b = std::fs::read(&p).unwrap();
+        let s = scan_mkv(&b).unwrap();
+        assert_eq!(read_size(&b, s.seg_size_at as usize).unwrap().0, Some(b.len() as u64 - s.seg_data), "Segment 크기를 고쳐 썼다");
+        assert_eq!(rd_id(&b, s.cut as usize).0, ID_CUES, "빈 Cues 를 붙였다");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn scan_finds_cut_block_open_cluster_and_earlier_unknown_size() {
+        let dir = std::env::temp_dir().join(format!("oxpeer-mkv-scan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = [0x10, 0x02, 0x00, 0x9d, 0x01, 0x2a, 0x80, 0x02, 0xe0, 0x01];
+        let defs = [TrackDef { num: 1, codec: Codec::Vp8, first: key.to_vec() }, TrackDef { num: 2, codec: Codec::Opus, first: vec![0xf8] }];
+        let mut m = Mkv::create(&dir.join("s.mkv"), &defs, 1, 0, Faults::default()).unwrap();
+        for i in 0..60u64 {
+            m.push(2, Codec::Opus, i * 20, true, &[0xf8, i as u8], i * 20 + 20).unwrap();
+            if i % 25 == 0 {
+                m.push(1, Codec::Vp8, i * 20, true, &key, i * 20 + 33).unwrap();
+            } else if i % 5 == 0 {
+                m.push(1, Codec::Vp8, i * 20, false, &[0x01, 0x00], i * 20 + 33).unwrap();
+            }
+        }
+        let first_cluster = m.cues[0].1 + m.seg_data;
+        let p = m.path.clone();
+        drop(m);
+        let mut b = std::fs::read(&p).unwrap();
+        let s = scan_mkv(&b).unwrap();
+        assert_eq!(s.video, Some(1), "Tracks 에서 영상 트랙 번호");
+        assert_eq!(s.cues.len(), 3, "영상 키 클러스터만 Cue(0 · 500 · 1000ms)");
+        assert_eq!(s.cues.iter().map(|c| c.0).collect::<Vec<_>>(), vec![0, 500, 1000]);
+        assert_eq!(s.blocks, 60 + 12, "블록 수");
+        assert_eq!(s.end_ms, 1180, "마지막 블록 시각");
+        assert_eq!(s.cut, b.len() as u64, "온전하면 끝까지");
+        assert!(s.fixes.is_empty());
+        let open = s.cluster_open.unwrap();
+        assert_eq!(read_size(&b, open.0 as usize).unwrap().0, None, "마지막 클러스터는 열린 채");
+        let at = first_cluster as usize + 4;
+        b[at..at + 8].copy_from_slice(&UNKNOWN_SIZE);
+        let s2 = scan_mkv(&b).unwrap();
+        assert_eq!(s2.fixes.len(), 1, "앞 클러스터의 크기 모름은 고칠 목록에");
+        assert_eq!(s2.fixes[0].0, at as u64);
+        assert_eq!(s2.blocks, s.blocks);
+        let cut = &b[..b.len() - 2];
+        let s3 = scan_mkv(cut).unwrap();
+        assert_eq!(s3.blocks, s.blocks - 1, "잘린 블록 앞에서 멈춘다");
+        assert!(s3.cut < cut.len() as u64);
+        assert!(scan_mkv(&b[..40]).is_none(), "Info · Tracks 가 없으면 회수하지 못한다");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

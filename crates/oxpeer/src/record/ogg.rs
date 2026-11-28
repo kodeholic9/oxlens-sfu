@@ -4,11 +4,11 @@
 //! ★결정론(SDK:RULE-PLAT-REC-PIPE) — 파일 이름 · 일련번호는 세그먼트에서 셈하고 벽시계를 넣지 않는다. 그래뉼 위치는 TOC 가 말하는 길이(RFC 6716 §3.1).
 
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::{self, BufWriter, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{self, BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use super::pipeline::{Output, SegmentKind};
+use super::pipeline::{Frame, Output, SegmentKind};
 
 /// 닫힌 Ogg 파일 하나
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,8 +35,10 @@ pub struct OggFile {
 }
 
 struct Open {
-    w: OggOpus,
+    w: Option<OggOpus>,
     file: OggFile,
+    name: PathBuf,
+    stalled: Option<u64>,
 }
 
 /// 세그먼트마다 Ogg Opus 하나(음성 · opus 세그먼트만 · 나머지는 지나친다)
@@ -45,17 +47,23 @@ pub struct OggSink {
     open: BTreeMap<u64, Open>,
     done: Vec<OggFile>,
     talks: std::collections::BTreeSet<String>,
+    faults: Faults,
+    dropped: u64,
+    ended: bool,
 }
 
 impl OggSink {
     pub fn new(dir: impl Into<PathBuf>) -> io::Result<OggSink> {
         let dir = dir.into();
         std::fs::create_dir_all(&dir)?;
-        Ok(OggSink { dir, open: BTreeMap::new(), done: Vec::new(), talks: std::collections::BTreeSet::new() })
+        Ok(OggSink { dir, open: BTreeMap::new(), done: Vec::new(), talks: std::collections::BTreeSet::new(), faults: Faults::default(), dropped: 0, ended: false })
     }
 
     /// 파이프라인 출력 하나
     pub fn write(&mut self, o: &Output) -> io::Result<()> {
+        if self.ended {
+            return Ok(());
+        }
         match o {
             Output::Segment(s) if s.event == SegmentKind::Opened => {
                 if s.kind != "audio" || !s.codec.eq_ignore_ascii_case("opus") {
@@ -69,36 +77,77 @@ impl OggSink {
                     None => format!("{}-{:04}-{}.ogg", safe(&s.room), s.id, safe(&who)),
                 };
                 let path = self.dir.join(name);
-                let w = OggOpus::create(&path, s.id as u32)?;
-                let file = OggFile { path, segment: s.id, track_id: s.track_id.clone(), user_id: s.user_id.clone(), source: s.source, packets: 0, samples: 0, first_seq: None, last_seq: None, first_ts: None, end_ts: None, filled: 0, reason: None, talk: s.talk.clone() };
-                self.open.insert(s.id, Open { w, file });
+                let file = OggFile { path: path.clone(), segment: s.id, track_id: s.track_id.clone(), user_id: s.user_id.clone(), source: s.source, packets: 0, samples: 0, first_seq: None, last_seq: None, first_ts: None, end_ts: None, filled: 0, reason: None, talk: s.talk.clone() };
+                self.open.insert(s.id, Open { w: None, file, name: path, stalled: None });
             }
             Output::Segment(s) => {
                 if let Some(mut x) = self.open.remove(&s.id) {
-                    x.file.samples = x.w.finish()?;
-                    x.file.reason = s.reason.map(str::to_string);
                     if x.file.user_id.is_none() {
-                        x.file.user_id = s.user_id.clone();
+                        x.file.user_id.clone_from(&s.user_id);
                     }
-                    self.done.push(x.file);
+                    if let Some(w) = x.w.take() {
+                        self.done.push(close_ogg(w, x.file, s.reason));
+                    }
                 }
             }
-            Output::Frame(f) => {
-                if let Some(x) = f.segment.and_then(|id| self.open.get_mut(&id)) {
-                    x.w.push(&f.data)?;
-                    x.file.packets += 1;
-                    x.file.filled += u64::from(f.filled);
-                    if !f.filled {
-                        x.file.first_seq.get_or_insert(f.seq_first);
-                        x.file.last_seq = Some(f.seq_last);
-                    }
-                    x.file.first_ts.get_or_insert(f.rtp_ts);
-                    x.file.end_ts = Some(f.rtp_ts.wrapping_add(opus_samples(&f.data) as u32));
-                }
-            }
+            Output::Frame(f) => self.frame(f),
             Output::Orphan(_) => {}
         }
         Ok(())
+    }
+
+    fn frame(&mut self, f: &Frame) {
+        let Some(id) = f.segment else { return };
+        let Some(x) = self.open.get_mut(&id) else { return };
+        if x.w.is_none() {
+            if !retry_due(x.stalled, f.log_time) {
+                self.dropped += 1;
+                return;
+            }
+            match OggOpus::create(&x.name, id as u32, self.faults) {
+                Ok((w, path)) => {
+                    x.file = fresh(&x.file, path);
+                    x.w = Some(w);
+                    x.stalled = None;
+                }
+                Err(_) => {
+                    x.stalled = Some(f.log_time);
+                    self.dropped += 1;
+                    return;
+                }
+            }
+        }
+        let pushed = x.w.as_mut().map(|w| w.push(&f.data));
+        if let Some(Err(_)) = pushed {
+            if let Some(w) = x.w.take() {
+                self.done.push(close_ogg(w, x.file.clone(), Some("disk_low")));
+            }
+            x.stalled = Some(f.log_time);
+            return;
+        }
+        x.file.packets += 1;
+        x.file.filled += u64::from(f.filled);
+        if !f.filled {
+            x.file.first_seq.get_or_insert(f.seq_first);
+            x.file.last_seq = Some(f.seq_last);
+        }
+        x.file.first_ts.get_or_insert(f.rtp_ts);
+        x.file.end_ts = Some(f.rtp_ts.wrapping_add(opus_samples(&f.data) as u32));
+    }
+
+    pub fn close(&mut self, reason: Option<&str>) -> io::Result<()> {
+        let reason = reason.unwrap_or("end");
+        for (_, mut x) in std::mem::take(&mut self.open) {
+            if let Some(w) = x.w.take() {
+                self.done.push(close_ogg(w, x.file, Some(reason)));
+            }
+        }
+        self.ended = true;
+        Ok(())
+    }
+
+    pub fn dropped(&self) -> u64 {
+        self.dropped
     }
 
     /// 닫힌 파일(닫힌 차례)
@@ -107,13 +156,32 @@ impl OggSink {
     }
 }
 
+fn fresh(base: &OggFile, path: PathBuf) -> OggFile {
+    OggFile { path, segment: base.segment, track_id: base.track_id.clone(), user_id: base.user_id.clone(), source: base.source, packets: 0, samples: 0, first_seq: None, last_seq: None, first_ts: None, end_ts: None, filled: 0, reason: None, talk: base.talk.clone() }
+}
+
+fn close_ogg(mut w: OggOpus, mut file: OggFile, reason: Option<&str>) -> OggFile {
+    match w.finish() {
+        Ok(granule) => {
+            file.samples = granule;
+            file.reason = reason.map(str::to_string);
+        }
+        Err(_) => {
+            file.samples = w.granule;
+            file.reason = Some("disk_low".into());
+            w.abandon();
+        }
+    }
+    file
+}
+
 fn safe(s: &str) -> String {
     s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' }).collect()
 }
 
 /// Ogg Opus 파일 하나 — 한 쪽에 한 패킷 · 마지막 쪽에 EOS
 struct OggOpus {
-    f: BufWriter<File>,
+    f: BufWriter<Dest>,
     serial: u32,
     seq: u32,
     granule: u64,
@@ -121,8 +189,9 @@ struct OggOpus {
 }
 
 impl OggOpus {
-    fn create(path: &Path, serial: u32) -> io::Result<OggOpus> {
-        let mut w = OggOpus { f: BufWriter::new(File::create(path)?), serial, seq: 0, granule: 0, pending: None };
+    fn create(path: &Path, serial: u32, faults: Faults) -> io::Result<(OggOpus, PathBuf)> {
+        let (dest, path) = open_dest(path, false, faults)?;
+        let mut w = OggOpus { f: BufWriter::new(dest), serial, seq: 0, granule: 0, pending: None };
         let mut head = b"OpusHead".to_vec();
         head.push(1); // version
         head.push(1); // channels
@@ -137,18 +206,21 @@ impl OggOpus {
         tags.extend_from_slice(vendor);
         tags.extend_from_slice(&0u32.to_le_bytes());
         w.page(&tags, 0x00, 0)?;
-        Ok(w)
+        Ok((w, path))
     }
 
     fn push(&mut self, packet: &[u8]) -> io::Result<()> {
-        if let Some(p) = self.pending.take() {
-            self.emit(&p, 0x00)?;
+        if let Some(p) = self.pending.take()
+            && let Err(e) = self.emit(&p, 0x00)
+        {
+            self.pending = Some(p);
+            return Err(e);
         }
         self.pending = Some(packet.to_vec());
         Ok(())
     }
 
-    fn finish(mut self) -> io::Result<u64> {
+    fn finish(&mut self) -> io::Result<u64> {
         match self.pending.take() {
             Some(p) => self.emit(&p, 0x04)?,
             None => self.page(&[], 0x04, self.granule)?,
@@ -157,30 +229,41 @@ impl OggOpus {
         Ok(self.granule)
     }
 
+    fn abandon(self) {
+        let _ = self.f.into_parts();
+    }
+
     fn emit(&mut self, p: &[u8], flags: u8) -> io::Result<()> {
-        self.granule += opus_samples(p);
-        let g = self.granule;
-        self.page(p, flags, g)
+        let g = self.granule + opus_samples(p);
+        self.page(p, flags, g)?;
+        self.granule = g;
+        Ok(())
     }
 
     fn page(&mut self, packet: &[u8], flags: u8, granule: u64) -> io::Result<()> {
-        let mut lacing = vec![255u8; packet.len() / 255];
-        lacing.push((packet.len() % 255) as u8);
-        let mut h = b"OggS".to_vec();
-        h.push(0);
-        h.push(flags);
-        h.extend_from_slice(&granule.to_le_bytes());
-        h.extend_from_slice(&self.serial.to_le_bytes());
-        h.extend_from_slice(&self.seq.to_le_bytes());
-        h.extend_from_slice(&0u32.to_le_bytes());
-        h.push(lacing.len() as u8);
-        h.extend_from_slice(&lacing);
-        h.extend_from_slice(packet);
-        let crc = crc(&h);
-        h[22..26].copy_from_slice(&crc.to_le_bytes());
+        let h = page_bytes(packet, flags, granule, self.serial, self.seq);
+        self.f.write_all(&h)?;
         self.seq += 1;
-        self.f.write_all(&h)
+        Ok(())
     }
+}
+
+pub(super) fn page_bytes(packet: &[u8], flags: u8, granule: u64, serial: u32, seq: u32) -> Vec<u8> {
+    let mut lacing = vec![255u8; packet.len() / 255];
+    lacing.push((packet.len() % 255) as u8);
+    let mut h = b"OggS".to_vec();
+    h.push(0);
+    h.push(flags);
+    h.extend_from_slice(&granule.to_le_bytes());
+    h.extend_from_slice(&serial.to_le_bytes());
+    h.extend_from_slice(&seq.to_le_bytes());
+    h.extend_from_slice(&0u32.to_le_bytes());
+    h.push(lacing.len() as u8);
+    h.extend_from_slice(&lacing);
+    h.extend_from_slice(packet);
+    let crc = crc(&h);
+    h[22..26].copy_from_slice(&crc.to_le_bytes());
+    h
 }
 
 /// Opus 패킷 하나의 길이(48kHz 표본) — TOC 의 config · 프레임 수(RFC 6716 §3.1)
@@ -201,7 +284,7 @@ pub fn opus_samples(p: &[u8]) -> u64 {
 }
 
 /// Ogg 의 CRC-32(다항 0x04C11DB7 · 반사 없음 · 초기값 0)
-fn crc(b: &[u8]) -> u32 {
+pub(super) fn crc(b: &[u8]) -> u32 {
     let mut c = 0u32;
     for &x in b {
         c ^= u32::from(x) << 24;
@@ -210,4 +293,208 @@ fn crc(b: &[u8]) -> u32 {
         }
     }
     c
+}
+
+pub(super) const RETRY_NS: u64 = 1_000_000_000;
+const MAX_NUMBER: u32 = 9_999;
+
+pub(super) fn retry_due(stalled: Option<u64>, now: u64) -> bool {
+    stalled.is_none_or(|at| now.saturating_sub(at) >= RETRY_NS)
+}
+
+pub(super) fn numbered(path: &Path, n: u32) -> PathBuf {
+    if n == 0 {
+        return path.to_path_buf();
+    }
+    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = match path.extension() {
+        Some(e) => format!("{stem}-{n:04}.{}", e.to_string_lossy()),
+        None => format!("{stem}-{n:04}"),
+    };
+    path.with_file_name(name)
+}
+
+pub(super) fn open_dest(path: &Path, read: bool, faults: Faults) -> io::Result<(Dest, PathBuf)> {
+    let mut n = 0u32;
+    loop {
+        let p = numbered(path, n);
+        match OpenOptions::new().read(read).write(true).create_new(true).open(&p) {
+            Ok(f) => return Ok((Dest::new(f, faults), p)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && n < MAX_NUMBER => n += 1,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Recovered {
+    pub path: PathBuf,
+    pub media_frames: u64,
+    pub duration_ms: u64,
+    pub reason: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Page {
+    pub(super) end: usize,
+    pub(super) flags: u8,
+    pub(super) granule: u64,
+    pub(super) serial: u32,
+    pub(super) seq: u32,
+    pub(super) body: usize,
+}
+
+pub(super) fn read_page(b: &[u8], at: usize) -> Option<Page> {
+    let h = b.get(at..at + 27)?;
+    if &h[..4] != b"OggS" || h[4] != 0 {
+        return None;
+    }
+    let n = usize::from(h[26]);
+    let lacing = b.get(at + 27..at + 27 + n)?;
+    let body: usize = lacing.iter().map(|x| usize::from(*x)).sum();
+    let end = at + 27 + n + body;
+    let mut page = b.get(at..end)?.to_vec();
+    let want = u32::from_le_bytes([page[22], page[23], page[24], page[25]]);
+    page[22..26].fill(0);
+    if crc(&page) != want {
+        return None;
+    }
+    Some(Page {
+        end,
+        flags: h[5],
+        granule: u64::from_le_bytes(h[6..14].try_into().ok()?),
+        serial: u32::from_le_bytes(h[14..18].try_into().ok()?),
+        seq: u32::from_le_bytes(h[18..22].try_into().ok()?),
+        body,
+    })
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct OggScan {
+    pub(super) cut: u64,
+    pub(super) pages: u64,
+    pub(super) frames: u64,
+    pub(super) serial: u32,
+    pub(super) next_seq: u32,
+    pub(super) granule: u64,
+    pub(super) eos: bool,
+}
+
+pub(super) fn scan_ogg(b: &[u8]) -> OggScan {
+    let mut s = OggScan::default();
+    let mut at = 0;
+    while let Some(p) = read_page(b, at) {
+        if s.pages > 0 && p.serial != s.serial {
+            break;
+        }
+        if s.pages >= 2 && p.body > 0 {
+            s.frames += 1;
+        }
+        s.pages += 1;
+        s.serial = p.serial;
+        s.next_seq = p.seq.wrapping_add(1);
+        s.granule = p.granule;
+        s.eos = p.flags & 0x04 != 0;
+        at = p.end;
+        if s.eos {
+            break;
+        }
+    }
+    s.cut = at as u64;
+    s
+}
+
+pub fn recover_ogg(path: &Path) -> io::Result<Recovered> {
+    let b = std::fs::read(path)?;
+    let s = scan_ogg(&b);
+    let mut f = OpenOptions::new().write(true).open(path)?;
+    f.set_len(s.cut)?;
+    if s.pages > 0 && !s.eos {
+        f.seek(SeekFrom::Start(s.cut))?;
+        f.write_all(&page_bytes(&[], 0x04, s.granule, s.serial, s.next_seq))?;
+    }
+    f.flush()?;
+    Ok(Recovered { path: path.to_path_buf(), media_frames: s.frames, duration_ms: s.granule / 48, reason: "crash".into() })
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Faults {
+    pub(super) after: Option<u64>,
+    pub(super) sticky: bool,
+}
+
+pub(super) struct Budget {
+    left: u64,
+    sticky: bool,
+    tripped: bool,
+}
+
+impl Budget {
+    fn take(&mut self, n: usize) -> io::Result<usize> {
+        if n == 0 || (self.tripped && !self.sticky) {
+            return Ok(n);
+        }
+        if self.left == 0 {
+            self.tripped = true;
+            return Err(io::Error::new(io::ErrorKind::StorageFull, "write budget spent"));
+        }
+        let k = n.min(usize::try_from(self.left).unwrap_or(usize::MAX));
+        self.left -= k as u64;
+        Ok(k)
+    }
+}
+
+pub(super) enum Dest {
+    Plain(File),
+    Faulty(File, Budget),
+}
+
+impl Dest {
+    fn new(f: File, faults: Faults) -> Dest {
+        match faults.after {
+            None => Dest::Plain(f),
+            Some(left) => Dest::Faulty(f, Budget { left, sticky: faults.sticky, tripped: false }),
+        }
+    }
+
+    fn file(&mut self) -> &mut File {
+        match self {
+            Dest::Plain(f) | Dest::Faulty(f, _) => f,
+        }
+    }
+
+    pub(super) fn cut(&mut self, at: u64) -> io::Result<()> {
+        let f = self.file();
+        f.set_len(at)?;
+        f.seek(SeekFrom::Start(at)).map(|_| ())
+    }
+}
+
+impl Write for Dest {
+    fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+        match self {
+            Dest::Plain(f) => f.write(b),
+            Dest::Faulty(f, budget) => {
+                let k = budget.take(b.len())?;
+                f.write(&b[..k])
+            }
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file().flush()
+    }
+}
+
+impl Seek for Dest {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        self.file().seek(pos)
+    }
+}
+
+#[cfg(test)]
+impl OggSink {
+    pub(super) fn inject(&mut self, faults: Faults) {
+        self.faults = faults;
+    }
 }

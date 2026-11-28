@@ -104,9 +104,8 @@ pub struct FileSource {
 }
 
 impl FileSource {
-    /// 디렉터리의 `<recording_id>-NNNN.mcap` 을 파트 번호 차례로
-    pub fn open(dir: &Path, recording_id: &str) -> std::io::Result<FileSource> {
-        let pre = format!("{recording_id}-");
+    pub fn open(dir: &Path, stem: &str) -> std::io::Result<FileSource> {
+        let pre = format!("{stem}-");
         let mut parts: Vec<(u32, PathBuf)> = std::fs::read_dir(dir)?
             .filter_map(|e| e.ok().map(|e| e.path()))
             .filter_map(|p| {
@@ -115,6 +114,9 @@ impl FileSource {
             })
             .collect();
         parts.sort();
+        if parts.is_empty() {
+            return Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("no raw part {pre}NNNN.mcap in {}", dir.display())));
+        }
         Ok(FileSource { parts: parts.into_iter().map(|(_, p)| p).collect(), scans: Vec::new() })
     }
 

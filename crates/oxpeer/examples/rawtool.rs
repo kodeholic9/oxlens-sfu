@@ -1,10 +1,12 @@
 // author: kodeholic (powered by Claude)
 //! 원시 파트 읽기 도구(context 202611/20261109d P8) — 녹음 원시 파트(MCAP)에서 프레임 목록을 JSON 한 줄로 낸다. ★판정은 하지 않는다(재는 쪽은 labs).
 //!
-//!   rawtool frames <dir> <recording_id>            전체 파트를 이어 파이프라인으로 조립한 프레임
-//!   rawtool frames <dir> <recording_id> --part K   파트 K 하나만(파트 자족 — SDK:RULE-PLAT-REC-PART 머리 스냅숏)
-//!   rawtool frames <dir> <recording_id> --ref      대조군 — webrtc-media SampleBuilder + 디패킷타이저(설계 D15 · 기능 record-ref)
-//!   rawtool nals <dir> <recording_id>              H264 영상 프레임마다 NAL 종류(실측 M4 — SPS · PPS 가 키프레임 안에만 오나 · 202611/20261110b)
+//!   rawtool frames <dir> <stem>            전체 파트를 이어 파이프라인으로 조립한 프레임
+//!   rawtool frames <dir> <stem> --part K   파트 K 하나만(파트 자족 — SDK:RULE-PLAT-REC-PART 머리 스냅숏)
+//!   rawtool frames <dir> <stem> --ref      대조군 — webrtc-media SampleBuilder + 디패킷타이저(설계 D15 · 기능 record-ref)
+//!   rawtool nals <dir> <stem>              H264 영상 프레임마다 NAL 종류(실측 M4 — SPS · PPS 가 키프레임 안에만 오나 · 202611/20261110b)
+//!
+//! `<stem>` = `<recording_id>-<run>` — 한 기록기의 파트 사슬(파트 이름 `<stem>-NNNN.mcap` · SDK:RULE-PLAT-REC-PART).
 //!
 //! 프레임 하나 = [줄 SSRC, RTP 시각, 키프레임, 길이, CRC32, 첫 레코드 순번, 끝 레코드 순번, 종류 a|v](대조군은 레코드 순번이 없어 0).
 
@@ -16,7 +18,7 @@ use serde_json::{Value, json};
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 3 || (args[0] != "frames" && args[0] != "nals") {
-        eprintln!("사용: rawtool frames <dir> <recording_id> [--part K | --ref] · rawtool nals <dir> <recording_id>");
+        eprintln!("사용: rawtool frames <dir> <recording_id>-<run> [--part K | --ref] · rawtool nals <dir> <recording_id>-<run>");
         std::process::exit(2);
     }
     let dir = PathBuf::from(&args[1]);
@@ -24,7 +26,14 @@ fn main() {
     let part = args.iter().position(|a| a == "--part").and_then(|i| args.get(i + 1)).and_then(|v| v.parse::<u32>().ok());
     let reference = args.iter().any(|a| a == "--ref");
     let mut src = match part {
-        Some(k) => FileSource::of(vec![dir.join(format!("{id}-{k:04}.mcap"))]),
+        Some(k) => {
+            let p = dir.join(format!("{id}-{k:04}.mcap"));
+            if !p.is_file() {
+                eprintln!("파트를 못 열었다: {} 없음", p.display());
+                std::process::exit(1);
+            }
+            FileSource::of(vec![p])
+        }
         None => FileSource::open(&dir, id).unwrap_or_else(|e| {
             eprintln!("파트를 못 열었다: {e}");
             std::process::exit(1);

@@ -12,7 +12,7 @@ use common::bus::TokenEvent;
 use common::keyspace::Parsed;
 use common::log::{Setup, Sink};
 use common::talk::Report;
-use oxpeer::record::{Pipeline, Policy, RecordConfig};
+use oxpeer::record::{Pipeline, Policy, RecordConfig, Recorder};
 use oxpeer::{Client, Config, Event};
 use oxtapd::bus::Bus;
 use oxtapd::{Hub, Layout};
@@ -167,7 +167,13 @@ async fn run(a: Args) -> i32 {
     }
     let mut cfg = Config::new(&a.hub_base, &a.token);
     cfg.tls_pin_pem = ca;
-    cfg.record = Some(RecordConfig::live(format!("rec-{}", a.node)));
+    cfg.record = match Recorder::open(RecordConfig::live(format!("rec-{}", a.node))) {
+        Ok(r) => Some(r),
+        Err(e) => {
+            tracing::error!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", "rec recorder: {e}");
+            return 1;
+        }
+    };
     let (client, mut events, mut media, _frames) = match Client::open(cfg).await {
         Ok(x) => x,
         Err(e) => {

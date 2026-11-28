@@ -31,7 +31,7 @@ pub struct Config {
     pub unit: Unit,
     /// 녹음 원시 기록(SDK:RULE-PLAT-REC-TAP) — 주면 받는 줄 전부의 정리층 출구 RTP 와 제어 사건을 MCAP 파트에 적는다
     #[cfg(feature = "record")]
-    pub record: Option<crate::record::RecordConfig>,
+    pub record: Option<std::sync::Arc<crate::record::Recorder>>,
     /// 운영 로그(SDK:RULE-PLAT-SERVER 「운영 로그」) — 기본은 켬 · 표준 출력 · 같은 장비면 `socket` 에 hub 로거 소켓
     pub log: crate::log::LogConfig,
 }
@@ -552,7 +552,6 @@ impl Client {
     }
 
     /// 라이브 레코드 통을 연다(지점 ① — SDK:RULE-PLAT-REC-API) — 연 뒤의 레코드 전량 · `capacity` 를 넘으면 원시 파트 꼬리 읽기로 갈아탄다.
-    /// 녹음(`Config.record`)을 켜지 않았으면 바로 끝나는 통이다. 기록기가 닫히면 끝난다 — ★`close()` 가 아니라 `Client` 를 놓을 때(같은 객체로 다시 `connect` 하는 동안 녹음은 이어진다)
     #[cfg(feature = "record")]
     pub fn records(&self, capacity: usize) -> crate::record::Records {
         let (tx, rx) = mpsc::channel(capacity.max(16));

@@ -22,9 +22,16 @@ fn tmp(name: &str) -> PathBuf {
 
 fn cfg(dir: &Path) -> RecordConfig {
     let mut c = RecordConfig::new(dir, "r1");
+    c.run = "run0".into();
     c.tick = Duration::from_secs(3_600);
     c.min_free_bytes = 0;
     c
+}
+
+fn start(c: RecordConfig, ev: mpsc::UnboundedSender<crate::api::Event>, log: Arc<crate::log::Logger>) -> std::io::Result<Arc<Recorder>> {
+    let r = Recorder::open(c)?;
+    r.attach(ev, log);
+    Ok(r)
 }
 
 fn rtp(seq: u16) -> Vec<u8> {
@@ -35,7 +42,7 @@ fn rtp(seq: u16) -> Vec<u8> {
 }
 
 fn all(dir: &Path) -> (Vec<Record>, Vec<PartScan>) {
-    let mut src = FileSource::open(dir, "r1").unwrap();
+    let mut src = FileSource::open(dir, "r1-run0").unwrap();
     let mut got = Vec::new();
     src.run(|r| got.push(r));
     (got, src.scans().to_vec())
@@ -45,7 +52,7 @@ fn all(dir: &Path) -> (Vec<Record>, Vec<PartScan>) {
 async fn roundtrip_keeps_order_sequence_and_time() {
     let d = tmp("rt");
     let (ev, _rx) = mpsc::unbounded_channel();
-    let r = Recorder::start(cfg(&d), ev, quiet()).unwrap();
+    let r = start(cfg(&d), ev, quiet()).unwrap();
     r.track("room1", serde_json::json!({ "room": "room1", "tracks": [], "rows": {} }));
     for s in 0..50u16 {
         r.push(Channel::Rtp(1000 + (s % 2) as u32), rtp(s));
@@ -57,23 +64,87 @@ async fn roundtrip_keeps_order_sequence_and_time() {
     assert!(scans[0].complete, "정상으로 닫은 파트는 Footer 가 있다");
     assert_eq!(scans[0].recording.get("format").map(String::as_str), Some("1"));
     assert_eq!(got.len(), 52);
-    assert_eq!(got[0].channel, Channel::Track);
-    for (i, x) in got.iter().enumerate() {
-        assert_eq!(x.sequence, i as u32 + 1, "순번은 파일 차례로 하나씩");
-    }
-    assert!(got.windows(2).all(|w| w[0].log_time <= w[1].log_time), "시각도 파일 차례로 오른다");
+    assert_eq!(got[0].channel, Channel::Track, "SDK:RULE-PLAT-REC-PART 첫 RTP 에서 연 파트의 머리 스냅숏이 앞선 트랙 목록을 나른다");
     assert_eq!(got[1].data, rtp(0));
+    for (i, x) in got.iter().enumerate().skip(1) {
+        assert_eq!(x.sequence, got[1].sequence + i as u32 - 1, "순번은 파일 차례로 하나씩");
+    }
+    assert!(got[0].sequence < got[1].sequence, "머리 스냅숏은 첫 RTP 앞");
+    assert!(got.windows(2).all(|w| w[0].log_time <= w[1].log_time), "시각도 파일 차례로 오른다");
     assert_eq!(got[2].channel, Channel::Rtp(1001));
     let end = scans[0].part_end.clone().unwrap();
     assert_eq!(end.get("reason").map(String::as_str), Some("close"));
-    assert_eq!(end.get("last_sequence").map(String::as_str), Some("52"));
+    assert_eq!(end.get("last_sequence").map(String::as_str), Some(got[51].sequence.to_string().as_str()));
+    assert_eq!(scans[0].recording.get("run").map(String::as_str), Some("run0"), "SDK:RULE-PLAT-REC-RAW oxlens.recording run");
+}
+
+#[tokio::test]
+async fn a_part_opens_only_with_rtp_and_never_overwrites_a_same_name() {
+    let d = tmp("first-rtp");
+    let (ev, mut rx) = mpsc::unbounded_channel();
+    let r = start(cfg(&d), ev, quiet()).unwrap();
+    r.track("room1", serde_json::json!({ "room": "room1", "tracks": [], "rows": {} }));
+    r.push(Channel::Tick, b"{}".to_vec());
+    r.push(Channel::Sr, br#"{"ssrc":1,"ntp":1,"rtp":2}"#.to_vec());
+    assert_eq!(std::fs::read_dir(&d).expect("the recorder made its folder").count(), 0, "SDK:RULE-PLAT-REC-PART 미디어가 없으면 파트를 만들지 않는다");
+    r.push(Channel::Rtp(1), rtp(0));
+    assert!(d.join("r1-run0-0000.mcap").exists(), "SDK:RULE-PLAT-REC-PART 파트 이름 <recording_id>-<run>-NNNN.mcap · 첫 RTP 에서 연다");
+    r.close();
+    assert!(rx.try_recv().is_err(), "stand check — 앞 기록기는 멈춤 없이 닫았다");
+    let first = std::fs::read(d.join("r1-run0-0000.mcap")).unwrap();
+    let (ev2, mut rx2) = mpsc::unbounded_channel();
+    let r3 = start(cfg(&d), ev2, quiet()).unwrap();
+    r3.push(Channel::Rtp(1), rtp(1));
+    r3.push(Channel::Rtp(1), rtp(2));
+    match rx2.try_recv() {
+        Ok(Event::RecordStopped { reason }) => assert_eq!(reason, "name_taken", "SDK:RULE-PLAT-REC-PART 같은 이름이면 열지 않고 멈추고 사건"),
+        x => panic!("멈춤 사건이 와야 한다: {x:?}"),
+    }
+    r3.push(Channel::Tick, b"{}".to_vec());
+    r3.push(Channel::Rtp(1), rtp(3));
+    assert!(rx2.try_recv().is_err(), "이름 겹침은 여유로 풀리지 않는다 — 다시 열지 않는다");
+    assert_eq!(std::fs::read(d.join("r1-run0-0000.mcap")).unwrap(), first, "덮어쓰지 않는다 — 앞 실행의 파트 바이트 그대로");
+    let (ev3, mut rx3) = mpsc::unbounded_channel();
+    r3.attach(ev3, quiet());
+    match rx3.try_recv() {
+        Ok(Event::RecordStopped { reason }) => assert_eq!(reason, "name_taken", "멈춘 채로 새 세션에 붙으면 그 세션에도 알린다 — 상태를 숨기지 않는다"),
+        x => panic!("붙을 때 멈춤 사건이 와야 한다: {x:?}"),
+    }
+    assert!(FileSource::open(&d, "r1-nope").is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound), "앞머리에 맞는 파트가 없으면 빈 결과가 아니라 오류");
+    let mut other = cfg(&d);
+    other.run = "run1".into();
+    let r4 = start(other, mpsc::unbounded_channel().0, quiet()).unwrap();
+    r4.push(Channel::Rtp(1), rtp(9));
+    r4.close();
+    assert!(d.join("r1-run1-0000.mcap").exists(), "실행 표지가 다르면 이름이 갈린다 · 새 기록기는 0 부터");
+}
+
+#[test]
+fn disk_low_resumes_only_past_the_floor_plus_one_part() {
+    assert!(!resumes(None, Some(u64::MAX), 10, 5), "멈추지 않았으면 다시 켤 것이 없다");
+    assert!(!resumes(Some(Stop::DiskLow), Some(15), 10, 5), "SDK:RULE-PLAT-REC-PART 하한 + S 를 넘어야 — 같으면 아직");
+    assert!(resumes(Some(Stop::DiskLow), Some(16), 10, 5), "하한 + S 를 넘으면 새 파트로 다시 켠다");
+    assert!(!resumes(Some(Stop::DiskLow), None, 10, 5), "여유를 못 재면 켜지 않는다");
+    assert!(!resumes(Some(Stop::NameTaken), Some(u64::MAX), 10, 5), "이름 겹침은 여유로 풀리지 않는다");
+    assert!(!resumes(Some(Stop::Unwritable), Some(u64::MAX), 10, 5), "공간과 무관한 열기 실패는 여유로 풀리지 않는다 — tick 마다 멈춤 · 사건을 되풀이하지 않게");
+}
+
+#[test]
+fn a_part_open_failure_is_classified_by_its_cause() {
+    use std::io::{Error, ErrorKind};
+    assert_eq!(open_failure(&Error::from(ErrorKind::AlreadyExists)), Stop::NameTaken, "SDK:RULE-PLAT-REC-PART 같은 이름");
+    assert_eq!(open_failure(&Error::from(ErrorKind::StorageFull)), Stop::DiskLow, "공간 부족은 여유가 돌아오면 다시 켠다");
+    assert_eq!(open_failure(&Error::from(ErrorKind::PermissionDenied)), Stop::Unwritable);
+    assert_eq!(open_failure(&Error::from(ErrorKind::NotFound)), Stop::Unwritable);
+    assert_eq!((stop_reason(Stop::DiskLow), stop_reason(Stop::Unwritable), stop_reason(Stop::NameTaken)), ("disk_low", "disk_low", "name_taken"), "SDK:RULE-PLAT-REC-API 회전 — 쓰기 실패의 까닭은 disk_low");
 }
 
 #[tokio::test]
 async fn same_track_list_is_written_once() {
     let d = tmp("tr");
     let (ev, _rx) = mpsc::unbounded_channel();
-    let r = Recorder::start(cfg(&d), ev, quiet()).unwrap();
+    let r = start(cfg(&d), ev, quiet()).unwrap();
+    r.push(Channel::Rtp(1), rtp(0));
     let b = serde_json::json!({ "room": "a", "tracks": [], "rows": { "5": "t1" } });
     r.track("a", b.clone());
     r.track("a", b);
@@ -89,7 +160,7 @@ async fn rotation_by_size_chains_parts_and_repeats_head_snapshot() {
     let (ev, _rx) = mpsc::unbounded_channel();
     let mut c = cfg(&d);
     c.part_bytes = 2_000;
-    let r = Recorder::start(c, ev, quiet()).unwrap();
+    let r = start(c, ev, quiet()).unwrap();
     r.track("room1", serde_json::json!({ "room": "room1", "tracks": [], "rows": {} }));
     r.push(Channel::Floor, br#"{"room":"room1","event":"taken","user_id":"u1","sources":[7],"seq":3}"#.to_vec());
     r.push(Channel::Sr, br#"{"ssrc":1000,"ntp":9,"rtp":8}"#.to_vec());
@@ -126,7 +197,7 @@ async fn rotation_by_time() {
     let (ev, _rx) = mpsc::unbounded_channel();
     let mut c = cfg(&d);
     c.part_time = Duration::from_millis(30);
-    let r = Recorder::start(c, ev, quiet()).unwrap();
+    let r = start(c, ev, quiet()).unwrap();
     for s in 0..4u16 {
         r.push(Channel::Rtp(1), rtp(s));
         tokio::time::sleep(Duration::from_millis(40)).await;
@@ -143,7 +214,7 @@ async fn unclosed_part_reads_up_to_last_flushed_chunk() {
     let (ev, _rx) = mpsc::unbounded_channel();
     let mut c = cfg(&d);
     c.flush = Duration::ZERO;
-    let r = Recorder::start(c, ev, quiet()).unwrap();
+    let r = start(c, ev, quiet()).unwrap();
     for s in 0..10u16 {
         r.push(Channel::Rtp(1), rtp(s));
     }
@@ -152,7 +223,7 @@ async fn unclosed_part_reads_up_to_last_flushed_chunk() {
         r.push(Channel::Rtp(1), rtp(s));
     }
     // 프로세스가 죽은 것처럼 — 닫지 않은 파일을 그대로 베낀다
-    let live = d.join("r1-0000.mcap");
+    let live = d.join("r1-run0-0000.mcap");
     let cut = d.join("cut.mcap");
     std::fs::copy(&live, &cut).unwrap();
     std::mem::forget(r);
@@ -168,7 +239,7 @@ async fn disk_low_stops_with_event() {
     let (ev, mut rx) = mpsc::unbounded_channel();
     let mut c = cfg(&d);
     c.min_free_bytes = u64::MAX;
-    let r = Recorder::start(c, ev, quiet()).unwrap();
+    let r = start(c, ev, quiet()).unwrap();
     r.push(Channel::Rtp(1), rtp(0));
     r.push(Channel::Rtp(1), rtp(1));
     match rx.try_recv() {
@@ -498,7 +569,7 @@ async fn live_tap_equals_file_records() {
     let (ev, _rx) = mpsc::unbounded_channel();
     let mut c = cfg(&d);
     c.part_bytes = 300;
-    let r = Recorder::start(c, ev, quiet()).unwrap();
+    let r = start(c, ev, quiet()).unwrap();
     let (tx, rx) = mpsc::channel(10_000);
     let shared = Arc::new(Shared::default());
     r.subscribe(tx, shared.clone());
@@ -513,7 +584,20 @@ async fn live_tap_equals_file_records() {
     }
     let (file, scans) = all(&d);
     assert!(scans.len() > 1, "회전이 끼어도");
-    assert_eq!(got, file, "라이브 통 = 파일(머리 스냅숏 포함 · 같은 순번 · 시각)");
+    let mut it = got.iter();
+    let mut missing = Vec::new();
+    for f in &file {
+        loop {
+            let Some(x) = it.next() else { panic!("파일 레코드 {} 가 라이브 통에 없다", f.sequence) };
+            if x == f {
+                break;
+            }
+            missing.push(x.clone());
+        }
+    }
+    missing.extend(it.cloned());
+    assert!(missing.iter().all(|x| !matches!(x.channel, Channel::Rtp(_))), "파일 = 라이브 통에서 파트가 닫혀 있던 구간(첫 RTP 앞 · 회전 뒤 RTP 를 기다림)의 제어 레코드만 뺀 것 — RTP 는 하나도 빠지지 않는다(SDK:RULE-PLAT-REC-PART 사슬): {missing:?}");
+    assert!(!missing.is_empty(), "stand check — 파트가 닫혀 있던 구간이 있었다");
 }
 
 #[tokio::test]
@@ -524,7 +608,7 @@ async fn overflow_downgrades_to_tail_read_without_loss_or_duplicates() {
     c.part_bytes = 3_000;
     c.flush = Duration::ZERO;
     c.tick = Duration::from_millis(20);
-    let r = Recorder::start(c, ev, quiet()).unwrap();
+    let r = start(c, ev, quiet()).unwrap();
     let (tx, rx) = mpsc::channel(16);
     let shared = Arc::new(Shared::default());
     r.subscribe(tx, shared.clone());
@@ -559,7 +643,7 @@ async fn overflow_without_raw_stops_with_event() {
     let (ev, mut evs) = mpsc::unbounded_channel();
     let mut c = RecordConfig::live("live");
     c.tick = Duration::from_secs(3_600);
-    let r = Recorder::start(c, ev, quiet()).unwrap();
+    let r = start(c, ev, quiet()).unwrap();
     let (tx, rx) = mpsc::channel(16);
     let shared = Arc::new(Shared::default());
     r.subscribe(tx, shared.clone());
@@ -581,7 +665,7 @@ async fn closed_recorder_takes_nothing_and_opens_no_new_part() {
     // 닫힌 뒤 tick 이 밀어 넣어도 새 파트를 열지 않는다(꼬리 읽기가 끝을 볼 수 있게 — 20261109d 에서 드러남)
     let d = tmp("closed");
     let (ev, _rx) = mpsc::unbounded_channel();
-    let r = Recorder::start(cfg(&d), ev, quiet()).unwrap();
+    let r = start(cfg(&d), ev, quiet()).unwrap();
     r.push(Channel::Rtp(1), rtp(0));
     r.close();
     r.push(Channel::Tick, b"{}".to_vec());
@@ -597,7 +681,7 @@ async fn late_subscriber_gets_current_state_first() {
     let (ev, _rx) = mpsc::unbounded_channel();
     let mut c = RecordConfig::live("late");
     c.tick = Duration::from_secs(3_600);
-    let r = Recorder::start(c, ev, quiet()).unwrap();
+    let r = start(c, ev, quiet()).unwrap();
     let recs = stream();
     for x in &recs[..2] {
         r.push(x.channel.clone(), x.data.clone());
@@ -1548,4 +1632,452 @@ fn mkv_av_is_deterministic_for_same_records() {
     assert_eq!(std::fs::read(&fa[0].path).unwrap(), std::fs::read(&fb[0].path).unwrap());
     std::fs::remove_dir_all(&a).ok();
     std::fs::remove_dir_all(&b).ok();
+}
+
+fn names_of(paths: impl Iterator<Item = PathBuf>) -> Vec<String> {
+    paths.map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect()
+}
+
+fn long_opus(n: u32) -> Vec<Record> {
+    opus_stream(&(0..n).map(|i| (i as u16, i * 960)).collect::<Vec<_>>(), 0x78)
+}
+
+fn ogg_pages(b: &[u8]) -> Vec<ogg::Page> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while let Some(p) = ogg::read_page(b, at) {
+        at = p.end;
+        out.push(p);
+    }
+    assert_eq!(at, b.len(), "SDK:RULE-PLAT-REC-API 회수 — 모든 페이지가 온전하다(머리 · CRC)");
+    out
+}
+
+fn ogg_closed(b: &[u8]) -> Vec<ogg::Page> {
+    let pages = ogg_pages(b);
+    assert!(pages.len() >= 3, "머리 둘 + 끝 페이지");
+    assert!(pages.windows(2).all(|w| w[1].seq == w[0].seq + 1 && w[1].serial == w[0].serial), "일련번호가 이어진다");
+    assert_eq!(pages.last().map(|p| p.flags & 0x04), Some(0x04), "SDK:RULE-PLAT-REC-API 회수 — 마지막 페이지에 EOS");
+    assert_eq!(pages.iter().filter(|p| p.flags & 0x04 != 0).count(), 1, "EOS 는 하나");
+    pages
+}
+
+fn media_pages(pages: &[ogg::Page]) -> u64 {
+    pages.iter().skip(2).filter(|p| p.body > 0).count() as u64
+}
+
+fn segment_frames(out: &[Output]) -> u64 {
+    out.iter().filter(|o| matches!(o, Output::Frame(f) if f.segment.is_some())).count() as u64
+}
+
+fn mkv_closed(b: &[u8]) -> (f64, usize) {
+    let s = mkv::scan_mkv(b).expect("EBML · Segment · Info · Tracks");
+    let (size, _) = mkv::read_size(b, s.seg_size_at as usize).unwrap();
+    assert_eq!(size, Some(b.len() as u64 - s.seg_data), "SDK:RULE-PLAT-REC-MKV 닫기 — Segment 크기 = 파일 끝(크기 모름 꼴이 아니다)");
+    let mut at = s.seg_data as usize;
+    let mut cue_points = None;
+    while at < b.len() {
+        let (id, n) = mkv::read_id(b, at).unwrap();
+        let (size, k) = mkv::read_size(b, at + n).unwrap();
+        let size = size.expect("닫은 파일의 최상위 요소는 크기를 안다") as usize;
+        if id == 0x1C53_BB6B {
+            cue_points = Some(b[at + n + k..at + n + k + size].iter().filter(|x| **x == 0xBB).count());
+        }
+        at += n + k + size;
+    }
+    assert_eq!(at, b.len(), "요소 크기를 따라 걸으면 파일 끝에 닿는다");
+    let at = s.duration_at as usize;
+    let dur = f64::from_be_bytes(b[at..at + 8].try_into().unwrap());
+    (dur, cue_points.expect("SDK:RULE-PLAT-REC-MKV 닫기 — Cues"))
+}
+
+fn feed_mkv(sink: &mut MkvSink, pl: &mut Pipeline, recs: &[Record]) {
+    for r in recs {
+        sink.record(r);
+        for o in pl.push(r) {
+            sink.write(&o).unwrap();
+        }
+    }
+}
+
+#[test]
+fn result_name_inserts_next_number_before_extension() {
+    let p = Path::new("/x/r-0000-A.ogg");
+    assert_eq!(ogg::numbered(p, 0), p.to_path_buf(), "SDK:RULE-PLAT-REC-API 덮어쓰기 금지 — 첫 이름은 그대로");
+    assert_eq!(ogg::numbered(p, 1), PathBuf::from("/x/r-0000-A-0001.ogg"));
+    assert_eq!(ogg::numbered(Path::new("/x/r-u1-0000.mkv"), 12), PathBuf::from("/x/r-u1-0000-0012.mkv"));
+    assert_eq!(ogg::numbered(Path::new("/x/plain"), 3), PathBuf::from("/x/plain-0003"));
+}
+
+#[test]
+fn exclusive_open_never_truncates_and_takes_next_free_number() {
+    let d = tmp("excl");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join("a.ogg"), b"keep").unwrap();
+    std::fs::write(d.join("a-0001.ogg"), b"keep1").unwrap();
+    let (_, p) = ogg::open_dest(&d.join("a.ogg"), false, ogg::Faults::default()).unwrap();
+    assert_eq!(p, d.join("a-0002.ogg"), "SDK:RULE-PLAT-REC-API 덮어쓰기 금지 — 이름이 있으면 다음 번호");
+    assert_eq!(std::fs::read(d.join("a.ogg")).unwrap(), b"keep", "있던 파일은 비우지 않는다");
+    assert_eq!(std::fs::read(d.join("a-0001.ogg")).unwrap(), b"keep1");
+    let (_, q) = ogg::open_dest(&d.join("b.mkv"), true, ogg::Faults::default()).unwrap();
+    assert_eq!(q, d.join("b.mkv"), "없으면 그 이름");
+    std::fs::remove_dir_all(&d).ok();
+}
+
+#[test]
+fn retry_is_due_once_per_second_of_frame_clock() {
+    let s = 5_000_000_000u64;
+    assert!(ogg::retry_due(None, 0), "멈춘 적 없으면 연다");
+    assert!(!ogg::retry_due(Some(s), s), "SDK:RULE-PLAT-REC-API 회전 — 실패한 그 프레임에서 다시 열지 않는다");
+    assert!(!ogg::retry_due(Some(s), s + 999_999_999));
+    assert!(ogg::retry_due(Some(s), s + 1_000_000_000), "프레임 시각으로 1초 뒤에 다시 연다");
+    assert!(!ogg::retry_due(Some(s), s - 1), "시각이 뒤로 가면 기다린다");
+}
+
+#[test]
+fn new_sinks_on_the_same_folder_write_new_files() {
+    let d = tmp("ogg-again");
+    let mut seen = Vec::new();
+    for _ in 0..2 {
+        let mut sink = OggSink::new(&d).unwrap();
+        for o in run_pipe(Policy::Utterance, &stream()) {
+            sink.write(&o).unwrap();
+        }
+        seen.push(names_of(sink.files().iter().map(|f| f.path.clone())));
+    }
+    assert_eq!(seen[0], vec!["r-0000-A.ogg".to_string(), "r-0002-B.ogg".to_string()]);
+    assert_eq!(seen[1], vec!["r-0000-A-0001.ogg".to_string(), "r-0002-B-0001.ogg".to_string()], "SDK:RULE-PLAT-REC-API 덮어쓰기 금지 — 새로 지은 뒤의 녹음은 늘 새 파일");
+    assert_eq!(std::fs::read(d.join("r-0000-A.ogg")).unwrap(), std::fs::read(d.join("r-0000-A-0001.ogg")).unwrap(), "앞 파일은 그대로");
+    std::fs::remove_dir_all(&d).ok();
+    let d = tmp("mkv-again");
+    let recs = av_stream(2, 1000, None);
+    let (a, _) = mkv_av_build(&recs, &d, Policy::Utterance, MkvConfig::default());
+    let (b, _) = mkv_av_build(&recs, &d, Policy::Utterance, MkvConfig::default());
+    assert_eq!(names_of(a.iter().map(|f| f.path.clone())), vec!["r-u1-0000.mkv".to_string()]);
+    assert_eq!(names_of(b.iter().map(|f| f.path.clone())), vec!["r-u1-0000-0001.mkv".to_string()], "SDK:RULE-PLAT-REC-API 덮어쓰기 금지 — Matroska 도 다음 번호");
+    assert_eq!(std::fs::read(&a[0].path).unwrap(), std::fs::read(&b[0].path).unwrap());
+    std::fs::remove_dir_all(&d).ok();
+}
+
+#[test]
+fn ogg_write_failure_closes_disk_low_waits_a_second_and_opens_next_number() {
+    let d = tmp("ogg-fail");
+    let out = run_pipe(Policy::Utterance, &long_opus(600));
+    let mut sink = OggSink::new(&d).unwrap();
+    sink.inject(ogg::Faults { after: Some(10_000), sticky: false });
+    for o in &out {
+        sink.write(o).unwrap();
+        if !sink.files().is_empty() {
+            sink.inject(ogg::Faults::default());
+        }
+    }
+    let fs = sink.files().to_vec();
+    assert_eq!(names_of(fs.iter().map(|f| f.path.clone())), vec!["r-0000-A.ogg".to_string(), "r-0000-A-0001.ogg".to_string()], "SDK:RULE-PLAT-REC-API 회전 — 다음 파일은 다음 번호");
+    assert_eq!(fs[0].reason.as_deref(), Some("disk_low"), "SDK:RULE-PLAT-REC-SPLIT 결과물 닫힌 까닭 — 쓰기 실패");
+    assert_eq!(fs[1].reason.as_deref(), Some("end"));
+    assert_eq!(sink.dropped(), 49, "실패한 프레임 뒤 1초(20ms 마다 49개)는 버리고 센다");
+    assert_eq!(fs[0].packets + fs[1].packets + sink.dropped() + 1, segment_frames(&out), "실패한 프레임 하나 · 버린 프레임 · 담은 프레임이 전부다");
+    for f in &fs {
+        let pages = ogg_closed(&std::fs::read(&f.path).unwrap());
+        assert_eq!(media_pages(&pages), f.packets, "SDK:RULE-PLAT-REC-API 회전 — 정상으로 닫았다(끝 표지)");
+        assert_eq!(pages.last().unwrap().granule, f.samples);
+    }
+    std::fs::remove_dir_all(&d).ok();
+}
+
+#[test]
+fn ogg_close_failure_leaves_file_and_recovery_finishes_it() {
+    let d = tmp("ogg-fail-hard");
+    let out = run_pipe(Policy::Utterance, &long_opus(600));
+    let mut sink = OggSink::new(&d).unwrap();
+    sink.inject(ogg::Faults { after: Some(10_000), sticky: true });
+    for o in &out {
+        sink.write(o).unwrap();
+        if !sink.files().is_empty() {
+            sink.inject(ogg::Faults::default());
+        }
+    }
+    let first = sink.files()[0].clone();
+    assert_eq!(first.reason.as_deref(), Some("disk_low"), "SDK:RULE-PLAT-REC-API 회전 — 닫기마저 실패해도 까닭은 disk_low");
+    let b = std::fs::read(&first.path).unwrap();
+    assert_eq!(b.len(), 10_000, "닫기마저 실패하면 그 파일을 그대로 둔다");
+    assert!(ogg::scan_ogg(&b).cut < 10_000, "꼬리가 잘린 채다");
+    assert_eq!(sink.files().len(), 2, "1초 뒤 다음 파일");
+    let r = recover_ogg(&first.path).unwrap();
+    let pages = ogg_closed(&std::fs::read(&first.path).unwrap());
+    assert_eq!(r.media_frames, media_pages(&pages), "SDK:RULE-PLAT-REC-API 회수 — 프레임 수");
+    assert!(r.media_frames > 200 && r.media_frames <= first.packets, "{} / {}", r.media_frames, first.packets);
+    assert_eq!(r.duration_ms, r.media_frames * 20, "길이 = 마지막 그래뉼 / 48");
+    assert_eq!(r.reason, "crash");
+    std::fs::remove_dir_all(&d).ok();
+}
+
+#[test]
+fn ogg_recovery_closes_a_crashed_copy_and_a_cut_tail() {
+    let d = tmp("ogg-crash");
+    let out = run_pipe(Policy::Utterance, &long_opus(600));
+    let mut sink = OggSink::new(d.join("live")).unwrap();
+    for o in out.iter().filter(|o| !matches!(o, Output::Segment(s) if s.event == SegmentKind::Closed)) {
+        sink.write(o).unwrap();
+    }
+    let live = d.join("live").join("r-0000-A.ogg");
+    let whole = d.join("whole.ogg");
+    std::fs::copy(&live, &whole).unwrap();
+    let r = recover_ogg(&whole).unwrap();
+    let pages = ogg_closed(&std::fs::read(&whole).unwrap());
+    assert_eq!(r.media_frames, media_pages(&pages));
+    assert!(r.media_frames > 400 && r.media_frames < 600, "버퍼에 남은 꼬리는 없다 — {}", r.media_frames);
+    assert_eq!(r.duration_ms, pages.last().unwrap().granule / 48);
+    let cut = d.join("cut.ogg");
+    let b = std::fs::read(&live).unwrap();
+    std::fs::write(&cut, &b[..b.len() - 5]).unwrap();
+    let rc = recover_ogg(&cut).unwrap();
+    let cb = std::fs::read(&cut).unwrap();
+    ogg_closed(&cb);
+    assert_eq!(rc.media_frames, r.media_frames - 1, "SDK:RULE-PLAT-REC-API 회수 — 잘린 페이지만 잘라낸다");
+    let kept = ogg::scan_ogg(&b[..b.len() - 5]).cut as usize;
+    assert_eq!(&cb[..kept], &b[..kept], "그 앞은 바꾸지 않는다");
+    let again = recover_ogg(&cut).unwrap();
+    assert_eq!((again.media_frames, std::fs::read(&cut).unwrap()), (rc.media_frames, cb), "닫힌 파일을 다시 회수해도 같다");
+    std::fs::remove_dir_all(&d).ok();
+}
+
+#[test]
+fn ogg_recovery_of_a_file_without_media_says_zero() {
+    let d = tmp("ogg-empty");
+    std::fs::create_dir_all(&d).unwrap();
+    let p = d.join("h.ogg");
+    let mut b = ogg::page_bytes(b"OpusHead", 0x02, 0, 7, 0);
+    b.extend(ogg::page_bytes(b"OpusTags", 0x00, 0, 7, 1));
+    std::fs::write(&p, &b).unwrap();
+    let r = recover_ogg(&p).unwrap();
+    assert_eq!((r.media_frames, r.duration_ms), (0, 0), "SDK:RULE-PLAT-REC-API 회수 — 미디어 프레임이 0 이면 그렇다고 돌려준다");
+    let pages = ogg_closed(&std::fs::read(&p).unwrap());
+    assert_eq!((pages.len(), pages[2].serial, pages[2].seq), (3, 7, 2), "같은 일련 · 다음 순번의 빈 EOS 페이지");
+    let e = d.join("e.ogg");
+    std::fs::write(&e, b"OggS\0").unwrap();
+    assert_eq!(recover_ogg(&e).unwrap().media_frames, 0);
+    assert!(std::fs::read(&e).unwrap().is_empty(), "온전한 페이지가 없으면 남는 것이 없다");
+    std::fs::remove_dir_all(&d).ok();
+}
+
+#[test]
+fn ogg_scan_stops_at_first_page_with_bad_crc() {
+    let mut b = ogg::page_bytes(b"OpusHead", 0x02, 0, 3, 0);
+    b.extend(ogg::page_bytes(b"OpusTags", 0x00, 0, 3, 1));
+    let two = b.len() as u64;
+    b.extend(ogg::page_bytes(&[0x78, 1, 2], 0x00, 960, 3, 2));
+    b.extend(ogg::page_bytes(&[0x78, 3, 4], 0x00, 1920, 3, 3));
+    let s = ogg::scan_ogg(&b);
+    assert_eq!((s.pages, s.frames, s.granule, s.next_seq, s.eos), (4, 2, 1920, 4, false));
+    let mut bad = b.clone();
+    let at = two as usize + 28;
+    bad[at] ^= 0xFF;
+    let s = ogg::scan_ogg(&bad);
+    assert_eq!((s.cut, s.pages, s.frames, s.granule), (two, 2, 0, 0), "CRC 가 틀린 페이지에서 멈춘다");
+    let mut other = ogg::page_bytes(b"OpusHead", 0x02, 0, 3, 0);
+    other.extend(ogg::page_bytes(b"OpusTags", 0x00, 0, 4, 1));
+    assert_eq!(ogg::scan_ogg(&other).pages, 1, "일련이 바뀌면 멈춘다");
+}
+
+#[test]
+fn ogg_app_close_gives_its_reason_and_never_reopens() {
+    let out = run_pipe(Policy::Utterance, &long_opus(100));
+    for (reason, want) in [(Some("app_stop"), "app_stop"), (None, "end")] {
+        let d = tmp("ogg-close");
+        let mut sink = OggSink::new(&d).unwrap();
+        for o in &out[..60] {
+            sink.write(o).unwrap();
+        }
+        sink.close(reason).unwrap();
+        for o in &out[60..] {
+            sink.write(o).unwrap();
+        }
+        assert_eq!(sink.files().len(), 1, "SDK:RULE-PLAT-REC-API 회전 — 앱이 닫는 것은 회전이 아니다(닫고 열지 않는다)");
+        assert_eq!(sink.files()[0].reason.as_deref(), Some(want), "SDK:RULE-PLAT-REC-API 회전 — 앱이 준 까닭 · 없으면 end");
+        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 1);
+        ogg_closed(&std::fs::read(&sink.files()[0].path).unwrap());
+        std::fs::remove_dir_all(&d).ok();
+    }
+}
+
+#[test]
+fn mkv_recovery_rewrites_a_crashed_copy_like_close() {
+    let d = tmp("mkv-crash");
+    let recs = av_stream(4, 1000, None);
+    let mut pl = Pipeline::new(Policy::Utterance);
+    let mut sink = MkvSink::new(d.join("live")).unwrap();
+    feed_mkv(&mut sink, &mut pl, &recs);
+    let live = d.join("live").join("r-u1-0000.mkv");
+    let crashed = std::fs::read(&live).unwrap();
+    assert_eq!(&crashed[crashed.len() / 2..].windows(8).filter(|w| *w == [0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]).count(), &1, "열린 클러스터 하나만 크기 모름");
+    let copy = d.join("copy.mkv");
+    std::fs::write(&copy, &crashed).unwrap();
+    for o in pl.finish() {
+        sink.write(&o).unwrap();
+    }
+    sink.finish().unwrap();
+    let closed = sink.files()[0].clone();
+    let r = recover_mkv(&copy).unwrap();
+    let b = std::fs::read(&copy).unwrap();
+    let (dur, cues) = mkv_closed(&b);
+    assert_eq!(r.media_frames, closed.tracks.iter().map(|t| t.frames).sum::<u64>(), "SDK:RULE-PLAT-REC-API 회수 — 블록 수 = 프레임 수");
+    assert!(dur > 3_000.0 && dur as u64 == r.duration_ms, "Duration {dur}");
+    assert!(closed.duration_ms >= r.duration_ms && closed.duration_ms - r.duration_ms <= 40, "회수 길이는 마지막 블록 시각 — 닫은 길이 {} · 회수 {}", closed.duration_ms, r.duration_ms);
+    assert_eq!(cues, 5, "키프레임 클러스터마다 Cue(1초 GOP · 0 ~ 3.96초 키 다섯)");
+    let good = std::fs::read(&closed.path).unwrap();
+    let s = mkv::scan_mkv(&good).unwrap();
+    let at = s.duration_at as usize;
+    assert_eq!(good.len(), b.len());
+    assert!(good.iter().zip(&b).enumerate().all(|(i, (x, y))| x == y || (at..at + 8).contains(&i)), "SDK:RULE-PLAT-REC-MKV 닫기 — 같은 고쳐 쓰기(Duration 만 다르다)");
+    let cut = d.join("cut.mkv");
+    std::fs::write(&cut, &crashed[..crashed.len() - 3]).unwrap();
+    let rc = recover_mkv(&cut).unwrap();
+    mkv_closed(&std::fs::read(&cut).unwrap());
+    assert_eq!(rc.media_frames, r.media_frames - 1, "SDK:RULE-PLAT-REC-API 회수 — 잘린 블록만 잘라낸다");
+    assert_eq!(rc.reason, "crash");
+    std::fs::remove_dir_all(&d).ok();
+}
+
+#[test]
+fn mkv_write_failure_closes_disk_low_and_opens_next_file_after_a_second() {
+    let d = tmp("mkv-fail");
+    let recs = av_stream(6, 1000, None);
+    let mut pl = Pipeline::new(Policy::Utterance);
+    let mut sink = MkvSink::new(&d).unwrap();
+    sink.inject(ogg::Faults { after: Some(4_000), sticky: false });
+    for r in &recs {
+        for o in pl.push(r) {
+            sink.write(&o).unwrap();
+            if !sink.files().is_empty() {
+                sink.inject(ogg::Faults::default());
+            }
+        }
+    }
+    for o in pl.finish() {
+        sink.write(&o).unwrap();
+    }
+    sink.finish().unwrap();
+    let fs = sink.files().to_vec();
+    assert_eq!(names_of(fs.iter().map(|f| f.path.clone())), vec!["r-u1-0000.mkv".to_string(), "r-u1-0001.mkv".to_string()], "SDK:RULE-PLAT-REC-API 회전 — 다음 파일");
+    assert_eq!(fs[0].reason.as_deref(), Some("disk_low"));
+    assert_eq!(fs[1].reason.as_deref(), Some("end"));
+    assert!(sink.dropped() > 50, "1초 동안 버리고 센다 — {}", sink.dropped());
+    for f in &fs {
+        let (dur, cues) = mkv_closed(&std::fs::read(&f.path).unwrap());
+        assert!(dur > 0.0 && cues > 0, "SDK:RULE-PLAT-REC-API 회전 — 정상으로 닫았다");
+    }
+    let gap = fs[1].start_ms - (fs[0].start_ms + fs[0].duration_ms);
+    assert!((900..1_500).contains(&gap), "다음 파일은 실패한 프레임의 `log_time` 에서 1초 뒤 — 앞 파일 끝(마지막 블록 + 33ms)과의 틈 {gap}ms");
+    std::fs::remove_dir_all(&d).ok();
+}
+
+#[test]
+fn mkv_close_failure_leaves_file_and_recovery_finishes_it() {
+    let d = tmp("mkv-fail-hard");
+    let recs = av_stream(6, 1000, None);
+    let mut pl = Pipeline::new(Policy::Utterance);
+    let mut sink = MkvSink::new(&d).unwrap();
+    sink.inject(ogg::Faults { after: Some(4_000), sticky: true });
+    for r in &recs {
+        for o in pl.push(r) {
+            sink.write(&o).unwrap();
+            if !sink.files().is_empty() {
+                sink.inject(ogg::Faults::default());
+            }
+        }
+    }
+    let first = sink.files()[0].clone();
+    assert_eq!(first.reason.as_deref(), Some("disk_low"), "SDK:RULE-PLAT-REC-API 회전 — 닫기마저 실패해도 까닭은 disk_low");
+    let b = std::fs::read(&first.path).unwrap();
+    let s = mkv::scan_mkv(&b).unwrap();
+    assert_eq!(mkv::read_size(&b, s.seg_size_at as usize).unwrap().0, None, "닫기마저 실패하면 그 파일을 그대로 둔다(크기 모름)");
+    let r = recover_mkv(&first.path).unwrap();
+    let (dur, cues) = mkv_closed(&std::fs::read(&first.path).unwrap());
+    assert!(r.media_frames > 0 && dur > 0.0 && cues > 0, "SDK:RULE-PLAT-REC-API 회수 — {r:?}");
+    std::fs::remove_dir_all(&d).ok();
+}
+
+#[test]
+fn mkv_app_close_gives_its_reason_and_never_reopens() {
+    let d = tmp("mkv-close");
+    let recs = av_stream(4, 1000, None);
+    let mut pl = Pipeline::new(Policy::Utterance);
+    let mut sink = MkvSink::new(&d).unwrap();
+    feed_mkv(&mut sink, &mut pl, &recs[..recs.len() / 2]);
+    sink.close(Some("app_stop")).unwrap();
+    feed_mkv(&mut sink, &mut pl, &recs[recs.len() / 2..]);
+    for o in pl.finish() {
+        sink.write(&o).unwrap();
+    }
+    sink.finish().unwrap();
+    assert_eq!(sink.files().len(), 1, "SDK:RULE-PLAT-REC-API 회전 — 닫고 열지 않는다");
+    assert_eq!(sink.files()[0].reason.as_deref(), Some("app_stop"), "앱이 준 까닭");
+    assert_eq!(sink.open_files(), 0);
+    mkv_closed(&std::fs::read(&sink.files()[0].path).unwrap());
+    std::fs::remove_dir_all(&d).ok();
+}
+
+#[test]
+fn coverage_tracks_first_listed_and_first_loaded_of_personal_tracks() {
+    let ms = 1_000_000u64;
+    let t0 = 7_000 * ms;
+    let list = |extra: bool| {
+        let mut t = vec![
+            serde_json::json!({ "track_id": "slot-a", "kind": "audio" }),
+            serde_json::json!({ "track_id": "cam-u1", "kind": "video", "user_id": "u1" }),
+            serde_json::json!({ "track_id": "mic-u1", "kind": "audio", "user_id": "u1" }),
+            serde_json::json!({ "track_id": "dc-u1", "kind": "data", "user_id": "u1" }),
+        ];
+        if extra {
+            t.push(serde_json::json!({ "track_id": "cam-u2", "kind": "video", "user_id": "u2" }));
+        }
+        track_list("r", serde_json::Value::Array(t), serde_json::json!({}))
+    };
+    let mut c = cover::Cover::default();
+    c.seen(t0);
+    c.listed(t0 + 5 * ms, &list(false));
+    c.loaded(t0 + 40 * ms, "cam-u1");
+    c.loaded(t0 + 90 * ms, "cam-u1");
+    c.loaded(t0 + 50 * ms, "slot-a");
+    c.listed(t0 + 100 * ms, &list(true));
+    c.listed(t0 + 150 * ms, b"not json");
+    c.loaded(t0 + 300 * ms, "cam-u2");
+    let got = c.summary();
+    let row = |id: &str, user: &str, kind: &str, listed: u64, loaded: Option<u64>| cover::TrackCoverage { track_id: id.into(), user_id: user.into(), kind: kind.into(), listed_ms: listed, loaded_ms: loaded };
+    assert_eq!(
+        got.tracks,
+        vec![row("cam-u1", "u1", "video", 5, Some(40)), row("cam-u2", "u2", "video", 100, Some(300)), row("mic-u1", "u1", "audio", 5, None)],
+        "SDK:RULE-PLAT-REC-API 트랙 덮음 요약 — 개인 트랙마다 처음 실린 때(첫 레코드부터 ms) · 무전 슬롯 · 데이터는 밖"
+    );
+    assert_eq!(got.not_recorded, vec!["mic-u1".to_string()], "SDK:RULE-PLAT-REC-API 트랙 덮음 요약 — 끝내 못 실린 트랙");
+}
+
+#[test]
+fn mkv_sink_reports_coverage_from_records_and_frames() {
+    let d = tmp("mkv-cover");
+    let ms = 1_000_000u64;
+    let mut recs = av_stream(2, 1000, None);
+    let t0 = recs[0].log_time;
+    let more = serde_json::json!([
+        { "track_id": "cam-u1", "kind": "video", "user_id": "u1", "csrc": 9 },
+        { "track_id": "mic-u1", "kind": "audio", "user_id": "u1", "csrc": 10 },
+        { "track_id": "cam-u2", "kind": "video", "user_id": "u2", "csrc": 11 }
+    ]);
+    let rows = serde_json::json!({ "200": { "track_id": "cam-u1", "kind": "video", "codec": "H264", "pt": 102 }, "100": { "track_id": "mic-u1", "kind": "audio", "codec": "opus", "pt": 111 } });
+    let at = recs.iter().position(|r| r.log_time >= t0 + 250 * ms).unwrap();
+    recs.insert(at, rec(0, recs[at].log_time, Channel::Track, track_list("r", more, rows)));
+    let mut pl = Pipeline::new(Policy::Utterance);
+    let mut sink = MkvSink::new(&d).unwrap();
+    feed_mkv(&mut sink, &mut pl, &recs);
+    let c = sink.coverage();
+    let ids: Vec<(&str, u64, Option<u64>)> = c.tracks.iter().map(|t| (t.track_id.as_str(), t.listed_ms, t.loaded_ms)).collect();
+    assert_eq!(ids.len(), 3);
+    assert_eq!((ids[0].0, ids[0].1), ("cam-u1", 0));
+    assert!(ids[0].2.is_some_and(|x| x < 50), "{ids:?}");
+    assert_eq!((ids[1].0, ids[1].1, ids[1].2), ("cam-u2", recs[at].log_time.saturating_sub(t0) / ms, None));
+    assert_eq!((ids[2].0, ids[2].1), ("mic-u1", 0));
+    assert!(ids[2].2.is_some_and(|x| x < 50), "{ids:?}");
+    assert_eq!(c.not_recorded, vec!["cam-u2".to_string()], "SDK:RULE-PLAT-REC-API 트랙 덮음 요약 — 끝내 못 실린 트랙");
+    std::fs::remove_dir_all(&d).ok();
 }

@@ -277,10 +277,7 @@ pub(crate) fn spawn(cfg: Config, ev: mpsc::UnboundedSender<Event>, media: mpsc::
         remb: Arc::new(AtomicU64::new(0)),
         rtx_sent: Arc::new(AtomicU64::new(0)),
         #[cfg(feature = "record")]
-        recorder: match cfg.record.clone() {
-            Some(rc) => Some(crate::record::Recorder::start(rc, ev.clone(), log.clone()).map_err(|e| Error::transport(format!("녹음 원시 기록: {e}")))?),
-            None => None,
-        },
+        recorder: cfg.record.clone().inspect(|r| r.attach(ev.clone(), log.clone())),
         unrouted: Arc::new(AtomicU64::new(0)),
         decrypt_fail: Arc::new(AtomicU64::new(0)),
     };
@@ -361,10 +358,6 @@ async fn run(mut core: Core, mut cmd: mpsc::UnboundedReceiver<Cmd>, mut int: mps
                 None => {
                     core.close_for_app();
                     core.drain();
-                    #[cfg(feature = "record")]
-                    if let Some(r) = &core.sink.recorder {
-                        r.close();
-                    }
                     break;
                 }
             },

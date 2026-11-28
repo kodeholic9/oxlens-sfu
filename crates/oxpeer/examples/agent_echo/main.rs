@@ -140,7 +140,13 @@ fn beacon_video(n: u32, key: bool, layer: u8, codec: &str) -> Bytes {
 #[cfg(feature = "record")]
 fn raw_config(cfg: &mut Config, a: &Args) {
     if let Some(dir) = &a.raw {
-        cfg.record = Some(oxpeer::record::RecordConfig::new(dir, &a.user));
+        match oxpeer::record::Recorder::open(oxpeer::record::RecordConfig::new(dir, &a.user)) {
+            Ok(r) => cfg.record = Some(r),
+            Err(e) => {
+                eprintln!("녹음 원시 기록을 못 열었다: {e}");
+                std::process::exit(1);
+            }
+        }
     }
 }
 
