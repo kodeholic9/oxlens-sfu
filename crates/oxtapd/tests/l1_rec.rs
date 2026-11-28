@@ -1,54 +1,32 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-OPS-REC-UNIT · 정:IMPL-CHAT-TALK · 정:RULE-OPS-DROPS · 연:RULE-CHAT-REC-FILE · model: claude-opus-5-5
-//! 1층 녹음 유닛 — 녹취는 `<root>/.rec-part/` 에서 다 쓰고 `<root>/rec/{space_id}/{space_id}-{발언 id}-{화자}.ogg` 로 이름을 바꿔 닫는다(그 전에는 `rec/` 에 안 보인다) · 닫으면 `rec` 알림이 버스 `q/node/{node}/talk` 로 게이트웨이에 간다 · 답이 없으면 상한까지 다시 하고 버려 센다(`talk_drop`) · 보관 기간을 넘긴 녹취만 지운다 · 방 상세의 `record`.
+// spec: v1.14 · 정:IMPL-OPS-REC-UNIT · 정:IMPL-CHAT-TALK · 정:RULE-OPS-DROPS · 연:RULE-CHAT-REC-FILE · model: claude-opus-5-5
+//! 1층 녹음 유닛 — 쓰는 중은 `.rec-part/{node}/{시각}/` 아래 닫힐 경로 그대로 · 닫기는 덮어쓰지 않는 링크 걸기(겹치면 `-NNNN` · 경합에도 한쪽만) · 발언 파일 · 개인 트랙 녹화 · 기동 회수(마감 · 빈 조각 지움 · 실패 조각 `failed/` · 다른 node 는 안 건드림) · 보관 네 폴더 · 등록부 · 되살림 판정 · `rec` 알림 · Handle.
 
-use std::path::Path;
+use std::collections::{HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use common::envelope::Reply;
 use common::talk::Report;
 use oxmesh::{Config, Mesh};
-use oxpeer::record::OggFile;
-use oxtapd::{Layout, PART_DIR};
+use oxpeer::record::{Channel, Output, Pipeline, Policy, Record};
+use oxtapd::consumer::{RecConsumer, TalkFiles, TrackFiles};
+use oxtapd::{Layout, RecoverCtx, Registry, RoomCtx};
 use tokio::sync::mpsc;
 
 const TALK: &str = "81330e4c0190a1b2c3d4e5f60718293a4b5c";
 
-fn root(tag: &str) -> std::path::PathBuf {
+fn root(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("oxtapd-l1-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     d
 }
 
-fn written(l: &Layout, name: &str, bytes: usize, talk: Option<&str>) -> OggFile {
-    std::fs::create_dir_all(l.staging()).expect("staging");
-    let path = l.staging().join(name);
-    std::fs::write(&path, vec![7u8; bytes]).expect("write");
-    OggFile { path, segment: 3, track_id: "slot-a".into(), user_id: Some("bot-a".into()), source: Some(9), packets: 50, samples: 48_000, first_seq: None, last_seq: None, first_ts: None, end_ts: None, filled: 0, reason: Some("idle".into()), talk: talk.map(str::to_string) }
-}
-
-fn files_under(d: &Path) -> Vec<String> {
-    std::fs::read_dir(d).map(|it| it.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect()).unwrap_or_default()
-}
-
-#[test]
-fn a_recording_shows_under_rec_only_after_it_is_closed() {
-    let l = Layout::new(root("settle"));
-    let f = written(&l, "staged.ogg", 1234, Some(TALK));
-    assert!(files_under(&l.rec_dir("ch-1")).is_empty(), "정:IMPL-OPS-REC-UNIT S-sym-IMPL-OPS-REC-UNIT-3 — a file being written is not under rec/ by its name");
-    assert!(f.path.starts_with(l.root.join(PART_DIR)), "it is written in the staging place on the same store");
-    let r = l.settle("ch-1", &f).expect("settle").expect("a talk id makes a report");
-    let name = format!("ch-1-{TALK}-bot-a.ogg");
-    assert_eq!(files_under(&l.rec_dir("ch-1")), vec![name.clone()], "정:IMPL-OPS-REC-UNIT 파일 — rec/{{space}}/{{space}}-{{talk}}-{{speaker}}.ogg");
-    assert!(!f.path.exists(), "renamed, not copied");
-    assert_eq!(r, Report::Rec { talk_id: TALK.into(), path: format!("rec/ch-1/{name}"), size: 1234, mime: "audio/ogg".into(), duration_ms: 1_000 }, "정:IMPL-CHAT-TALK 2 — rec{{talk_id, path, size, mime, duration_ms}}");
-    let g = written(&l, "staged2.ogg", 10, Some(TALK));
-    let r2 = l.settle("ch-1", &g).expect("settle").expect("report");
-    assert!(matches!(&r2, Report::Rec { path, .. } if path.ends_with("-bot-a-0003.ogg")), "a second file of the same talk does not overwrite the first {r2:?}");
-    let h = written(&l, "old-server.ogg", 10, None);
-    assert_eq!(l.settle("ch-1", &h).expect("settle"), None, "no talk id (older server) — nothing to link");
-    assert!(!h.path.exists(), "and the file is not left in staging");
+fn names(d: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(d).map(|it| it.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect()).unwrap_or_default();
+    v.sort();
+    v
 }
 
 fn pkt(seq: u16, ts: u32, csrc: u32, payload: &[u8]) -> Vec<u8> {
@@ -60,27 +38,26 @@ fn pkt(seq: u16, ts: u32, csrc: u32, payload: &[u8]) -> Vec<u8> {
     v
 }
 
-fn record(seq: u32, t_ms: u64, channel: oxpeer::record::Channel, data: Vec<u8>) -> oxpeer::record::Record {
-    oxpeer::record::Record { sequence: seq, log_time: t_ms * 1_000_000, channel, data }
+fn record(seq: u32, t_ms: u64, channel: Channel, data: Vec<u8>) -> Record {
+    Record { sequence: seq, log_time: t_ms * 1_000_000, channel, data }
 }
 
-#[test]
-fn one_file_per_talk_mkv_with_video_else_ogg() {
-    use oxpeer::record::{Channel, Pipeline, Policy};
-    let l = Layout::new(root("one-per-talk"));
-    l.clear_staging().expect("staging");
-    let mut talks = oxtapd::Talks::new(Layout::new(&l.root)).expect("talks");
+fn talk_stream() -> Vec<Record> {
+    talks_in("r", 100, 100)
+}
+
+fn talks_in(room: &str, a_frames: u64, b_frames: u64) -> Vec<Record> {
     let tracks = serde_json::json!({
-        "room": "r",
+        "room": room,
         "tracks": [{ "track_id": "slot-a", "kind": "audio" }, { "track_id": "slot-v", "kind": "video" }],
         "rows": { "100": { "track_id": "slot-a", "kind": "audio", "codec": "opus", "pt": 111 }, "200": { "track_id": "slot-v", "kind": "video", "codec": "VP8", "pt": 96 } }
     });
     let mut recs = vec![record(1, 0, Channel::Track, tracks.to_string().into_bytes())];
     let (mut aseq, mut vseq) = (0u16, 0u16);
-    for (src, t0, who, talk, video) in [(7u32, 0u64, "A", "tA", true), (8, 3_000, "B", "tB", false)] {
+    for (src, t0, who, talk, video, frames) in [(7u32, 0u64, "A", "tA", true, a_frames), (8, 3_000, "B", "tB", false, b_frames)] {
         let n = recs.len() as u32 + 1;
-        recs.push(record(n, t0, Channel::Floor, format!(r#"{{"room":"r","event":"taken","user_id":"{who}","sources":[{src},{}],"seq":{n},"talk":"{talk}"}}"#, src + 10).into_bytes()));
-        for i in 0..100u64 {
+        recs.push(record(n, t0, Channel::Floor, serde_json::json!({ "room": room, "event": "taken", "user_id": who, "sources": [src, src + 10], "seq": n, "talk": talk }).to_string().into_bytes()));
+        for i in 0..frames {
             let t = t0 + i * 20;
             let n = recs.len() as u32 + 1;
             recs.push(record(n, t, Channel::Rtp(100), pkt(aseq, (t * 48) as u32, src, &[0x78, i as u8])));
@@ -93,71 +70,346 @@ fn one_file_per_talk_mkv_with_video_else_ogg() {
             }
         }
     }
-    let mut pipe = Pipeline::new(Policy::Utterance);
-    let mut reports = Vec::new();
-    for r in &recs {
-        for o in pipe.push(r) {
-            reports.extend(talks.feed(&o));
+    recs
+}
+
+fn track_stream() -> Vec<Record> {
+    let tracks = serde_json::json!({
+        "room": "r",
+        "tracks": [{ "track_id": "cam-u1", "kind": "video", "user_id": "u1", "csrc": 9 }, { "track_id": "mic-u1", "kind": "audio", "user_id": "u1", "csrc": 10 }],
+        "rows": { "300": { "track_id": "cam-u1", "kind": "video", "codec": "VP8", "pt": 96 }, "400": { "track_id": "mic-u1", "kind": "audio", "codec": "opus", "pt": 111 } }
+    });
+    let mut recs = vec![record(1, 0, Channel::Track, tracks.to_string().into_bytes())];
+    for i in 0..150u64 {
+        let t = i * 20;
+        let n = recs.len() as u32 + 1;
+        recs.push(record(n, t, Channel::Rtp(400), pkt(i as u16, (t * 48) as u32, 10, &[0x78, i as u8])));
+        if i % 2 == 0 {
+            let n = recs.len() as u32 + 1;
+            recs.push(record(n, t, Channel::Rtp(300), pkt((i / 2) as u16, (t * 90) as u32, 9, if i == 0 { &[0x10, 0x00, 0x9d, 0x01, 0x2a] } else { &[0x10, 0x01, 7] })));
         }
     }
-    for o in pipe.finish() {
-        reports.extend(talks.feed(&o));
+    recs
+}
+
+fn ctx(layout: &Layout, run: &str) -> (RoomCtx, mpsc::UnboundedReceiver<Report>) {
+    ctx_in(layout, run, "r")
+}
+
+fn ctx_in(layout: &Layout, run: &str, room: &str) -> (RoomCtx, mpsc::UnboundedReceiver<Report>) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    (RoomCtx { room: room.into(), run: run.into(), layout: layout.clone(), reports: tx }, rx)
+}
+
+fn crash_then_recover(l: &Layout, run: &str, room: &str, recs: &[Record]) -> Vec<(String, String, String, String)> {
+    let (c, mut live) = ctx_in(l, run, room);
+    let mut t = TalkFiles::open(&c).expect("talk");
+    feed(&mut t, recs, None);
+    drop(t);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    Registry::defaults().recover(&RecoverCtx { layout: l.clone(), runs: vec![l.run_dir(run)], reports: tx, reason: "crash" });
+    let mut all = reports(&mut live);
+    all.extend(reports(&mut rx));
+    all.sort();
+    all
+}
+
+#[test]
+fn recovery_keeps_and_reports_talks_of_a_room_whose_id_is_not_a_plain_file_name() {
+    let room = "회의 1";
+    let l = Layout::new(root("recover-room"), "n1");
+    let got = crash_then_recover(&l, "400", room, &talks_in(room, 100, 100));
+    let talks: Vec<&str> = got.iter().map(|(t, _, _, _)| t.as_str()).collect();
+    assert_eq!(talks, vec!["tA", "tB"], "정:IMPL-OPS-REC-UNIT 기동 회수 — 방 id 가 파일 이름 글자 밖이어도 발언을 찾아 알린다: {got:?}");
+    assert_eq!(oxtapd::files::files_under(&l.closed("rec", room)).len(), 2, "both talks are kept under rec/{{room}}/");
+}
+
+#[test]
+fn recovery_reports_an_audio_talk_as_ogg_and_a_video_talk_as_matroska() {
+    let l = Layout::new(root("recover-kinds"), "n1");
+    let got = crash_then_recover(&l, "500", "r", &talks_in("r", 100, 150));
+    let b: Vec<&(String, String, String, String)> = got.iter().filter(|x| x.0 == "tB").collect();
+    assert_eq!(b.len(), 1, "{got:?}");
+    assert_eq!((b[0].2.as_str(), b[0].3.as_str()), ("audio/ogg", "crash"), "정:IMPL-OPS-REC-UNIT 파일 — 영상 트랙이 없는 발언은 .ogg(보류 뒤 음성만 연 matroska 는 버린다)");
+    assert!(!names(&l.closed("rec", "r")).iter().any(|n| n.starts_with("r-tB-") && n.ends_with(".mkv")), "{:?}", names(&l.closed("rec", "r")));
+    let cut: Vec<Record> = talks_in("r", 140, 0).into_iter().filter(|r| r.log_time < 2_700 * 1_000_000).collect();
+    let l2 = Layout::new(root("recover-video"), "n1");
+    let got = crash_then_recover(&l2, "600", "r", &cut);
+    assert_eq!(got.iter().map(|x| (x.0.as_str(), x.2.as_str())).collect::<Vec<_>>(), vec![("tA", "video/x-matroska")], "정:IMPL-OPS-REC-UNIT — 영상 발언 가운데 죽어도 회수는 matroska(마감)를 그 발언의 녹취로 알린다: {got:?}");
+    let kept = names(&l2.closed("rec", "r"));
+    assert!(kept.contains(&"r-tA-A.mkv".to_string()), "{kept:?}");
+    assert!(kept.contains(&"r-tA-A.ogg".to_string()), "the talk's ogg stays on disk as a second file — nothing recovered is deleted: {kept:?}");
+}
+
+#[test]
+fn a_run_folder_locked_by_a_live_unit_is_not_recovered() {
+    let l = Layout::new(root("recover-lock"), "n1");
+    let (c, _rx) = ctx(&l, "700");
+    let mut t = TalkFiles::open(&c).expect("talk");
+    feed(&mut t, &talk_stream(), None);
+    drop(t);
+    let staged = |l: &Layout| oxtapd::files::files_under(&l.run_dir("700")).into_iter().filter(|p| !p.ends_with(oxtapd::files::LOCK_FILE)).collect::<Vec<_>>();
+    let before = staged(&l);
+    assert!(!before.is_empty(), "the crash left a file being written");
+    let held = oxtapd::files::lock_run(&l.run_dir("700")).expect("lock").expect("free");
+    let (tx, _r) = mpsc::unbounded_channel();
+    Registry::defaults().recover(&RecoverCtx { layout: l.clone(), runs: l.runs(), reports: tx.clone(), reason: "crash" });
+    assert_eq!(staged(&l), before, "정:IMPL-OPS-REC-UNIT 기동 회수 — 아직 쓰는 유닛의 실행 폴더는 건드리지 않는다");
+    drop(held);
+    Registry::defaults().recover(&RecoverCtx { layout: l.clone(), runs: l.runs(), reports: tx, reason: "crash" });
+    assert!(!l.run_dir("700").exists(), "and the run folder is removed");
+}
+
+#[test]
+fn one_failing_consumer_is_closed_alone_reopened_after_backoff_and_stopped_past_the_intensity() {
+    use oxtapd::job::{Consumers, Slot};
+    struct Flaky(bool);
+    impl RecConsumer for Flaky {
+        fn record(&mut self, _r: &Record) -> Result<(), String> {
+            if self.0 {
+                panic!("qa boom");
+            }
+            Ok(())
+        }
+        fn finish(&mut self, _r: &str) -> Result<(), String> {
+            Ok(())
+        }
     }
-    let mut files = files_under(&l.rec_dir("r"));
-    files.sort();
-    assert_eq!(files, vec!["r-tA-A.mkv".to_string(), "r-tB-B.ogg".to_string()], "정:IMPL-OPS-REC-UNIT 파일 — 발언마다 하나 · 영상 트랙이 든 발언은 .mkv(음성도 그 안) · 아니면 .ogg");
-    let mut got: Vec<(String, String)> = reports
-        .iter()
-        .map(|r| match r {
-            Report::Rec { talk_id, mime, .. } => (talk_id.clone(), mime.clone()),
+    let mut reg = Registry::defaults();
+    reg.register::<Flaky>("bad", |_| Ok(Flaky(true)));
+    reg.register::<Flaky>("good", |_| Ok(Flaky(false)));
+    let l = Layout::new(root("isolate"), "n1");
+    let (c, _rx) = ctx(&l, "800");
+    let open = |n: &str| Slot::new(n, reg.open(n, &c).expect("registered").expect("open"));
+    let mut cs = Consumers::new("r", oxtapd::Restart::parse(Some("100"), Some("2"), Some("60")).expect("restart"), vec![open("bad"), open("good")]);
+    let r = record(1, 0, Channel::Tick, Vec::new());
+    let t0 = Instant::now();
+    cs.each(|x| x.record(&r));
+    assert_eq!((cs.live(), cs.waiting()), (vec!["good".to_string()], vec!["bad".to_string()]), "정:IMPL-OPS-REC-UNIT 결과물 소비자 — 소비자 하나의 패닉은 그 소비자만 닫는다");
+    cs.revive(&reg, &c, t0 + Duration::from_millis(10));
+    assert_eq!(cs.waiting(), vec!["bad".to_string()], "not before the backoff");
+    cs.revive(&reg, &c, t0 + Duration::from_millis(200));
+    assert_eq!(cs.live(), vec!["bad".to_string(), "good".to_string()], "그 종류는 backoff 뒤 다시 짓는다");
+    cs.each(|x| x.record(&r));
+    cs.revive(&reg, &c, Instant::now() + Duration::from_millis(200));
+    cs.each(|x| x.record(&r));
+    assert_eq!((cs.live(), cs.waiting()), (vec!["good".to_string()], Vec::<String>::new()), "정:IMPL-OPS-REC-UNIT 되살림 반복 — intensity 를 넘으면 그 종류만 멈춘다");
+}
+
+fn feed(c: &mut dyn RecConsumer, recs: &[Record], finish: Option<&str>) {
+    let mut pipe = Pipeline::new(Policy::Utterance);
+    let go = |c: &mut dyn RecConsumer, outs: Vec<Output>| {
+        for o in outs {
+            match &o {
+                Output::Frame(f) => c.frame(f).expect("frame"),
+                Output::Segment(s) => c.segment(s).expect("segment"),
+                Output::Orphan(_) => {}
+            }
+        }
+    };
+    for r in recs {
+        c.record(r).expect("record");
+        go(c, pipe.push(r));
+    }
+    if let Some(why) = finish {
+        go(c, pipe.finish());
+        c.finish(why).expect("finish");
+    }
+}
+
+fn reports(rx: &mut mpsc::UnboundedReceiver<Report>) -> Vec<(String, String, String, String)> {
+    let mut v = Vec::new();
+    while let Ok(r) = rx.try_recv() {
+        match r {
+            Report::Rec { talk_id, path, mime, reason, .. } => v.push((talk_id, path, mime, reason)),
             other => panic!("{other:?}"),
+        }
+    }
+    v.sort();
+    v
+}
+
+#[test]
+fn a_closed_name_is_never_overwritten_even_by_two_closers_at_once() {
+    let d = root("link");
+    std::fs::create_dir_all(&d).expect("dir");
+    let dst = d.join("rec").join("r");
+    let mut made = Vec::new();
+    for i in 0..3 {
+        let p = d.join(format!("s{i}.ogg"));
+        std::fs::write(&p, format!("body{i}")).expect("write");
+        made.push(oxtapd::files::link_no_overwrite(&p, &dst, "r-t-u.ogg").expect("link"));
+    }
+    assert_eq!(names(&dst), vec!["r-t-u-0001.ogg", "r-t-u-0002.ogg", "r-t-u.ogg"], "정:IMPL-OPS-REC-UNIT 덮어쓰기 금지 — 같은 이름은 다음 차례 -NNNN 으로 비킨다");
+    assert_eq!(std::fs::read_to_string(dst.join("r-t-u.ogg")).expect("read"), "body0", "the first stays as it was");
+    assert!((0..3).all(|i| !d.join(format!("s{i}.ogg")).exists()), "the staged file is gone once the name is taken");
+    let race = d.join("race");
+    let srcs: Vec<PathBuf> = (0..8)
+        .map(|i| {
+            let p = d.join(format!("x{i}.ogg"));
+            std::fs::write(&p, format!("{i}")).expect("write");
+            p
         })
         .collect();
-    got.sort();
-    assert_eq!(got, vec![("tA".to_string(), "video/x-matroska".to_string()), ("tB".to_string(), "audio/ogg".to_string())], "rec 알림도 발언마다 하나");
-    assert!(files_under(&l.staging()).is_empty(), "the file not chosen is removed, nothing half-written stays");
+    let handles: Vec<_> = srcs
+        .into_iter()
+        .map(|p| {
+            let race = race.clone();
+            std::thread::spawn(move || oxtapd::files::link_no_overwrite(&p, &race, "same.ogg").expect("link"))
+        })
+        .collect();
+    let got: HashSet<PathBuf> = handles.into_iter().map(|h| h.join().expect("thread")).collect();
+    assert_eq!(got.len(), 8, "S-sym-IMPL-OPS-REC-UNIT-8 — closers racing for one name each win a different name");
+    let bodies: HashSet<String> = names(&race).iter().map(|n| std::fs::read_to_string(race.join(n)).expect("read")).collect();
+    assert_eq!(bodies.len(), 8, "no closer overwrote another");
 }
 
 #[test]
-fn a_restart_clears_half_written_files() {
-    let l = Layout::new(root("clear"));
-    written(&l, "half.ogg", 10, Some(TALK));
-    assert_eq!(l.clear_staging().expect("clear"), 1, "정:IMPL-OPS-REC-UNIT — a half-written file from a crashed run never reaches rec/");
-    assert!(files_under(&l.staging()).is_empty());
-}
-
-#[test]
-fn the_sweep_removes_only_files_past_the_keep_days() {
-    let l = Layout::new(root("sweep"));
-    let dir = l.rec_dir("ch-1");
-    std::fs::create_dir_all(&dir).expect("dir");
-    let now = SystemTime::now();
-    for (name, age_days) in [("old.ogg", 31u64), ("edge.ogg", 29), ("new.ogg", 0)] {
-        let p = dir.join(name);
-        std::fs::write(&p, b"x").expect("write");
-        let f = std::fs::File::options().write(true).open(&p).expect("open");
-        f.set_modified(now - Duration::from_secs(age_days * 86_400)).expect("mtime");
+fn names_are_derived_from_the_room_the_talk_and_the_run() {
+    use oxtapd::files::{numbered_name, room_name_ok, talk_of, tracks_closed_name};
+    assert_eq!(numbered_name("a-b.ogg", 0), "a-b.ogg");
+    assert_eq!(numbered_name("a-b.ogg", 3), "a-b-0003.ogg");
+    assert_eq!(tracks_closed_name("r-u1-0002.mkv", "1795"), "r-u1-1795-0002.mkv", "정:IMPL-OPS-REC-UNIT 결과물 tracks — 묶음 키 · 실행 표지 · 차례");
+    assert_eq!(talk_of("r", &format!("r-{TALK}-bot-a.ogg")).as_deref(), Some(TALK), "the talk id is read back from a staged talk file name");
+    assert_eq!(talk_of("r-x", &format!("r-x-{TALK}-u-0001.mkv")).as_deref(), Some(TALK), "a room id with a dash");
+    assert_eq!(talk_of("r", "q-t-u.ogg"), None);
+    assert!(room_name_ok("ch-1", "1795836407989"));
+    for bad in [".", "..", "a/b", ""] {
+        assert!(!room_name_ok(bad, "1"), "정:IMPL-OPS-REC-UNIT 결과물 — 이름에 못 쓰는 room_id {bad:?}");
     }
-    assert_eq!(oxtapd::sweep(&l.root, 30, now).expect("sweep"), 1, "정:IMPL-OPS-REC-UNIT 보관 — [data] rec_keep_days(30)");
-    let mut left = files_under(&dir);
-    left.sort();
-    assert_eq!(left, vec!["edge.ogg".to_string(), "new.ogg".to_string()]);
-    assert_eq!(oxtapd::sweep(&l.root, 1, now).expect("sweep"), 1, "a shorter keep removes more");
+    assert!(!room_name_ok(&"r".repeat(250), "1795836407989"), "a name past the file system length limit");
 }
 
 #[test]
-fn the_room_detail_record_list_decides() {
-    assert!(oxtapd::recorded(&serde_json::json!({ "room_id": "r", "record": ["talk"] })), "연:ROOM.http.CREATE_ROOM record — 목록에 이 유닛이 내는 종류가 있다");
-    assert!(oxtapd::recorded(&serde_json::json!({ "room_id": "r", "record": ["raw", "talk"] })));
-    assert!(!oxtapd::recorded(&serde_json::json!({ "room_id": "r", "record": [] })), "빈 목록 = 녹음하지 않는다");
-    assert!(!oxtapd::recorded(&serde_json::json!({ "room_id": "r", "record": ["raw"] })), "이 유닛이 아직 내지 않는 종류뿐이면 들지 않는다");
-    assert!(!oxtapd::recorded(&serde_json::json!({ "room_id": "r", "record": true })), "옛 bool 꼴은 목록이 아니다");
-    assert!(!oxtapd::recorded(&serde_json::json!({ "room_id": "r" })), "an older gateway without the field = not recorded");
-    let h = oxtapd::hub_of("http://127.0.0.1:1974/media", None).expect("hub");
-    assert_eq!((h.host.as_str(), h.port, h.path.as_str(), h.tls.is_none()), ("127.0.0.1", 1974, "/media", true), "정:IMPL-OPS-REC-UNIT 로컬 게이트웨이 — --hub-base");
-    assert!(oxtapd::hub_of("https://127.0.0.1:1974/media", None).is_none(), "TLS needs --hub-ca (no system trust store)");
-    let (st, body) = oxtapd::parse_reply(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\nb\r\n{\"record\":[\r\n8\r\n\"talk\"]}\r\n0\r\n\r\n").expect("parse");
-    assert!(st == 200 && oxtapd::recorded(&body), "a chunked body is read whole");
+fn talk_files_close_under_rec_one_per_talk_with_the_reason() {
+    let l = Layout::new(root("talk"), "n1");
+    let (c, mut rx) = ctx(&l, "100");
+    let mut t = TalkFiles::open(&c).expect("talk");
+    feed(&mut t, &talk_stream(), Some("end"));
+    assert_eq!(names(&l.closed("rec", "r")), vec!["r-tA-A.mkv".to_string(), "r-tB-B.ogg".to_string()], "정:IMPL-OPS-REC-UNIT 파일 — 발언마다 하나 · 영상 트랙이 든 발언은 .mkv(음성도 그 안) · 아니면 .ogg");
+    let got = reports(&mut rx);
+    assert!(got.iter().any(|x| x.0 == "tB" && x.3 == "end") && got.iter().all(|x| !x.3.is_empty()), "정:IMPL-OPS-REC-UNIT 알림 — reason 은 늘 싣는다 · 닫을 때 준 사유: {got:?}");
+    let got: Vec<(&str, &str, &str)> = got.iter().map(|(t, p, m, _)| (t.as_str(), p.as_str(), m.as_str())).collect();
+    assert_eq!(got, vec![("tA", "rec/r/r-tA-A.mkv", "video/x-matroska"), ("tB", "rec/r/r-tB-B.ogg", "audio/ogg")], "정:IMPL-CHAT-TALK 2 — rec 알림도 발언마다 하나");
+    assert!(oxtapd::files::files_under(&l.run_dir("100")).is_empty(), "nothing half-written stays in the run folder");
+    assert!(oxtapd::files::files_under(&l.closed("tracks", "r")).is_empty(), "talk files do not write personal tracks");
+}
+
+#[test]
+fn track_files_close_under_tracks_with_the_run_in_the_name() {
+    let l = Layout::new(root("tracks"), "n1");
+    let (c, mut rx) = ctx(&l, "200");
+    let mut t = TrackFiles::open(&c).expect("tracks");
+    feed(&mut t, &track_stream(), Some("end"));
+    let got = names(&l.closed("tracks", "r"));
+    assert_eq!(got, vec!["r-u1-200-0000.mkv".to_string()], "정:IMPL-OPS-REC-UNIT 결과물 tracks — tracks/{{room}}/ 아래 · 묶음 키 · 실행 표지 · 차례");
+    assert!(reports(&mut rx).is_empty(), "only talk files are reported");
+    assert!(oxtapd::files::files_under(&l.closed("rec", "r")).is_empty());
+}
+
+fn ogg_cut(p: &Path, pages: usize) {
+    let b = std::fs::read(p).expect("read");
+    let at: Vec<usize> = b.windows(4).enumerate().filter(|(_, w)| *w == b"OggS").map(|(i, _)| i).collect();
+    std::fs::write(p, &b[..at[pages]]).expect("cut");
+}
+
+#[test]
+fn startup_recovery_closes_each_fragment_and_leaves_other_nodes_alone() {
+    let l = Layout::new(root("recover"), "n1");
+    let (c, _rx) = ctx(&l, "300");
+    let mut t = TalkFiles::open(&c).expect("talk");
+    feed(&mut t, &talk_stream(), None);
+    drop(t);
+    let run = l.run_dir("300");
+    let staged = oxtapd::files::files_under(&run);
+    assert!(!staged.is_empty(), "a crash leaves files being written in the run folder");
+    let ogg = staged.iter().find(|p| p.extension().is_some_and(|e| e == "ogg")).expect("ogg").clone();
+    let bytes = std::fs::read(&ogg).expect("read");
+    let tail = bytes.len();
+    std::fs::write(&ogg, [&bytes[..], &bytes[tail - 7..]].concat()).expect("torn tail");
+    let empty = run.join("rec").join("r").join(format!("r-{TALK}-z.ogg"));
+    std::fs::copy(&ogg, &empty).expect("copy");
+    ogg_cut(&empty, 2);
+    let broken = run.join("rec").join("r").join("r-tX-y.ogg");
+    std::fs::write(&broken, b"not an ogg").expect("write");
+    let stray = run.join("other").join("thing.bin");
+    std::fs::create_dir_all(stray.parent().expect("p")).expect("dir");
+    std::fs::write(&stray, b"x").expect("write");
+    let other = Layout::new(&l.root, "n2");
+    let theirs = other.run_dir("9").join("rec").join("r").join("r-tO-o.ogg");
+    std::fs::create_dir_all(theirs.parent().expect("p")).expect("dir");
+    std::fs::write(&theirs, b"theirs").expect("write");
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    Registry::defaults().recover(&RecoverCtx { layout: l.clone(), runs: l.runs(), reports: tx, reason: "crash" });
+    let closed = names(&l.closed("rec", "r"));
+    assert!(closed.contains(&"r-tA-A.mkv".to_string()) && closed.contains(&"r-tB-B.ogg".to_string()), "정:IMPL-OPS-REC-UNIT 기동 회수 — 마감해 닫힌 경로로: {closed:?}");
+    let o = std::fs::read(l.closed("rec", "r").join("r-tB-B.ogg")).expect("ogg");
+    let last = o.windows(4).rposition(|w| w == b"OggS").expect("page");
+    assert_eq!(o[last + 5] & 0x04, 0x04, "정:IMPL-OPS-REC-UNIT 기동 회수 — Ogg 는 끝 표지를 덧붙인다");
+    let got = reports(&mut rx);
+    assert!(!got.is_empty() && got.iter().all(|(_, _, _, why)| why == "crash"), "정:IMPL-OPS-REC-UNIT 알림 — 회수 crash: {got:?}");
+    assert!(!empty.exists() && !closed.iter().any(|n| n.ends_with("-z.ogg")), "정:IMPL-OPS-REC-UNIT 기동 회수 — 미디어 프레임이 없는 조각은 지운다");
+    assert!(oxtapd::files::files_under(&l.failed()).iter().any(|p| p.ends_with("r-tX-y.ogg")), "정:IMPL-OPS-REC-UNIT 기동 회수 — 마감에 실패한 조각은 .rec-part/failed/");
+    assert!(stray.exists(), "a fragment no kind claims is left in place");
+    assert_eq!(std::fs::read(&theirs).expect("theirs"), b"theirs", "정:IMPL-OPS-REC-UNIT 기동 회수 — 다른 node 의 것은 건드리지 않는다");
+    assert!(!run.join("rec").exists(), "emptied run folders are removed");
+}
+
+#[test]
+fn the_sweep_removes_only_files_past_the_keep_days_in_the_four_kept_places() {
+    let l = Layout::new(root("sweep"), "n1");
+    let now = SystemTime::now();
+    let mut planted = Vec::new();
+    for dir in [l.closed("rec", "ch-1"), l.closed("tracks", "ch-1"), l.closed("raw", "ch-1"), l.failed().join("n1").join("1"), l.run_dir("5")] {
+        std::fs::create_dir_all(&dir).expect("dir");
+        for (name, age_days) in [("old.bin", 31u64), ("new.bin", 0)] {
+            let p = dir.join(name);
+            std::fs::write(&p, b"x").expect("write");
+            let f = std::fs::File::options().write(true).open(&p).expect("open");
+            f.set_modified(now - Duration::from_secs(age_days * 86_400)).expect("mtime");
+            planted.push(p);
+        }
+    }
+    assert_eq!(oxtapd::sweep(&l.root, 30, now).expect("sweep"), 4, "정:IMPL-OPS-REC-UNIT 보관 — rec/ · tracks/ · raw/ · .rec-part/failed/");
+    assert!(l.run_dir("5").join("old.bin").exists(), "the other staging folders are not swept");
+    assert!(planted.iter().filter(|p| p.ends_with("new.bin")).all(|p| p.exists()));
+}
+
+#[test]
+fn the_registry_starts_with_three_kinds_and_only_replaces_or_adds() {
+    struct Probe;
+    impl RecConsumer for Probe {
+        fn finish(&mut self, _r: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+    let mut r = Registry::defaults();
+    assert_eq!(r.names(), vec!["raw", "talk", "tracks"], "정:IMPL-OPS-REC-UNIT 결과물 소비자 — 기본 셋을 든 채 시작");
+    r.register::<Probe>("qa", |_| Ok(Probe));
+    r.register::<Probe>("talk", |_| Ok(Probe));
+    r.register::<Probe>("", |_| Ok(Probe));
+    assert_eq!(r.names(), vec!["qa", "raw", "talk", "tracks"], "같은 이름은 바꾸고 새 이름은 더한다 · 빈 이름은 등록하지 않는다");
+    let l = Layout::new(root("reg"), "n1");
+    let (c, _rx) = ctx(&l, "1");
+    assert!(r.open("nope", &c).is_none(), "an unregistered kind is not opened");
+    assert!(r.open("talk", &c).is_some_and(|x| x.is_ok()));
+    assert_eq!(oxtapd::job::kinds_of(&serde_json::json!({ "record": ["talk", "raw", "talk", ""] })), vec!["talk", "raw"], "연:ROOM.http.CREATE_ROOM record — 차례 그대로 · 중복 없이");
+    assert!(oxtapd::job::kinds_of(&serde_json::json!({ "record": true })).is_empty(), "the old bool form is no list");
+    assert!(oxtapd::job::kinds_of(&serde_json::json!({})).is_empty());
+}
+
+#[test]
+fn a_room_job_is_reopened_after_backoff_and_quarantined_past_the_intensity() {
+    let r = oxtapd::Restart::parse(Some("100,200"), Some("3"), Some("60")).expect("restart");
+    let mut hist = VecDeque::new();
+    let t0 = Instant::now();
+    let got: Vec<Option<u64>> = (0..4).map(|i| oxtapd::job::restart_after(&mut hist, t0 + Duration::from_secs(i), &r, i as usize).map(|d| d.as_millis() as u64)).collect();
+    assert_eq!(got, vec![Some(100), Some(200), Some(200), None], "정:IMPL-OPS-REC-UNIT 되살림 반복 ② — backoff 차례 · 창 안 상한을 넘으면 격리");
+    let mut hist = VecDeque::new();
+    let spread: Vec<bool> = (0..6).map(|i| oxtapd::job::restart_after(&mut hist, t0 + Duration::from_secs(i * 30), &r, 0).is_some()).collect();
+    assert!(spread.iter().all(|x| *x), "failures spread past the window never quarantine");
+    assert_eq!(oxtapd::job::rung(0), Duration::ZERO, "연:RULE-SES-BACKOFF-LADDER 첫 칸");
+    assert!(oxtapd::job::rung(1) > Duration::ZERO && oxtapd::job::rung(99) == oxtapd::job::rung(9), "the ladder holds its last rung");
 }
 
 #[test]
@@ -165,8 +417,9 @@ fn the_unit_answers_its_record_kinds_and_takes_the_supervisor_restart_values() {
     let mut env = common::envelope::Envelope::new(common::envelope::CallKind::Admin);
     env.method = Some("GET".into());
     env.path = Some(format!("/{}", common::system::REC_KINDS_PATH));
-    match oxtapd::admin_answer(&env, 0, None) {
-        common::envelope::Reply::Ok { body } => assert_eq!(body["kinds"], serde_json::json!(oxtapd::KINDS), "정:IMPL-OPS-REC-UNIT 결과물 소비자 — Call GET /unit/record_kinds → {{kinds}}"),
+    let kinds = Registry::defaults().names();
+    match oxtapd::admin_answer(&env, 0, None, &kinds) {
+        Reply::Ok { body } => assert_eq!(body["kinds"], serde_json::json!(["raw", "talk", "tracks"]), "정:IMPL-OPS-REC-UNIT 결과물 소비자 — Call GET /unit/record_kinds → {{kinds}} = 등록된 이름 전부"),
         other => panic!("kinds answer {other:?}"),
     }
     let r = oxtapd::Restart::parse(Some("200,500,1000"), Some("5"), Some("60")).expect("parse");
@@ -176,6 +429,42 @@ fn the_unit_answers_its_record_kinds_and_takes_the_supervisor_restart_values() {
     for bad in [(Some("x"), None, None), (Some(""), None, None), (None, Some("-1"), None), (None, None, Some("w"))] {
         assert!(oxtapd::Restart::parse(bad.0, bad.1, bad.2).is_err(), "틀린 값은 거절 {bad:?}");
     }
+    let base: Vec<String> = ["--id", "n1", "--bus-namespace", "t", "--bus-connect", "tcp/1", "--data-root", "/d", "--token", "x", "--hub-base", "http://h:1/m", "--grpc-listen", "127.0.0.1:1"].iter().map(|s| s.to_string()).collect();
+    assert!(oxtapd::unit::parse(base.clone()).is_ok());
+    let mut bad = base;
+    bad.extend(["--nope".to_string(), "1".to_string()]);
+    assert!(oxtapd::unit::parse(bad).is_err(), "운영:RULE-BOOT-ARGS — 모르는 인자는 거절");
+}
+
+#[test]
+fn a_hub_base_is_parsed_and_a_chunked_body_read_whole() {
+    let h = oxtapd::hub_of("http://127.0.0.1:1974/media", None).expect("hub");
+    assert_eq!((h.host.as_str(), h.port, h.path.as_str(), h.tls.is_none()), ("127.0.0.1", 1974, "/media", true), "정:IMPL-OPS-REC-UNIT 로컬 게이트웨이 — --hub-base");
+    assert!(oxtapd::hub_of("https://127.0.0.1:1974/media", None).is_none(), "TLS needs --hub-ca (no system trust store)");
+    let (st, body) = oxtapd::parse_reply(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\nb\r\n{\"record\":[\r\n8\r\n\"talk\"]}\r\n0\r\n\r\n").expect("parse");
+    assert!(st == 200 && oxtapd::job::kinds_of(&body) == vec!["talk"], "a chunked body is read whole");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_room_session_token_is_asked_with_the_node_token() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = l.local_addr().expect("addr").port();
+    let (seen_tx, mut seen_rx) = mpsc::unbounded_channel::<String>();
+    tokio::spawn(async move {
+        let Ok((mut s, _)) = l.accept().await else { return };
+        let mut buf = vec![0u8; 4096];
+        let n = s.read(&mut buf).await.unwrap_or(0);
+        let _ = seen_tx.send(String::from_utf8_lossy(&buf[..n]).into_owned());
+        let body = br#"{"token":"room-tok"}"#;
+        let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).as_bytes()).await;
+        let _ = s.write_all(body).await;
+    });
+    let hub = oxtapd::hub_of(&format!("http://127.0.0.1:{port}/media"), None).expect("hub");
+    let (st, body) = oxtapd::request_json(&hub, "POST", "/rec_unit/session_token", "node-tok", Some(&serde_json::json!({ "room_id": "ch-1" }))).await.expect("answer");
+    assert_eq!((st, body["token"].as_str()), (200, Some("room-tok")));
+    let req = seen_rx.recv().await.expect("request");
+    assert!(req.starts_with("POST /media/rec_unit/session_token HTTP/1.1") && req.contains("Authorization: Bearer node-tok") && req.ends_with(r#"{"room_id":"ch-1"}"#), "정:IMPL-SES-TOKEN-ISSUE 녹음 유닛 방 세션 토큰 — node 토큰 Bearer · {{room_id}}: {req}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -213,7 +502,7 @@ async fn over_tls_the_room_detail_is_read_with_the_hub_certificate_only() {
     let base = format!("https://127.0.0.1:{port}/media");
     let hub = oxtapd::hub_of(&base, Some(&pem)).expect("hub");
     let (st, body) = oxtapd::get_json(&hub, "/rooms/ch-1", "tok").await.expect("read over TLS on loopback — no name check");
-    assert!(st == 200 && oxtapd::recorded(&body), "정:IMPL-OPS-REC-UNIT 로컬 게이트웨이 — --hub-ca 의 인증서 하나로 검증");
+    assert!(st == 200 && oxtapd::job::kinds_of(&body) == vec!["talk"], "정:IMPL-OPS-REC-UNIT 로컬 게이트웨이 — --hub-ca 의 인증서 하나로 검증");
     let wrong = oxtapd::hub_of(&base, Some(&other)).expect("hub");
     assert!(oxtapd::get_json(&wrong, "/rooms/ch-1", "tok").await.is_none(), "another certificate is refused");
 }
@@ -223,13 +512,13 @@ async fn the_unit_answers_hello_and_drops_over_its_handle() {
     use common::envelope::handle::handle_client::HandleClient;
     use common::envelope::handle::handle_server::HandleServer;
     use common::envelope::handle::{CallReq, HelloReq};
-    use common::envelope::{CallKind, Envelope, Reply};
+    use common::envelope::{CallKind, Envelope};
     let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("port");
     let addr = probe.local_addr().expect("addr");
     drop(probe);
     let drops = std::sync::Arc::new(AtomicU64::new(0));
     let (tok_tx, mut tok_rx) = tokio::sync::watch::channel("t0".to_string());
-    let svc = oxtapd::Svc { epoch: "e-rec".into(), build: "b1".into(), drops: drops.clone(), token: tok_tx };
+    let svc = oxtapd::Svc { epoch: "e-rec".into(), build: "b1".into(), drops: drops.clone(), token: tok_tx, kinds: Registry::defaults().names() };
     tokio::spawn(tonic::transport::Server::builder().add_service(HandleServer::new(svc)).serve(addr));
     let mut c = None;
     for _ in 0..50 {
@@ -257,7 +546,7 @@ async fn the_unit_answers_hello_and_drops_over_its_handle() {
     give.body = serde_json::json!({ "token": "t1" });
     let r = Reply::decode(&c.call(CallReq { envelope: give.encode() }).await.expect("call").into_inner().reply).expect("reply");
     assert!(matches!(r, Reply::Ok { .. }) && tok_rx.has_changed().unwrap_or(false), "S-sym-IMPL-OPS-REC-UNIT-4① the supervisor's token handover is the one more Call path the unit takes: {r:?}");
-    assert_eq!(tok_rx.borrow_and_update().as_str(), "t1", "S-sym-IMPL-OPS-REC-UNIT-4① the handed token replaces the one the unit reads rooms and re-binds with");
+    assert_eq!(tok_rx.borrow_and_update().as_str(), "t1", "S-sym-IMPL-OPS-REC-UNIT-4① the handed token replaces the one the unit reads rooms and asks room session tokens with");
     give.body = serde_json::json!({ "token": "" });
     let r = Reply::decode(&c.call(CallReq { envelope: give.encode() }).await.expect("call").into_inner().reply).expect("reply");
     assert!(matches!(r, Reply::Fail { .. }) && tok_rx.borrow().as_str() == "t1", "S-sym-IMPL-OPS-REC-UNIT-4① an empty token is not a handover — it fails and the held token stays");
@@ -282,7 +571,7 @@ async fn a_closed_recording_is_reported_to_the_gateway_over_the_bus() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     let drops = AtomicU64::new(0);
     let (tx, rx) = mpsc::unbounded_channel();
-    let rec = Report::Rec { talk_id: TALK.into(), path: format!("rec/ch-1/ch-1-{TALK}-bot-a.ogg"), size: 9, mime: "audio/ogg".into(), duration_ms: 1_000 };
+    let rec = Report::Rec { talk_id: TALK.into(), path: format!("rec/ch-1/ch-1-{TALK}-bot-a.ogg"), size: 9, mime: "audio/ogg".into(), duration_ms: 1_000, reason: "idle".into() };
     tx.send(rec.clone()).expect("queue");
     drop(tx);
     let u2 = unit.clone();
@@ -297,11 +586,11 @@ async fn a_closed_recording_is_reported_to_the_gateway_over_the_bus() {
     )
     .await;
     let (k, r) = tokio::time::timeout(Duration::from_secs(5), got_rx.recv()).await.expect("in time").expect("arrived");
-    assert_eq!((k.as_str(), r), ("ox/t/int/q/node/n1/talk", rec), "정:IMPL-OPS-REC-UNIT 알림 — rec goes to q/node/{{node}}/talk");
+    assert_eq!((k.as_str(), r), ("ox/t/int/q/node/n1/talk", rec), "정:IMPL-OPS-REC-UNIT 알림 — rec{{.., reason}} goes to q/node/{{node}}/talk");
     assert_eq!(drops.load(Ordering::Relaxed), 0);
     let dead = oxtapd::bus::Bus::open("n9", "t", &at).await.expect("client");
     let (tx, rx) = mpsc::unbounded_channel();
-    tx.send(Report::Rec { talk_id: TALK.into(), path: "rec/x/y".into(), size: 1, mime: "audio/ogg".into(), duration_ms: 1 }).expect("queue");
+    tx.send(Report::Rec { talk_id: TALK.into(), path: "rec/x/y".into(), size: 1, mime: "audio/ogg".into(), duration_ms: 1, reason: "end".into() }).expect("queue");
     drop(tx);
     oxtapd::report_line(
         rx,

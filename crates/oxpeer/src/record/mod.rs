@@ -23,6 +23,7 @@ pub use ogg::{OggFile, OggSink, opus_samples};
 pub use pipeline::{Frame, Output, Pipeline, Policy, Segment, SegmentKind};
 pub use cover::{Coverage, TrackCoverage};
 pub use mkv::recover_mkv;
+pub use ogg::safe as safe_name;
 pub use ogg::{Recovered, recover_ogg};
 pub use ogg::OggConfig;
 

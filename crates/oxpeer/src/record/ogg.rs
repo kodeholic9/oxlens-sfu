@@ -237,7 +237,7 @@ fn close_ogg(mut w: OggOpus, mut file: OggFile, reason: Option<&str>) -> (OggFil
     }
 }
 
-fn safe(s: &str) -> String {
+pub fn safe(s: &str) -> String {
     s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' }).collect()
 }
 
@@ -448,6 +448,7 @@ pub struct Recovered {
     pub media_frames: u64,
     pub duration_ms: u64,
     pub reason: String,
+    pub video: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -533,7 +534,7 @@ pub fn recover_ogg(path: &Path) -> io::Result<Recovered> {
         f.write_all(&page_bytes(&[], 0x04, s.granule, s.serial, s.next_seq))?;
     }
     f.flush()?;
-    Ok(Recovered { path: path.to_path_buf(), media_frames: s.frames, duration_ms: s.granule / 48, reason: "crash".into() })
+    Ok(Recovered { path: path.to_path_buf(), media_frames: s.frames, duration_ms: s.granule / 48, reason: "crash".into(), video: false })
 }
 
 #[derive(Clone, Debug, Default)]

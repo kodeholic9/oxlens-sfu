@@ -1,24 +1,23 @@
 // author: kodeholic (powered by Claude)
-// spec: v1.6 · 정:IMPL-OPS-REC-UNIT · 정:IMPL-CHAT-TALK · 정:IMPL-FLR-TALK-REPORT · 정:RULE-OPS-DROPS · 정:RULE-BUS-KEYSPACE · 연:RULE-CHAT-REC-FILE · 연:ROOM.http.CREATE_ROOM · model: claude-opus-5-5
-//! 녹음 유닛 — 발언마다 파일 하나(영상 트랙이 든 발언은 `.mkv` — 음성도 그 안 · 아니면 `.ogg` · 알림도 하나) · 파일 자리(`<root>/.rec-part/` 에 다 쓰고 `<root>/rec/{space_id}/` 로 이름 바꿔 닫는다 — 같은 저장소라 바꾸기는 한 번에) · 닫은 녹취의 `rec` 알림 · 하루 한 번 보관 기간을 넘긴 녹취 지우기 · 알림은 한 줄로(일시 실패는 백오프로 다시 · 상한을 넘기면 버리고 센다) · 로컬 게이트웨이(`--hub-base` · TLS 면 `--hub-ca` 인증서 하나로 검증) 방 상세의 `record` 목록(지원 종류 `KINDS` 가 들었나) · 운영 표면(Handle `Call` 은 `/admin/drops` · 감독자의 토큰 넘김 `POST /unit/token` · 지원 종류 `GET /unit/record_kinds`) · 방 작업 되살림 값(`Restart` — rec 유닛 인자 `--backoff-ms` · `--intensity-max` · `--intensity-window-secs`).
+// spec: v1.14 · 정:IMPL-OPS-REC-UNIT · 정:IMPL-CHAT-TALK · 정:IMPL-FLR-TALK-REPORT · 정:RULE-OPS-DROPS · 정:RULE-BUS-KEYSPACE · 정:IMPL-SES-TOKEN-ISSUE · 연:RULE-CHAT-REC-FILE · 연:ROOM.http.CREATE_ROOM · model: claude-opus-5-5
+//! 녹음 유닛 라이브러리 — 얇은 실행 파일이 `unit::run(인자, 등록부)` 를 부른다 · 결과물 소비자 등록부(`consumer`) · 방 작업(`job`) · 파일 자리(`files`) · 로컬 게이트웨이 HTTP(`--hub-base` · TLS 면 `--hub-ca` 인증서 하나로 검증 · 방 상세 · 방 세션 토큰) · 닫은 녹취의 `rec` 알림 한 줄(일시 실패는 백오프로 다시 · 상한을 넘기면 버리고 센다) · 운영 표면(Handle `Call` 은 `/admin/drops` · 감독자의 토큰 넘김 `POST /unit/token` · 지원 종류 `GET /unit/record_kinds` = 등록된 이름 전부) · 방 작업 되살림 값(`Restart` — rec 유닛 인자 `--backoff-ms` · `--intensity-max` · `--intensity-window-secs`).
 
 pub mod bus;
+pub mod consumer;
+pub mod files;
+pub mod job;
+pub mod unit;
 
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use common::talk::{Outcome, Report};
-use oxpeer::record::{MkvFile, OggFile};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
-pub const PART_DIR: &str = ".rec-part";
-pub const DAY: Duration = Duration::from_secs(86_400);
-pub const OGG_MIME: &str = "audio/ogg";
-pub const MKV_MIME: &str = "video/x-matroska";
-pub const KINDS: [&str; 1] = ["talk"];
+pub use consumer::{RecConsumer, RecoverCtx, Registry, RoomCtx};
+pub use files::{DAY, Layout, PART_DIR, sweep};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Restart {
@@ -41,200 +40,6 @@ impl Restart {
         let secs = window.map(|s| s.parse().map_err(|_| format!("--intensity-window-secs {s:?}"))).transpose()?.unwrap_or(d.intensity_window_secs);
         Ok(Restart { backoff_ms, intensity_max, intensity_window: Duration::from_secs(secs) })
     }
-}
-
-pub struct Layout {
-    pub root: PathBuf,
-}
-
-impl Layout {
-    pub fn new(root: impl Into<PathBuf>) -> Layout {
-        Layout { root: root.into() }
-    }
-
-    pub fn staging(&self) -> PathBuf {
-        self.root.join(PART_DIR)
-    }
-
-    pub fn rec_dir(&self, space: &str) -> PathBuf {
-        self.root.join("rec").join(space)
-    }
-
-    pub fn clear_staging(&self) -> std::io::Result<usize> {
-        let dir = self.staging();
-        std::fs::create_dir_all(&dir)?;
-        let mut n = 0;
-        for f in std::fs::read_dir(&dir)?.flatten() {
-            if f.file_type().map(|t| t.is_file()).unwrap_or(false) {
-                std::fs::remove_file(f.path())?;
-                n += 1;
-            }
-        }
-        Ok(n)
-    }
-
-    pub fn settle(&self, space: &str, f: &OggFile) -> std::io::Result<Option<Report>> {
-        let c = Closed { path: &f.path, talk: f.talk.as_deref(), user: f.user_id.as_deref(), ext: "ogg", mime: OGG_MIME, duration_ms: f.samples / 48, tag: f.segment };
-        self.settle_file(space, &c)
-    }
-
-    pub fn settle_mkv(&self, f: &MkvFile) -> std::io::Result<Option<Report>> {
-        let c = Closed { path: &f.path, talk: f.talk.as_deref(), user: f.user_id.as_deref(), ext: "mkv", mime: MKV_MIME, duration_ms: f.duration_ms, tag: f.index };
-        self.settle_file(&f.room, &c)
-    }
-
-    pub fn settle_file(&self, space: &str, f: &Closed) -> std::io::Result<Option<Report>> {
-        let (Some(talk), true) = (f.talk, common::keyspace::valid_piece(space)) else {
-            std::fs::remove_file(f.path)?;
-            return Ok(None);
-        };
-        let who = f.user.filter(|u| common::keyspace::valid_piece(u)).unwrap_or("none");
-        let dir = self.rec_dir(space);
-        std::fs::create_dir_all(&dir)?;
-        let mut name = format!("{space}-{talk}-{who}.{}", f.ext);
-        if dir.join(&name).exists() {
-            name = format!("{space}-{talk}-{who}-{:04}.{}", f.tag, f.ext);
-        }
-        let to = dir.join(&name);
-        std::fs::rename(f.path, &to)?;
-        let size = std::fs::metadata(&to)?.len();
-        Ok(Some(Report::Rec { talk_id: talk.to_string(), path: format!("rec/{space}/{name}"), size, mime: f.mime.into(), duration_ms: f.duration_ms }))
-    }
-}
-
-pub struct Closed<'a> {
-    pub path: &'a Path,
-    pub talk: Option<&'a str>,
-    pub user: Option<&'a str>,
-    pub ext: &'a str,
-    pub mime: &'a str,
-    pub duration_ms: u64,
-    pub tag: u64,
-}
-
-pub struct Talks {
-    pub layout: Layout,
-    ogg: oxpeer::record::OggSink,
-    mkv: oxpeer::record::MkvSink,
-    pick: OneFilePerTalk,
-    rooms: std::collections::HashMap<u64, String>,
-    ogg_seen: usize,
-    mkv_seen: usize,
-}
-
-impl Talks {
-    pub fn new(layout: Layout) -> std::io::Result<Talks> {
-        let ogg = oxpeer::record::OggSink::new(layout.staging())?;
-        let mkv = oxpeer::record::MkvSink::new(layout.staging())?;
-        Ok(Talks { layout, ogg, mkv, pick: OneFilePerTalk::default(), rooms: Default::default(), ogg_seen: 0, mkv_seen: 0 })
-    }
-
-    pub fn feed(&mut self, o: &oxpeer::record::Output) -> Vec<Report> {
-        use oxpeer::record::{Output, SegmentKind};
-        let mut closed = false;
-        if let Output::Segment(s) = o {
-            match s.event {
-                SegmentKind::Opened => {
-                    if let Err(e) = std::fs::create_dir_all(self.layout.staging()) {
-                        tracing::warn!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", "rec staging: {e}");
-                    }
-                    self.rooms.insert(s.id, s.room.clone());
-                    self.pick.saw(s);
-                }
-                SegmentKind::Closed => closed = true,
-            }
-        }
-        for r in [self.ogg.write(o), self.mkv.write(o)] {
-            if let Err(e) = r {
-                tracing::warn!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", "rec write: {e}");
-            }
-        }
-        if closed { self.settle() } else { Vec::new() }
-    }
-
-    pub fn keyframe_requests(&mut self) -> Vec<String> {
-        self.mkv.take_keyframe_requests()
-    }
-
-    fn settle(&mut self) -> Vec<Report> {
-        let mut out = Vec::new();
-        let mkv: Vec<MkvFile> = self.mkv.files().iter().skip(self.mkv_seen).cloned().collect();
-        self.mkv_seen += mkv.len();
-        for f in mkv {
-            let r = if self.pick.keep_mkv(&f) { self.layout.settle_mkv(&f) } else { std::fs::remove_file(&f.path).map(|_| None) };
-            Self::push(&mut out, r, &f.path);
-        }
-        let ogg: Vec<OggFile> = self.ogg.files().iter().skip(self.ogg_seen).cloned().collect();
-        self.ogg_seen += ogg.len();
-        for f in ogg {
-            let space = self.rooms.remove(&f.segment).unwrap_or_default();
-            let r = if self.pick.keep_ogg(&f) { self.layout.settle(&space, &f) } else { std::fs::remove_file(&f.path).map(|_| None) };
-            Self::push(&mut out, r, &f.path);
-        }
-        out
-    }
-
-    fn push(out: &mut Vec<Report>, r: std::io::Result<Option<Report>>, path: &Path) {
-        match r {
-            Ok(Some(x)) => out.push(x),
-            Ok(None) => {}
-            Err(e) => tracing::warn!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", file = %path.display(), "rec settle: {e}"),
-        }
-    }
-}
-
-#[derive(Default)]
-pub struct OneFilePerTalk {
-    video: std::collections::HashSet<String>,
-}
-
-impl OneFilePerTalk {
-    pub fn saw(&mut self, s: &oxpeer::record::Segment) {
-        if s.owner.is_none()
-            && s.kind == "video"
-            && let Some(t) = &s.talk
-        {
-            self.video.insert(t.clone());
-        }
-    }
-
-    pub fn keep_ogg(&self, f: &OggFile) -> bool {
-        f.talk.as_ref().is_some_and(|t| !self.video.contains(t))
-    }
-
-    pub fn keep_mkv(&mut self, f: &MkvFile) -> bool {
-        let video = f.owner.is_none() && f.tracks.iter().any(|t| t.kind == "video");
-        if let Some(t) = &f.talk
-            && video
-        {
-            self.video.remove(t);
-            return true;
-        }
-        false
-    }
-}
-
-pub fn sweep(root: &Path, keep_days: u32, now: SystemTime) -> std::io::Result<usize> {
-    let cut = now.checked_sub(DAY * keep_days).unwrap_or(SystemTime::UNIX_EPOCH);
-    let Ok(spaces) = std::fs::read_dir(root.join("rec")) else { return Ok(0) };
-    let mut n = 0;
-    for sp in spaces.flatten() {
-        if !sp.file_type()?.is_dir() {
-            continue;
-        }
-        for f in std::fs::read_dir(sp.path())?.flatten() {
-            let m = f.metadata()?;
-            if m.is_file() && m.modified()? < cut {
-                std::fs::remove_file(f.path())?;
-                n += 1;
-            }
-        }
-    }
-    Ok(n)
-}
-
-pub fn recorded(body: &Value) -> bool {
-    body.get("record").and_then(Value::as_array).is_some_and(|a| a.iter().filter_map(Value::as_str).any(|k| KINDS.contains(&k)))
 }
 
 pub async fn report_line<A, F>(mut rx: mpsc::UnboundedReceiver<Report>, retry_for: Duration, mut ask: A, drops: &AtomicU64)
@@ -287,8 +92,20 @@ pub fn hub_of(base: &str, ca_pem: Option<&[u8]>) -> Option<Hub> {
 }
 
 pub async fn get_json(hub: &Hub, path: &str, token: &str) -> Option<(u16, Value)> {
+    request_json(hub, "GET", path, token, None).await
+}
+
+pub const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub async fn request_json(hub: &Hub, method: &str, path: &str, token: &str, body: Option<&Value>) -> Option<(u16, Value)> {
+    tokio::time::timeout(HTTP_TIMEOUT, request_once(hub, method, path, token, body)).await.ok().flatten()
+}
+
+async fn request_once(hub: &Hub, method: &str, path: &str, token: &str, body: Option<&Value>) -> Option<(u16, Value)> {
     let tcp = tokio::net::TcpStream::connect((hub.host.as_str(), hub.port)).await.ok()?;
-    let req = format!("GET {}{} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n", hub.path, path, hub.host, token);
+    let payload = body.map(|b| b.to_string()).unwrap_or_default();
+    let typed = if body.is_some() { format!("Content-Type: application/json\r\nContent-Length: {}\r\n", payload.len()) } else { String::new() };
+    let req = format!("{method} {}{path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {token}\r\n{typed}Connection: close\r\n\r\n{payload}", hub.path, hub.host);
     let mut buf = Vec::new();
     match &hub.tls {
         None => {
@@ -311,6 +128,7 @@ pub struct Svc {
     pub build: String,
     pub drops: std::sync::Arc<AtomicU64>,
     pub token: tokio::sync::watch::Sender<String>,
+    pub kinds: Vec<String>,
 }
 
 pub fn handed_token(env: &common::envelope::Envelope) -> Option<String> {
@@ -337,12 +155,12 @@ impl common::envelope::handle::handle_server::Handle for Svc {
             return Ok(tonic::Response::new(common::envelope::handle::CallRes { reply: common::envelope::Reply::ok(serde_json::json!({})).encode() }));
         }
         let log = common::log::global().map(|l| (l.counters.queue_full.load(Ordering::Relaxed), l.counters.spool_full.load(Ordering::Relaxed)));
-        let reply = admin_answer(&env, self.drops.load(Ordering::Relaxed), log);
+        let reply = admin_answer(&env, self.drops.load(Ordering::Relaxed), log, &self.kinds);
         Ok(tonic::Response::new(common::envelope::handle::CallRes { reply: reply.encode() }))
     }
 }
 
-pub fn admin_answer(env: &common::envelope::Envelope, talk_drop: u64, log: Option<(u64, u64)>) -> common::envelope::Reply {
+pub fn admin_answer(env: &common::envelope::Envelope, talk_drop: u64, log: Option<(u64, u64)>, kinds: &[String]) -> common::envelope::Reply {
     use common::envelope::{CallKind, Reply};
     let get = env.method.as_deref().unwrap_or("GET") == "GET";
     match (&env.kind, get, env.path.as_deref().map(|p| p.trim_matches('/'))) {
@@ -354,7 +172,7 @@ pub fn admin_answer(env: &common::envelope::Envelope, talk_drop: u64, log: Optio
             }
             Reply::ok(o)
         }
-        (CallKind::Admin, true, Some(common::system::REC_KINDS_PATH)) => Reply::ok(serde_json::json!({ "kinds": KINDS })),
+        (CallKind::Admin, true, Some(common::system::REC_KINDS_PATH)) => Reply::ok(serde_json::json!({ "kinds": kinds })),
         _ => Reply::fail(oxsig::Code::UnknownOp.failure().with_message(format!("{:?} {}", env.kind, env.path.as_deref().unwrap_or("")))),
     }
 }

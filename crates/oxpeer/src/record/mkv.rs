@@ -1488,7 +1488,7 @@ pub fn recover_mkv(path: &Path) -> io::Result<Recovered> {
         end_ms: s.end_ms,
     };
     m.finish()?;
-    Ok(Recovered { path: path.to_path_buf(), media_frames: s.blocks, duration_ms: s.end_ms, reason: "crash".into() })
+    Ok(Recovered { path: path.to_path_buf(), media_frames: s.blocks, duration_ms: s.end_ms, reason: "crash".into(), video: s.video.is_some() })
 }
 
 #[cfg(test)]

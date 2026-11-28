@@ -30,7 +30,15 @@ pub enum Report {
         reason: Option<u8>,
         duration_ms: u64,
     },
-    Rec { talk_id: String, path: String, size: u64, mime: String, duration_ms: u64 },
+    Rec {
+        talk_id: String,
+        path: String,
+        size: u64,
+        mime: String,
+        duration_ms: u64,
+        #[serde(default)]
+        reason: String,
+    },
 }
 
 impl Report {

@@ -1461,7 +1461,7 @@ fn talk_end(id: &str, state: TalkState, reason: Option<u8>, d: u64) -> Report {
 }
 
 fn talk_rec(id: &str, path: &str) -> Report {
-    Report::Rec { talk_id: id.into(), path: path.into(), size: 123, mime: "audio/ogg".into(), duration_ms: 900 }
+    Report::Rec { talk_id: id.into(), path: path.into(), size: 123, mime: "audio/ogg".into(), duration_ms: 900, reason: "idle".into() }
 }
 
 fn sent_msg(r: Result<Sent, Code>) -> (bool, ChatMessage) {
