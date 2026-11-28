@@ -150,8 +150,6 @@ pub struct Claims {
     pub metadata: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission: Option<Permission>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub unit: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -287,7 +285,7 @@ mod tests {
 
     #[test]
     fn material_marker_and_shape() {
-        let room = RoomSummary { room_id: "r1".into(), name: "r1".into(), capacity: 10, user_count: 0, created_at: 1, rec: false, record: false };
+        let room = RoomSummary { room_id: "r1".into(), name: "r1".into(), capacity: 10, user_count: 0, created_at: 1, rec: false, record: Vec::new() };
         let m = Material::RoomCreated(room);
         let n = m.notice("r1", "e1");
         assert_eq!(n.op, 0xF001, "정:RULE-BUS-EVENTS hub 만 읽는 갈래 — 재료 표지 0xF001");
@@ -301,7 +299,7 @@ mod tests {
         let other = Notice { op: 0xF002, body: v, exclude: Vec::new(), room_id: None, sfu_id: None };
         assert_eq!(Material::of_notice(&other), None, "정:RULE-BUS-EVENTS — 구간의 다른 번호는 재료가 아님");
         for (m, name) in [
-            (Material::RoomClosed(RoomSummary { room_id: "r".into(), name: "r".into(), capacity: 1, user_count: 0, created_at: 0, rec: false, record: false }), "room_closed"),
+            (Material::RoomClosed(RoomSummary { room_id: "r".into(), name: "r".into(), capacity: 1, user_count: 0, created_at: 0, rec: false, record: Vec::new() }), "room_closed"),
             (Material::FloorRevoked(FloorRevoke { cause: 1, reason: None, room: "r".into() }), "floor_revoked"),
         ] {
             assert_eq!(m.name(), name);

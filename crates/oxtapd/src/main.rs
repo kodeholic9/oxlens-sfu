@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.6 · 정:IMPL-OPS-REC-UNIT · 정:IMPL-CFG-SYSTEM-FILE · 정:RULE-OPS-SUPERVISOR · 정:RULE-BUS-FATE · 정:RULE-BUS-KEYSPACE · 정:RULE-BUS-SHAPE · 정:IMPL-FLR-TALK-REPORT · 운영:RULE-BOOT-ARGS · model: claude-opus-5-5
-//! 녹음 유닛 실행 파일 — 슈퍼바이저가 띄운다(`--id` · `--build` · `--bus-namespace` · `--bus-connect` · `--log-dir`? · `--log-socket`? · `--data-root` · `--rec-keep-days` · `--token` · `--hub-base` · `--hub-ca`? · 유닛 명령의 `--grpc-listen`) · Handle(`Hello` 준비 신호 · `Call` 은 `/admin/drops` 와 감독자의 토큰 넘김 — 새 토큰은 방 상세 조회와 세션의 다시 BIND 에 쓴다) · 방 상세를 못 읽으면 경고 줄 · 버스로 그 node 의 방 토큰을 보고 `record` 방에 녹화 참가자로 든다 · 발언마다 파일 하나(영상 트랙이 든 발언은 mkv · 아니면 ogg)를 다 쓰고 이름을 바꿔 닫은 뒤 `rec` 알림 · 영상 키프레임 요청은 SDK 에 · 하루 한 번 보관 지우기 · 부모 생존 채널(stdin)이 닫히면 끝 · 토큰을 다시 요구받거나 세션이 끝나면 끝(슈퍼바이저가 새 토큰으로 되살린다).
+//! 녹음 유닛 실행 파일 — 슈퍼바이저가 띄운다(`--id` · `--build` · `--bus-namespace` · `--bus-connect` · `--log-dir`? · `--log-socket`? · `--data-root` · `--rec-keep-days` · `--token` · `--backoff-ms` · `--intensity-max` · `--intensity-window-secs` · `--hub-base` · `--hub-ca`? · 유닛 명령의 `--grpc-listen`) · Handle(`Hello` 준비 신호 · `Call` 은 `/admin/drops` 와 감독자의 토큰 넘김 — 새 토큰은 방 상세 조회와 세션의 다시 BIND 에 쓴다) · 방 상세를 못 읽으면 경고 줄 · 버스로 그 node 의 방 토큰을 보고 `record` 방에 녹화 참가자로 든다 · 발언마다 파일 하나(영상 트랙이 든 발언은 mkv · 아니면 ogg)를 다 쓰고 이름을 바꿔 닫은 뒤 `rec` 알림 · 영상 키프레임 요청은 SDK 에 · 하루 한 번 보관 지우기 · 부모 생존 채널(stdin)이 닫히면 끝 · 토큰을 다시 요구받거나 세션이 끝나면 끝(슈퍼바이저가 새 토큰으로 되살린다).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
@@ -31,6 +31,7 @@ struct Args {
     hub_base: String,
     hub_ca: Option<PathBuf>,
     grpc: std::net::SocketAddr,
+    restart: oxtapd::Restart,
 }
 
 fn args() -> Result<Args, String> {
@@ -43,7 +44,7 @@ fn args() -> Result<Args, String> {
     }
     let need = |k: &str| m.get(k).cloned().ok_or_else(|| format!("--{k} missing"));
     for k in m.keys() {
-        if !["id", "build", "bus-namespace", "bus-connect", "log-dir", "log-socket", "data-root", "rec-keep-days", "token", "hub-base", "hub-ca", "grpc-listen"].contains(&k.as_str()) {
+        if !["id", "build", "bus-namespace", "bus-connect", "log-dir", "log-socket", "data-root", "rec-keep-days", "token", "hub-base", "hub-ca", "grpc-listen", "backoff-ms", "intensity-max", "intensity-window-secs"].contains(&k.as_str()) {
             return Err(format!("unknown argument --{k}"));
         }
     }
@@ -60,6 +61,7 @@ fn args() -> Result<Args, String> {
         hub_base: need("hub-base")?,
         hub_ca: m.get("hub-ca").map(PathBuf::from),
         grpc: need("grpc-listen")?.parse().map_err(|e| format!("--grpc-listen: {e}"))?,
+        restart: oxtapd::Restart::parse(m.get("backoff-ms").map(String::as_str), m.get("intensity-max").map(String::as_str), m.get("intensity-window-secs").map(String::as_str))?,
     })
 }
 
@@ -88,7 +90,7 @@ async fn run(a: Args) -> i32 {
     };
     let epoch = common::ident::new_epoch();
     let _sender = common::log::init(Setup { node: a.node.clone(), proc_name: "peer", epoch: Some(epoch.clone()), sink, log_dir: a.log_dir.clone() }, &policy);
-    tracing::info!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", build = %a.build, root = %a.root.display(), keep_days = a.keep_days, "rec unit boot");
+    tracing::info!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", build = %a.build, root = %a.root.display(), keep_days = a.keep_days, backoff_ms = ?a.restart.backoff_ms, intensity_max = a.restart.intensity_max, intensity_window_secs = a.restart.intensity_window.as_secs(), "rec unit boot");
     let ca = match &a.hub_ca {
         Some(p) => match std::fs::read(p) {
             Ok(b) => Some(b),

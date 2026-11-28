@@ -1,4 +1,4 @@
-{"area":"AFF","ir_sha":"207c0df6ea211dc9","n":181,"v":[
+{"area":"AFF","ir_sha":"9f8284b8a4c4f8ec","n":181,"v":[
 {"e":"joinSelect","s":{"pub":"NONE","wait":"NONE","want":"NONE","from":"NONE","back":"NONE"},"a":["a"],"r":{"s":{"pub":"NONE","wait":"JOIN","want":"a","from":"NONE","back":"NONE"},"label":"AFF.C.NOPUB.join_select","out":[],"fx":[],"seams":[],"start":[]}},
 {"e":"joinFailed","s":{"pub":"NONE","wait":"JOIN","want":"a","from":"NONE","back":"NONE"},"a":["NONE"],"r":{"s":{"pub":"NONE","wait":"JOIN","want":"a","from":"NONE","back":"NONE"},"label":"AFF.C.any.join_failed_other","out":[],"fx":[],"seams":[],"start":[]}},
 {"e":"joinFailed","s":{"pub":"NONE","wait":"JOIN","want":"a","from":"NONE","back":"NONE"},"a":["a"],"r":{"s":{"pub":"NONE","wait":"NONE","want":"NONE","from":"NONE","back":"NONE"},"label":"AFF.C.any.join_failed","out":[],"fx":["app.aff_failed"],"seams":[],"start":[]}},

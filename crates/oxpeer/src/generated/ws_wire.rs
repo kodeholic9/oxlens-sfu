@@ -354,7 +354,7 @@ pub struct RoomSummary {
     pub user_count: u32,
     pub created_at: u64,
     pub rec: bool,
-    pub record: bool,
+    pub record: Vec<String>,
 }
 
 /// ROOM.type.MemberInfo — `MemberInfo` (§[ROOM.type.MemberInfo])
@@ -490,7 +490,7 @@ pub struct CreateRoomReq {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_codecs: Option<MediaCodecs>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub record: Option<bool>,
+    pub record: Option<Vec<String>>,
 }
 
 /// ROOM.http.CREATE_ROOM.res — POST /rooms 방 생성
@@ -500,7 +500,7 @@ pub struct CreateRoomRes {
     pub name: String,
     pub capacity: u32,
     pub created_at: u64,
-    pub record: bool,
+    pub record: Vec<String>,
     pub media_codecs: MediaCodecs,
 }
 
@@ -528,7 +528,7 @@ pub struct GetRoomRes {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub me: Option<MemberInfo>,
     pub created_at: u64,
-    pub record: bool,
+    pub record: Vec<String>,
     pub media_codecs: MediaCodecs,
     pub version: Version,
     #[serde(default, skip_serializing_if = "Option::is_none")]

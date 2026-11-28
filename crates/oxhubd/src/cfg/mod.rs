@@ -86,6 +86,13 @@ impl HubCfg {
         }
         a.push("--rec-keep-days".into());
         a.push(self.system.rec_keep_days().to_string());
+        let sv = &self.system.supervisor;
+        a.push("--backoff-ms".into());
+        a.push(sv.backoff_ms.iter().map(u64::to_string).collect::<Vec<_>>().join(","));
+        a.push("--intensity-max".into());
+        a.push(sv.intensity_max.to_string());
+        a.push("--intensity-window-secs".into());
+        a.push(sv.intensity_window_secs.to_string());
         a.push("--hub-base".into());
         a.push(hub_base(&self.system.hub.listen, &self.system.hub.base_path, self.system.hub.tls.is_some()));
         if let Some(t) = &self.system.hub.tls {

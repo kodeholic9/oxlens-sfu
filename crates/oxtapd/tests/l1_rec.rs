@@ -146,15 +146,36 @@ fn the_sweep_removes_only_files_past_the_keep_days() {
 }
 
 #[test]
-fn the_room_detail_record_flag_decides() {
-    assert!(oxtapd::recorded(&serde_json::json!({ "room_id": "r", "record": true })), "연:ROOM.http.CREATE_ROOM record");
-    assert!(!oxtapd::recorded(&serde_json::json!({ "room_id": "r", "record": false })));
+fn the_room_detail_record_list_decides() {
+    assert!(oxtapd::recorded(&serde_json::json!({ "room_id": "r", "record": ["talk"] })), "연:ROOM.http.CREATE_ROOM record — 목록에 이 유닛이 내는 종류가 있다");
+    assert!(oxtapd::recorded(&serde_json::json!({ "room_id": "r", "record": ["raw", "talk"] })));
+    assert!(!oxtapd::recorded(&serde_json::json!({ "room_id": "r", "record": [] })), "빈 목록 = 녹음하지 않는다");
+    assert!(!oxtapd::recorded(&serde_json::json!({ "room_id": "r", "record": ["raw"] })), "이 유닛이 아직 내지 않는 종류뿐이면 들지 않는다");
+    assert!(!oxtapd::recorded(&serde_json::json!({ "room_id": "r", "record": true })), "옛 bool 꼴은 목록이 아니다");
     assert!(!oxtapd::recorded(&serde_json::json!({ "room_id": "r" })), "an older gateway without the field = not recorded");
     let h = oxtapd::hub_of("http://127.0.0.1:1974/media", None).expect("hub");
     assert_eq!((h.host.as_str(), h.port, h.path.as_str(), h.tls.is_none()), ("127.0.0.1", 1974, "/media", true), "정:IMPL-OPS-REC-UNIT 로컬 게이트웨이 — --hub-base");
     assert!(oxtapd::hub_of("https://127.0.0.1:1974/media", None).is_none(), "TLS needs --hub-ca (no system trust store)");
-    let (st, body) = oxtapd::parse_reply(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\nb\r\n{\"record\":t\r\n4\r\nrue}\r\n0\r\n\r\n").expect("parse");
+    let (st, body) = oxtapd::parse_reply(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\nb\r\n{\"record\":[\r\n8\r\n\"talk\"]}\r\n0\r\n\r\n").expect("parse");
     assert!(st == 200 && oxtapd::recorded(&body), "a chunked body is read whole");
+}
+
+#[test]
+fn the_unit_answers_its_record_kinds_and_takes_the_supervisor_restart_values() {
+    let mut env = common::envelope::Envelope::new(common::envelope::CallKind::Admin);
+    env.method = Some("GET".into());
+    env.path = Some(format!("/{}", common::system::REC_KINDS_PATH));
+    match oxtapd::admin_answer(&env, 0, None) {
+        common::envelope::Reply::Ok { body } => assert_eq!(body["kinds"], serde_json::json!(oxtapd::KINDS), "정:IMPL-OPS-REC-UNIT 결과물 소비자 — Call GET /unit/record_kinds → {{kinds}}"),
+        other => panic!("kinds answer {other:?}"),
+    }
+    let r = oxtapd::Restart::parse(Some("200,500,1000"), Some("5"), Some("60")).expect("parse");
+    assert_eq!((r.backoff_ms, r.intensity_max, r.intensity_window.as_secs()), (vec![200, 500, 1000], 5, 60), "정:IMPL-CFG-SYSTEM-FILE rec 유닛 인자 --backoff-ms · --intensity-max · --intensity-window-secs");
+    let d = oxtapd::Restart::parse(None, None, None).expect("defaults");
+    assert_eq!(d.backoff_ms, common::system::Supervisor::default().backoff_ms, "인자가 없으면 [supervisor] 기본값");
+    for bad in [(Some("x"), None, None), (Some(""), None, None), (None, Some("-1"), None), (None, None, Some("w"))] {
+        assert!(oxtapd::Restart::parse(bad.0, bad.1, bad.2).is_err(), "틀린 값은 거절 {bad:?}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -182,7 +203,7 @@ async fn over_tls_the_room_detail_is_read_with_the_hub_certificate_only() {
                 let Ok(mut s) = acc.accept(tcp).await else { return };
                 let mut buf = [0u8; 2048];
                 let _ = s.read(&mut buf).await;
-                let body = br#"{"room_id":"ch-1","record":true}"#;
+                let body = br#"{"room_id":"ch-1","record":["talk"]}"#;
                 let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).as_bytes()).await;
                 let _ = s.write_all(body).await;
                 let _ = s.shutdown().await;

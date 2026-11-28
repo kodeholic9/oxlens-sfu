@@ -19,7 +19,6 @@ use crate::room::{Member, PERMANENT, Room, RoomInit};
 use crate::sub::Table;
 
 pub const MAX_ROOMS: usize = 20;
-pub const UNIT_MAX_ROOMS: usize = 250;
 
 fn sfu() -> Result<&'static Arc<super::Sfu>, Failure> {
     super::sfu().ok_or_else(|| Code::InternalError.failure())
@@ -89,11 +88,7 @@ fn new_peer(c: &Ctx) -> Result<Arc<Peer>, Failure> {
         }
         PcMode::Two => (new_transport(s, c, Role::Publish)?, new_transport(s, c, Role::Subscribe)?),
     };
-    let table = if c.claims.as_ref().is_some_and(|k| k.unit) {
-        Table::for_unit(subscribe.clone(), c.pc_mode, UNIT_MAX_ROOMS)
-    } else {
-        Table::new(subscribe.clone(), c.pc_mode, s.policy.media.slot_mid_reserve as usize)
-    };
+    let table = Table::new(subscribe.clone(), c.pc_mode, s.policy.media.slot_mid_reserve as usize);
     let floor = s.tables.floor(&c.sid);
     if floor > 0 {
         table.carry(floor + 1);
@@ -155,11 +150,10 @@ pub fn join(c: &Ctx, body: &Value) -> Result<Value, Failure> {
         return Err(Code::RoomFull.failure().with_details(serde_json::json!({ "capacity": room.capacity })));
     }
     let existing = s.peer(&c.user);
-    if let Some(p) = &existing {
-        let limit = if p.claims.unit { UNIT_MAX_ROOMS } else { MAX_ROOMS };
-        if p.rooms().len() >= limit {
-            return Err(Code::ListenLimit.failure().with_details(serde_json::json!({ "limit": limit, "current": p.rooms().len() })));
-        }
+    if let Some(p) = &existing
+        && p.rooms().len() >= MAX_ROOMS
+    {
+        return Err(Code::ListenLimit.failure().with_details(serde_json::json!({ "limit": MAX_ROOMS, "current": p.rooms().len() })));
     }
     let peer = match existing {
         Some(p) => p,
@@ -336,7 +330,7 @@ pub async fn create(env: &Envelope) -> Result<Value, Failure> {
     let req: CreateRoomReq = parse(&env.body)?;
     let id = req.room_id.clone().filter(|x| !x.is_empty()).ok_or_else(|| Code::MissingField.failure().with_message("room_id"))?;
     if let Some(r) = s.rooms.get(&id) {
-        return ok(&CreateRoomRes { room_id: r.id.clone(), name: r.name.clone(), capacity: r.capacity, created_at: r.created_at, record: r.record, media_codecs: r.media_codecs.clone() });
+        return ok(&CreateRoomRes { room_id: r.id.clone(), name: r.name.clone(), capacity: r.capacity, created_at: r.created_at, record: r.record.clone(), media_codecs: r.media_codecs.clone() });
     }
     let codecs = crate::trk::resolve_room_codecs(req.media_codecs.as_ref())
         .ok_or_else(|| Code::CodecRequired.failure().with_details(json!({ "supported": crate::trk::supported_list() })))?;
@@ -351,7 +345,7 @@ pub async fn create(env: &Envelope) -> Result<Value, Failure> {
         media_codecs: codecs,
         epoch: s.epoch.clone(),
         floor: crate::flr::core::Floor::new(s.policy.floor.queue_max as usize, s.policy.floor.t2_stop_talking_secs as u32),
-        record: req.record.unwrap_or(false),
+        record: req.record.clone().unwrap_or_default(),
     });
     let (room, fresh) = s.rooms.insert(room);
     if fresh {
@@ -364,7 +358,7 @@ pub async fn create(env: &Envelope) -> Result<Value, Failure> {
         crate::bus::room_material(&room.id, &Material::RoomCreated(room.summary()));
         tracing::info!(kind = "diag", spec = "SV-IMPL-ROOM-LIFE", room = %room.id, "in.unused_ttl" = room.unused_ttl, "in.departure_ttl" = room.departure_ttl, "room created");
     }
-    ok(&CreateRoomRes { room_id: room.id.clone(), name: room.name.clone(), capacity: room.capacity, created_at: room.created_at, record: room.record, media_codecs: room.media_codecs.clone() })
+    ok(&CreateRoomRes { room_id: room.id.clone(), name: room.name.clone(), capacity: room.capacity, created_at: room.created_at, record: room.record.clone(), media_codecs: room.media_codecs.clone() })
 }
 
 pub fn get(env: &Envelope) -> Result<Value, Failure> {
@@ -382,7 +376,7 @@ pub fn get(env: &Envelope) -> Result<Value, Failure> {
         participants: room.participants(),
         me,
         created_at: room.created_at,
-        record: room.record,
+        record: room.record.clone(),
         media_codecs: room.media_codecs.clone(),
         version: room.version(),
         tracks: if tracks { Some(tracks_of(&room)) } else { None },

@@ -11,6 +11,7 @@ use common::envelope::handle::handle_client::HandleClient;
 use common::envelope::handle::{CallReq, HelloReq};
 use common::envelope::{CallKind, Envelope, Reply};
 use common::system::{Unit, UnitKind};
+use oxsig::Code;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::bus::{Bus, Local};
@@ -103,6 +104,15 @@ pub struct Supervisor {
     pub stopping: AtomicBool,
     pub node_declared: AtomicBool,
     pub fatal: mpsc::UnboundedSender<String>,
+    record_kinds: Arc<Mutex<Option<Vec<String>>>>,
+}
+
+pub fn supported_kinds(has_rec_unit: bool, read: Option<&[String]>) -> Option<Vec<String>> {
+    match (has_rec_unit, read) {
+        (false, _) => Some(Vec::new()),
+        (true, Some(k)) => Some(k.to_vec()),
+        (true, None) => None,
+    }
 }
 
 fn line(unit: &str, from: UnitState, to: UnitState, cause: &str) {
@@ -196,6 +206,7 @@ impl Supervisor {
             stopping: AtomicBool::new(false),
             node_declared: AtomicBool::new(false),
             fatal,
+            record_kinds: Arc::default(),
         })
     }
 
@@ -419,6 +430,7 @@ impl Supervisor {
                     let _ = h.replace(local);
                 }
                 u.set(UnitState::Running, "hello");
+                self.read_kinds(&u);
                 let outcome = self.supervise(&u, child, &mut rx, None).await;
                 if let Ok(mut h) = u.handle.lock() {
                     let _ = h.take();
@@ -586,6 +598,42 @@ impl Supervisor {
         });
     }
 
+    pub fn record_kinds(&self) -> Option<Vec<String>> {
+        let has_rec = self.units.iter().any(|u| u.role == Role::Rec);
+        let read = self.record_kinds.lock().ok().and_then(|g| g.clone());
+        supported_kinds(has_rec, read.as_deref())
+    }
+
+    fn read_kinds(&self, u: &UnitHandle) {
+        let Some(mut client) = u.handle.lock().ok().and_then(|h| h.as_ref().map(|l| l.client.clone())) else { return };
+        let mut env = Envelope::new(CallKind::Admin);
+        env.method = Some("GET".into());
+        env.path = Some(format!("/{}", common::system::REC_KINDS_PATH));
+        let id = u.id.clone();
+        let store = self.record_kinds.clone();
+        tokio::spawn(async move {
+            let req = CallReq { envelope: env.encode() };
+            let got = match tokio::time::timeout(crate::bus::LOCAL_CALL_TIMEOUT, client.call(req)).await {
+                Ok(Ok(r)) => match Reply::decode(&r.into_inner().reply) {
+                    Ok(Reply::Ok { body }) => serde_json::from_value::<Vec<String>>(body.get("kinds").cloned().unwrap_or_default()).map_err(|e| format!("bad kinds {e}")),
+                    Ok(other) => Err(format!("refused {other:?}")),
+                    Err(e) => Err(format!("bad reply {e}")),
+                },
+                Ok(Err(e)) => Err(format!("call failed {:?}", e.code())),
+                Err(_) => Err("call timed out".to_string()),
+            };
+            match got {
+                Ok(k) => {
+                    common::log::emit(common::log::Line::diag("SV-IMPL-OPS-REC-UNIT").key("unit", &id).key("kinds", k.join(",")).msg("rec unit record kinds read"));
+                    if let Ok(mut g) = store.lock() {
+                        let _ = g.replace(k);
+                    }
+                }
+                Err(w) => tracing::warn!(kind = "diag", spec = "SV-IMPL-OPS-REC-UNIT", unit = %id, "rec unit record kinds not read — {w} — the last read set stays"),
+            }
+        });
+    }
+
     pub async fn request(&self, id: &str, which: &str) -> Result<(UnitState, UnitState), String> {
         let u = self.unit(id).ok_or_else(|| "no unit".to_string())?;
         if u.state() == UnitState::Disabled {
@@ -626,6 +674,20 @@ impl Supervisor {
 
 pub fn rec_user(node: &str) -> String {
     format!("rec-{node}")
+}
+
+pub fn rec_room_user(node: &str, room: &str) -> String {
+    format!("rec-{node}-{room}")
+}
+
+pub fn grant_room_session(node: &str, unit_user: &str, room: &str, room_node: Option<&str>) -> Result<String, Code> {
+    if unit_user != rec_user(node) {
+        return Err(Code::TokenInvalid);
+    }
+    if room_node != Some(node) {
+        return Err(Code::RoomNotFound);
+    }
+    Ok(rec_room_user(node, room))
 }
 
 pub fn renew_every(ttl_secs: u32) -> Duration {

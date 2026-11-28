@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.6 · 정:IMPL-OPS-REC-UNIT · 정:IMPL-CHAT-TALK · 정:IMPL-FLR-TALK-REPORT · 정:RULE-OPS-DROPS · 정:RULE-BUS-KEYSPACE · 연:RULE-CHAT-REC-FILE · 연:ROOM.http.CREATE_ROOM · model: claude-opus-5-5
-//! 녹음 유닛 — 발언마다 파일 하나(영상 트랙이 든 발언은 `.mkv` — 음성도 그 안 · 아니면 `.ogg` · 알림도 하나) · 파일 자리(`<root>/.rec-part/` 에 다 쓰고 `<root>/rec/{space_id}/` 로 이름 바꿔 닫는다 — 같은 저장소라 바꾸기는 한 번에) · 닫은 녹취의 `rec` 알림 · 하루 한 번 보관 기간을 넘긴 녹취 지우기 · 알림은 한 줄로(일시 실패는 백오프로 다시 · 상한을 넘기면 버리고 센다) · 로컬 게이트웨이(`--hub-base` · TLS 면 `--hub-ca` 인증서 하나로 검증) 방 상세의 `record` · 운영 표면(Handle `Call` 은 `/admin/drops` 와 감독자의 토큰 넘김 `POST /unit/token` 만).
+//! 녹음 유닛 — 발언마다 파일 하나(영상 트랙이 든 발언은 `.mkv` — 음성도 그 안 · 아니면 `.ogg` · 알림도 하나) · 파일 자리(`<root>/.rec-part/` 에 다 쓰고 `<root>/rec/{space_id}/` 로 이름 바꿔 닫는다 — 같은 저장소라 바꾸기는 한 번에) · 닫은 녹취의 `rec` 알림 · 하루 한 번 보관 기간을 넘긴 녹취 지우기 · 알림은 한 줄로(일시 실패는 백오프로 다시 · 상한을 넘기면 버리고 센다) · 로컬 게이트웨이(`--hub-base` · TLS 면 `--hub-ca` 인증서 하나로 검증) 방 상세의 `record` 목록(지원 종류 `KINDS` 가 들었나) · 운영 표면(Handle `Call` 은 `/admin/drops` · 감독자의 토큰 넘김 `POST /unit/token` · 지원 종류 `GET /unit/record_kinds`) · 방 작업 되살림 값(`Restart` — rec 유닛 인자 `--backoff-ms` · `--intensity-max` · `--intensity-window-secs`).
 
 pub mod bus;
 
@@ -18,6 +18,30 @@ pub const PART_DIR: &str = ".rec-part";
 pub const DAY: Duration = Duration::from_secs(86_400);
 pub const OGG_MIME: &str = "audio/ogg";
 pub const MKV_MIME: &str = "video/x-matroska";
+pub const KINDS: [&str; 1] = ["talk"];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Restart {
+    pub backoff_ms: Vec<u64>,
+    pub intensity_max: u32,
+    pub intensity_window: Duration,
+}
+
+impl Restart {
+    pub fn parse(backoff: Option<&str>, max: Option<&str>, window: Option<&str>) -> Result<Restart, String> {
+        let d = common::system::Supervisor::default();
+        let backoff_ms = match backoff {
+            Some(s) => s.split(',').map(|x| x.trim().parse::<u64>().map_err(|_| format!("--backoff-ms {s:?}"))).collect::<Result<Vec<_>, _>>()?,
+            None => d.backoff_ms,
+        };
+        if backoff_ms.is_empty() {
+            return Err("--backoff-ms empty".to_string());
+        }
+        let intensity_max = max.map(|s| s.parse().map_err(|_| format!("--intensity-max {s:?}"))).transpose()?.unwrap_or(d.intensity_max);
+        let secs = window.map(|s| s.parse().map_err(|_| format!("--intensity-window-secs {s:?}"))).transpose()?.unwrap_or(d.intensity_window_secs);
+        Ok(Restart { backoff_ms, intensity_max, intensity_window: Duration::from_secs(secs) })
+    }
+}
 
 pub struct Layout {
     pub root: PathBuf,
@@ -210,7 +234,7 @@ pub fn sweep(root: &Path, keep_days: u32, now: SystemTime) -> std::io::Result<us
 }
 
 pub fn recorded(body: &Value) -> bool {
-    body.get("record").and_then(Value::as_bool).unwrap_or(false)
+    body.get("record").and_then(Value::as_array).is_some_and(|a| a.iter().filter_map(Value::as_str).any(|k| KINDS.contains(&k)))
 }
 
 pub async fn report_line<A, F>(mut rx: mpsc::UnboundedReceiver<Report>, retry_for: Duration, mut ask: A, drops: &AtomicU64)
@@ -330,6 +354,7 @@ pub fn admin_answer(env: &common::envelope::Envelope, talk_drop: u64, log: Optio
             }
             Reply::ok(o)
         }
+        (CallKind::Admin, true, Some(common::system::REC_KINDS_PATH)) => Reply::ok(serde_json::json!({ "kinds": KINDS })),
         _ => Reply::fail(oxsig::Code::UnknownOp.failure().with_message(format!("{:?} {}", env.kind, env.path.as_deref().unwrap_or("")))),
     }
 }

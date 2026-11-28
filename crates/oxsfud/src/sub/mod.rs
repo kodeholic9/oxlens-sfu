@@ -203,11 +203,6 @@ impl Table {
         Self::with_caps(conn, pc_mode, slot_budget, cap)
     }
 
-    pub fn for_unit(conn: Arc<Transport>, pc_mode: PcMode, rooms: usize) -> Arc<Table> {
-        let slots = rooms * 2;
-        Self::with_caps(conn, pc_mode, slots, slots + FULL_AUDIO + FULL_VIDEO)
-    }
-
     fn with_caps(conn: Arc<Transport>, pc_mode: PcMode, slot_budget: usize, cap: usize) -> Arc<Table> {
         Arc::new(Table {
             conn,
@@ -1176,24 +1171,5 @@ mod tests {
             vec![(0, "H264".into(), None), (1, "AV1".into(), Some("c".into()))],
             "정:IMPL-SUB-TABLE I3 with the share full the retune takes the free slot row used longest ago (the VP9 row · loaded at 20), not the lower mid"
         );
-    }
-
-    #[test]
-    fn a_unit_table_holds_two_slot_rows_per_room_plus_the_full_duplex_caps() {
-        for mode in [PcMode::One, PcMode::Two] {
-            let t = Table::for_unit(Transport::new(1, "u", "", Role::Both, 0, false), mode, 250);
-            assert_eq!((t.slot_budget, t.limit()), (500, 550), "정:IMPL-SUB-TABLE I2 {mode:?} — the unit table's slot share is two rows per room (250 rooms → 500) and its row ceiling adds the full-duplex caps (25 + 25 → 550)");
-            let mut cands: Vec<Cand> = Vec::new();
-            for i in 0..250 {
-                let room = format!("r{i}");
-                cands.push(Cand { track_id: format!("ptt-{room}-audio"), room: room.clone(), kind: Kind::Audio, class: Class::Slot, codec: "opus".into(), rank: 0, paused: false });
-                cands.push(slot_v(&room, "H264"));
-            }
-            assert!(!t.sync(&cands, 1).mid_limit, "정:IMPL-SUB-TABLE I2 {mode:?} — 250 slot rooms fit the unit table");
-            assert_eq!(t.rows().len(), 500, "stand check — two loaded slot rows per room");
-            cands.push(slot_v("over", "VP8"));
-            let out = t.sync(&cands, 2);
-            assert!(out.mid_limit && out.budget == Some((500, 500)), "정:IMPL-SUB-TABLE I2 {mode:?} — a slot room past the 500 slot rows is MID_LIMIT {{500,500}}: {:?}", out.budget);
-        }
     }
 }

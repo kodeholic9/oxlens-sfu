@@ -350,7 +350,7 @@ mod tests {
             media_codecs: MediaCodecs::default(),
             epoch: "e".into(),
             floor: crate::flr::core::Floor::new(10, 30),
-            record: false,
+            record: Vec::new(),
         })
     }
 

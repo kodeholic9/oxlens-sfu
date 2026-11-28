@@ -1,5 +1,5 @@
 // ★생성 파일 — gen/floor_client.mts 가 원천(context/spec/protocol · areas/flr/behavior/client.ts)에서 짓는다. 손으로 고치지 않는다.
-// IR sha256 207c0df6ea211dc9 · 3GPP TS 24.380 §6.2.4 floor participant · Rust 판 — 같은 생성기의 TS 판과 한 뿌리(같은 입구 · 같은 칸 · 같은 라벨).
+// IR sha256 9f8284b8a4c4f8ec · 3GPP TS 24.380 §6.2.4 floor participant · Rust 판 — 같은 생성기의 TS 판과 한 뿌리(같은 입구 · 같은 칸 · 같은 라벨).
 // 집행은 부르는 쪽 몫이다 — out(DC 로 보낼 것) · ack(ACK 으로 답할 것) · fx(마이크 · 화면 · 앱 알림) · start(다시 걸 타이머). armed() 밖의 타이머는 멈춘다.
 #![allow(dead_code, unused_variables, unused_mut, unused_parens, non_camel_case_types, clippy::all)]
 

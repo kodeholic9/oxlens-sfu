@@ -25,7 +25,7 @@ fn vp8_room(id: &str) -> Arc<Room> {
         media_codecs: MediaCodecs { audio: None, video: Some("VP8".into()) },
         epoch: s.epoch.clone(),
         floor: Floor::new(10, 30),
-        record: false,
+        record: Vec::new(),
     }));
     assert!(fresh, "stand check — room {id} is new");
     r
@@ -77,7 +77,7 @@ fn a_join_with_select_into_a_room_that_refuses_the_tracks_joins_without_the_spea
     assert_ne!(pub_room_of(&res).as_deref(), Some(vp8.id.as_str()), "S-sym-IMPL-AFF-PUB-MOVE-1② the response affiliation.pub_room is not the room whose codec refused the tracks");
     assert_eq!(mine(&vp8, &u.p.user), 0, "S-sym-IMPL-AFF-PUB-MOVE-1③ the tracks do not follow into the VP8 room — no TRACK_EVENT add there");
     let mut c = ctx_of(&u.p);
-    c.claims = Some(Claims { participant_type: 0, hidden: false, metadata: None, permission: Some(Permission { publish_video: false, ..Permission::ALL }), unit: false });
+    c.claims = Some(Claims { participant_type: 0, hidden: false, metadata: None, permission: Some(Permission { publish_video: false, ..Permission::ALL }) });
     let bits = room(&tag("cm-bits"));
     let res = oxsfud::ops::rooms::join(&c, &json!({ "room_id": bits.id, "select": true }));
     assert!(res.is_ok() && bits.has(&u.p.user), "S-sym-IMPL-AFF-PUB-MOVE-1① the join succeeds when the room's bits block the video: {res:?}");

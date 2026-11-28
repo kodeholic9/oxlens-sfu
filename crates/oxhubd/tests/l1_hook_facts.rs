@@ -16,7 +16,7 @@ fn notice(op: u16, body: serde_json::Value) -> Notice {
 }
 
 fn summary() -> RoomSummary {
-    RoomSummary { room_id: "r1".into(), name: "r1".into(), capacity: 10, user_count: 1, created_at: 1, rec: false, record: false }
+    RoomSummary { room_id: "r1".into(), name: "r1".into(), capacity: 10, user_count: 1, created_at: 1, rec: false, record: Vec::new() }
 }
 
 #[test]

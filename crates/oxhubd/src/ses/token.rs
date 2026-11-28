@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.6 · 정:IMPL-SES-TOKEN-ISSUE · 정:RULE-OPS-TOKEN · 연:SES.http.TOKEN · 연:RULE-SES-TOKEN-ACCOUNT-ALLOW · 연:RULE-SES-TOKEN-CLAIMS · 정:CAND-SES-TOKEN-CLAIM-NAMES · 연:RULE-SES-TOKEN-AXES-SEPARATE · 연:RULE-SES-TOKEN-NO-FLOOR-POLICY · 연:RULE-SES-TOKEN-BY-BACKEND · model: claude-opus-5-5
-//! 토큰 — 발급(계정 비밀로 HS256 · 계정 허용 검사 · `metadata` 상한) · 유닛 토큰(감독자만 — hub 프로세스 안에서만 사는 유닛 열쇠로 서명 · `unit` 표지) · A 평면 검증(유닛 열쇠 + 계정 비밀 전부 + `jwt_secret` · `unit` 표지는 유닛 열쇠로 풀린 토큰에서만 참) · 운영 토큰 검증(`iss` 계정 · `ops`).
+//! 토큰 — 발급(계정 비밀로 HS256 · 계정 허용 검사 · `metadata` 상한) · 녹음 유닛 토큰(hub 프로세스 안에서만 사는 유닛 열쇠로 서명 — 감독자의 node 토큰 · 방 세션 토큰) · A 평면 검증(유닛 열쇠 + 계정 비밀 전부 + `jwt_secret`) · 유닛 열쇠로만 풀리는 node 토큰 검증 · 운영 토큰 검증(`iss` 계정 · `ops`).
 
 use common::envelope::Claims;
 use common::system::ApiKey;
@@ -30,8 +30,6 @@ pub struct UserClaims {
     pub metadata: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission: Option<Permission>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub unit: bool,
     pub iat: u64,
     pub exp: u64,
 }
@@ -103,7 +101,6 @@ impl Accounts {
             hidden,
             metadata: req.metadata.clone(),
             permission: req.permission,
-            unit: false,
             iat: now,
             exp: now + ttl_secs as u64,
         };
@@ -122,8 +119,8 @@ impl Accounts {
 
     pub fn verify_user(&self, token: &str) -> Result<Identity, Code> {
         let mut expired = false;
-        let keys = UNIT_KEY.as_deref().map(|k| (k, true)).into_iter().chain(self.secrets().into_iter().map(|s| (s.as_bytes(), false)));
-        for (s, by_unit_key) in keys {
+        let keys = UNIT_KEY.as_deref().into_iter().chain(self.secrets().into_iter().map(str::as_bytes));
+        for s in keys {
             match decode::<UserClaims>(token, &DecodingKey::from_secret(s), &validation()) {
                 Ok(d) => {
                     let c = d.claims;
@@ -137,7 +134,6 @@ impl Accounts {
                             hidden: c.hidden,
                             metadata: c.metadata,
                             permission: c.permission,
-                            unit: by_unit_key && c.unit,
                         },
                     });
                 }
@@ -167,8 +163,14 @@ impl Accounts {
     pub fn sign_unit(&self, user: &str, ttl_secs: u32) -> Option<String> {
         let key = UNIT_KEY.as_deref()?;
         let now = secs_now();
-        let c = UserClaims { sub: Some(user.to_string()), user_id: None, participant_type: 1, hidden: true, metadata: None, permission: None, unit: true, iat: now, exp: now + ttl_secs as u64 };
+        let c = UserClaims { sub: Some(user.to_string()), user_id: None, participant_type: 1, hidden: true, metadata: None, permission: None, iat: now, exp: now + ttl_secs as u64 };
         encode(&Header::new(Algorithm::HS256), &c, &EncodingKey::from_secret(key)).ok()
+    }
+
+    pub fn verify_unit(&self, token: &str) -> Result<String, Code> {
+        let key = UNIT_KEY.as_deref().ok_or(Code::TokenInvalid)?;
+        let d = decode::<UserClaims>(token, &DecodingKey::from_secret(key), &validation()).map_err(|_| Code::TokenInvalid)?;
+        d.claims.sub.or(d.claims.user_id).filter(|u| common::keyspace::valid_piece(u)).ok_or(Code::TokenInvalid)
     }
 
     pub fn sign_ops(&self, iss: &str, ttl_secs: u64) -> Option<String> {
@@ -226,7 +228,7 @@ mod tests {
     fn bind_path_never_answers_claim_not_allowed() {
         let a = accounts();
         let now = secs_now();
-        let c = UserClaims { sub: Some("u1".into()), user_id: None, participant_type: 2, hidden: true, metadata: None, permission: None, unit: false, iat: now, exp: now + 60 };
+        let c = UserClaims { sub: Some("u1".into()), user_id: None, participant_type: 2, hidden: true, metadata: None, permission: None, iat: now, exp: now + 60 };
         let t = encode(&Header::new(Algorithm::HS256), &c, &EncodingKey::from_secret(b"s")).expect("signed");
         assert_eq!(a.issue(&req(Some(2), Some(true)), 60, 2048).unwrap_err().code, 2005, "positive control — the same claims are refused at issuance");
         let got = a.verify_user(&t);

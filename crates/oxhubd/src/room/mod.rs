@@ -27,10 +27,31 @@ fn unwrap(r: Reply) -> Result<serde_json::Value, Failure> {
     }
 }
 
-pub async fn create(bus: &Bus, policy: &Policy, mut body: serde_json::Value) -> Result<serde_json::Value, Failure> {
+pub fn record_kinds_of(req: Option<&serde_json::Value>, supported: Option<&[String]>) -> Result<Vec<String>, Failure> {
+    let list = match req {
+        None | Some(serde_json::Value::Null) => return Ok(Vec::new()),
+        Some(serde_json::Value::Array(a)) => a,
+        Some(_) => return Err(Code::InvalidPayload.failure().with_message("record")),
+    };
+    let mut out: Vec<String> = Vec::with_capacity(list.len());
+    for v in list {
+        let Some(k) = v.as_str() else { return Err(Code::InvalidPayload.failure().with_message("record")) };
+        if supported.is_some_and(|s| !s.iter().any(|x| x == k)) {
+            return Err(Code::InvalidPayload.failure().with_message("record"));
+        }
+        if !out.iter().any(|o| o == k) {
+            out.push(k.to_string());
+        }
+    }
+    Ok(out)
+}
+
+pub async fn create(bus: &Bus, policy: &Policy, record_kinds: Option<&[String]>, mut body: serde_json::Value) -> Result<serde_json::Value, Failure> {
     let Some(obj) = body.as_object_mut() else {
         return Err(Code::InvalidPayload.failure());
     };
+    let record = record_kinds_of(obj.get("record"), record_kinds)?;
+    obj.insert("record".into(), serde_json::json!(record));
     match obj.get("name") {
         Some(serde_json::Value::String(n)) if !n.is_empty() => {}
         Some(serde_json::Value::String(_)) | None | Some(serde_json::Value::Null) => {

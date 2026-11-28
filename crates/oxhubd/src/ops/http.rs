@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
 // spec: v1.6 · 연:RULE-TRN-ENDPOINTS · 연:RULE-TRN-HTTP-AUTH-TWO · 연:RULE-TRN-CORS · 연:DEV-TRN-WS-ORIGIN · 연:RULE-TRN-SESSION-HEADER-SCOPE · 정:IMPL-ERR-ISSUERS · 정:RULE-OPS-SURFACE · 정:RULE-OPS-TOKEN · 운영:BOOT.http.HEALTH_READY · 정:CAND-ERR-HTTP-MAP · 정:CAND-ROOM-CORS-MAX-AGE · 정:IMPL-CHAT-TALK · 연:CHAT.http.REC_FILE · 연:RULE-CHAT-REC-FILE · model: claude-opus-5-5
-//! HTTP 표면 — `{base}/ws` · `{base}/auth/token` · `{base}/rooms` 셋(CORS) · `{base}/rec/{space_id}/{file}`(녹취 내려받기 — Bearer · 멤버 · 보이기 시작점 · `Range`) · `/healthz` · `/admin`(운영 토큰 또는 loopback) · HTTP 상태 번호는 일반 사상 하나.
+//! HTTP 표면 — `{base}/ws` · `{base}/auth/token` · `{base}/rec_unit/session_token`(녹음 유닛 방 세션 토큰 — node 토큰 Bearer 만 · 그 node 의 방만) · `{base}/rooms` 셋(CORS) · `{base}/rec/{space_id}/{file}`(녹취 내려받기 — Bearer · 멤버 · 보이기 시작점 · `Range`) · `/healthz` · `/admin`(운영 토큰 또는 loopback) · HTTP 상태 번호는 일반 사상 하나.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -80,6 +80,7 @@ pub fn router(hub: Arc<Hub>) -> Router {
     let client = Router::new()
         .route("/ws", get(ws))
         .route("/auth/token", post(token))
+        .route("/rec_unit/session_token", post(rec_session_token))
         .route("/rooms", any(rooms))
         .route("/rooms/:room", any(room))
         .route("/rec/:space/:file", any(rec_file));
@@ -128,6 +129,28 @@ async fn token(State(hub): St, body: Bytes) -> Response {
     match hub.ses.accounts.issue(&req, hub.policy.hub.token_ttl_secs, hub.policy.hub.metadata_max_bytes) {
         Ok(t) => ok(serde_json::to_value(t).unwrap_or_default()),
         Err(f) => fail(f),
+    }
+}
+
+async fn rec_session_token(State(hub): St, headers: HeaderMap, body: Bytes) -> Response {
+    let bearer = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer "));
+    let Some(unit_user) = bearer.map(|t| hub.ses.accounts.verify_unit(t)) else { return fail(Code::TokenInvalid.failure()) };
+    let unit_user = match unit_user {
+        Ok(u) => u,
+        Err(c) => return fail(c.failure()),
+    };
+    let room = match serde_json::from_slice::<Value>(&body).ok().and_then(|v| v.get("room_id").and_then(Value::as_str).map(str::to_string)) {
+        Some(r) if !r.is_empty() => r,
+        _ => return fail(Code::MissingField.failure().with_message("room_id")),
+    };
+    let room_node = hub.bus.room_route(&room).map(|l| l.node);
+    let sub = match crate::ops::supervisor::grant_room_session(&hub.node, &unit_user, &room, room_node.as_deref()) {
+        Ok(s) => s,
+        Err(c) => return fail(c.failure()),
+    };
+    match hub.ses.accounts.sign_unit(&sub, hub.policy.hub.token_ttl_secs) {
+        Some(token) => ok(json!({ "token": token })),
+        None => fail(Code::InternalError.failure()),
     }
 }
 
@@ -185,7 +208,7 @@ async fn rooms(State(hub): St, method: Method, headers: HeaderMap, body: Bytes) 
                 Ok(v) => v,
                 Err(_) => return cors(&hub, &headers, fail(Code::InvalidPayload.failure())),
             };
-            match crate::room::create(&hub.bus, &hub.policy, v).await {
+            match crate::room::create(&hub.bus, &hub.policy, hub.sup.record_kinds().as_deref(), v).await {
                 Ok(v) => (StatusCode::CREATED, axum::Json(v)).into_response(),
                 Err(f) => fail(f),
             }

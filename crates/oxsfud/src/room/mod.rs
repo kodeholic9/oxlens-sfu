@@ -67,7 +67,7 @@ pub struct Room {
     pub unused_ttl: u32,
     pub departure_ttl: u32,
     pub media_codecs: MediaCodecs,
-    pub record: bool,
+    pub record: Vec<String>,
     pub epoch: String,
     pub st: Mutex<RoomState>,
     pub floor: Mutex<Floor>,
@@ -85,7 +85,7 @@ pub struct RoomInit {
     pub media_codecs: MediaCodecs,
     pub epoch: String,
     pub floor: Floor,
-    pub record: bool,
+    pub record: Vec<String>,
 }
 
 impl Room {
@@ -229,7 +229,7 @@ impl Room {
             user_count: s.members.values().filter(|m| !m.hidden).count() as u32,
             created_at: self.created_at,
             rec: rec_of(s),
-            record: self.record,
+            record: self.record.clone(),
         }
     }
 
