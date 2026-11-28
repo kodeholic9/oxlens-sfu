@@ -1,7 +1,7 @@
 // author: kodeholic (powered by Claude)
-//! 진짜 코덱 표본(ffmpeg 가 지은 VP8 · H264 · Opus — `scripts/media_check.sh`)을 보내는 쪽 패킷화(`send::packetize` — libwebrtc 꼴)로 쪼개 수신 정리층에 넣고,
+//! 진짜 코덱 표본(ffmpeg 가 지은 VP8 · H264 · Opus — oxtapd `scripts/media_check.sh`)을 보내는 쪽 패킷화(`send::packetize` — libwebrtc 꼴)로 쪼개 수신 정리층에 넣고,
 //! 나온 프레임이 원본과 같은지 바이트로 견준다(20261107a 미결 — 재생기 호환 실측의 앞 절반). 뒤바뀜 · RTX 복구를 섞는다.
-//! 나온 프레임은 `frames_<코덱>.bin` 으로 남긴다 — 예제 `mkvcheck` 가 녹화기의 MKV 쓰개로 파일을 짓고 스크립트가 ffprobe · ffmpeg 로 읽는다.
+//! 나온 프레임은 `frames_<코덱>.bin` 으로 남긴다 — oxtapd 예제 `mkvcheck` 가 녹음 유닛의 MKV 쓰개로 파일을 짓고 스크립트가 ffprobe · ffmpeg 로 읽는다.
 //! 표본 폴더는 `OXPEER_MEDIA_DIR` — 없으면 돌지 않는다(`#[ignore]`).
 
 use std::path::{Path, PathBuf};

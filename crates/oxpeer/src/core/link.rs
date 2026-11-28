@@ -867,8 +867,15 @@ impl Core {
             for r in self.rooms.values() {
                 let tracks: Vec<&crate::generated::ws_wire::TrackEntry> = r.entries.values().filter(|t| !r.own(t, me.as_deref())).collect();
                 let rows: std::collections::BTreeMap<String, serde_json::Value> = routes.media.iter().filter(|(_, x)| x.room == r.id).map(|(k, x)| (k.to_string(), serde_json::json!({ "track_id": x.track_id, "kind": x.kind, "codec": x.codec, "pt": x.pt }))).collect();
-                let joined = !r.closed && r.st.rs == crate::generated::room_client::RoomSt::JOINED;
-                if crate::record::track_fact(joined, tracks.len(), rows.len()) {
+                use crate::generated::room_client::RoomSt;
+                let phase = match r.st.rs {
+                    _ if r.closed => crate::record::RoomPhase::Gone,
+                    RoomSt::JOINED => crate::record::RoomPhase::Joined,
+                    RoomSt::JOINING => crate::record::RoomPhase::Rejoining,
+                    RoomSt::NONE if r.st.rejoin => crate::record::RoomPhase::Rejoining,
+                    _ => crate::record::RoomPhase::Gone,
+                };
+                if crate::record::track_fact(phase, tracks.len(), rows.len()) {
                     rec.track(&r.id, serde_json::json!({ "room": r.id, "tracks": tracks, "rows": rows }));
                 }
             }

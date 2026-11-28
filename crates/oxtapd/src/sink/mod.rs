@@ -15,6 +15,8 @@ pub use ogg::{OggConfig, OggFile, OggSink, Recovered, recover_ogg, safe as safe_
 
 use std::path::Path;
 
+pub(crate) const MIN_FREE_BYTES: u64 = 512 << 20;
+
 fn free_bytes(dir: &Path) -> Option<u64> {
     let s = rustix::fs::statvfs(dir).ok()?;
     Some(s.f_bavail.saturating_mul(s.f_frsize))

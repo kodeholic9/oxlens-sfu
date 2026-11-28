@@ -368,7 +368,7 @@ pub(super) fn crc(b: &[u8]) -> u32 {
 pub(super) const RETRY_NS: u64 = 1_000_000_000;
 const MAX_NUMBER: u32 = 9_999;
 
-pub(super) use oxpeer::record::MIN_FREE_BYTES;
+pub(super) use super::MIN_FREE_BYTES;
 
 pub(super) fn retry_due(stalled: Option<u64>, now: u64) -> bool {
     stalled.is_none_or(|at| now.saturating_sub(at) >= RETRY_NS)

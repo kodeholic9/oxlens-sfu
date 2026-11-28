@@ -2,7 +2,7 @@
 //! 재생기 호환 실측 도구(context 202611/20261107a 미결) — 수신 정리층이 다시 이은 진짜 코덱 프레임(`frames_<코덱>.bin` · lib 시험 `media_fixture_*`)을
 //! ★녹음 유닛 결과물 `MkvSink`(정:RULE-OPS-REC-MKV)로 파일에 쓴다. 판정은 `scripts/media_check.sh` 가 ffprobe · ffmpeg 로 한다.
 //!
-//!   cargo run -p oxpeer --example mkvcheck --features record -- <표본 폴더>
+//!   cargo run --manifest-path crates/oxtapd/Cargo.toml --example mkvcheck -- <표본 폴더>
 
 use std::path::PathBuf;
 

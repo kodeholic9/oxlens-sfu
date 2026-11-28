@@ -1,6 +1,6 @@
 // author: kodeholic (powered by Claude)
 //! 진짜 코덱 표본 읽기(예제 agent `file` 형상 — context 202611/20261108d R9) — Ogg Opus 패킷 · IVF(VP8) 프레임 · H264 Annex-B 접근 단위.
-//! 표본은 ffmpeg 가 짓는다(oxpeer `scripts/media_check.sh` 와 같은 꼴 — H264 는 `aud=1` 로 접근 단위 경계가 AUD).
+//! 표본은 ffmpeg 가 짓는다(oxtapd `scripts/media_check.sh` 와 같은 꼴 — H264 는 `aud=1` 로 접근 단위 경계가 AUD).
 
 use bytes::Bytes;
 

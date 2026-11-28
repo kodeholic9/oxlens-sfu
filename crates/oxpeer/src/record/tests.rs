@@ -803,12 +803,14 @@ fn slot_video_segment_opens_only_at_keyframe_of_new_source() {
 }
 
 #[test]
-fn a_room_snapshot_is_a_fact_only_while_joined_with_its_lines_up() {
-    assert!(track_fact(true, 1, 1));
-    assert!(track_fact(true, 0, 0), "a joined room that really has no tracks");
-    assert!(!track_fact(false, 0, 1), "the session dropped the room: the list is unknown, not empty");
-    assert!(!track_fact(false, 0, 0));
-    assert!(!track_fact(true, 1, 0), "joined again but its lines are not up yet");
+fn a_room_snapshot_is_a_fact_unless_the_room_is_rejoining() {
+    use RoomPhase::*;
+    assert!(track_fact(Joined, 1, 1));
+    assert!(track_fact(Joined, 0, 0), "a joined room that really has no tracks");
+    assert!(!track_fact(Joined, 1, 0), "joined again but its lines are not up yet");
+    assert!(!track_fact(Rejoining, 0, 0), "the session dropped the room and will rejoin: the list is unknown, not empty");
+    assert!(!track_fact(Rejoining, 0, 1));
+    assert!(track_fact(Gone, 0, 0), "left, kicked or the room is gone: the tracks did go away");
 }
 
 fn slot_segments(recs: &[Record]) -> Vec<(Option<String>, Option<&'static str>, u64, u64)> {

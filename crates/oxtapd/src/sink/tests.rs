@@ -1119,3 +1119,13 @@ fn sinks_never_read_the_system_clock() {
     }
     assert_eq!(seen, 3);
 }
+
+#[test]
+fn a_session_cut_keeps_the_matroska_audio_timeline_continuous() {
+    let d = tmp("mkv-cut");
+    let (fs, _) = mkv_av_build(&cut_and_rejoin(false), &d, Policy::Utterance, MkvConfig::default());
+    assert_eq!(fs.len(), 1, "{fs:?}");
+    let b = std::fs::read(&fs[0].path).unwrap();
+    let (dur, _) = mkv_closed(&b);
+    assert!((9_600.0..9_800.0).contains(&dur), "정:RULE-OPS-REC-MKV 시각 — 끊긴 구간은 PLC 로 이어지고 새 줄은 log_time 차로 잇는다(마지막 프레임 9.658 s): {dur}");
+}

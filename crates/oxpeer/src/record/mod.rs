@@ -34,7 +34,7 @@ use crate::api::Event;
 /// 원시 포맷 판(SDK:RULE-PLAT-REC-RAW `oxlens.recording` `format`)
 pub const FORMAT: u32 = 1;
 
-pub const MIN_FREE_BYTES: u64 = 512 << 20;
+const MIN_FREE_BYTES: u64 = 512 << 20;
 
 /// 청크 압축(실측 M9 — 기본은 없음)
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -233,8 +233,19 @@ pub(crate) fn resumes(stop: Option<Stop>, free: Option<u64>, min_free: u64, part
     stop == Some(Stop::DiskLow) && free.is_some_and(|f| f > min_free.saturating_add(part_bytes))
 }
 
-pub(crate) fn track_fact(joined: bool, listed: usize, rows: usize) -> bool {
-    joined && (listed == 0 || rows > 0)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RoomPhase {
+    Joined,
+    Rejoining,
+    Gone,
+}
+
+pub(crate) fn track_fact(phase: RoomPhase, listed: usize, rows: usize) -> bool {
+    match phase {
+        RoomPhase::Joined => listed == 0 || rows > 0,
+        RoomPhase::Rejoining => false,
+        RoomPhase::Gone => true,
+    }
 }
 
 struct Inner {

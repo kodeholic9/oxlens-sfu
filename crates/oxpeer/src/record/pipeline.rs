@@ -371,7 +371,11 @@ impl Pipeline {
         }
         let seq = v["seq"].as_u64();
         let talk = v["talk"].as_str().filter(|t| !t.is_empty());
-        if opens && self.speaking.get(&room).is_some_and(|sp| same_talk(sp, seq, talk)) {
+        if opens && let Some(sp) = self.speaking.get_mut(&room).filter(|sp| same_talk(sp, seq, talk)) {
+            sp.seq = seq;
+            if !sources.is_empty() {
+                sp.sources = sources;
+            }
             return;
         }
         if let Some(old) = self.speaking.remove(&room) {
@@ -652,6 +656,7 @@ impl Pipeline {
             x.carry = total % per;
         }
         let Some(seg) = self.open.get_mut(key) else { return };
+        let moved = t.ssrc != f.ssrc;
         for i in 0..n {
             let ts = t.end_ts.wrapping_add((i * per) as u32);
             seg.frames += 1;
@@ -668,6 +673,8 @@ impl Pipeline {
                 rec_last: f.rec_first,
                 data: vec![toc],
                 filled: true,
+                ssrc: if moved { t.ssrc } else { f.ssrc },
+                log_time: if moved { t.end_log + i * per * 1_000_000_000 / 48_000 } else { f.log_time },
                 ..f.clone()
             }));
         }
@@ -695,7 +702,10 @@ fn moved_hole(end_log: u64, at: u64) -> u64 {
 }
 
 fn same_talk(sp: &Speaker, seq: Option<u64>, talk: Option<&str>) -> bool {
-    (seq.is_some() && sp.seq == seq) || (talk.is_some() && sp.talk.as_deref() == talk)
+    match (talk, sp.talk.as_deref()) {
+        (Some(a), Some(b)) => a == b,
+        _ => seq.is_some() && sp.seq == seq,
+    }
 }
 
 /// Opus 패킷 하나의 길이(48kHz 표본) — TOC 의 config · 프레임 수(RFC 6716 §3.1)
