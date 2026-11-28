@@ -2265,3 +2265,173 @@ fn mkv_sink_reports_coverage_from_records_and_frames() {
     assert_eq!(c.not_recorded, vec!["cam-u2".to_string()], "SDK:RULE-PLAT-REC-API 트랙 덮음 요약 — 끝내 못 실린 트랙");
     std::fs::remove_dir_all(&d).ok();
 }
+
+#[test]
+fn key_request_asks_at_target_minus_lead_and_once_more_at_target_after_an_early_key() {
+    use KeyAsk::*;
+    let k = |st, key, el| key_request(st, key, el, 4_000, 1_000);
+    assert_eq!(k(Idle, false, 2_999), (false, Idle), "SDK:RULE-PLAT-REC-HLS before T - 1");
+    assert_eq!(k(Idle, false, 3_000), (true, Asked), "SDK:RULE-PLAT-REC-HLS T - 1 asks");
+    assert_eq!(k(Idle, true, 3_000), (true, Asked), "a key exactly at T - 1 was not answered yet - ask");
+    assert_eq!(k(Asked, false, 3_500), (false, Asked));
+    assert_eq!(k(Asked, true, 3_150), (false, Early), "a key before T cannot cut");
+    assert_eq!(k(Early, false, 3_900), (false, Early), "the second ask waits for T");
+    assert_eq!(k(Early, false, 4_000), (true, Again), "SDK:RULE-PLAT-REC-HLS ask once more at T");
+    assert_eq!(k(Again, true, 4_100), (false, Again), "at most two asks per segment");
+    assert_eq!(k(Again, false, 9_000), (false, Again), "a publisher that ignores both is counted over target, not asked again");
+    assert_eq!(k(Asked, true, 4_000), (false, Asked), "a key at T cuts - the sink resets");
+    assert_eq!(k(Idle, true, 0), (false, Idle), "the cutting key opens the next segment unasked");
+    assert_eq!(key_request(Idle, true, 0, 1_000, 1_000), (true, Asked), "T at or under the lead asks at once");
+}
+
+fn pli_step(now: u32, pending: bool, latency: u32, plis: &mut Vec<u32>, due: &mut Vec<u32>) -> bool {
+    if pending && plis.last().is_none_or(|t| now.saturating_sub(*t) >= 1_000) {
+        plis.push(now);
+        due.push(now + latency);
+        return false;
+    }
+    pending
+}
+
+fn av_on_request(secs: u32, sps_switch_at: Option<u32>, latency: u32, feed: &mut dyn FnMut(&Record) -> usize) -> Vec<u32> {
+    let ms = 1_000_000u64;
+    let t0 = 1_800_000_000_000_000_000u64;
+    let tracks = serde_json::json!([
+        { "track_id": "cam-u1", "kind": "video", "user_id": "u1", "csrc": 9 },
+        { "track_id": "mic-u1", "kind": "audio", "user_id": "u1", "csrc": 10 }
+    ]);
+    let rows = serde_json::json!({ "200": { "track_id": "cam-u1", "kind": "video", "codec": "H264", "pt": 102 }, "100": { "track_id": "mic-u1", "kind": "audio", "codec": "opus", "pt": 111 } });
+    let (mut plis, mut due) = (Vec::new(), Vec::new());
+    let mut n = 1u32;
+    let asked = feed(&rec(n, t0, Channel::Track, track_list("r", tracks, rows)));
+    let mut pending = pli_step(0, asked > 0, latency, &mut plis, &mut due);
+    n += 1;
+    let (mut vseq, mut aseq) = (0u16, 0u16);
+    let (mut tv, mut ta) = (0u32, 0u32);
+    let ntp = |unix_ns: u64| -> u64 { (((unix_ns / 1_000_000_000) + 2_208_988_800) << 32) | (((unix_ns % 1_000_000_000) << 32) / 1_000_000_000) };
+    let (mut sr_done, mut switched) = (false, false);
+    while tv.min(ta) < secs * 1000 {
+        let now = tv.min(ta);
+        let mut out: Vec<Record> = Vec::new();
+        if !sr_done && now >= 500 {
+            sr_done = true;
+            let at = t0 + 500 * ms;
+            out.push(rec(n, at, Channel::Sr, format!(r#"{{"ssrc":200,"ntp":{},"rtp":{}}}"#, ntp(at), 1000u32.wrapping_add(500 * 90)).into_bytes()));
+            out.push(rec(n + 1, at, Channel::Sr, format!(r#"{{"ssrc":100,"ntp":{},"rtp":{}}}"#, ntp(at), 500 * 48).into_bytes()));
+            n += 2;
+        }
+        if tv <= ta {
+            let i = tv / 33;
+            let switch = sps_switch_at.is_some_and(|s| tv >= s) && !switched;
+            switched |= switch;
+            let answered = due.iter().any(|d| *d <= tv);
+            due.retain(|d| *d > tv);
+            let key = i == 0 || answered || switch;
+            let ts = 1000u32.wrapping_add(i * 3000);
+            let sps = if switched { SPS_B } else { SPS_A };
+            let (idr, delta) = ([0x65, 0x88, 0x84, i as u8], [0x41, 0x9a, i as u8]);
+            let nal: Vec<&[u8]> = if key { vec![sps, PPS, &idr] } else { vec![&delta] };
+            for (k, x) in nal.iter().enumerate() {
+                out.push(rec(n, t0 + u64::from(tv) * ms, Channel::Rtp(200), pkt(vseq, ts, k + 1 == nal.len(), Some(9), x)));
+                n += 1;
+                vseq = vseq.wrapping_add(1);
+            }
+            tv += 33;
+        } else {
+            out.push(rec(n, t0 + u64::from(ta) * ms, Channel::Rtp(100), pkt(aseq, ta * 48, true, Some(10), &[0x78, aseq as u8])));
+            n += 1;
+            aseq = aseq.wrapping_add(1);
+            ta += 20;
+        }
+        for r in &out {
+            let asked = feed(r);
+            pending = pli_step(now, pending || asked > 0, latency, &mut plis, &mut due);
+        }
+    }
+    plis
+}
+
+fn hls_on_request(secs: u32, sps_switch_at: Option<u32>, latency: u32, dir: &Path) -> (HlsStream, Vec<u32>) {
+    let mut pl = Pipeline::new(Policy::Span { time_ns: u64::MAX, bytes: u64::MAX });
+    let mut sink = HlsSink::new(dir, HlsConfig::default()).unwrap();
+    let plis = av_on_request(secs, sps_switch_at, latency, &mut |r| {
+        for o in pl.push(r) {
+            sink.write(&o).unwrap();
+        }
+        sink.take_keyframe_requests().len()
+    });
+    for o in pl.finish() {
+        sink.write(&o).unwrap();
+    }
+    sink.finish().unwrap();
+    (sink.streams()[0].clone(), plis)
+}
+
+#[test]
+fn hls_publisher_that_keys_only_on_request_gets_segments_near_target() {
+    let d = tmp("hls-on-request");
+    let (s, plis) = hls_on_request(14, None, 150, &d);
+    let durs: Vec<f64> = s.segments.iter().map(|x| x.duration).collect();
+    assert!(durs.len() >= 3, "SDK:RULE-PLAT-REC-HLS 14 s at T 4 s: {durs:?} plis {plis:?}");
+    assert!(durs[..durs.len() - 1].iter().all(|x| (4.0..=4.5).contains(x)), "SDK:RULE-PLAT-REC-HLS a key before T asks once more at T - segments end just past T: {durs:?} plis {plis:?}");
+    assert!(durs[durs.len() - 1] < 3.0, "{durs:?}");
+    assert_eq!(s.over_target, 0, "{durs:?}");
+    assert!(s.segments.iter().all(|x| !x.discontinuity));
+    assert_eq!(s.keyframe_requests as usize, 2 * (durs.len() - 1), "SDK:RULE-PLAT-REC-HLS two asks per closed segment (T - 1 and T): {plis:?}");
+    std::fs::remove_dir_all(&d).ok();
+}
+
+#[test]
+fn hls_cut_by_parameter_change_does_not_spend_the_next_segments_request() {
+    let d = tmp("hls-on-request-sps");
+    let (s, plis) = hls_on_request(14, Some(7_500), 150, &d);
+    let durs: Vec<f64> = s.segments.iter().map(|x| x.duration).collect();
+    assert!(s.segments.iter().any(|x| x.discontinuity), "SDK:RULE-PLAT-REC-HLS parameter change cuts: {durs:?}");
+    assert!(!plis.iter().any(|t| (7_400..10_400).contains(t)), "the segment opened at 7.5 s by a parameter change asks at its own T - 1 (10.5 s), not at its start: {plis:?} {durs:?}");
+    assert!(plis.iter().any(|t| (10_400..10_700).contains(t)), "{plis:?} {durs:?}");
+    std::fs::remove_dir_all(&d).ok();
+}
+
+#[test]
+fn mkv_span_publisher_that_keys_only_on_request_gets_files_near_span() {
+    let d = tmp("mkv-on-request");
+    let cfg = MkvConfig { span: Some(Duration::from_secs(4)), ..MkvConfig::default() };
+    let mut pl = Pipeline::new(Policy::Span { time_ns: u64::MAX, bytes: u64::MAX });
+    let mut sink = MkvSink::with(&d, cfg).unwrap();
+    let mut asks = 0usize;
+    let plis = av_on_request(14, None, 150, &mut |r| {
+        for o in pl.push(r) {
+            sink.write(&o).unwrap();
+        }
+        let n = sink.take_keyframe_requests().len();
+        asks += n;
+        n
+    });
+    for o in pl.finish() {
+        sink.write(&o).unwrap();
+    }
+    sink.finish().unwrap();
+    let fs = sink.files().to_vec();
+    let frames: Vec<u64> = fs.iter().map(|f| f.tracks.iter().find(|t| t.kind == "video").map(|t| t.frames).unwrap_or(0)).collect();
+    assert!(fs.len() >= 3, "SDK:RULE-PLAT-REC-MKV span 4 s over 14 s: {frames:?} plis {plis:?}");
+    assert!(fs[..fs.len() - 1].iter().all(|f| f.reason.as_deref() == Some("span")), "{frames:?}");
+    assert!(frames[..frames.len() - 1].iter().all(|n| (120..=135).contains(n)), "SDK:RULE-PLAT-REC-MKV a key before T asks once more at T - files end just past T: {frames:?} plis {plis:?}");
+    assert_eq!(asks, 2 * (fs.len() - 1), "SDK:RULE-PLAT-REC-MKV two asks per closed file: {plis:?}");
+    std::fs::remove_dir_all(&d).ok();
+}
+
+#[test]
+fn a_key_at_target_after_an_early_key_cuts_without_a_second_ask() {
+    let recs = av_stream_gop(10, 1000, None, 15);
+    let d = tmp("mkv-early-then-cut");
+    let cfg = MkvConfig { span: Some(Duration::from_secs(4)), ..MkvConfig::default() };
+    let (fs, asked) = mkv_av_build(&recs, &d, Policy::Span { time_ns: u64::MAX, bytes: u64::MAX }, cfg);
+    assert_eq!(fs.len(), 3, "SDK:RULE-PLAT-REC-MKV keys every 0.5 s - cut at 4 s and 8 s");
+    assert_eq!(asked.len(), 2, "SDK:RULE-PLAT-REC-MKV T - 1 asks, the 3.5 s key is early, the 4.0 s key cuts before any second ask: {asked:?}");
+    std::fs::remove_dir_all(&d).ok();
+    let d = tmp("hls-early-then-cut");
+    let (st, asked) = hls_build(&recs, &d);
+    assert_eq!(st[0].segments.len(), 3, "SDK:RULE-PLAT-REC-HLS");
+    assert_eq!(asked.len(), 2, "SDK:RULE-PLAT-REC-HLS the cutting key at T is not asked again: {asked:?}");
+    std::fs::remove_dir_all(&d).ok();
+}

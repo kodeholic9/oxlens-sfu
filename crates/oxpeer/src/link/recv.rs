@@ -76,6 +76,15 @@ pub(crate) enum Out {
     /// 빈 번호 · 스트림 재설정(SDK:RULE-PLAT-REC-TAP 빈 번호) — 녹음을 켰을 때만
     #[cfg_attr(not(feature = "record"), allow(dead_code))]
     Gap(Gap),
+    Pli(PliSent),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PliSent {
+    pub room: String,
+    pub track_id: String,
+    pub ssrc: u32,
+    pub why: String,
 }
 
 /// 빈 번호 사건 — `from` · `to` 는 16비트 seq(양 끝 포함)
@@ -166,6 +175,7 @@ struct Stream {
     /// 키프레임 전에는 프레임을 내지 않는다 · `want_key` = 그래서 실제로 버렸다(PLI 를 낼 까닭) — 첫 키프레임을 기다리는 것만으로는 묻지 않는다
     need_key: bool,
     want_key: bool,
+    lost: bool,
     pli_at: Option<Instant>,
     key_wait: Option<Instant>,
     layer_gen: u64,
@@ -201,6 +211,7 @@ impl Stream {
             asm: None,
             need_key: video,
             want_key: false,
+            lost: false,
             pli_at: None,
             key_wait: None,
             layer_gen: route.layer_gen,
@@ -341,6 +352,7 @@ impl Stream {
             if self.video {
                 self.need_key = true;
                 self.want_key = true;
+                self.lost = true;
             }
             return;
         };
@@ -376,10 +388,12 @@ impl Stream {
             if self.video {
                 self.need_key = true;
                 self.want_key = true;
+                self.lost = true;
             }
             return;
         }
         if a.key {
+            self.lost = false;
             self.need_key = false;
             self.want_key = false;
             self.key_wait = None;
@@ -510,6 +524,7 @@ impl Recv {
                 if s.video {
                     s.need_key = true;
                     s.want_key = true;
+                    s.lost = true;
                 }
             } else {
                 for k in s.highest + 1..ext {
@@ -595,6 +610,7 @@ impl Recv {
             if s.video && s.route.pli {
                 let late = s.key_wait.is_some_and(|t| now >= t);
                 if (s.want_key || late || s.ask_key) && s.pli_at.is_none_or(|t| now.duration_since(t) >= PLI_INTERVAL) {
+                    let why = pli_why(s.lost, s.want_key, late, s.ask_key);
                     s.pli_at = Some(now);
                     s.ask_key = false;
                     if late {
@@ -602,6 +618,7 @@ impl Recv {
                     }
                     Counters::add(&c.pli_sent, 1);
                     fb.extend(pli(self.me, s.route.ssrc));
+                    out.push(Out::Pli(PliSent { room: s.route.room.clone(), track_id: s.route.track_id.clone(), ssrc: s.route.ssrc, why }));
                 }
             }
         }
@@ -677,6 +694,11 @@ fn pli(me: u32, media: u32) -> Vec<u8> {
     b.extend_from_slice(&me.to_be_bytes());
     b.extend_from_slice(&media.to_be_bytes());
     b
+}
+
+pub(crate) fn pli_why(lost: bool, want_key: bool, late: bool, ask_key: bool) -> String {
+    let gone = if lost { "loss" } else { "start" };
+    [(want_key, gone), (late, "layer"), (ask_key, "app")].iter().filter(|(on, _)| *on).map(|(_, w)| *w).collect::<Vec<_>>().join("+")
 }
 
 /// 받은 RTCP 묶음에서 SR 만 — (ssrc, NTP, RTP)
@@ -960,6 +982,70 @@ mod tests {
         r.on_rtp(&rt, rtp(3, 6000, true, &VP8_DELTA), t0, w);
         assert!(r.tick(t0 + Duration::from_millis(200)).1.is_none_or(|b| !split(&b).iter().any(|x| x.0 == 206)), "간격(1s) 안에는 미룬다");
         assert!(split(&r.tick(t0 + PLI_INTERVAL).1.unwrap()).iter().any(|x| x.0 == 206), "간격이 지나면 낸다");
+    }
+
+    #[test]
+    fn app_keyframe_requests_n_times_send_n_plis_with_reason() {
+        let c = Arc::new(Counters::default());
+        let mut r = Recv::new(9, c.clone());
+        let mut rt = route("video", "VP8", Unit::Frame);
+        let t0 = Instant::now();
+        let w = SystemTime::now();
+        r.on_rtp(&rt, rtp(1, 0, true, &[0x10, 0x00]), t0, w);
+        let mut sent = Vec::new();
+        let ms = Duration::from_millis;
+        let asks = [ms(1_000), ms(2_000), ms(2_900), ms(4_000)];
+        for (n, d) in asks.iter().enumerate() {
+            rt.key_gen = n as u64 + 1;
+            r.on_rtp(&rt, rtp(2 + n as u16, 3000 * (n as u32 + 1), true, &VP8_DELTA), t0 + *d, w);
+            for step in [ms(0), ms(100)] {
+                let (o, _) = r.tick(t0 + *d + step);
+                sent.extend(o.into_iter().filter_map(|x| if let Out::Pli(p) = x { Some((d.as_millis() + step.as_millis(), p)) } else { None }));
+            }
+        }
+        let at: Vec<u128> = sent.iter().map(|(t, _)| *t).collect();
+        assert_eq!(at, vec![1_000, 2_000, 3_000, 4_000], "SDK:RULE-PLAT-SERVER every request goes out as one PLI - the one inside the 1 s interval waits for it");
+        assert_eq!(c.pli_sent.load(Ordering::Relaxed), 4);
+        assert!(sent.iter().all(|(_, p)| p.why == "app" && p.track_id == "t" && p.ssrc == 1111 && p.room == "r"), "{sent:?}");
+    }
+
+    #[test]
+    fn loss_before_the_first_key_is_named_loss() {
+        let c = Arc::new(Counters::default());
+        let mut r = Recv::new(9, c.clone());
+        let rt = route("video", "VP8", Unit::Frame);
+        let t0 = Instant::now();
+        let w = SystemTime::now();
+        r.on_rtp(&rt, rtp(1, 0, false, &VP8_KEY_A), t0, w);
+        r.on_rtp(&rt, rtp(3, 3000, true, &VP8_DELTA), t0, w);
+        let mut why = Vec::new();
+        let mut t = t0;
+        for _ in 0..15 {
+            why.extend(r.tick(t).0.into_iter().filter_map(|x| if let Out::Pli(p) = x { Some(p.why) } else { None }));
+            t += NACK_INTERVAL;
+        }
+        assert_eq!(why.first().map(String::as_str), Some("loss"), "SDK:RULE-PLAT-SERVER a broken first key is loss, not start: {why:?}");
+    }
+
+    #[test]
+    fn pli_reason_names_every_cause_in_spec_order() {
+        assert_eq!(pli_why(false, true, false, false), "start");
+        assert_eq!(pli_why(true, true, false, false), "loss");
+        assert_eq!(pli_why(true, false, true, false), "layer");
+        assert_eq!(pli_why(true, false, false, true), "app");
+        assert_eq!(pli_why(true, true, true, true), "loss+layer+app");
+    }
+
+    #[test]
+    fn first_delta_pli_is_named_start() {
+        let c = Arc::new(Counters::default());
+        let mut r = Recv::new(9, c.clone());
+        let rt = route("video", "VP8", Unit::Frame);
+        let t0 = Instant::now();
+        r.on_rtp(&rt, rtp(50, 0, true, &VP8_DELTA), t0, SystemTime::now());
+        let (o, _) = r.tick(t0);
+        let why: Vec<String> = o.into_iter().filter_map(|x| if let Out::Pli(p) = x { Some(p.why) } else { None }).collect();
+        assert_eq!(why, vec!["start".to_string()]);
     }
 
     #[test]

@@ -613,6 +613,7 @@ fn deliver(outs: Vec<Out>, sink: &MediaSink) {
             }
             #[cfg(not(feature = "record"))]
             Out::Raw { .. } | Out::Gap(_) => {}
+            Out::Pli(p) => sink.log.emit(crate::log::Line::new(crate::log::Kind::Diag).spec("SD-RULE-PLAT-SERVER").corr("room", &p.room).corr("track", &p.track_id).corr("ssrc", p.ssrc).key("in.why", &p.why).msg("pli sent")),
         }
     }
 }

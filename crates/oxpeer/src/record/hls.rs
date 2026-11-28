@@ -164,7 +164,7 @@ struct Group {
     base: Option<(bool, i128, i128)>,
     /// 조각 시작 — 이끄는 트랙의 종류 · 틱
     seg_start: Option<(Kind, u64)>,
-    asked: bool,
+    asked: super::KeyAsk,
     reinit: bool,
     disc_next: bool,
     init_n: u64,
@@ -245,7 +245,7 @@ impl HlsSink {
             audio: None,
             base: None,
             seg_start: None,
-            asked: false,
+            asked: super::KeyAsk::Idle,
             reinit: false,
             disc_next: false,
             init_n: 0,
@@ -397,11 +397,14 @@ impl HlsSink {
                     g.reinit = true;
                 }
             }
-            // T − 1초에 키프레임 요청(영상이 이끌 때 · 조각마다 한 번)
-            if kind == Kind::Video && !g.asked && elapsed + Kind::Video.timescale() >= tgt_ticks(Kind::Video) {
-                g.asked = true;
-                g.out.keyframe_requests += 1;
-                self.wants.push(f.track_id.clone());
+            if kind == Kind::Video {
+                let elapsed = ticks.saturating_sub(g.seg_start.map(|(_, t)| t).unwrap_or(ticks));
+                let (ask, st) = super::key_request(g.asked, sample_key, u128::from(elapsed), u128::from(tgt_ticks(Kind::Video)), u128::from(Kind::Video.timescale()));
+                g.asked = st;
+                if ask {
+                    g.out.keyframe_requests += 1;
+                    self.wants.push(f.track_id.clone());
+                }
             }
         }
         let Some(t) = (match kind {
@@ -448,7 +451,7 @@ fn flush(g: &mut Group, cfg: &HlsConfig, log: Option<&crate::log::Logger>, targe
     let has = g.video.as_ref().is_some_and(|t| !t.buf.is_empty()) || g.audio.as_ref().is_some_and(|t| !t.buf.is_empty());
     if !has {
         g.seg_start = next;
-        g.asked = false;
+        g.asked = super::KeyAsk::Idle;
         return Ok(());
     }
     std::fs::create_dir_all(&g.dir)?;
@@ -588,7 +591,7 @@ fn flush(g: &mut Group, cfg: &HlsConfig, log: Option<&crate::log::Logger>, targe
     }
     g.out.segments.push(HlsSegment { file, init: g.init.clone().unwrap_or_default(), discontinuity: std::mem::take(&mut g.disc_next), duration });
     g.seg_start = next;
-    g.asked = false;
+    g.asked = super::KeyAsk::Idle;
     playlists(g, cfg, target)
 }
 

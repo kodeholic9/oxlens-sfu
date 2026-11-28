@@ -240,6 +240,24 @@ pub(crate) fn resumes(stop: Option<Stop>, free: Option<u64>, min_free: u64, part
     stop == Some(Stop::DiskLow) && free.is_some_and(|f| f > min_free.saturating_add(part_bytes))
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum KeyAsk {
+    #[default]
+    Idle,
+    Asked,
+    Early,
+    Again,
+}
+
+pub(crate) fn key_request(st: KeyAsk, video_key: bool, elapsed: u128, target: u128, lead: u128) -> (bool, KeyAsk) {
+    match st {
+        KeyAsk::Idle if elapsed.saturating_add(lead) >= target => (true, KeyAsk::Asked),
+        KeyAsk::Asked if video_key && elapsed < target => (false, KeyAsk::Early),
+        KeyAsk::Early if elapsed >= target => (true, KeyAsk::Again),
+        s => (false, s),
+    }
+}
+
 struct Inner {
     cfg: RecordConfig,
     anchor_ns: u64,

@@ -636,7 +636,7 @@ struct OpenFile {
     /// 영상이 키프레임을 받았나(파일 안 영상은 키프레임부터)
     keyed: bool,
     start: Option<(Kind, u64)>,
-    asked: bool,
+    asked: super::KeyAsk,
     vshift: Option<i128>,
     vshift_at: i128,
 }
@@ -992,10 +992,6 @@ impl MkvSink {
                 let fl = g.file.as_mut().expect("file");
                 let start = *fl.start.get_or_insert((lead, p.ticks));
                 let el_ns = u128::from(p.ticks.saturating_sub(start.1)) * 1_000_000_000 / u128::from(clock);
-                if kind == Kind::Video && !fl.asked && el_ns + 1_000_000_000 >= u128::from(span) {
-                    fl.asked = true;
-                    self.wants.push(track_id.clone());
-                }
                 if p.key && el_ns >= u128::from(span) {
                     g.pend_since = Some(f.log_time);
                     g.pend_source = f.source;
@@ -1005,6 +1001,15 @@ impl MkvSink {
                     //   키 하나로 열면 그 음성이 원점 앞으로 떨어져 0 에 눌린다(2층 장시간 판 · 파일마다 1.4초씩 · 202611/20261110e)
                     g.cont = true;
                     break 'place close_file(g, "span", &mut self.fs).map_err(Broke::from);
+                }
+                if kind == Kind::Video
+                    && let Some(fl) = g.file.as_mut()
+                {
+                    let (ask, st) = super::key_request(fl.asked, p.key, el_ns, u128::from(span), 1_000_000_000);
+                    fl.asked = st;
+                    if ask {
+                        self.wants.push(track_id.clone());
+                    }
                 }
             }
         }
@@ -1127,7 +1132,7 @@ fn open_file(g: &mut Group, fs: &mut Files) -> Step {
     // 길이 정책의 시작 = 모은 더미의 첫 이끄는 트랙(영상 · 없으면 음성) 프레임 — 보류 동안 쌓인 프레임도 셈에 든다
     let lead = if kinds.contains(&Kind::Video) { Kind::Video } else { Kind::Audio };
     let start = pend.iter().find(|p| p.kind == lead).map(|p| (lead, p.ticks));
-    g.file = Some(OpenFile { m, path, index, origin, utc, source: g.pend_source, user_id: g.pend_user.clone(), tracks, keyed: first_vkey.is_some(), start, asked: false, vshift: None, vshift_at: 0 });
+    g.file = Some(OpenFile { m, path, index, origin, utc, source: g.pend_source, user_id: g.pend_user.clone(), tracks, keyed: first_vkey.is_some(), start, asked: super::KeyAsk::Idle, vshift: None, vshift_at: 0 });
     g.pend_since = None;
     let mut rest = pend.into_iter();
     let failed = rest.by_ref().map(|p| write_one(g, p, fs)).find(Result::is_err);
